@@ -10,7 +10,7 @@ Please read it before participating.
 
 ## Getting started
 
-1. Fork the repository on [GitHub](https://github.com/jezdez/conda-workspaces).
+1. Fork the repository on [GitHub](https://github.com/conda-incubator/conda-workspaces).
 2. Clone your fork locally.
 3. Install [pixi](https://pixi.sh) (used for development environments).
 4. Run the tests to make sure everything works:
@@ -93,6 +93,6 @@ Pull requests consisting of unchecked AI-generated content may be closed.
 
 ## Getting help
 
-- Open an [issue](https://github.com/jezdez/conda-workspaces/issues) for
+- Open an [issue](https://github.com/conda-incubator/conda-workspaces/issues) for
   bug reports or feature requests.
 - Join the [conda community chat](https://conda.zulipchat.com) for questions.
