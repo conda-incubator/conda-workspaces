@@ -5,11 +5,24 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import tomlkit
+from conda.models.match_spec import MatchSpec
 
 from ..parsers import detect_workspace_file
 
 if TYPE_CHECKING:
     import argparse
+
+
+def _parse_spec(spec: str) -> tuple[str, str]:
+    """Extract package name and version constraint from a MatchSpec string.
+
+    Uses conda's own MatchSpec parser (CEP 29) to handle all valid forms:
+    ``python>=3.12``, ``python >=3.12``, ``python=3.12``, ``numpy``, etc.
+    Returns ``"*"`` when no version constraint is present.
+    """
+    ms = MatchSpec(spec)
+    version = str(ms.version) if ms.version else "*"
+    return ms.name, version
 
 
 def execute_add(args: argparse.Namespace) -> int:
@@ -67,8 +80,8 @@ def _add_to_toml(
 
     deps = target.setdefault(dep_key, tomlkit.table())
     for spec in specs:
-        name, _, version = spec.partition(" ")
-        deps[name] = version.strip() if version.strip() else "*"
+        name, version = _parse_spec(spec)
+        deps[name] = version
 
 
 def _add_to_pyproject(
@@ -102,5 +115,5 @@ def _add_to_pyproject(
 
     deps = target.setdefault(dep_key, tomlkit.table())
     for spec in specs:
-        name, _, version = spec.partition(" ")
-        deps[name] = version.strip() if version.strip() else "*"
+        name, version = _parse_spec(spec)
+        deps[name] = version
