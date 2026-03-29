@@ -55,6 +55,13 @@ def _add_to_toml(
     if feature:
         feat_table = doc.setdefault("feature", tomlkit.table())
         target = feat_table.setdefault(feature, tomlkit.table())
+
+        envs = doc.setdefault("environments", tomlkit.table())
+        if feature not in envs:
+            entry = tomlkit.inline_table()
+            entry["features"] = [feature]
+            envs[feature] = entry
+            print(f"Created environment '{feature}' with feature '{feature}'")
     else:
         target = doc
 
@@ -70,11 +77,12 @@ def _add_to_pyproject(
     dep_key: str,
     feature: str | None,
 ) -> None:
-    """Add deps to a pyproject.toml with [tool.pixi.*] tables."""
+    """Add deps to a pyproject.toml with [tool.conda.*] / [tool.pixi.*] tables."""
     tool = doc.setdefault("tool", tomlkit.table())
 
-    # Prefer conda-workspaces table if it exists, else pixi
-    if "conda-workspaces" in tool:
+    if "conda" in tool:
+        source = tool["conda"]
+    elif "conda-workspaces" in tool:
         source = tool["conda-workspaces"]
     else:
         source = tool.setdefault("pixi", tomlkit.table())
@@ -82,6 +90,13 @@ def _add_to_pyproject(
     if feature:
         feat_table = source.setdefault("feature", tomlkit.table())
         target = feat_table.setdefault(feature, tomlkit.table())
+
+        envs = source.setdefault("environments", tomlkit.table())
+        if feature not in envs:
+            entry = tomlkit.inline_table()
+            entry["features"] = [feature]
+            envs[feature] = entry
+            print(f"Created environment '{feature}' with feature '{feature}'")
     else:
         target = source
 

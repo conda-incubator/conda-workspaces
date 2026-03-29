@@ -10,7 +10,10 @@ import pytest
 from conda.exceptions import ArgumentError
 
 from conda_workspaces.cli.run import execute_run
-from conda_workspaces.exceptions import EnvironmentNotInstalledError
+from conda_workspaces.exceptions import (
+    EnvironmentNotFoundError,
+    EnvironmentNotInstalledError,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -124,3 +127,13 @@ def test_run_exit_code(
     args = _make_args(cmd=cmd)
     result = execute_run(args)
     assert result == rc
+
+
+def test_run_undefined_environment(
+    pixi_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Undefined env raises EnvironmentNotFoundError."""
+    monkeypatch.chdir(pixi_workspace)
+    args = _make_args(environment="nonexistent", cmd=["echo", "hi"])
+    with pytest.raises(EnvironmentNotFoundError, match="not defined"):
+        execute_run(args)

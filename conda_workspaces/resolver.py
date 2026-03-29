@@ -7,6 +7,7 @@ constituent features.  Also handles solve-group coordination.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,8 @@ from .exceptions import (
 
 if TYPE_CHECKING:
     from .models import Channel, MatchSpec, PyPIDependency, WorkspaceConfig
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -79,6 +82,12 @@ def resolve_environment(
     if feature_platforms:
         resolved.platforms = sorted(feature_platforms)
     else:
+        if any(f.platforms for f in features):
+            log.warning(
+                "Feature platform intersection for environment '%s' is empty; "
+                "falling back to workspace platforms",
+                env_name,
+            )
         resolved.platforms = list(config.platforms)
 
     # Merge activation and system requirements

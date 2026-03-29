@@ -5,8 +5,8 @@ and its parents. The first matching file is used.
 
 ## Search order
 
-1. `pixi.toml` — pixi-native format (full compatibility)
-2. `conda.toml` — conda-native workspace manifest
+1. `conda.toml` — conda-native workspace manifest
+2. `pixi.toml` — pixi-native format (full compatibility)
 3. `pyproject.toml` — embedded under `[tool.conda.*]`, `[tool.conda-workspaces.*]` (legacy), or `[tool.pixi.*]`
 
 ## File formats

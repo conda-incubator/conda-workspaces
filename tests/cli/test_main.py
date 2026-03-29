@@ -66,15 +66,15 @@ def test_unknown_subcmd_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
         (["install", "-e", "test"], "environment", "test"),
         (["install", "--force-reinstall"], "force_reinstall", True),
         (["list", "--installed"], "installed", True),
-        (["info", "test"], "env_name", "test"),
-        (["info"], "env_name", "default"),
+        (["info", "-e", "test"], "environment", "test"),
+        (["info"], "environment", None),
         (["add", "--pypi", "requests"], "pypi", True),
         (["add", "--feature", "dev", "numpy"], "feature", "dev"),
         (["remove", "--pypi", "requests"], "pypi", True),
         (["clean", "-e", "test"], "environment", "test"),
         (["run", "-e", "test", "--", "pytest"], "environment", "test"),
-        (["activate", "docs"], "env_name", "docs"),
-        (["activate"], "env_name", "default"),
+        (["activate", "-e", "docs"], "environment", "docs"),
+        (["activate"], "environment", "default"),
     ],
     ids=[
         "init-format-conda",
@@ -145,3 +145,24 @@ def test_execute_dispatches_to_subcommand(
     result = execute(args)
     assert result == 0
     assert calls == [subcmd]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["run", "-n", "myenv", "--", "echo"],
+        ["run", "-p", "/some/path", "--", "echo"],
+    ],
+    ids=["run-rejects-n", "run-rejects-p"],
+)
+def test_run_rejects_legacy_flags(args: list[str]) -> None:
+    """run no longer accepts -n or -p flags."""
+    parser = generate_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(args)
+
+
+def test_shell_accepts_environment_flag() -> None:
+    parser = generate_parser()
+    parsed = parser.parse_args(["shell", "-e", "test"])
+    assert parsed.environment == "test"

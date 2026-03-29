@@ -17,7 +17,6 @@ from conda_workspaces.lockfile import (
     _build_lockfile_dict,
     _extract_env_packages,
     _record_to_dict,
-    generate_lockfile,
     install_from_lockfile,
     lockfile_exists,
     lockfile_path,
@@ -43,7 +42,6 @@ def _make_ctx(
         manifest_path=str(tmp_path / "pixi.toml"),
     )
     ctx = WorkspaceContext(config)
-    # Bypass the lazy platform property so tests don't need conda
     ctx._cache["platform"] = platform
     return ctx
 
@@ -79,7 +77,7 @@ def test_record_to_dict(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result["sha256"] == "abc123"
     assert result["md5"] == "def456"
     assert result["size"] == 1024
-    assert "depends" not in result  # empty field omitted
+    assert "depends" not in result
 
 
 def test_build_lockfile_dict() -> None:
@@ -94,17 +92,13 @@ def test_build_lockfile_dict() -> None:
         def get(self, key, default=None):
             return self._data.get(key, default)
 
-    class FakeEnv:
-        def __init__(self, pkgs: list[FakePkg]):
-            self.explicit_packages = pkgs
-
     pkg_a = FakePkg("numpy", "https://example.com/numpy-1.24.conda")
     pkg_b = FakePkg("python", "https://example.com/python-3.10.conda")
     pkg_c = FakePkg("pytest", "https://example.com/pytest-8.0.conda")
 
     environments = {
-        ("default", "linux-64"): FakeEnv([pkg_a, pkg_b]),  # type: ignore[dict-item]
-        ("test", "linux-64"): FakeEnv([pkg_a, pkg_b, pkg_c]),  # type: ignore[dict-item]
+        ("default", "linux-64"): [pkg_a, pkg_b],
+        ("test", "linux-64"): [pkg_a, pkg_b, pkg_c],
     }
     channels_by_env = {
         "default": ["conda-forge"],
@@ -117,14 +111,11 @@ def test_build_lockfile_dict() -> None:
     assert "default" in result["environments"]
     assert "test" in result["environments"]
 
-    # default has 2 packages, test has 3
     assert len(result["environments"]["default"]["packages"]["linux-64"]) == 2
     assert len(result["environments"]["test"]["packages"]["linux-64"]) == 3
 
-    # packages list is deduplicated (3 unique URLs)
     assert len(result["packages"]) == 3
 
-    # channels are correct
     assert result["environments"]["default"]["channels"] == [{"url": "conda-forge"}]
 
 
@@ -187,7 +178,10 @@ def test_generate_lockfile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """generate_lockfile builds & writes conda.lock."""
+    """generate_lockfile solves and writes conda.lock."""
+    from conda_workspaces.lockfile import generate_lockfile
+    from conda_workspaces.resolver import ResolvedEnvironment
+
     ctx = _make_ctx(tmp_path, env_names=["default", "test"])
 
     class FakePkg:
@@ -198,30 +192,28 @@ def test_generate_lockfile(
         def get(self, key, default=None):
             return default
 
-    class FakeEnv:
-        def __init__(self, pkgs: list):
-            self.explicit_packages = pkgs
-
-    from_prefix_calls: list[dict] = []
-
-    def fake_from_prefix(prefix, name, platform):
-        from_prefix_calls.append({"prefix": prefix, "name": name})
+    def fake_solve(ctx_arg, resolved):
         pkgs = [FakePkg("python", "https://example.com/python.conda")]
-        if name == "test":
+        if resolved.name == "test":
             pkgs.append(FakePkg("pytest", "https://example.com/pytest.conda"))
-        return FakeEnv(pkgs)
+        return pkgs
 
-    monkeypatch.setattr(
-        "conda_workspaces.lockfile.Environment.from_prefix", fake_from_prefix
-    )
+    monkeypatch.setattr("conda_workspaces.lockfile._solve_for_records", fake_solve)
 
-    # Stub env_exists so both envs are "installed"
-    monkeypatch.setattr(
-        "conda_workspaces.context.WorkspaceContext.env_exists",
-        lambda self, name: True,
-    )
+    resolved_envs = {
+        "default": ResolvedEnvironment(
+            name="default",
+            channels=[Channel("conda-forge")],
+            platforms=["linux-64"],
+        ),
+        "test": ResolvedEnvironment(
+            name="test",
+            channels=[Channel("conda-forge")],
+            platforms=["linux-64"],
+        ),
+    }
 
-    result = generate_lockfile(ctx)
+    result = generate_lockfile(ctx, resolved_envs)
     assert result == tmp_path / LOCKFILE_NAME
     assert result.is_file()
 
@@ -232,25 +224,31 @@ def test_generate_lockfile(
     assert "https://example.com/python.conda" in content
     assert "https://example.com/pytest.conda" in content
 
-    assert len(from_prefix_calls) == 2
-
 
 def test_generate_lockfile_specific_envs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """generate_lockfile with env_names generates only for specified envs."""
+    """generate_lockfile with only one env generates only for that env."""
+    from conda_workspaces.lockfile import generate_lockfile
+    from conda_workspaces.resolver import ResolvedEnvironment
+
     ctx = _make_ctx(tmp_path, env_names=["default", "test"])
 
-    class FakeEnv:
-        explicit_packages = []
-
     monkeypatch.setattr(
-        "conda_workspaces.lockfile.Environment.from_prefix",
-        lambda prefix, name, platform: FakeEnv(),
+        "conda_workspaces.lockfile._solve_for_records",
+        lambda ctx_arg, resolved: [],
     )
 
-    result = generate_lockfile(ctx, env_names=["default"])
+    resolved_envs = {
+        "default": ResolvedEnvironment(
+            name="default",
+            channels=[Channel("conda-forge")],
+            platforms=["linux-64"],
+        ),
+    }
+
+    result = generate_lockfile(ctx, resolved_envs)
     content = result.read_text(encoding="utf-8")
     assert "default" in content
 
@@ -269,7 +267,6 @@ def test_install_from_lockfile(
     """install_from_lockfile reads conda.lock, extracts URLs, and installs."""
     ctx = _make_ctx(tmp_path)
 
-    # Write a minimal conda.lock
     lockfile = tmp_path / LOCKFILE_NAME
     lockfile.write_text(
         "version: 1\n"

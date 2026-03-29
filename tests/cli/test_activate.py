@@ -16,7 +16,7 @@ from conda_workspaces.exceptions import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-_ACTIVATE_DEFAULTS = {"file": None, "env_name": "default"}
+_ACTIVATE_DEFAULTS = {"file": None, "environment": "default"}
 
 
 def _make_args(**kwargs) -> argparse.Namespace:
@@ -57,6 +57,6 @@ def test_activate_error(
     pixi_workspace: Path, monkeypatch: pytest.MonkeyPatch, env_name: str, exc_type: type
 ) -> None:
     monkeypatch.chdir(pixi_workspace)
-    args = _make_args(env_name=env_name)
+    args = _make_args(environment=env_name)
     with pytest.raises(exc_type):
         execute_activate(args)

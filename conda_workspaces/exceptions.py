@@ -128,3 +128,17 @@ class LockfileNotFoundError(CondaWorkspacesError):
             f"in {path}.\n"
             f"Run 'conda workspace install' to generate one."
         )
+
+
+class LockfileStaleError(CondaWorkspacesError):
+    """The lockfile is older than the workspace manifest."""
+
+    def __init__(self, manifest: str | Path, lockfile: str | Path) -> None:
+        self.manifest = manifest
+        self.lockfile = lockfile
+        super().__init__(
+            f"Lockfile '{lockfile}' is out of date "
+            f"(manifest '{manifest}' has been modified since the last lock).\n"
+            "Run 'conda workspace lock' to update it, "
+            "or use --frozen to install anyway."
+        )

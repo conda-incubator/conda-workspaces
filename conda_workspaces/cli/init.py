@@ -25,27 +25,31 @@ def execute_init(args: argparse.Namespace) -> int:
     else:
         platforms = _detect_platforms()
 
+    base_dir = Path(args.file).parent if args.file else Path.cwd()
+
     if fmt == "pixi":
-        return _write_pixi_toml(name, channels, platforms)
+        return _write_workspace_toml("pixi.toml", name, channels, platforms, base_dir)
     elif fmt == "conda":
-        return _write_conda_toml(name, channels, platforms)
+        return _write_workspace_toml("conda.toml", name, channels, platforms, base_dir)
     elif fmt == "pyproject":
-        return _write_pyproject_toml(name, channels, platforms)
+        return _write_pyproject_toml(name, channels, platforms, base_dir)
 
     return 1
 
 
 def _detect_platforms() -> list[str]:
-    """Auto-detect a reasonable set of platforms."""
-    current = conda_context.subdir
-    # Include a sensible default set based on current platform
-    defaults = {"linux-64", "osx-64", "osx-arm64", "win-64"}
-    defaults.add(current)
-    return sorted(defaults)
+    """Return the current platform as detected by conda."""
+    return [conda_context.subdir]
 
 
-def _write_pixi_toml(name: str, channels: list[str], platforms: list[str]) -> int:
-    path = Path("pixi.toml")
+def _write_workspace_toml(
+    filename: str,
+    name: str,
+    channels: list[str],
+    platforms: list[str],
+    base_dir: Path,
+) -> int:
+    path = base_dir / filename
     if path.exists():
         raise ManifestExistsError(path)
 
@@ -53,7 +57,6 @@ def _write_pixi_toml(name: str, channels: list[str], platforms: list[str]) -> in
 
     ws = tomlkit.table()
     ws.add("name", name)
-    ws.add("version", "0.1.0")
     ws.add("channels", channels)
     ws.add("platforms", platforms)
     doc.add("workspace", ws)
@@ -66,49 +69,36 @@ def _write_pixi_toml(name: str, channels: list[str], platforms: list[str]) -> in
     return 0
 
 
-def _write_conda_toml(name: str, channels: list[str], platforms: list[str]) -> int:
-    path = Path("conda.toml")
-    if path.exists():
-        raise ManifestExistsError(path)
+def _write_pyproject_toml(
+    name: str,
+    channels: list[str],
+    platforms: list[str],
+    base_dir: Path,
+) -> int:
+    path = base_dir / "pyproject.toml"
+    existed = path.exists()
 
-    doc = tomlkit.document()
-
-    ws = tomlkit.table()
-    ws.add("name", name)
-    ws.add("version", "0.1.0")
-    ws.add("channels", channels)
-    ws.add("platforms", platforms)
-    doc.add("workspace", ws)
-
-    deps = tomlkit.table()
-    doc.add("dependencies", deps)
-
-    path.write_text(tomlkit.dumps(doc), encoding="utf-8")
-    print(f"Created {path}")
-    return 0
-
-
-def _write_pyproject_toml(name: str, channels: list[str], platforms: list[str]) -> int:
-    path = Path("pyproject.toml")
-
-    if path.exists():
+    if existed:
         text = path.read_text(encoding="utf-8")
         doc = tomlkit.loads(text)
     else:
         doc = tomlkit.document()
 
     tool = doc.setdefault("tool", tomlkit.table())
+    if "conda" in tool:
+        raise ManifestExistsError("[tool.conda] in pyproject.toml")
     if "pixi" in tool:
         raise ManifestExistsError("[tool.pixi] in pyproject.toml")
 
-    pixi = tomlkit.table()
+    conda = tomlkit.table()
     ws = tomlkit.table()
+    ws.add("name", name)
     ws.add("channels", channels)
     ws.add("platforms", platforms)
-    pixi.add("workspace", ws)
-    pixi.add("dependencies", tomlkit.table())
-    tool.add("pixi", pixi)
+    conda.add("workspace", ws)
+    conda.add("dependencies", tomlkit.table())
+    tool.add("conda", conda)
 
     path.write_text(tomlkit.dumps(doc), encoding="utf-8")
-    print(f"{'Updated' if path.exists() else 'Created'} {path}")
+    print(f"{'Updated' if existed else 'Created'} {path}")
     return 0

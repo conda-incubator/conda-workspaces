@@ -57,9 +57,10 @@ Then install and use your environments:
 ```bash
 cw install                    # solve + install + generate conda.lock
 cw run -e test -- pytest -v   # run a command in an environment
-cw shell test                 # spawn a shell with test env activated
+cw shell -e test              # spawn a shell with test env activated
 cw install --locked           # reproducible install from conda.lock
-cw list                       # show defined environments
+cw list                       # list packages in default env
+cw info                       # workspace overview
 ```
 
 Environments are standard conda prefixes stored in `.conda/envs/` inside

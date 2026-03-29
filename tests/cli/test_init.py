@@ -15,10 +15,11 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _INIT_DEFAULTS = {
-    "manifest_format": "pixi",
+    "manifest_format": "conda",
     "name": None,
     "channels": None,
     "platforms": ["linux-64", "osx-arm64", "win-64"],
+    "file": None,
 }
 
 
@@ -94,21 +95,24 @@ def test_init_conda_toml_structure(
     assert doc["workspace"]["name"] == "my-conda"
 
 
-def test_init_pyproject_creates_tool_pixi(
+def test_init_pyproject_creates_tool_conda(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
     args = _make_args(manifest_format="pyproject", name="pp")
     execute_init(args)
     doc = tomlkit.loads((tmp_path / "pyproject.toml").read_text(encoding="utf-8"))
-    assert "pixi" in doc["tool"]
-    assert "workspace" in doc["tool"]["pixi"]
+    assert "conda" in doc["tool"]
+    ws = doc["tool"]["conda"]["workspace"]
+    assert ws["name"] == "pp"
+    assert "channels" in ws
+    assert "platforms" in ws
 
 
 def test_init_pyproject_appends_to_existing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """If pyproject.toml already exists, init adds [tool.pixi] to it."""
+    """If pyproject.toml already exists, init adds [tool.conda] to it."""
     monkeypatch.chdir(tmp_path)
     existing = '[project]\nname = "existing"\n'
     (tmp_path / "pyproject.toml").write_text(existing, encoding="utf-8")
@@ -116,16 +120,24 @@ def test_init_pyproject_appends_to_existing(
     execute_init(args)
     doc = tomlkit.loads((tmp_path / "pyproject.toml").read_text(encoding="utf-8"))
     assert doc["project"]["name"] == "existing"
-    assert "pixi" in doc["tool"]
+    assert "conda" in doc["tool"]
 
 
-def test_init_pyproject_refuses_existing_pixi(
+@pytest.mark.parametrize(
+    "existing_content",
+    [
+        '[tool.conda.workspace]\nchannels = ["defaults"]\n',
+        '[tool.pixi.workspace]\nchannels = ["defaults"]\n',
+    ],
+    ids=["tool-conda-exists", "tool-pixi-exists"],
+)
+def test_init_pyproject_refuses_existing_workspace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    existing_content: str,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    existing = '[tool.pixi.workspace]\nchannels = ["defaults"]\n'
-    (tmp_path / "pyproject.toml").write_text(existing, encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(existing_content, encoding="utf-8")
     args = _make_args(manifest_format="pyproject", name="pp")
     with pytest.raises(ManifestExistsError, match="already exists"):
         execute_init(args)
@@ -152,14 +164,13 @@ def test_init_default_channels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 def test_init_detects_platforms(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When no platforms argument given, _detect_platforms is called."""
+    """_detect_platforms returns only the current platform."""
     monkeypatch.chdir(tmp_path)
-    args = _make_args(manifest_format="pixi", name="auto-plat", platforms=None)
+    args = _make_args(manifest_format="conda", name="auto-plat", platforms=None)
     execute_init(args)
-    doc = tomlkit.loads((tmp_path / "pixi.toml").read_text(encoding="utf-8"))
+    doc = tomlkit.loads((tmp_path / "conda.toml").read_text(encoding="utf-8"))
     platforms = doc["workspace"]["platforms"]
-    assert len(platforms) >= 4
-    assert "linux-64" in platforms
+    assert len(platforms) == 1
 
 
 def test_init_unknown_format(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -171,3 +182,56 @@ def test_init_unknown_format(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert not (tmp_path / "pixi.toml").exists()
     assert not (tmp_path / "conda.toml").exists()
     assert not (tmp_path / "pyproject.toml").exists()
+
+
+def test_init_pyproject_uses_tool_conda(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--format pyproject creates [tool.conda.*], not [tool.pixi.*]."""
+    monkeypatch.chdir(tmp_path)
+    args = _make_args(manifest_format="pyproject", name="myproj")
+    execute_init(args)
+    doc = tomlkit.loads((tmp_path / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "conda" in doc["tool"]
+    assert "pixi" not in doc["tool"]
+
+
+@pytest.mark.parametrize(
+    "fmt, filename",
+    [
+        ("pixi", "pixi.toml"),
+        ("conda", "conda.toml"),
+    ],
+    ids=["pixi-no-version", "conda-no-version"],
+)
+def test_init_no_version_field(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fmt: str, filename: str
+) -> None:
+    """init does not include a version field in the generated manifest."""
+    monkeypatch.chdir(tmp_path)
+    args = _make_args(manifest_format=fmt, name="novr")
+    execute_init(args)
+    doc = tomlkit.loads((tmp_path / filename).read_text(encoding="utf-8"))
+    assert "version" not in doc.get("workspace", {})
+
+
+def test_init_pyproject_no_version_field(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """init --format pyproject does not include a version in [tool.conda.workspace]."""
+    monkeypatch.chdir(tmp_path)
+    args = _make_args(manifest_format="pyproject", name="novr")
+    execute_init(args)
+    doc = tomlkit.loads((tmp_path / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "version" not in doc["tool"]["conda"]["workspace"]
+
+
+def test_init_auto_detect_single_platform(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """init with no --platform arg creates exactly one platform (auto-detected)."""
+    monkeypatch.chdir(tmp_path)
+    args = _make_args(manifest_format="conda", name="single-plat", platforms=None)
+    execute_init(args)
+    doc = tomlkit.loads((tmp_path / "conda.toml").read_text(encoding="utf-8"))
+    assert len(doc["workspace"]["platforms"]) == 1

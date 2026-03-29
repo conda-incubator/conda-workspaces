@@ -9,6 +9,7 @@ from conda.reporters import confirm_yn
 
 from ..context import WorkspaceContext
 from ..envs import clean_all, list_installed_environments, remove_environment
+from ..exceptions import EnvironmentNotFoundError
 from ..parsers import detect_and_parse
 
 if TYPE_CHECKING:
@@ -25,6 +26,11 @@ def execute_clean(args: argparse.Namespace) -> int:
 
     try:
         if env_name:
+            if env_name not in config.environments:
+                raise EnvironmentNotFoundError(
+                    env_name, list(config.environments.keys())
+                )
+
             if not ctx.env_exists(env_name):
                 print(f"Environment '{env_name}' is not installed.")
                 return 0

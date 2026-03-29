@@ -153,9 +153,11 @@ class PyprojectTomlParser(WorkspaceParser):
         envs_data = source.get("environments", {})
         if envs_data:
             for env_name, env_val in envs_data.items():
-                env = _parse_environment(env_name, env_val)
+                env = _parse_environment(env_name, env_val, path)
                 config.environments[env_name] = env
         else:
-            config.environments["default"] = Environment(name="default")
+            config.environments[Environment.DEFAULT_NAME] = Environment(
+                name=Environment.DEFAULT_NAME
+            )
 
         return config

@@ -20,7 +20,7 @@ def execute_activate(args: argparse.Namespace) -> int:
     _, config = detect_and_parse(manifest_path)
     ctx = WorkspaceContext(config)
 
-    env_name = args.env_name
+    env_name = args.environment
 
     if env_name not in config.environments:
         raise EnvironmentNotFoundError(env_name, list(config.environments.keys()))

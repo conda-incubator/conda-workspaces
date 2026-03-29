@@ -8,7 +8,6 @@ from pathlib import Path
 from conda.cli.helpers import (
     add_output_and_prompt_options,
     add_parser_help,
-    add_parser_prefix,
 )
 
 
@@ -46,9 +45,9 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     init_parser.add_argument(
         "--format",
         choices=["pixi", "conda", "pyproject"],
-        default="pixi",
+        default="conda",
         dest="manifest_format",
-        help="Manifest format to generate (default: pixi).",
+        help="Manifest format to generate (default: conda).",
     )
     init_parser.add_argument(
         "--name",
@@ -94,48 +93,67 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         "--locked",
         action="store_true",
         default=False,
-        help="Install from existing lockfiles (skip solving).",
+        help="Install from lockfiles, verifying they are up-to-date.",
+    )
+    install_parser.add_argument(
+        "--frozen",
+        action="store_true",
+        default=False,
+        help="Install from existing lockfiles without checking freshness.",
     )
 
     lock_parser = sub.add_parser(
         "lock",
-        help="Generate lockfiles for installed environments.",
+        help="Solve and generate lockfiles for workspace environments.",
         add_help=False,
     )
     add_parser_help(lock_parser)
+    add_output_and_prompt_options(lock_parser)
     lock_parser.add_argument(
         "-e",
         "--environment",
         default=None,
-        help="Generate lockfile for this environment only (default: all installed).",
+        help="Generate lockfile for this environment only (default: all).",
     )
 
     list_parser = sub.add_parser(
         "list",
-        help="List environments defined in the workspace.",
+        help="List packages in an environment, or list environments.",
         add_help=False,
     )
     add_parser_help(list_parser)
     add_output_and_prompt_options(list_parser)
     list_parser.add_argument(
+        "-e",
+        "--environment",
+        default="default",
+        help="Environment to list packages for (default: default).",
+    )
+    list_parser.add_argument(
+        "--envs",
+        action="store_true",
+        default=False,
+        help="List environments instead of packages.",
+    )
+    list_parser.add_argument(
         "--installed",
         action="store_true",
         default=False,
-        help="Only show environments that are currently installed.",
+        help="Only show installed environments (with --envs).",
     )
 
     info_parser = sub.add_parser(
         "info",
-        help="Show details about an environment.",
+        help="Show workspace overview or environment details.",
         add_help=False,
     )
     add_parser_help(info_parser)
     add_output_and_prompt_options(info_parser)
     info_parser.add_argument(
-        "env_name",
-        nargs="?",
-        default="default",
-        help="Environment name (default: default).",
+        "-e",
+        "--environment",
+        default=None,
+        help="Show details for this environment (default: workspace overview).",
     )
 
     add_parser_cmd = sub.add_parser(
@@ -218,7 +236,6 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         add_help=False,
     )
     add_parser_help(run_parser)
-    add_parser_prefix(run_parser)
     run_parser.add_argument(
         "-e",
         "--environment",
@@ -238,8 +255,8 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     )
     add_parser_help(activate_parser)
     activate_parser.add_argument(
-        "env_name",
-        nargs="?",
+        "-e",
+        "--environment",
         default="default",
         help="Environment name (default: default).",
     )
@@ -251,8 +268,8 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     )
     add_parser_help(shell_parser)
     shell_parser.add_argument(
-        "env_name",
-        nargs="?",
+        "-e",
+        "--environment",
         default="default",
         help="Environment name (default: default).",
     )

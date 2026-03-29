@@ -1,20 +1,21 @@
-"""``conda workspace lock`` — generate lockfiles for workspace environments."""
+"""``conda workspace lock`` — solve and generate lockfiles."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 from ..context import WorkspaceContext
+from ..exceptions import EnvironmentNotFoundError
 from ..lockfile import generate_lockfile, lockfile_path
 from ..parsers import detect_and_parse
-from ..resolver import resolve_all_environments
+from ..resolver import resolve_all_environments, resolve_environment
 
 if TYPE_CHECKING:
     import argparse
 
 
 def execute_lock(args: argparse.Namespace) -> int:
-    """Generate a ``conda.lock`` for installed workspace environments."""
+    """Solve workspace environments and write ``conda.lock``."""
     manifest_path = getattr(args, "file", None)
     _, config = detect_and_parse(manifest_path)
     ctx = WorkspaceContext(config)
@@ -22,22 +23,18 @@ def execute_lock(args: argparse.Namespace) -> int:
     env_name = getattr(args, "environment", None)
 
     if env_name:
-        if not ctx.env_exists(env_name):
-            from ..exceptions import EnvironmentNotInstalledError
-
-            raise EnvironmentNotInstalledError(env_name)
-        path = generate_lockfile(ctx, env_names=[env_name])
+        if env_name not in config.environments:
+            raise EnvironmentNotFoundError(
+                env_name, list(config.environments.keys())
+            )
+        resolved = resolve_environment(config, env_name, ctx.platform)
+        path = generate_lockfile(ctx, {env_name: resolved})
         print(f"Lockfile written to {path}")
     else:
         resolved_all = resolve_all_environments(config, ctx.platform)
-        installed = [name for name in resolved_all if ctx.env_exists(name)]
-        skipped = [name for name in resolved_all if not ctx.env_exists(name)]
-        if installed:
-            path = generate_lockfile(ctx, env_names=installed)
-            for name in installed:
-                print(f"  {name} -> {path}")
-        for name in skipped:
-            print(f"  {name} — skipped (not installed)")
-        print(f"\n{len(installed)} environment(s) locked in {lockfile_path(ctx)}.")
+        path = generate_lockfile(ctx, resolved_all)
+        for name in resolved_all:
+            print(f"  {name} -> {path}")
+        print(f"\n{len(resolved_all)} environment(s) locked in {lockfile_path(ctx)}.")
 
     return 0

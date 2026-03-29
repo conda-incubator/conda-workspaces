@@ -70,13 +70,7 @@ class WorkspaceContext:
         return self.platform in self.config.platforms
 
     def env_prefix(self, env_name: str) -> Path:
-        """Return the prefix path for a named environment.
-
-        The ``default`` environment lives directly in the envs dir;
-        named environments get a subdirectory.
-        """
-        if env_name == "default":
-            return self.envs_dir / "default"
+        """Return the prefix path for a named environment."""
         return self.envs_dir / env_name
 
     def env_exists(self, env_name: str) -> bool:

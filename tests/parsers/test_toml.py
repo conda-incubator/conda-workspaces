@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from conda_workspaces.exceptions import WorkspaceParseError
 from conda_workspaces.models import Feature, MatchSpec
 from conda_workspaces.parsers.toml import (
     CondaTomlParser,
@@ -149,18 +150,25 @@ def test_parse_pypi_deps_empty():
         (["feat1", "feat2"], ["feat1", "feat2"]),
         ({"features": ["a"]}, ["a"]),
         ({"features": ["a"], "solve-group": "g"}, ["a"]),
-        ("unexpected", []),
     ],
-    ids=["list", "dict-features", "dict-solve-group", "other-type"],
+    ids=["list", "dict-features", "dict-solve-group"],
 )
-def test_parse_environment(raw, expected_features):
-    env = _parse_environment("myenv", raw)
+def test_parse_environment(tmp_path, raw, expected_features):
+    env = _parse_environment("myenv", raw, tmp_path / "conda.toml")
     assert env.name == "myenv"
     assert env.features == expected_features
 
 
-def test_parse_environment_no_default_feature():
-    env = _parse_environment("e", {"no-default-feature": True, "features": ["x"]})
+def test_parse_environment_invalid_type(tmp_path):
+    path = tmp_path / "conda.toml"
+    with pytest.raises(WorkspaceParseError, match="expected list or dict, got str"):
+        _parse_environment("myenv", "unexpected", path)
+
+
+def test_parse_environment_no_default_feature(tmp_path):
+    env = _parse_environment(
+        "e", {"no-default-feature": True, "features": ["x"]}, tmp_path / "conda.toml"
+    )
     assert env.no_default_feature is True
 
 
@@ -187,3 +195,54 @@ def test_parse_target_overrides_empty():
     _parse_target_overrides({}, feature)
     assert feature.target_conda_dependencies == {}
     assert feature.target_pypi_dependencies == {}
+
+
+@pytest.mark.parametrize(
+    "raw, field_name, expected_value",
+    [
+        (
+            {"pkg": {"version": ">=1.0", "extras": ["extra1", "extra2"]}},
+            "extras",
+            ("extra1", "extra2"),
+        ),
+        (
+            {"pkg": {"version": ">=1.0", "path": "/local/pkg"}},
+            "path",
+            "/local/pkg",
+        ),
+        (
+            {"pkg": {"version": ">=1.0", "editable": True}},
+            "editable",
+            True,
+        ),
+        (
+            {"pkg": {"git": "https://github.com/user/repo.git"}},
+            "git",
+            "https://github.com/user/repo.git",
+        ),
+        (
+            {"pkg": {"url": "https://example.com/pkg-1.0.tar.gz"}},
+            "url",
+            "https://example.com/pkg-1.0.tar.gz",
+        ),
+    ],
+    ids=["extras", "path", "editable", "git", "url"],
+)
+def test_parse_pypi_deps_dict_fields(raw, field_name, expected_value):
+    deps = _parse_pypi_deps(raw)
+    assert "pkg" in deps
+    assert getattr(deps["pkg"], field_name) == expected_value
+
+
+@pytest.mark.parametrize(
+    "raw, type_name",
+    [
+        (42, "int"),
+        (True, "bool"),
+    ],
+    ids=["int-type", "bool-type"],
+)
+def test_parse_environment_rejects_invalid_types(tmp_path, raw, type_name):
+    path = tmp_path / "conda.toml"
+    with pytest.raises(WorkspaceParseError, match=f"got {type_name}"):
+        _parse_environment("badenv", raw, path)

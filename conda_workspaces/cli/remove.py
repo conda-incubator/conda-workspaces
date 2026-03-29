@@ -36,8 +36,10 @@ def execute_remove(args: argparse.Namespace) -> int:
     if removed:
         manifest_path.write_text(tomlkit.dumps(doc), encoding="utf-8")
         label = "PyPI" if is_pypi else "conda"
+        location = f"feature '{target_feature}'" if target_feature else "default"
         print(
-            f"Removed {len(removed)} {label} dependency(ies) from {manifest_path.name}"
+            f"Removed {len(removed)} {label} dependency(ies)"
+            f" from {location} in {manifest_path.name}"
         )
     else:
         print("No matching dependencies found to remove.")
@@ -73,10 +75,12 @@ def _remove_from_pyproject(
     dep_key: str,
     feature: str | None,
 ) -> list[str]:
-    """Remove deps from a pyproject.toml with [tool.pixi.*] tables."""
+    """Remove deps from a pyproject.toml with [tool.conda.*] / [tool.pixi.*] tables."""
     tool = doc.get("tool", {})
 
-    if "conda-workspaces" in tool:
+    if "conda" in tool:
+        source = tool["conda"]
+    elif "conda-workspaces" in tool:
         source = tool["conda-workspaces"]
     elif "pixi" in tool:
         source = tool["pixi"]

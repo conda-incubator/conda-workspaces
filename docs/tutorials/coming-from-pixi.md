@@ -38,16 +38,21 @@ Both read the same `pixi.toml` manifest.
 |---|---|
 | `pixi init` | `cw init` |
 | `pixi install` | `cw install` |
+| `pixi install --locked` | `cw install --locked` (validates lockfile freshness) |
+| `pixi install --frozen` | `cw install --frozen` (installs from lockfile as-is) |
 | `pixi add python` | `cw add python` |
-| `pixi add --feature test pytest` | `cw add -e test pytest` |
+| `pixi add --feature test pytest` | `cw add -e test pytest` or `cw add --feature test pytest` |
+| `pixi add --pypi requests` | `cw add --pypi requests` |
 | `pixi remove numpy` | `cw remove numpy` |
-| `pixi run test` | `cw run -e default -- test` |
-| `pixi list` | `cw list` |
-| `pixi info` | `cw info` |
-| `pixi lock` | `cw lock` |
-| `pixi install --locked` | `cw install --locked` |
+| `pixi run test` | pixi task; for conda task running see [conda-tasks](https://github.com/conda-incubator/conda-tasks) |
+| `pixi list` | `cw list` (packages in default env) |
+| `pixi list` (envs) | `cw list --envs` |
+| `pixi list` (specific env) | `cw list -e <env>` |
+| `pixi info` | `cw info` (workspace overview) |
+| `pixi info` (per-env) | `cw info -e <env>` |
+| `pixi lock` | `cw lock` (pure solve, no install required) |
+| `pixi shell` | `cw shell` or `cw shell -e <env>` |
 | `pixi clean` | `cw clean` |
-| `pixi shell` | `conda activate .conda/envs/default` |
 
 ## Using conda.toml instead
 
@@ -62,7 +67,7 @@ This creates a `conda.toml` file with the same workspace/feature/
 environment structure. The only difference is:
 
 - `conda.toml` uses `[workspace]` exclusively (no `[project]` fallback)
-- `conda.toml` is searched after `pixi.toml` but before `pyproject.toml`
+- `conda.toml` is searched first, before `pixi.toml` and `pyproject.toml`
 
 ## Embedded in pyproject.toml
 

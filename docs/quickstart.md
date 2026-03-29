@@ -117,16 +117,43 @@ This creates project-local conda environments under `.conda/envs/` for
 each environment defined in your manifest. A `conda.lock` file is
 generated automatically after solving.
 
+You can point to a specific manifest with `--file` / `-f`:
+
+```bash
+cw install -f path/to/conda.toml
+```
+
+To recreate environments from scratch, use `--force-reinstall`:
+
+```bash
+cw install --force-reinstall
+```
+
+## Lock
+
+The `cw lock` command runs the solver and records the solution in
+`conda.lock` without installing any environments:
+
+```bash
+cw lock
+```
+
 ## Reproducible installs
 
-To install from the lockfile without re-solving:
+Use `--locked` to install from the lockfile. This validates that the
+lockfile is still fresh relative to the manifest — if the manifest has
+changed, the install fails:
 
 ```bash
 cw install --locked
 ```
 
-This uses the exact package URLs recorded in `conda.lock`, ensuring
-identical environments across machines and CI.
+Use `--frozen` to install from the lockfile as-is, without checking
+freshness:
+
+```bash
+cw install --frozen
+```
 
 ## Run commands
 
@@ -141,25 +168,62 @@ To drop into an interactive shell with an environment activated, use
 to start a new shell process — exit with `exit` or Ctrl+D to return.
 
 ```bash
-cw shell test
+cw shell -e test
 ```
 
 You can also pass a command to run inside the spawned shell:
 
 ```bash
-cw shell test -- python -c "import numpy; print(numpy.__version__)"
+cw shell -e test -- python -c "import numpy; print(numpy.__version__)"
 ```
 
-## List environments
+## Add dependencies
+
+```bash
+cw add numpy
+```
+
+Add to a specific feature:
+
+```bash
+cw add --feature test pytest
+```
+
+Add a PyPI dependency:
+
+```bash
+cw add --pypi requests
+```
+
+## List packages
 
 ```bash
 cw list
 ```
 
-## View environment details
+This lists packages in the default environment. To list packages in a
+specific environment:
 
 ```bash
-cw info test
+cw list -e test
+```
+
+To list defined environments instead:
+
+```bash
+cw list --envs
+```
+
+## Workspace overview
+
+```bash
+cw info
+```
+
+To see details for a specific environment:
+
+```bash
+cw info -e test
 ```
 
 ## Next steps

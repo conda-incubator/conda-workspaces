@@ -37,11 +37,26 @@ class PyPIDependency:
 
     name: str
     spec: str = ""
+    extras: tuple[str, ...] = ()
+    path: str | None = None
+    editable: bool = False
+    git: str | None = None
+    url: str | None = None
 
     def __str__(self) -> str:
+        base = self.name
+        if self.extras:
+            base = f"{base}[{','.join(self.extras)}]"
+        if self.git:
+            return f"{base} @ git+{self.git}"
+        if self.path:
+            prefix = "-e " if self.editable else ""
+            return f"{prefix}{base} @ {self.path}"
+        if self.url:
+            return f"{base} @ {self.url}"
         if self.spec:
-            return f"{self.name}{self.spec}"
-        return self.name
+            return f"{base}{self.spec}"
+        return base
 
 
 @dataclass
@@ -95,6 +110,8 @@ class Environment:
     matching pixi's ``no-default-feature = true`` option.
     """
 
+    DEFAULT_NAME: ClassVar[str] = "default"
+
     name: str
     features: list[str] = field(default_factory=list)
     solve_group: str | None = None
@@ -102,7 +119,7 @@ class Environment:
 
     @property
     def is_default(self) -> bool:
-        return self.name == "default"
+        return self.name == self.DEFAULT_NAME
 
 
 @dataclass
@@ -150,8 +167,10 @@ class WorkspaceConfig:
         """
         if Feature.DEFAULT_NAME not in self.features:
             self.features[Feature.DEFAULT_NAME] = Feature(name=Feature.DEFAULT_NAME)
-        if "default" not in self.environments:
-            self.environments["default"] = Environment(name="default")
+        if Environment.DEFAULT_NAME not in self.environments:
+            self.environments[Environment.DEFAULT_NAME] = Environment(
+                name=Environment.DEFAULT_NAME
+            )
 
         invalid = [p for p in self.platforms if p not in KNOWN_SUBDIRS]
         if invalid:

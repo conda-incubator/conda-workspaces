@@ -8,6 +8,7 @@ environments, and target overrides are shared with
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import tomlkit
@@ -29,6 +30,8 @@ if TYPE_CHECKING:
         Feature,
         WorkspaceConfig,
     )
+
+log = logging.getLogger(__name__)
 
 
 class CondaTomlParser(WorkspaceParser):
@@ -76,6 +79,13 @@ def _parse_channels(raw: list[Any]) -> list[Channel]:
         if isinstance(item, str):
             channels.append(Channel(item))
         elif isinstance(item, dict):
+            if "priority" in item:
+                log.debug(
+                    "Channel priority is not supported by conda; "
+                    "ignoring priority=%s for channel '%s'",
+                    item["priority"],
+                    item["channel"],
+                )
             channels.append(Channel(item["channel"]))
     return channels
 
@@ -107,14 +117,22 @@ def _parse_pypi_deps(raw: dict[str, Any]) -> dict[str, PyPIDependency]:
         if isinstance(spec, str):
             deps[name] = PyPIDependency(name=name, spec=spec)
         elif isinstance(spec, dict):
-            version = spec.get("version", "")
-            deps[name] = PyPIDependency(name=name, spec=version)
+            extras = spec.get("extras", [])
+            deps[name] = PyPIDependency(
+                name=name,
+                spec=spec.get("version", ""),
+                extras=tuple(extras) if extras else (),
+                path=spec.get("path"),
+                editable=spec.get("editable", False),
+                git=spec.get("git"),
+                url=spec.get("url"),
+            )
         else:
             deps[name] = PyPIDependency(name=name, spec=str(spec))
     return deps
 
 
-def _parse_environment(name: str, raw: Any) -> Environment:
+def _parse_environment(name: str, raw: Any, path: Path) -> Environment:
     """Parse a single environment entry.
 
     Environments can be specified as:
@@ -130,7 +148,11 @@ def _parse_environment(name: str, raw: Any) -> Environment:
             solve_group=raw.get("solve-group"),
             no_default_feature=raw.get("no-default-feature", False),
         )
-    return Environment(name=name)
+    raise WorkspaceParseError(
+        path,
+        f"Invalid environment definition for '{name}': "
+        f"expected list or dict, got {type(raw).__name__}",
+    )
 
 
 def _parse_target_overrides(target_data: dict[str, Any], feature: Feature) -> None:

@@ -16,7 +16,7 @@ from conda_workspaces.exceptions import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-_SHELL_DEFAULTS = {"file": None, "env_name": "default", "cmd": []}
+_SHELL_DEFAULTS = {"file": None, "environment": "default", "cmd": []}
 
 
 def _make_args(**kwargs) -> argparse.Namespace:
@@ -50,7 +50,7 @@ def test_shell_spawns_env(
 
     monkeypatch.setattr("conda_spawn.main.spawn", fake_spawn)
 
-    args = _make_args(env_name=env_name)
+    args = _make_args(environment=env_name)
     result = execute_shell(args)
     assert result == 0
     assert len(spawn_calls) == 1
@@ -108,7 +108,7 @@ def test_shell_error(
     exc_type: type,
 ) -> None:
     monkeypatch.chdir(pixi_workspace)
-    args = _make_args(env_name=env_name)
+    args = _make_args(environment=env_name)
     with pytest.raises(exc_type):
         execute_shell(args)
 

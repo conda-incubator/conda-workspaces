@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from conda_workspaces.cli.clean import execute_clean
+from conda_workspaces.exceptions import EnvironmentNotFoundError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -125,3 +126,13 @@ def test_clean_all_prompt_abort(
     args = _make_args()
     result = execute_clean(args)
     assert result == 0
+
+
+def test_clean_undefined_environment(
+    pixi_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """clean with an undefined env raises EnvironmentNotFoundError."""
+    monkeypatch.chdir(pixi_workspace)
+    args = _make_args(environment="nonexistent")
+    with pytest.raises(EnvironmentNotFoundError, match="not defined"):
+        execute_clean(args)

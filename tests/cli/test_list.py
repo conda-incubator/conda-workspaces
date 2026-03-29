@@ -13,7 +13,13 @@ if TYPE_CHECKING:
 
     import pytest
 
-_LIST_DEFAULTS = {"file": None, "installed": False, "json": False}
+_LIST_DEFAULTS = {
+    "file": None,
+    "installed": False,
+    "json": False,
+    "envs": False,
+    "environment": "default",
+}
 
 
 def _make_args(**kwargs) -> argparse.Namespace:
@@ -26,7 +32,7 @@ def test_list_all_environments(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.chdir(pixi_workspace)
-    args = _make_args()
+    args = _make_args(envs=True)
     result = execute_list(args)
     assert result == 0
     out = capsys.readouterr().out
@@ -40,8 +46,7 @@ def test_list_installed_only(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.chdir(pixi_workspace)
-    # No environments installed yet
-    args = _make_args(installed=True)
+    args = _make_args(envs=True, installed=True)
     result = execute_list(args)
     assert result == 0
     out = capsys.readouterr().out
@@ -54,16 +59,14 @@ def test_list_installed_with_env(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.chdir(pixi_workspace)
-    # Fake-install the default env
     meta = pixi_workspace / ".conda" / "envs" / "default" / "conda-meta"
     meta.mkdir(parents=True)
     (meta / "history").write_text("", encoding="utf-8")
 
-    args = _make_args(installed=True)
+    args = _make_args(envs=True, installed=True)
     execute_list(args)
     out = capsys.readouterr().out
     assert "default" in out
-    # test env is not installed, should be filtered out
     assert "test" not in out
 
 
@@ -73,7 +76,7 @@ def test_list_json_output(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.chdir(pixi_workspace)
-    args = _make_args(json=True)
+    args = _make_args(envs=True, json=True)
     execute_list(args)
     out = capsys.readouterr().out
     data = json.loads(out)
@@ -81,3 +84,17 @@ def test_list_json_output(
     names = {row["name"] for row in data}
     assert "default" in names
     assert "test" in names
+
+
+def test_list_packages_not_installed(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default list (packages) raises when the env is not installed."""
+    from conda_workspaces.exceptions import EnvironmentNotInstalledError
+
+    monkeypatch.chdir(pixi_workspace)
+    import pytest as _pt
+
+    with _pt.raises(EnvironmentNotInstalledError):
+        execute_list(_make_args())

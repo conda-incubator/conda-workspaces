@@ -13,7 +13,7 @@ from conda.gateways.subprocess import subprocess_call
 from conda.utils import wrap_subprocess_call
 
 from ..context import WorkspaceContext
-from ..exceptions import EnvironmentNotInstalledError
+from ..exceptions import EnvironmentNotFoundError, EnvironmentNotInstalledError
 from ..parsers import detect_and_parse
 
 if TYPE_CHECKING:
@@ -35,6 +35,9 @@ def execute_run(args: argparse.Namespace) -> int:
     # Strip leading -- if present (from argparse.REMAINDER)
     if cmd and cmd[0] == "--":
         cmd = cmd[1:]
+
+    if env_name not in config.environments:
+        raise EnvironmentNotFoundError(env_name, list(config.environments.keys()))
 
     if not ctx.env_exists(env_name):
         raise EnvironmentNotInstalledError(env_name)

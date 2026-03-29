@@ -1,4 +1,4 @@
-"""``conda workspace info`` — show environment details."""
+"""``conda workspace info`` — show workspace or environment details."""
 
 from __future__ import annotations
 
@@ -13,16 +13,58 @@ from ..resolver import resolve_environment
 if TYPE_CHECKING:
     import argparse
 
+    from ..models import WorkspaceConfig
+
 
 def execute_info(args: argparse.Namespace) -> int:
-    """Show details about an environment."""
+    """Show workspace overview or per-environment details."""
     manifest_path = getattr(args, "file", None)
     _, config = detect_and_parse(manifest_path)
     ctx = WorkspaceContext(config)
 
-    env_name = args.env_name
+    env_name = getattr(args, "environment", None)
     json_output = getattr(args, "json", False)
 
+    if env_name is None:
+        return _show_workspace_info(config, ctx, json_output)
+    return _show_env_info(config, ctx, env_name, json_output)
+
+
+def _show_workspace_info(
+    config: WorkspaceConfig,
+    ctx: WorkspaceContext,
+    json_output: bool,
+) -> int:
+    """Show workspace-level overview."""
+    info = {
+        "manifest": config.manifest_path,
+        "name": config.name or "(unnamed)",
+        "channels": [ch.canonical_name for ch in config.channels],
+        "platforms": config.platforms,
+        "environments": list(config.environments.keys()),
+        "features": list(config.features.keys()),
+    }
+
+    if json_output:
+        print(json.dumps(info, indent=2))
+    else:
+        print(f"Manifest:     {info['manifest']}")
+        print(f"Name:         {info['name']}")
+        print(f"Channels:     {', '.join(info['channels']) or '(none)'}")
+        print(f"Platforms:    {', '.join(info['platforms']) or '(all)'}")
+        print(f"Environments: {', '.join(info['environments'])}")
+        print(f"Features:     {', '.join(info['features'])}")
+
+    return 0
+
+
+def _show_env_info(
+    config: WorkspaceConfig,
+    ctx: WorkspaceContext,
+    env_name: str,
+    json_output: bool,
+) -> int:
+    """Show details for a single environment."""
     resolved = resolve_environment(config, env_name, ctx.platform)
     install_info = get_environment_info(ctx, env_name)
 
