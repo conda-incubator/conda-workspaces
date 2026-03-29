@@ -106,15 +106,28 @@ def _solve_for_records(
 
     Uses conda's solver API to resolve dependencies without installing,
     producing the list of exact packages that would be installed.
+    Applies the same transformations as ``install_environment``:
+    PyPI deps are translated and merged, system requirements are added
+    as virtual package constraints, and channel priority is honoured.
     """
     from conda.base.context import context as conda_context
     from conda.exceptions import UnsatisfiableError
     from conda.models.match_spec import MatchSpec
 
+    from .envs import (
+        _apply_system_requirements,
+        _build_pypi_specs,
+        _channel_priority_override,
+    )
+
     specs = [
         MatchSpec(dep.conda_build_form())
         for dep in resolved.conda_dependencies.values()
     ]
+
+    specs.extend(_build_pypi_specs(resolved))
+    _apply_system_requirements(resolved, specs)
+
     if not specs:
         return []
 
@@ -123,17 +136,19 @@ def _solve_for_records(
         raise SolveError(resolved.name, "No solver backend found")
 
     prefix = str(ctx.env_prefix(resolved.name))
-    solver = solver_backend(
-        prefix,
-        list(resolved.channels),
-        conda_context.subdirs,
-        specs_to_add=specs,
-    )
 
-    try:
-        return list(solver.solve_final_state())
-    except (UnsatisfiableError, SystemExit) as exc:
-        raise SolveError(resolved.name, str(exc)) from exc
+    with _channel_priority_override(resolved.channel_priority):
+        solver = solver_backend(
+            prefix,
+            list(resolved.channels),
+            conda_context.subdirs,
+            specs_to_add=specs,
+        )
+
+        try:
+            return list(solver.solve_final_state())
+        except (UnsatisfiableError, SystemExit) as exc:
+            raise SolveError(resolved.name, str(exc)) from exc
 
 
 def generate_lockfile(

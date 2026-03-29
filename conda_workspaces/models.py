@@ -31,8 +31,10 @@ from .exceptions import (
 class PyPIDependency:
     """A PyPI dependency (PEP 508 string).
 
-    Stored separately from conda deps because they require a different
-    solver path (pip / uv integration via conda-pypi).
+    Names are translated to conda equivalents via ``conda-pypi``'s
+    grayskull mapping and merged into the same solver call as conda
+    deps.  Path/git/URL deps are handled post-solve via conda-pypi's
+    build system.
     """
 
     name: str
@@ -103,9 +105,6 @@ class Environment:
     An environment inherits the ``default`` feature plus any additional
     features listed in *features*.
 
-    *solve_group* links environments so they share a single solver
-    solution (ensuring package-version consistency across environments).
-
     *no_default_feature* can be set to exclude the default feature,
     matching pixi's ``no-default-feature = true`` option.
     """
@@ -114,7 +113,6 @@ class Environment:
 
     name: str
     features: list[str] = field(default_factory=list)
-    solve_group: str | None = None
     no_default_feature: bool = False
 
     @property

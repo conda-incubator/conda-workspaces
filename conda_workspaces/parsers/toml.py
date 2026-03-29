@@ -137,7 +137,7 @@ def _parse_environment(name: str, raw: Any, path: Path) -> Environment:
 
     Environments can be specified as:
     - A list of feature names: ``env = ["feat1", "feat2"]``
-    - A dict with keys: ``env = {features = [...], solve-group = "..."}``
+    - A dict with keys: ``env = {features = [...]}``
     """
     if isinstance(raw, list):
         return Environment(name=name, features=raw)
@@ -145,7 +145,6 @@ def _parse_environment(name: str, raw: Any, path: Path) -> Environment:
         return Environment(
             name=name,
             features=list(raw.get("features", [])),
-            solve_group=raw.get("solve-group"),
             no_default_feature=raw.get("no-default-feature", False),
         )
     raise WorkspaceParseError(

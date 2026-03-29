@@ -2,7 +2,7 @@
 
 Takes a ``WorkspaceConfig`` and resolves which conda/PyPI packages
 need to be installed for a given environment by composing its
-constituent features.  Also handles solve-group coordination.
+constituent features.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ class ResolvedEnvironment:
     activation_scripts: list[str] = field(default_factory=list)
     activation_env: dict[str, str] = field(default_factory=dict)
     system_requirements: dict[str, str] = field(default_factory=dict)
-    solve_group: str | None = None
+    channel_priority: str | None = None
 
 
 def resolve_environment(
@@ -61,7 +61,7 @@ def resolve_environment(
 
     resolved = ResolvedEnvironment(
         name=env_name,
-        solve_group=env.solve_group,
+        channel_priority=config.channel_priority,
     )
 
     # Merge dependencies
@@ -111,18 +111,3 @@ def resolve_all_environments(
         name: resolve_environment(config, name, platform)
         for name in config.environments
     }
-
-
-def group_by_solve_group(
-    resolved: dict[str, ResolvedEnvironment],
-) -> dict[str | None, list[ResolvedEnvironment]]:
-    """Group resolved environments by solve-group.
-
-    Environments sharing a solve-group should be solved together
-    to ensure version consistency.  Environments without a solve-group
-    are grouped under ``None``.
-    """
-    groups: dict[str | None, list[ResolvedEnvironment]] = {}
-    for env in resolved.values():
-        groups.setdefault(env.solve_group, []).append(env)
-    return groups
