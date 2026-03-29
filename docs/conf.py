@@ -50,6 +50,7 @@ html_context = {
 }
 
 html_static_path = ["_static"]
+html_extra_path = ["../demos"]
 html_css_files = ["css/custom.css"]
 
 html_baseurl = "https://conda-incubator.github.io/conda-workspaces/"

@@ -36,7 +36,7 @@ jobs:
         run: cw install -e test
 
       - name: Run tests
-        run: cw run -e test -- pytest -v --tb=short
+        run: cw run -e test pytest -v --tb=short
 ```
 
 ## Caching environments
@@ -70,7 +70,7 @@ jobs:
           miniforge-version: latest
       - run: conda install -c conda-forge conda-workspaces
       - run: cw install -e test
-      - run: cw run -e test -- pytest -v
+      - run: cw run -e test pytest -v
 
   docs:
     runs-on: ubuntu-latest
@@ -81,7 +81,7 @@ jobs:
           miniforge-version: latest
       - run: conda install -c conda-forge conda-workspaces
       - run: cw install -e docs
-      - run: cw run -e docs -- sphinx-build docs docs/_build/html
+      - run: cw run -e docs sphinx-build docs docs/_build/html
 ```
 
 ## With conda-tasks
@@ -92,5 +92,5 @@ for task definitions, you can combine both plugins:
 ```yaml
       - run: conda install -c conda-forge conda-workspaces conda-tasks
       - run: cw install -e test
-      - run: cw run -e test -- conda task run check
+      - run: cw run -e test conda task run check
 ```

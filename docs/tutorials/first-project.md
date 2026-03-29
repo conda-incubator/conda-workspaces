@@ -33,20 +33,20 @@ platforms = ["linux-64", "osx-arm64"]
 Add your base dependencies:
 
 ```bash
-cw add python ">=3.10"
-cw add numpy ">=1.24" scipy ">=1.11"
+cw add "python>=3.10"
+cw add "numpy>=1.24" "scipy>=1.11"
 ```
 
 Add test dependencies to a test feature:
 
 ```bash
-cw add -e test pytest ">=8.0" pytest-cov ">=4.0"
+cw add -e test "pytest>=8.0" "pytest-cov>=4.0"
 ```
 
 Add documentation dependencies:
 
 ```bash
-cw add -e docs sphinx ">=7.0" myst-parser ">=3.0"
+cw add -e docs "sphinx>=7.0" "myst-parser>=3.0"
 ```
 
 Your `conda.toml` now looks like:
@@ -96,20 +96,20 @@ This creates three conda environments under `.conda/envs/`:
 Run your tests:
 
 ```bash
-cw run -e test -- pytest -v
+cw run -e test pytest -v
 ```
 
 Build documentation:
 
 ```bash
-cw run -e docs -- sphinx-build docs docs/_build
+cw run -e docs sphinx-build docs docs/_build
 ```
 
 ## Check environment status
 
 ```bash
-cw list
-cw info test
+cw list --envs
+cw info -e test
 ```
 
 ## Next steps

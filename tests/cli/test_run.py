@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import builtins
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import pytest
 from conda.exceptions import ArgumentError
 
-from conda_workspaces.cli.run import execute_run
+import conda_workspaces.cli.run as run_mod
+from conda_workspaces.cli.run import _try_run_task, execute_run
 from conda_workspaces.exceptions import (
     EnvironmentNotFoundError,
     EnvironmentNotInstalledError,
@@ -39,7 +41,7 @@ def _stub_run_deps(
     rc: int = 0,
     recorded_cmds: list | None = None,
 ) -> None:
-    """Stub all conda imports used by execute_run for success paths."""
+    """Stub all conda imports used by _run_command for success paths."""
     if recorded_cmds is None:
         recorded_cmds = []
 
@@ -62,8 +64,15 @@ def _stub_run_deps(
     monkeypatch.setattr(
         "conda_workspaces.cli.run.subprocess_call", fake_subprocess_call
     )
-    monkeypatch.setattr("conda_workspaces.cli.run.encode_environment", lambda env: env)
+    monkeypatch.setattr(
+        "conda_workspaces.cli.run.encode_environment", lambda env: env
+    )
     monkeypatch.setattr("conda_workspaces.cli.run.rm_rf", lambda path: None)
+
+
+def _block_task_detection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure task detection returns None so tests exercise the command path."""
+    monkeypatch.setattr(run_mod, "_try_run_task", lambda args, name: None)
 
 
 @pytest.mark.parametrize(
@@ -71,10 +80,11 @@ def _stub_run_deps(
     [
         ([], ArgumentError, "No command"),
         (["echo", "hi"], EnvironmentNotInstalledError, "not installed"),
+        (["echo", "hi"], EnvironmentNotFoundError, "not defined"),
     ],
-    ids=["no-command", "not-installed"],
+    ids=["no-command", "not-installed", "undefined-env"],
 )
-def test_run_error(
+def test_run_command_errors(
     pixi_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
     cmd: list[str],
@@ -82,7 +92,11 @@ def test_run_error(
     match: str,
 ) -> None:
     monkeypatch.chdir(pixi_workspace)
-    args = make_args(_DEFAULTS,cmd=cmd)
+    _block_task_detection(monkeypatch)
+    overrides = {"cmd": cmd}
+    if exc_type is EnvironmentNotFoundError:
+        overrides["environment"] = "nonexistent"
+    args = make_args(_DEFAULTS, **overrides)
     with pytest.raises(exc_type, match=match):
         execute_run(args)
 
@@ -95,13 +109,13 @@ def test_run_strips_double_dash(
     monkeypatch.chdir(pixi_workspace)
     tmp_workspace_env(pixi_workspace, "default")
 
+    _block_task_detection(monkeypatch)
     recorded_cmds: list[list[str]] = []
     _stub_run_deps(monkeypatch, recorded_cmds=recorded_cmds)
 
-    args = make_args(_DEFAULTS,cmd=["--", "pytest", "-v"])
+    args = make_args(_DEFAULTS, cmd=["--", "pytest", "-v"])
     execute_run(args)
 
-    # wrap_subprocess_call should receive the cmd without leading "--"
     assert recorded_cmds[0] == ["pytest", "-v"]
 
 
@@ -123,18 +137,55 @@ def test_run_exit_code(
     monkeypatch.chdir(pixi_workspace)
     tmp_workspace_env(pixi_workspace, "default")
 
+    _block_task_detection(monkeypatch)
     _stub_run_deps(monkeypatch, rc=rc)
 
-    args = make_args(_DEFAULTS,cmd=cmd)
+    args = make_args(_DEFAULTS, cmd=cmd)
     result = execute_run(args)
     assert result == rc
 
 
-def test_run_undefined_environment(
-    pixi_workspace: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "cmd, expected_task",
+    [
+        (["mytask"], "mytask"),
+        (["build", "--release"], "build"),
+        (["--", "mytask", "arg1"], "mytask"),
+    ],
+    ids=["simple-task", "task-with-args", "double-dash-task"],
+)
+def test_run_delegates_to_task(
+    monkeypatch: pytest.MonkeyPatch,
+    cmd: list[str],
+    expected_task: str,
 ) -> None:
-    """Undefined env raises EnvironmentNotFoundError."""
-    monkeypatch.chdir(pixi_workspace)
-    args = make_args(_DEFAULTS,environment="nonexistent", cmd=["echo", "hi"])
-    with pytest.raises(EnvironmentNotFoundError, match="not defined"):
-        execute_run(args)
+    """execute_run delegates to _try_run_task when it returns an exit code."""
+    calls: list[str] = []
+
+    def fake_try(args, name):
+        calls.append(name)
+        return 0
+
+    monkeypatch.setattr(run_mod, "_try_run_task", fake_try)
+
+    args = make_args(_DEFAULTS, cmd=cmd)
+    result = execute_run(args)
+    assert result == 0
+    assert calls == [expected_task]
+
+
+def test_try_run_task_returns_none_without_conda_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_try_run_task returns None when conda-tasks is not importable."""
+    real_import = builtins.__import__
+
+    def block_conda_tasks(name, *a, **kw):
+        if name.startswith("conda_tasks"):
+            raise ImportError("no conda_tasks")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", block_conda_tasks)
+
+    args = make_args(_DEFAULTS, cmd=["sometask"])
+    assert _try_run_task(args, "sometask") is None

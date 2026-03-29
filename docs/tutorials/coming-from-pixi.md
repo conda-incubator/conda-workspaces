@@ -1,5 +1,7 @@
 # Coming from pixi
 
+![pixi compatibility demo](../../demos/pixi-compat.gif)
+
 If you already use pixi for workspace management, conda-workspaces can
 read the same manifest files. This guide explains how the two tools
 relate and how to use them side by side.
@@ -27,7 +29,7 @@ pixi run test
 
 # conda users
 cw install
-cw run -e test -- pytest
+cw run -e test pytest
 ```
 
 Both read the same `pixi.toml` manifest.
@@ -44,7 +46,8 @@ Both read the same `pixi.toml` manifest.
 | `pixi add --feature test pytest` | `cw add -e test pytest` or `cw add --feature test pytest` |
 | `pixi add --pypi requests` | `cw add --pypi requests` |
 | `pixi remove numpy` | `cw remove numpy` |
-| `pixi run test` | pixi task; for conda task running see [conda-tasks](https://github.com/conda-incubator/conda-tasks) |
+| `pixi run test` | `cw run test` (with [conda-tasks](https://github.com/conda-incubator/conda-tasks) installed) |
+| `pixi run CMD` | `cw run CMD` (arbitrary command in project env) |
 | `pixi list` | `cw list` (packages in default env) |
 | `pixi list` (envs) | `cw list --envs` |
 | `pixi list` (specific env) | `cw list -e <env>` |
@@ -52,6 +55,7 @@ Both read the same `pixi.toml` manifest.
 | `pixi info` (per-env) | `cw info -e <env>` |
 | `pixi lock` | `cw lock` (pure solve, no install required) |
 | `pixi shell` | `cw shell` or `cw shell -e <env>` |
+| `pixi exec CMD` | `cw run CMD` (runs in project env, not a temporary one) |
 | `pixi clean` | `cw clean` |
 
 ## Using conda.toml instead

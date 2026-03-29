@@ -12,6 +12,8 @@ existing pixi manifests -- no new package manager required.
 
 ## Quick start
 
+![quickstart demo](demos/quickstart.gif)
+
 Create a `conda.toml` in your project root:
 
 ```toml
@@ -29,16 +31,16 @@ pytest = ">=8.0"
 pytest-cov = ">=4.0"
 
 [environments]
-default = { solve-group = "default" }
-test = { features = ["test"], solve-group = "default" }
+test = { features = ["test"] }
 ```
 
 Install and manage your environments:
 
 ```console
 $ cw install           # solve + install + generate conda.lock
-$ cw run -e test -- pytest
-$ cw list
+$ cw run -e test pytest
+$ cw list              # list packages in default env
+$ cw list --envs       # list defined environments
 $ cw install --locked  # reproducible install from conda.lock
 ```
 
@@ -58,9 +60,11 @@ inside the conda CLI without switching tools.
 - Multi-environment support with composable features
 - Project-local environments in `.conda/envs/`
 - Lockfile generation (`conda.lock`) in rattler-lock v6 format for reproducible installs
-- Solve-groups for version consistency across environments
 - Per-platform dependency overrides via `[target.<platform>]`
-- PyPI dependency parsing (delegated to conda-pypi)
+- PyPI dependencies translated and resolved alongside conda packages via conda-pypi
+- Activation scripts and environment variables per feature
+- System requirements as virtual package constraints
+- Per-workspace channel priority override
 - Standalone `cw` CLI and `conda workspace` plugin subcommand
 
 ## Installation
@@ -80,11 +84,12 @@ standalone shortcut.
 | `cw install` | Create/update workspace environments |
 | `cw install --locked` | Install from lockfile (skip solving) |
 | `cw lock` | Generate/update `conda.lock` |
-| `cw list` | List defined environments |
+| `cw list` | List packages in an environment |
+| `cw list --envs` | List defined environments |
 | `cw info [ENV]` | Show environment details |
 | `cw add SPECS...` | Add dependencies |
 | `cw remove SPECS...` | Remove dependencies |
-| `cw run -e ENV -- CMD` | Run a command in an environment |
+| `cw run [-e ENV] CMD` | Run a task or command in an environment |
 | `cw shell [ENV]` | Spawn a shell with an environment activated |
 | `cw activate [ENV]` | Print activation instructions |
 | `cw clean` | Remove installed environments |

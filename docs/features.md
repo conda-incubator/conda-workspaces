@@ -2,6 +2,8 @@
 
 ## Environments
 
+![multi-env demo](../demos/multi-env.gif)
+
 Environments are named conda prefixes composed from one or more features.
 Each environment is installed under `.conda/envs/<name>/` in your project.
 

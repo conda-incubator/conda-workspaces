@@ -24,6 +24,8 @@ pixi global install conda-workspaces
 
 ## Your first workspace
 
+![quickstart demo](../demos/quickstart.gif)
+
 Create a manifest in your project root:
 
 ::::{tab-set}
@@ -131,6 +133,8 @@ cw install --force-reinstall
 
 ## Lock
 
+![lockfile demo](../demos/lockfile.gif)
+
 The `cw lock` command runs the solver and records the solution in
 `conda.lock` without installing any environments:
 
@@ -155,13 +159,19 @@ freshness:
 cw install --frozen
 ```
 
-## Run commands
+## Run tasks or commands
 
 ```bash
-cw run -e test -- pytest -v
+cw run -e test pytest -v
 ```
 
+When [conda-tasks](https://github.com/conda-incubator/conda-tasks) is
+installed, `cw run` checks for a matching task name first. If no task is
+found, the arguments are executed as a shell command in the environment.
+
 ## Spawn a shell
+
+![shell demo](../demos/shell.gif)
 
 To drop into an interactive shell with an environment activated, use
 `cw shell`. This relies on [conda-spawn](https://conda-incubator.github.io/conda-spawn/)
