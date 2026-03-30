@@ -284,9 +284,10 @@ pytest-benchmark = ">=4.0"
 
 PyPI package names are translated to their conda equivalents (via the
 [grayskull mapping](https://github.com/conda/grayskull)) and merged
-into the same solver call as conda dependencies. This means the rattler
-solver resolves conda and PyPI packages together in a single pass, and
-`conda-pypi`'s wheel extractor handles `.whl` installation.
+into the same solver call as conda dependencies. This means the solver
+(via the conda-rattler-solver backend) resolves conda and PyPI packages
+together in a single pass, and `conda-pypi`'s wheel extractor handles
+`.whl` installation.
 
 To use PyPI dependencies you need:
 

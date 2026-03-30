@@ -34,8 +34,8 @@ conda workspace install
 conda task run test
 ```
 
-Both read the same `pixi.toml` manifest — workspace definitions and
-task definitions alike.
+Both read the same `pixi.toml` (or `pyproject.toml`) manifest —
+workspace definitions and task definitions alike.
 
 ## Command mapping
 

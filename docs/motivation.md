@@ -27,8 +27,8 @@ definitions, and installation. Running `pixi install` uses rattler
 
 | Responsibility | In pixi | In conda + conda-workspaces |
 |---|---|---|
-| Define workspace & envs | `pixi.toml` | `conda.toml`, `pixi.toml`, or `pyproject.toml` |
-| Define tasks | `pixi.toml` `[tasks]` | Same manifest file |
+| Define workspace & envs | `pixi.toml` or `pyproject.toml` | `conda.toml`, `pixi.toml`, or `pyproject.toml` |
+| Define tasks | `pixi.toml` or `pyproject.toml` `[tasks]` | Same manifest file |
 | Solve dependencies | rattler (bundled) | conda / libmamba (existing) |
 | Install packages | rattler (into `.pixi/envs/`) | conda (into `.conda/envs/`) |
 | Manage environments | `pixi install` | `conda workspace install` (delegates to conda) |
@@ -65,7 +65,7 @@ check = { depends-on = ["test", "lint"] }
 ## Compatibility with pixi
 
 conda-workspaces reads the same manifest format as pixi. A project with a
-`pixi.toml` can use both tools:
+`pixi.toml` or `pyproject.toml` can use both tools:
 
 - pixi users run `pixi install` and `pixi run` as usual
 - conda users run `conda workspace install` and `conda task run` using conda's solver
