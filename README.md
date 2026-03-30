@@ -4,6 +4,7 @@
 [![Docs](https://github.com/conda-incubator/conda-workspaces/actions/workflows/docs.yml/badge.svg)](https://conda-incubator.github.io/conda-workspaces/)
 [![PyPI](https://img.shields.io/pypi/v/conda-workspaces)](https://pypi.org/project/conda-workspaces/)
 [![conda-forge](https://img.shields.io/conda-forge/vn/conda-workspaces)](https://anaconda.org/conda-forge/conda-workspaces)
+[![Codecov](https://img.shields.io/codecov/c/github/conda-incubator/conda-workspaces)](https://codecov.io/gh/conda-incubator/conda-workspaces)
 [![License](https://img.shields.io/github/license/conda-incubator/conda-workspaces)](https://github.com/conda-incubator/conda-workspaces/blob/main/LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%E2%80%933.14-blue)](https://github.com/conda-incubator/conda-workspaces)
 

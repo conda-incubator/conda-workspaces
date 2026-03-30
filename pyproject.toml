@@ -143,7 +143,7 @@ format = { cmd = "ruff format conda_workspaces tests", description = "Auto-forma
 format-check = { cmd = "ruff format --check conda_workspaces tests", description = "Verify formatting" }
 typecheck = { cmd = "ty check conda_workspaces", description = "Run type checker" }
 test = { cmd = "pytest", description = "Run test suite" }
-test-cov = { cmd = "pytest --cov --cov-report=term-missing --cov-report=html", description = "Tests with coverage" }
+test-cov = { cmd = "pytest --cov --cov-report=term-missing --cov-report=html --cov-report=xml", description = "Tests with coverage" }
 docs = { cmd = "sphinx-build -b dirhtml docs docs/_build/dirhtml", description = "Build documentation" }
 
 [tool.pixi.tasks.check]
