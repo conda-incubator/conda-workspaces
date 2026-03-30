@@ -21,16 +21,14 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: CPython",
 ]
 dependencies = [
-  # conda itself is not on PyPI; installed via conda
+  # These are required but only available via conda, not PyPI:
   # "conda >=24.7",
-  # conda-lockfiles provides rattler-lock v6 parsing and record helpers
   # "conda-lockfiles >=0.1",
-  # conda-rattler-solver provides the rattler solver backend
-  # "conda-rattler-solver >=0.0.6",
-  # conda-pypi provides PyPI wheel extraction and name mapping
-  # "conda-pypi >=0.5.0",
-  # conda-spawn provides shell spawning for `cw shell`
   # "conda-spawn >=0.0.5",
+  #
+  # These are optional (gracefully skipped when absent):
+  # "conda-pypi >=0.5.0",         # PyPI dependency support
+  # "conda-rattler-solver >=0.0.6",  # solver backend for PyPI deps
   "rich >=13.0",
   "tomlkit >=0.13",
   "platformdirs >=3.0",
