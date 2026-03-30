@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from conda.exceptions import CondaSystemExit, DryRunExit
+from conda.reporters import confirm_yn
 from rich.console import Console
 
 from ...parsers import detect_and_parse_tasks
@@ -27,12 +29,19 @@ def execute_export(args: argparse.Namespace, *, console: Console | None = None) 
     text = tasks_to_toml(tasks)
 
     if output is not None:
+        try:
+            if output.is_file():
+                confirm_yn(f"Overwrite {output}?")
+        except (CondaSystemExit, DryRunExit):
+            return 0
+
         output.write_text(text, encoding="utf-8")
+        n = len(tasks)
         if not quiet:
+            noun = "task" if n == 1 else "tasks"
             console.print(
-                f"[bold green]{'exported':<8}[/bold green]"
-                f" {len(tasks)} {'task' if len(tasks) == 1 else 'tasks'} from"
-                f" [dim]{task_file}[/dim] to [dim]{output}[/dim]"
+                f"[bold cyan]Exported[/bold cyan] {n} {noun}"
+                f" to [bold]{output}[/bold]"
             )
     else:
         print(text, end="")

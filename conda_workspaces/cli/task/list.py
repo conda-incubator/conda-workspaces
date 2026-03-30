@@ -44,23 +44,43 @@ def execute_list(args: argparse.Namespace, *, console: Console | None = None) ->
         return 0
 
     if not visible_tasks:
-        console.print(f"No tasks defined in {task_file}")
+        console.print(
+            f"No tasks defined in {task_file}."
+            " Add tasks with 'conda task add'."
+        )
         return 0
 
-    console.print(f"Tasks from {task_file}:")
+    console.print(f"[dim]{task_file}[/dim]")
 
-    has_descriptions = any(t.description for t in visible_tasks.values())
+    has_cmds = any(t.cmd for t in visible_tasks.values())
+    has_deps = any(t.depends_on for t in visible_tasks.values())
 
-    table = Table(show_edge=False, pad_edge=False, show_header=False)
-    table.add_column()
-    if has_descriptions:
-        table.add_column()
+    table = Table(show_edge=False, pad_edge=False, show_header=False, box=None)
+    table.add_column(style="bold")
+    if has_cmds:
+        table.add_column(style="dim")
+    if has_deps:
+        table.add_column(style="dim cyan")
 
     for name, task in visible_tasks.items():
-        if has_descriptions:
-            table.add_row(name, task.description or "")
-        else:
-            table.add_row(name)
+        cmd_col = ""
+        if task.is_alias:
+            cmd_col = "(alias)"
+        elif task.cmd is not None:
+            cmd = task.cmd if isinstance(task.cmd, str) else " ".join(task.cmd)
+            cmd_col = task.description or cmd
+
+        deps_col = ""
+        if task.depends_on:
+            dep_names = ", ".join(d.task for d in task.depends_on)
+            deps_col = f"← {dep_names}"
+
+        row: list[str] = [name]
+        if has_cmds:
+            row.append(cmd_col)
+        if has_deps:
+            row.append(deps_col)
+        table.add_row(*row)
 
     console.print(table)
 

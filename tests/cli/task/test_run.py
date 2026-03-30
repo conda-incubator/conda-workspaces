@@ -73,20 +73,20 @@ def test_resolve_task_args_missing_required():
 
 
 def test_execute_run_dry_run_single(tmp_path, capsys):
-    """Dry-run of a single task shows ◌ marker with command."""
+    """Dry-run of a single task shows 'Would run' with command."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text('[tasks]\ngreet = "echo hello"\n')
 
     result = execute_run(_run_args(task_file, dry_run=True))
     assert result == 0
     output = capsys.readouterr().out
-    assert "◌" in output
+    assert "Would run" in output
     assert "greet" in output
     assert "echo hello" in output
 
 
 def test_execute_run_dry_run_with_deps(tmp_path, capsys):
-    """Dry-run with deps shows a tree with ◌ markers."""
+    """Dry-run with deps shows a tree with 'Would run' labels."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text(
         '[tasks]\nsetup = "echo setup"\n\n'
@@ -95,7 +95,7 @@ def test_execute_run_dry_run_with_deps(tmp_path, capsys):
     result = execute_run(_run_args(task_file, task_name="build", dry_run=True))
     assert result == 0
     output = capsys.readouterr().out
-    assert "◌" in output
+    assert "Would run" in output
     assert "build" in output
     assert "setup" in output
 
@@ -111,14 +111,14 @@ def test_execute_run_dry_run_alias(tmp_path, capsys):
     result = execute_run(_run_args(task_file, task_name="check", dry_run=True))
     assert result == 0
     output = capsys.readouterr().out
-    assert "◌" in output
+    assert "Would run" in output
     assert "check" in output
     assert "lint" in output
     assert "test" in output
 
 
 def test_execute_run_alias_done(tmp_path, capsys, monkeypatch):
-    """Alias tasks show ✓ marker after dependencies finish executing."""
+    """Alias tasks show Finished after dependencies finish executing."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text(
         '[tasks]\nlint = "ruff check ."\ntest = "pytest"\n\n'
@@ -131,8 +131,8 @@ def test_execute_run_alias_done(tmp_path, capsys, monkeypatch):
 
     assert result == 0
     output = capsys.readouterr().out
-    assert "●" in output
-    assert "✓" in output
+    assert "Running" in output
+    assert "Finished" in output
     assert "check" in output
 
 
@@ -201,7 +201,7 @@ def test_execute_run_failure(tmp_path, monkeypatch):
 
 
 def test_execute_run_failure_with_deps(tmp_path, capsys, monkeypatch):
-    """Failed task in a dep chain shows ✗ marker."""
+    """Failed task in a dep chain shows Failed status."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text(
         '[tasks]\nsetup = "echo setup"\n\n'
@@ -221,12 +221,12 @@ def test_execute_run_failure_with_deps(tmp_path, capsys, monkeypatch):
         execute_run(_run_args(task_file, task_name="build"))
 
     output = capsys.readouterr().out
-    assert "✗" in output
+    assert "Failed" in output
     assert "build" in output
 
 
 def test_execute_run_dep_chain_markers(tmp_path, capsys, monkeypatch):
-    """Dep chain shows ● and ✓ markers for each task."""
+    """Dep chain shows Running and Finished for each task."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text(
         '[tasks]\nsetup = "echo setup"\n\n'
@@ -239,14 +239,14 @@ def test_execute_run_dep_chain_markers(tmp_path, capsys, monkeypatch):
 
     assert result == 0
     output = capsys.readouterr().out
-    assert "●" in output
-    assert "✓" in output
+    assert "Running" in output
+    assert "Finished" in output
     assert "setup" in output
     assert "build" in output
 
 
 def test_execute_run_dep_chain_verbose(tmp_path, capsys, monkeypatch):
-    """Verbose mode adds command text to ● markers."""
+    """Verbose mode adds command text to Running status."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text(
         '[tasks]\nsetup = "echo setup"\n\n'
@@ -284,7 +284,7 @@ def test_execute_run_verbose_with_io(tmp_path, capsys, monkeypatch):
 
 
 def test_execute_run_cached_in_dep_chain(tmp_path, capsys, monkeypatch):
-    """Cached tasks in a dep chain show ○ marker."""
+    """Cached tasks in a dep chain show Skipped status."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text(
         '[tasks.lint]\ncmd = "ruff"\ninputs = ["src/*.py"]\noutputs = [".lint"]\n\n'
@@ -298,12 +298,12 @@ def test_execute_run_cached_in_dep_chain(tmp_path, capsys, monkeypatch):
 
     assert result == 0
     output = capsys.readouterr().out
-    assert "○" in output
+    assert "Skipped" in output
     assert "cached" in output
 
 
 def test_execute_run_cached_single_shows_marker(tmp_path, capsys, monkeypatch):
-    """Cached single task (no deps) shows ○ marker."""
+    """Cached single task (no deps) shows Skipped status."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text(
         '[tasks.build]\ncmd = "make"\ninputs = ["src/*.py"]\noutputs = ["dist/"]\n'
@@ -316,7 +316,7 @@ def test_execute_run_cached_single_shows_marker(tmp_path, capsys, monkeypatch):
 
     assert result == 0
     output = capsys.readouterr().out
-    assert "○" in output
+    assert "Skipped" in output
     assert "cached" in output
 
 

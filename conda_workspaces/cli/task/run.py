@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 from conda.base.context import context
 from rich.console import Console
-from rich.markup import escape
 from rich.tree import Tree
 
 from ...cache import is_cached, save_cache
@@ -78,10 +77,12 @@ def _build_dry_run_tree(
     tasks: dict[str, Task],
     rendered_cmds: dict[str, str],
 ) -> Tree:
-    """Build a Rich Tree for dry-run display with ``◌`` markers."""
+    """Build a Rich Tree for dry-run display."""
 
     def _label(name: str) -> str:
-        return status.dry_run_label(name, detail=rendered_cmds.get(name))
+        return status.message_label(
+            "Would run", "task", name, detail=rendered_cmds.get(name),
+        )
 
     def _add_children(parent: Tree, task_name: str, seen: set[str]) -> None:
         for dep in tasks[task_name].depends_on:
@@ -143,6 +144,7 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
 
     has_deps = len(order) > 1 or tasks[target_name].is_alias
     shell = SubprocessShell()
+    task_count = 0
 
     for name in order:
         task = tasks[name]
@@ -215,11 +217,21 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
                 cwd,
             ):
                 if not quiet:
-                    status.cached(console, name)
+                    status.message(
+                        console, "Skipped", "task", name,
+                        style="dim", suffix="cached",
+                    )
                 continue
 
         if has_deps and not quiet:
-            status.running(console, name, detail=cmd if verbose else None)
+            if task_count > 0:
+                console.print()
+            status.message(
+                console, "Running", "task", name,
+                style="bold blue", ellipsis=True,
+                detail=cmd if verbose else None,
+            )
+        task_count += 1
 
         if has_deps and verbose and (rendered_inputs or rendered_outputs):
             if rendered_inputs:
@@ -237,11 +249,13 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
 
         if exit_code != 0:
             if has_deps and not quiet:
-                status.failed(console, name)
+                status.message(
+                    console, "Failed", "task", name, style="bold yellow",
+                )
             raise TaskExecutionError(name, exit_code)
 
         if has_deps and not quiet:
-            status.done(console, name)
+            status.message(console, "Finished", "task", name)
 
         if rendered_inputs or rendered_outputs:
             save_cache(
@@ -255,7 +269,7 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
             )
 
     if has_deps and not quiet and tasks[target_name].is_alias:
-        status.done(console, target_name)
+        status.message(console, "Finished", "task", target_name)
 
     return 0
 
@@ -331,7 +345,9 @@ def _run_adhoc(
 
     if dry_run:
         if not getattr(args, "quiet", False):
-            console.print(f"{status.DRY_RUN} [dim]{escape(full_cmd)}[/dim]")
+            status.message(
+                console, "Would run", "task", full_cmd, style="bold yellow",
+            )
         return 0
 
     shell = SubprocessShell()
