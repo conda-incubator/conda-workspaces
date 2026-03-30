@@ -702,7 +702,7 @@ def test_apply_activation_scripts_missing(
     with caplog.at_level(logging.WARNING):
         _apply_activation_scripts(prefix, ["/nonexistent/script.sh"])
 
-    assert "not found" in caplog.text
+    assert "skipping" in caplog.text
 
 
 def test_apply_activation_scripts_empty(
