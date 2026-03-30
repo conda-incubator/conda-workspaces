@@ -42,6 +42,10 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
 
     if env_name:
         resolved = resolve_environment(config, env_name, ctx.platform)
+        status.message(
+            console, "Installing", "environment", env_name,
+            style="bold blue", ellipsis=True,
+        )
         install_environment(
             ctx, resolved, force_reinstall=force, dry_run=dry_run,
         )
@@ -106,6 +110,10 @@ def _install_from_lockfile(
 ) -> int:
     """Install environments from existing lockfiles (no solving)."""
     if env_name:
+        status.message(
+            console, "Installing", "environment", env_name,
+            style="bold blue", ellipsis=True,
+        )
         install_from_lockfile(ctx, env_name)
         status.message(console, "Installed", "environment", env_name)
     else:

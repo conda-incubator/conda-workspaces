@@ -38,6 +38,7 @@ def _env_prefix_or_none(
         return None
     try:
         from ...context import WorkspaceContext
+        from ...exceptions import CondaWorkspacesError
         from ...parsers import detect_and_parse
 
         manifest_path = getattr(args, "file", None)
@@ -45,7 +46,7 @@ def _env_prefix_or_none(
         ctx = WorkspaceContext(config)
         if env_name in config.environments:
             return ctx.env_prefix(env_name)
-    except Exception:
+    except CondaWorkspacesError:
         pass
     return None
 
@@ -219,7 +220,7 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
                 if not quiet:
                     status.message(
                         console, "Skipped", "task", name,
-                        style="dim", suffix="cached",
+                        style="bold yellow", suffix="cached",
                     )
                 continue
 
@@ -345,8 +346,9 @@ def _run_adhoc(
 
     if dry_run:
         if not getattr(args, "quiet", False):
-            status.message(
-                console, "Would run", "task", full_cmd, style="bold yellow",
+            console.print(
+                "[bold yellow]Would run[/bold yellow]"
+                f" [dim]{full_cmd}[/dim]"
             )
         return 0
 

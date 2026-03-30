@@ -78,8 +78,8 @@ def _add_to_toml(
             entry["features"] = [feature]
             envs[feature] = entry
             console.print(
-                f"Created [bold]{feature}[/bold] environment"
-                f" with feature '{feature}'"
+                f"[bold cyan]Created[/bold cyan]"
+                f" [bold]{feature}[/bold] environment"
             )
     else:
         target = doc
@@ -116,8 +116,8 @@ def _add_to_pyproject(
             entry["features"] = [feature]
             envs[feature] = entry
             console.print(
-                f"Created [bold]{feature}[/bold] environment"
-                f" with feature '{feature}'"
+                f"[bold cyan]Created[/bold cyan]"
+                f" [bold]{feature}[/bold] environment"
             )
     else:
         target = source

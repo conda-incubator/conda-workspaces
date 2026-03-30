@@ -25,7 +25,7 @@ def execute_list(args: argparse.Namespace, *, console: Console | None = None) ->
     config, ctx = workspace_context_from_args(args)
 
     if console is None:
-        console = Console()
+        console = Console(highlight=False)
 
     json_output = getattr(args, "json", False)
 
@@ -68,7 +68,7 @@ def _list_packages(
         if not records:
             console.print(
                 f"No packages in [bold]{env_name}[/bold] environment."
-                f" Run 'conda workspace install -n {env_name}' first."
+                f" Run 'conda workspace install -e {env_name}' first."
             )
             return 0
 
@@ -109,10 +109,16 @@ def _list_environments(
         console.print_json(json.dumps(rows))
     else:
         if not rows:
-            console.print(
-                "No environments defined."
-                " Run 'conda workspace init' to create a workspace."
-            )
+            if installed_only:
+                console.print(
+                    "No environments installed."
+                    " Run 'conda workspace install' to create them."
+                )
+            else:
+                console.print(
+                    "No environments defined."
+                    " Run 'conda workspace init' to create a workspace."
+                )
             return 0
 
         table = Table(show_edge=False, pad_edge=False)

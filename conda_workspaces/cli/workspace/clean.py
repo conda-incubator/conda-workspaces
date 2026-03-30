@@ -37,7 +37,7 @@ def execute_clean(args: argparse.Namespace, *, console: Console | None = None) -
                 console.print(
                     f"[bold]{env_name}[/bold] environment is not installed."
                     " Run 'conda workspace install"
-                    f" -n {env_name}' to create it."
+                    f" -e {env_name}' to create it."
                 )
                 return 0
 
@@ -58,13 +58,17 @@ def execute_clean(args: argparse.Namespace, *, console: Console | None = None) -
                 names = ", ".join(installed)
                 confirm_yn(f"Remove {names} environments?")
 
-            for name in installed:
+            for i, name in enumerate(installed):
+                if i > 0:
+                    console.print()
                 status.message(
                     console, "Removing", "environment", name,
                     style="bold blue", ellipsis=True,
                 )
             clean_all(ctx)
-            for name in installed:
+            for i, name in enumerate(installed):
+                if i > 0:
+                    console.print()
                 status.message(console, "Removed", "environment", name)
     except (CondaSystemExit, DryRunExit):
         return 0

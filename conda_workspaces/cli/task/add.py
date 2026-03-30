@@ -28,6 +28,8 @@ def execute_add(args: argparse.Namespace, *, console: Console | None = None) -> 
     try:
         parser = find_parser(file_path)
     except Exception:
+        if file_path.exists():
+            raise
         parser = CondaTomlParser()
 
     depends = [TaskDependency(task=d) for d in (args.depends_on or [])]
@@ -43,8 +45,8 @@ def execute_add(args: argparse.Namespace, *, console: Console | None = None) -> 
 
     if dry_run:
         console.print(
-            f"[bold yellow]{'dry-run':<8}[/bold yellow]"
-            f" Would add task [bold]'{args.task_name}'[/bold]"
+            "[bold yellow]Would add[/bold yellow]"
+            f" [bold]{args.task_name}[/bold] task"
             f" to [dim]{file_path}[/dim]"
         )
         return 0
@@ -52,8 +54,8 @@ def execute_add(args: argparse.Namespace, *, console: Console | None = None) -> 
     parser.add_task(file_path, args.task_name, task)
     if not quiet:
         console.print(
-            f"[bold green]{'added':<8}[/bold green]"
-            f" task [bold]'{args.task_name}'[/bold]"
+            "[bold cyan]Added[/bold cyan]"
+            f" [bold]{args.task_name}[/bold] task"
             f" to [dim]{file_path}[/dim]"
         )
     return 0

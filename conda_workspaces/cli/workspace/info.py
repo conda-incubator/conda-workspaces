@@ -24,7 +24,7 @@ def execute_info(args: argparse.Namespace, *, console: Console | None = None) ->
     config, ctx = workspace_context_from_args(args)
 
     if console is None:
-        console = Console()
+        console = Console(highlight=False)
 
     env_name = getattr(args, "environment", None)
     json_output = getattr(args, "json", False)
@@ -121,12 +121,12 @@ def _show_env_info(
         console.print(table)
 
         if info["conda_dependencies"]:
-            console.print("\nConda dependencies:")
+            console.print("\n[bold]Conda dependencies:[/bold]")
             for _name, spec in sorted(info["conda_dependencies"].items()):
                 console.print(f"  {spec}")
 
         if info["pypi_dependencies"]:
-            console.print("\nPyPI dependencies:")
+            console.print("\n[bold]PyPI dependencies:[/bold]")
             for _name, spec in sorted(info["pypi_dependencies"].items()):
                 console.print(f"  {spec}")
 

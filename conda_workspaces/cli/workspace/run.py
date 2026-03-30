@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-import sys
 from typing import TYPE_CHECKING
 
-from ...exceptions import EnvironmentNotFoundError, EnvironmentNotInstalledError
+from ...exceptions import (
+    CondaWorkspacesError,
+    EnvironmentNotFoundError,
+    EnvironmentNotInstalledError,
+)
 from . import workspace_context_from_args
 
 if TYPE_CHECKING:
@@ -41,8 +44,10 @@ def execute_run(args: argparse.Namespace) -> int:
         cmd = cmd[1:]
 
     if not cmd:
-        print("No command specified.", file=sys.stderr)
-        return 1
+        raise CondaWorkspacesError(
+            "No command specified.",
+            hints=["Usage: conda workspace run -e ENV -- COMMAND [ARGS...]"],
+        )
 
     context.__init__(argparse_args=_argparse.Namespace(prefix=prefix))
 

@@ -44,7 +44,8 @@ def execute_init(args: argparse.Namespace, *, console: Console | None = None) ->
             name, channels, platforms, base_dir, console=console
         )
 
-    return 1
+    msg = f"Unknown manifest format: {fmt}"
+    raise ValueError(msg)
 
 
 def _detect_platforms() -> list[str]:

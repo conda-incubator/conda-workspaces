@@ -20,7 +20,7 @@ def execute_list(args: argparse.Namespace, *, console: Console | None = None) ->
     task_file, tasks = detect_and_parse_tasks(file_path=file_path)
 
     if console is None:
-        console = Console()
+        console = Console(highlight=False)
 
     use_json = getattr(args, "json", False)
 

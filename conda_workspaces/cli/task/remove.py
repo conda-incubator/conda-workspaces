@@ -26,8 +26,8 @@ def execute_remove(args: argparse.Namespace, *, console: Console | None = None) 
 
     if dry_run:
         console.print(
-            f"[bold yellow]{'dry-run':<8}[/bold yellow]"
-            f" Would remove task [bold]'{args.task_name}'[/bold]"
+            "[bold yellow]Would remove[/bold yellow]"
+            f" [bold]{args.task_name}[/bold] task"
             f" from [dim]{task_file}[/dim]"
         )
         return 0
@@ -35,8 +35,8 @@ def execute_remove(args: argparse.Namespace, *, console: Console | None = None) 
     parser.remove_task(task_file, args.task_name)
     if not quiet:
         console.print(
-            f"[bold red]{'removed':<8}[/bold red]"
-            f"  task [bold]'{args.task_name}'[/bold]"
+            "[bold cyan]Removed[/bold cyan]"
+            f" [bold]{args.task_name}[/bold] task"
             f" from [dim]{task_file}[/dim]"
         )
     return 0

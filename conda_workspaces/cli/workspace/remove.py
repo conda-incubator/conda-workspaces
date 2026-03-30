@@ -45,7 +45,11 @@ def execute_remove(args: argparse.Namespace, *, console: Console | None = None) 
             f" from {location} in [bold]{manifest_path.name}[/bold]"
         )
     else:
-        console.print("No matching dependencies found to remove.")
+        console.print(
+            "[bold yellow]No matching dependencies found.[/bold yellow]"
+            " Check the package name, or use [bold]--pypi[/bold]"
+            " for PyPI dependencies."
+        )
 
     return 0
 
