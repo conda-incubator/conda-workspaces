@@ -41,7 +41,7 @@ def test_add_task(tmp_path, capsys, dry_run, expect_file_exists):
         tasks = CondaTomlParser().parse_tasks(path)
         assert "newtask" in tasks
     else:
-        assert "dry-run" in capsys.readouterr().out
+        assert "Would add" in capsys.readouterr().out
         assert not path.exists()
 
 

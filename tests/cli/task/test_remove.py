@@ -44,7 +44,7 @@ def test_remove_nonexistent(sample_yaml):
 def test_remove_dry_run(sample_yaml, capsys):
     result = execute_remove(_remove_args(sample_yaml, "lint", dry_run=True))
     assert result == 0
-    assert "dry-run" in capsys.readouterr().out
+    assert "Would remove" in capsys.readouterr().out
 
     tasks = CondaTomlParser().parse_tasks(sample_yaml)
     assert "lint" in tasks

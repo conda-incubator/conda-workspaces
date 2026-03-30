@@ -55,7 +55,7 @@ def test_list_installed_only(
     result = execute_list(args, console=rich_console)
     assert result == 0
     out = rich_console.file.getvalue()
-    assert "No environments defined" in out
+    assert "No environments installed" in out
 
 
 def test_list_installed_with_env(

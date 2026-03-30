@@ -148,6 +148,10 @@ def test_conda_context_is_osx():
     assert CondaContext().is_osx == (context.platform == "osx")
 
 
+def test_conda_context_is_linux():
+    assert CondaContext().is_linux == (context.platform == "linux")
+
+
 @pytest.mark.parametrize(
     ("manifest_path", "expected"),
     [

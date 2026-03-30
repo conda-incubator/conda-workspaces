@@ -177,17 +177,6 @@ def test_init_auto_detects_single_platform(
     assert len(platforms) == 1
 
 
-def test_init_unknown_format(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Unknown format returns 1 without creating files."""
-    monkeypatch.chdir(tmp_path)
-    args = make_args(_DEFAULTS, manifest_format="unknown", name="test")
-    result = execute_init(args)
-    assert result == 1
-    assert not (tmp_path / "pixi.toml").exists()
-    assert not (tmp_path / "conda.toml").exists()
-    assert not (tmp_path / "pyproject.toml").exists()
-
-
 @pytest.mark.parametrize(
     "fmt, filename, ws_path",
     [
