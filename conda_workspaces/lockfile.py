@@ -154,8 +154,8 @@ def generate_lockfile(
 
     Solves each environment in *resolved_envs* and writes the results
     to a single ``conda.lock`` YAML file at the workspace root.
-    Conda's solver output is suppressed during this re-solve since
-    the user already saw it during the install step.
+    Solver output is suppressed to avoid noise since the caller
+    provides its own status messages.
 
     Returns the path to the generated lockfile.
     """
@@ -194,7 +194,7 @@ def _read_lockfile_data(ctx: WorkspaceContext) -> dict[str, Any]:
     path = lockfile_path(ctx)
     if not path.is_file():
         raise LockfileNotFoundError("(all)", path)
-    with path.open() as fh:
+    with path.open(encoding="utf-8") as fh:
         return yaml_load(fh)
 
 

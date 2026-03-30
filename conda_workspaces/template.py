@@ -10,9 +10,11 @@ from .context import build_template_context
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from jinja2 import Environment as JinjaEnvironment
+
 
 @lru_cache(maxsize=1)
-def _get_jinja_env():
+def _get_jinja_env() -> JinjaEnvironment:
     """Create and cache a Jinja2 Environment (singleton)."""
     from jinja2 import Environment, StrictUndefined
 

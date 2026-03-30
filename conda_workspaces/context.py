@@ -151,6 +151,13 @@ class CondaContext:
 
         return context.platform == "osx"
 
+    @property
+    def is_linux(self) -> bool:
+        """True when the host platform is Linux."""
+        from conda.base.context import context
+
+        return context.platform == "linux"
+
 
 class _EnvironmentProxy:
     """Allows ``{{ conda.environment.name }}`` in templates."""

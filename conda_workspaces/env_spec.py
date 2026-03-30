@@ -23,13 +23,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from conda.base.context import context
-from conda.models.environment import Environment, EnvironmentConfig
 from conda.plugins.types import EnvironmentSpecBase
 
 if TYPE_CHECKING:
     from typing import Any, ClassVar
 
     from conda.common.path import PathType
+    from conda.models.environment import Environment
     from conda.models.match_spec import MatchSpec
 
 #: Filenames the workspace env spec can handle.
@@ -67,6 +67,8 @@ class CondaWorkspaceSpec(EnvironmentSpecBase):
     @property
     def env(self) -> Environment:
         """Return the default environment from the workspace manifest."""
+        from conda.models.environment import Environment, EnvironmentConfig
+
         from .parsers import find_parser
         from .resolver import resolve_environment
 
@@ -110,7 +112,7 @@ class CondaLockSpec(EnvironmentSpecBase):
         if self._data_cache is None:
             from conda.common.serialize.yaml import load as yaml_load
 
-            with self.path.open() as fh:
+            with self.path.open(encoding="utf-8") as fh:
                 self._data_cache = yaml_load(fh)
         return self._data_cache
 
@@ -130,6 +132,7 @@ class CondaLockSpec(EnvironmentSpecBase):
         """Return the default environment from the lockfile."""
         from conda.common.io import dashlist
         from conda.models.channel import Channel
+        from conda.models.environment import Environment, EnvironmentConfig
         from conda_lockfiles.records_from_conda_urls import records_from_conda_urls
 
         from .lockfile import LOCKFILE_VERSION

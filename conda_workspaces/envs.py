@@ -283,6 +283,8 @@ def install_environment(
     sys.stdout.flush()
 
     if txn.nothing_to_do:
+        _apply_activation_env(prefix, resolved.activation_env)
+        _apply_activation_scripts(prefix, resolved.activation_scripts)
         return
 
     if dry_run:
@@ -294,7 +296,6 @@ def install_environment(
     txn.execute()
     sys.stdout.flush()
 
-    # Post-install: apply activation settings
     _apply_activation_env(prefix, resolved.activation_env)
     _apply_activation_scripts(prefix, resolved.activation_scripts)
 
