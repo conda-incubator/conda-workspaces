@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -279,15 +280,19 @@ def install_environment(
         except (UnsatisfiableError, SystemExit) as exc:
             raise SolveError(resolved.name, str(exc)) from exc
 
+    sys.stdout.flush()
+
     if txn.nothing_to_do:
         return
 
     if dry_run:
         txn.print_transaction_summary()
+        sys.stdout.flush()
         return
 
     txn.download_and_extract()
     txn.execute()
+    sys.stdout.flush()
 
     # Post-install: apply activation settings
     _apply_activation_env(prefix, resolved.activation_env)
