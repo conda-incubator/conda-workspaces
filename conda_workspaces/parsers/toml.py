@@ -37,89 +37,11 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def _task_to_toml_inline(task: Task) -> str | InlineTable:
-    """Convert a Task to a TOML-serializable value (string or inline table)."""
-    defn = tomlkit.inline_table()
-    if task.cmd is not None:
-        defn.append("cmd", task.cmd)
-    if task.depends_on:
-        defn.append("depends-on", [d.to_toml() for d in task.depends_on])
-    if task.description:
-        defn.append("description", task.description)
-    if task.env:
-        defn.append("env", dict(task.env))
-    if task.cwd:
-        defn.append("cwd", task.cwd)
-    if task.clean_env:
-        defn.append("clean-env", True)
-    if task.default_environment:
-        defn.append("default-environment", task.default_environment)
-    if task.args:
-        defn.append("args", [a.to_toml() for a in task.args])
-    if task.inputs:
-        defn.append("inputs", list(task.inputs))
-    if task.outputs:
-        defn.append("outputs", list(task.outputs))
-
-    if len(defn) == 1 and "cmd" in defn:
-        return str(defn["cmd"])
-    return defn
-
-
-def tasks_to_toml(tasks: dict[str, Task]) -> str:
-    """Serialize a full task dict to ``conda.toml`` TOML string."""
-    doc = tomlkit.document()
-
-    task_table = tomlkit.table()
-    for name, task in tasks.items():
-        task_table.add(name, _task_to_toml_inline(task))
-    doc.add("tasks", task_table)
-
-    targets: dict[str, dict[str, str | InlineTable]] = {}
-    for name, task in tasks.items():
-        if not task.platforms:
-            continue
-        for platform, override in task.platforms.items():
-            ov = tomlkit.inline_table()
-            if override.cmd is not None:
-                ov.append("cmd", override.cmd)
-            if override.env is not None:
-                ov.append("env", dict(override.env))
-            if override.cwd is not None:
-                ov.append("cwd", override.cwd)
-            if override.clean_env is not None:
-                ov.append("clean-env", override.clean_env)
-            if override.inputs is not None:
-                ov.append("inputs", list(override.inputs))
-            if override.outputs is not None:
-                ov.append("outputs", list(override.outputs))
-            if override.args is not None:
-                ov.append("args", [a.to_toml() for a in override.args])
-            if override.depends_on is not None:
-                ov.append("depends-on", [d.to_toml() for d in override.depends_on])
-            targets.setdefault(platform, {})[name] = (
-                str(ov["cmd"]) if len(ov) == 1 and "cmd" in ov else ov
-            )
-
-    for platform, platform_tasks in targets.items():
-        target_tbl = tomlkit.table(is_super_table=True)
-        tasks_tbl = tomlkit.table()
-        for tname, tval in platform_tasks.items():
-            tasks_tbl.add(tname, tval)
-        target_tbl.add("tasks", tasks_tbl)
-        doc.setdefault("target", tomlkit.table(is_super_table=True)).add(
-            platform, target_tbl
-        )
-
-    return tomlkit.dumps(doc)
-
-
 class CondaTomlParser(ManifestParser):
     """Parse ``conda.toml`` manifests (workspace and tasks).
 
     This is the conda-native format that mirrors pixi.toml structure
     but uses ``[workspace]`` exclusively (no ``[project]`` fallback).
-    It is also the only format that supports writing tasks.
     """
 
     filenames = ("conda.toml",)
@@ -173,7 +95,7 @@ class CondaTomlParser(ManifestParser):
             doc = tomlkit.document()
 
         tasks_section = doc.setdefault("tasks", tomlkit.table())
-        tasks_section[name] = _task_to_toml_inline(task)
+        tasks_section[name] = self.task_to_toml_inline(task)
         path.write_text(tomlkit.dumps(doc), encoding="utf-8")
 
     def remove_task(self, path: Path, name: str) -> None:
@@ -182,7 +104,61 @@ class CondaTomlParser(ManifestParser):
         if name not in tasks_section:
             raise TaskNotFoundError(name, list(tasks_section.keys()))
         del tasks_section[name]
+        self.remove_target_overrides(doc, name)
         path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+
+
+def tasks_to_toml(tasks: dict[str, Task]) -> str:
+    """Serialize a full task dict to ``conda.toml`` TOML string."""
+    parser = CondaTomlParser()
+    doc = tomlkit.document()
+
+    task_table = tomlkit.table()
+    for name, task in tasks.items():
+        task_table.add(name, parser.task_to_toml_inline(task))
+    doc.add("tasks", task_table)
+
+    targets: dict[str, dict[str, str | InlineTable]] = {}
+    for name, task in tasks.items():
+        if not task.platforms:
+            continue
+        for platform, override in task.platforms.items():
+            override_table = tomlkit.inline_table()
+            if override.cmd is not None:
+                override_table.append("cmd", override.cmd)
+            if override.env is not None:
+                override_table.append("env", dict(override.env))
+            if override.cwd is not None:
+                override_table.append("cwd", override.cwd)
+            if override.clean_env is not None:
+                override_table.append("clean-env", override.clean_env)
+            if override.inputs is not None:
+                override_table.append("inputs", list(override.inputs))
+            if override.outputs is not None:
+                override_table.append("outputs", list(override.outputs))
+            if override.args is not None:
+                override_table.append("args", [a.to_toml() for a in override.args])
+            if override.depends_on is not None:
+                override_table.append(
+                    "depends-on",
+                    [d.to_toml() for d in override.depends_on],
+                )
+            if len(override_table) == 1 and "cmd" in override_table:
+                targets.setdefault(platform, {})[name] = str(override_table["cmd"])
+            else:
+                targets.setdefault(platform, {})[name] = override_table
+
+    for platform, platform_tasks in targets.items():
+        target_tbl = tomlkit.table(is_super_table=True)
+        tasks_tbl = tomlkit.table()
+        for tname, tval in platform_tasks.items():
+            tasks_tbl.add(tname, tval)
+        target_tbl.add("tasks", tasks_tbl)
+        doc.setdefault("target", tomlkit.table(is_super_table=True)).add(
+            platform, target_tbl
+        )
+
+    return tomlkit.dumps(doc)
 
 
 def _parse_channels(raw: list[Any]) -> list[Channel]:

@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from conda_workspaces.exceptions import TaskParseError
-from conda_workspaces.models import Task
 from conda_workspaces.parsers.pixi_toml import PixiTomlParser
 
 
@@ -63,15 +62,3 @@ def test_parse_invalid_toml(tmp_project):
 
     with pytest.raises(TaskParseError):
         PixiTomlParser().parse_tasks(path)
-
-
-@pytest.mark.parametrize(
-    "method, args",
-    [
-        ("add_task", lambda p: (p, "x", Task(name="x", cmd="echo"))),
-        ("remove_task", lambda p: (p, "build")),
-    ],
-)
-def test_write_raises(task_pixi_toml, method, args):
-    with pytest.raises(NotImplementedError):
-        getattr(PixiTomlParser(), method)(*args(task_pixi_toml))
