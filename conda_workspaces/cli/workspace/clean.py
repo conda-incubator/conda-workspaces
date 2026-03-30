@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from conda.base.context import context as conda_context
 from conda.exceptions import CondaSystemExit, DryRunExit
 from conda.reporters import confirm_yn
 from rich.console import Console
@@ -34,34 +35,37 @@ def execute_clean(args: argparse.Namespace, *, console: Console | None = None) -
 
             if not ctx.env_exists(env_name):
                 console.print(
-                    f"Environment [bold]'{env_name}'[/bold] is not installed."
+                    f"[bold]{env_name}[/bold] environment is not installed."
+                    " Run 'conda workspace install"
+                    f" -n {env_name}' to create it."
                 )
                 return 0
 
-            confirm_yn(f"Remove environment '{env_name}'?")
+            confirm_yn(f"Remove {env_name} environment?")
 
             remove_environment(ctx, env_name)
-            status.done(console, env_name)
+            status.message(console, "Removed", "environment", env_name)
         else:
             installed = list_installed_environments(ctx)
             if not installed:
-                console.print("No environments installed.")
+                console.print(
+                    "No environments installed."
+                    " Run 'conda workspace install' to create them."
+                )
                 return 0
 
-            console.print(
-                f"This will remove {len(installed)}"
-                f" {'environment' if len(installed) == 1 else 'environments'}:"
-            )
-            for name in installed:
-                console.print(f"  - {name}")
-            confirm_yn("Continue?")
+            if not conda_context.always_yes:
+                names = ", ".join(installed)
+                confirm_yn(f"Remove {names} environments?")
 
+            for name in installed:
+                status.message(
+                    console, "Removing", "environment", name,
+                    style="bold blue", ellipsis=True,
+                )
             clean_all(ctx)
-            n = len(installed)
-            console.print(
-                f"{status.DONE} Removed {n}"
-                f" {'environment' if n == 1 else 'environments'}."
-            )
+            for name in installed:
+                status.message(console, "Removed", "environment", name)
     except (CondaSystemExit, DryRunExit):
         return 0
 

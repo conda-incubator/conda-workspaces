@@ -36,8 +36,8 @@ def _stub_lockfile(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize(
     "env_arg, expected_names, output_fragment",
     [
-        ("default", {"default"}, "✓"),
-        (None, {"default", "test"}, "2 environments"),
+        ("default", {"default"}, "Installed"),
+        (None, {"default", "test"}, "Installed"),
     ],
     ids=["single-env", "all-envs"],
 )
@@ -137,8 +137,8 @@ def test_install_dry_run_skips_lockfile(
 @pytest.mark.parametrize(
     "env_arg, expected_names, output_fragment",
     [
-        ("default", {"default"}, "✓"),
-        (None, {"default", "test"}, "installed"),
+        ("default", {"default"}, "Installed"),
+        (None, {"default", "test"}, "Installed"),
     ],
     ids=["single-env", "all-envs"],
 )

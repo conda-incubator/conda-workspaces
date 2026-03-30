@@ -66,7 +66,10 @@ def _list_packages(
         )
     else:
         if not records:
-            console.print(f"No packages installed in '{env_name}'.")
+            console.print(
+                f"No packages in [bold]{env_name}[/bold] environment."
+                f" Run 'conda workspace install -n {env_name}' first."
+            )
             return 0
 
         table = Table(show_edge=False, pad_edge=False)
@@ -106,7 +109,10 @@ def _list_environments(
         console.print_json(json.dumps(rows))
     else:
         if not rows:
-            console.print("No environments found.")
+            console.print(
+                "No environments defined."
+                " Run 'conda workspace init' to create a workspace."
+            )
             return 0
 
         table = Table(show_edge=False, pad_edge=False)

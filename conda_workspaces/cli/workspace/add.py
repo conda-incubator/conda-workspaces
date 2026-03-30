@@ -9,7 +9,6 @@ from conda.models.match_spec import MatchSpec
 from rich.console import Console
 
 from ...parsers import detect_workspace_file
-from .. import status
 
 if TYPE_CHECKING:
     import argparse
@@ -51,12 +50,11 @@ def execute_add(args: argparse.Namespace, *, console: Console | None = None) -> 
 
     label = "PyPI" if is_pypi else "conda"
     location = f"feature '{target_feature}'" if target_feature else "default"
-
     n = len(specs)
     noun = "dependency" if n == 1 else "dependencies"
     console.print(
-        f"{status.DONE} Added {n} {label} {noun}"
-        f" to {location} in {manifest_path.name}"
+        f"[bold cyan]Added[/bold cyan] {n} {label} {noun}"
+        f" to {location} in [bold]{manifest_path.name}[/bold]"
     )
     return 0
 
@@ -80,7 +78,8 @@ def _add_to_toml(
             entry["features"] = [feature]
             envs[feature] = entry
             console.print(
-                f"Created environment [bold]'{feature}'[/bold] with feature '{feature}'"
+                f"Created [bold]{feature}[/bold] environment"
+                f" with feature '{feature}'"
             )
     else:
         target = doc
@@ -117,7 +116,8 @@ def _add_to_pyproject(
             entry["features"] = [feature]
             envs[feature] = entry
             console.print(
-                f"Created environment [bold]'{feature}'[/bold] with feature '{feature}'"
+                f"Created [bold]{feature}[/bold] environment"
+                f" with feature '{feature}'"
             )
     else:
         target = source

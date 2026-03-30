@@ -77,7 +77,7 @@ def _write_workspace_toml(
     doc.add("dependencies", deps)
 
     path.write_text(tomlkit.dumps(doc), encoding="utf-8")
-    console.print(f"{status.DONE} Created [dim]{path}[/dim]")
+    status.message(console, "Created", "workspace", path.name, detail=str(path.parent))
     return 0
 
 
@@ -115,5 +115,5 @@ def _write_pyproject_toml(
 
     path.write_text(tomlkit.dumps(doc), encoding="utf-8")
     verb = "Updated" if existed else "Created"
-    console.print(f"{status.DONE} {verb} [dim]{path}[/dim]")
+    status.message(console, verb, "workspace", path.name, detail=str(path.parent))
     return 0

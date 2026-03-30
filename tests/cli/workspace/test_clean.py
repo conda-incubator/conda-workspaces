@@ -43,7 +43,7 @@ def test_clean_single_environment(
     result = execute_clean(args)
     assert result == 0
     assert not prefix.is_dir()
-    assert "✓" in capsys.readouterr().out
+    assert "Removed" in capsys.readouterr().out
 
 
 def test_clean_all_environments(
@@ -60,7 +60,7 @@ def test_clean_all_environments(
     args = make_args(_DEFAULTS)
     result = execute_clean(args)
     assert result == 0
-    assert "Removed 2" in capsys.readouterr().out
+    assert "Removed" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(

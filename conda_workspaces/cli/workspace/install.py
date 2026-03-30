@@ -42,20 +42,45 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
 
     if env_name:
         resolved = resolve_environment(config, env_name, ctx.platform)
-        install_environment(ctx, resolved, force_reinstall=force, dry_run=dry_run)
+        install_environment(
+            ctx, resolved, force_reinstall=force, dry_run=dry_run,
+        )
+        status.message(console, "Installed", "environment", env_name)
         if not dry_run:
+            console.print()
+            console.print(
+                "[bold blue]Updating[/bold blue]"
+                " [bold]conda.lock[/bold][dim]...[/dim]"
+            )
             generate_lockfile(ctx, {env_name: resolved})
-        status.done(console, env_name)
+            console.print(
+                "[bold cyan]Updated[/bold cyan]"
+                " [bold]conda.lock[/bold]"
+            )
     else:
         resolved_all = resolve_all_environments(config, ctx.platform)
-        for name, resolved in resolved_all.items():
-            status.running(console, name)
-            install_environment(ctx, resolved, force_reinstall=force, dry_run=dry_run)
-            status.done(console, name)
+        for i, (name, resolved) in enumerate(resolved_all.items()):
+            if i > 0:
+                console.print()
+            status.message(
+                console, "Installing", "environment", name,
+                style="bold blue", ellipsis=True,
+            )
+            install_environment(
+                ctx, resolved, force_reinstall=force, dry_run=dry_run,
+            )
+            status.message(console, "Installed", "environment", name)
         if not dry_run:
+            console.print()
+            console.print(
+                "[bold blue]Updating[/bold blue]"
+                " [bold]conda.lock[/bold][dim]...[/dim]"
+            )
             generate_lockfile(ctx, resolved_all)
-        n = len(resolved_all)
-        console.print(f"{n} {'environment' if n == 1 else 'environments'} installed.")
+            console.print(
+                "[bold cyan]Updated[/bold cyan]"
+                " [bold]conda.lock[/bold]"
+            )
 
     return 0
 
@@ -82,14 +107,17 @@ def _install_from_lockfile(
     """Install environments from existing lockfiles (no solving)."""
     if env_name:
         install_from_lockfile(ctx, env_name)
-        status.done(console, env_name)
+        status.message(console, "Installed", "environment", env_name)
     else:
         env_names = list(config.environments)
-        for name in env_names:
-            status.running(console, name)
+        for i, name in enumerate(env_names):
+            if i > 0:
+                console.print()
+            status.message(
+                console, "Installing", "environment", name,
+                style="bold blue", ellipsis=True,
+            )
             install_from_lockfile(ctx, name)
-            status.done(console, name)
-        n = len(env_names)
-        console.print(f"{n} {'environment' if n == 1 else 'environments'} installed.")
+            status.message(console, "Installed", "environment", name)
 
     return 0

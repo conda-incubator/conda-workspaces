@@ -8,7 +8,6 @@ import tomlkit
 from rich.console import Console
 
 from ...parsers import detect_workspace_file
-from .. import status
 
 if TYPE_CHECKING:
     import argparse
@@ -42,8 +41,8 @@ def execute_remove(args: argparse.Namespace, *, console: Console | None = None) 
         n = len(removed)
         noun = "dependency" if n == 1 else "dependencies"
         console.print(
-            f"{status.DONE} Removed {n} {label} {noun}"
-            f" from {location} in {manifest_path.name}"
+            f"[bold cyan]Removed[/bold cyan] {n} {label} {noun}"
+            f" from {location} in [bold]{manifest_path.name}[/bold]"
         )
     else:
         console.print("No matching dependencies found to remove.")

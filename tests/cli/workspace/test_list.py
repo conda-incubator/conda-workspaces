@@ -55,7 +55,7 @@ def test_list_installed_only(
     result = execute_list(args, console=rich_console)
     assert result == 0
     out = rich_console.file.getvalue()
-    assert "No environments found" in out
+    assert "No environments defined" in out
 
 
 def test_list_installed_with_env(
@@ -199,4 +199,4 @@ def test_list_packages_empty(
     args = make_args(_DEFAULTS)
     result = execute_list(args, console=rich_console)
     assert result == 0
-    assert "No packages installed" in rich_console.file.getvalue()
+    assert "No packages in" in rich_console.file.getvalue()
