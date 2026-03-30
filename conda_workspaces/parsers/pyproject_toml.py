@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import tomlkit
 
-from ..exceptions import TaskParseError, WorkspaceParseError
+from ..exceptions import TaskNotFoundError, TaskParseError, WorkspaceParseError
 from ..models import WorkspaceConfig
 from .base import ManifestParser
 from .normalize import parse_feature_tasks, parse_tasks_and_targets
@@ -21,7 +21,8 @@ from .toml import _parse_channels, _parse_features_and_envs
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from typing import Any
+
+    from tomlkit.items import Table
 
     from ..models import Task
 
@@ -65,7 +66,6 @@ class PyprojectTomlParser(ManifestParser):
         conda = tool.get("conda", {})
         pixi = tool.get("pixi", {})
 
-        source: dict[str, Any]
         if conda.get("workspace"):
             source = conda
         elif pixi.get("workspace"):
@@ -116,3 +116,49 @@ class PyprojectTomlParser(ManifestParser):
         tasks = parse_tasks_and_targets(source)
         parse_feature_tasks(source, tasks)
         return tasks
+
+    def tool_section_for_tasks(self, doc: tomlkit.TOMLDocument) -> Table:
+        """Return the ``tool`` sub-table that owns tasks.
+
+        Uses the same precedence as ``parse_tasks``: non-empty
+        ``tool.conda`` wins, then non-empty ``tool.pixi``, then
+        falls back to ``tool.conda`` for new manifests.
+        """
+        tool = doc.setdefault("tool", tomlkit.table())
+        conda = tool.get("conda")
+        pixi = tool.get("pixi")
+        if conda is not None and len(conda) > 0:
+            return tool.setdefault("conda", tomlkit.table())
+        if pixi is not None and len(pixi) > 0:
+            return tool.setdefault("pixi", tomlkit.table())
+        return tool.setdefault("conda", tomlkit.table())
+
+    def add_task(self, path: Path, name: str, task: Task) -> None:
+        if path.exists():
+            doc = tomlkit.loads(path.read_text(encoding="utf-8"))
+        else:
+            doc = tomlkit.document()
+
+        parent = self.tool_section_for_tasks(doc)
+        tasks_section = parent.setdefault("tasks", tomlkit.table())
+        tasks_section[name] = self.task_to_toml_inline(task)
+        path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+
+    def remove_task(self, path: Path, name: str) -> None:
+        doc = tomlkit.loads(path.read_text(encoding="utf-8"))
+        tool = doc.get("tool", {})
+        available: list[str] = []
+        for sec_name in ("conda", "pixi"):
+            sec = tool.get(sec_name)
+            if sec is None:
+                continue
+            tasks_tbl = sec.get("tasks")
+            if tasks_tbl is None:
+                continue
+            available.extend(tasks_tbl.keys())
+            if name in tasks_tbl:
+                del tasks_tbl[name]
+                self.remove_target_overrides(sec, name)
+                path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+                return
+        raise TaskNotFoundError(name, sorted(set(available)))

@@ -72,13 +72,13 @@ def test_parse_target_only_task(tmp_project):
     assert tasks["special"].platforms is not None
 
 
-@pytest.mark.parametrize(
-    "method, args",
-    [
-        ("add_task", lambda p: (p, "x", Task(name="x", cmd="echo"))),
-        ("remove_task", lambda p: (p, "build")),
-    ],
-)
-def test_write_raises(task_pyproject, method, args):
-    with pytest.raises(NotImplementedError):
-        getattr(PyprojectTomlParser(), method)(*args(task_pyproject))
+def test_add_task_pixi_only(tmp_project):
+    path = tmp_project / "pyproject.toml"
+    path.write_text(
+        '[project]\nname = "example"\n\n[tool.pixi.workspace]\n'
+        'channels = ["conda-forge"]\nplatforms = ["linux-64"]\n'
+    )
+    parser = PyprojectTomlParser()
+    parser.add_task(path, "build", Task(name="build", cmd="make"))
+    tasks = parser.parse_tasks(path)
+    assert tasks["build"].cmd == "make"

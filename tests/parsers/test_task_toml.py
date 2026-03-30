@@ -8,11 +8,7 @@ import pytest
 
 from conda_workspaces.exceptions import TaskNotFoundError, TaskParseError
 from conda_workspaces.models import Task, TaskArg, TaskDependency, TaskOverride
-from conda_workspaces.parsers.toml import (
-    CondaTomlParser,
-    _task_to_toml_inline,
-    tasks_to_toml,
-)
+from conda_workspaces.parsers.toml import CondaTomlParser, tasks_to_toml
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -162,7 +158,7 @@ def test_parse_invalid(tmp_project):
 
 def test_to_toml_inline_simple_cmd():
     task = Task(name="build", cmd="make")
-    assert _task_to_toml_inline(task) == "make"
+    assert CondaTomlParser().task_to_toml_inline(task) == "make"
 
 
 def test_to_toml_inline_with_fields():
@@ -176,7 +172,7 @@ def test_to_toml_inline_with_fields():
         inputs=["src/**/*.py"],
         outputs=["results/"],
     )
-    result = _task_to_toml_inline(task)
+    result = CondaTomlParser().task_to_toml_inline(task)
     assert not isinstance(result, str)
     d = dict(result)
     assert d["cmd"] == "pytest"
@@ -191,7 +187,7 @@ def test_to_toml_inline_with_args():
         cmd="pytest {{ path }}",
         args=[TaskArg(name="path", default="tests/")],
     )
-    result = _task_to_toml_inline(task)
+    result = CondaTomlParser().task_to_toml_inline(task)
     assert not isinstance(result, str)
     d = dict(result)
     assert d["args"][0] == {"arg": "path", "default": "tests/"}  # ty: ignore[not-subscriptable]
