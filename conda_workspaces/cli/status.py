@@ -1,4 +1,22 @@
-"""Shared status markers and helpers for CLI output."""
+"""Shared status helpers for CLI output.
+
+Provides verb-based status messages that are accessible and
+colorblind-safe.  Every state is distinguishable by word alone;
+color is supplementary, using blue/cyan/yellow instead of green/red.
+
+Example output::
+
+    Running lint task...
+    All checks passed!
+    Finished lint task
+
+    Failed build task
+    Skipped format-check task (cached)
+    Would run lint task
+
+    Installing default environment...
+    Installed default environment
+"""
 
 from __future__ import annotations
 
@@ -9,98 +27,79 @@ from rich.markup import escape as _escape
 if TYPE_CHECKING:
     from rich.console import Console
 
-RUNNING = "[bold blue]●[/bold blue]"
-DONE = "[bold green]✓[/bold green]"
-FAILED = "[bold red]✗[/bold red]"
-CACHED = "[dim cyan]○[/dim cyan]"
-DRY_RUN = "[bold yellow]◌[/bold yellow]"
 
-
-def _label(
-    marker: str,
+def _format(
+    verb: str,
+    noun: str,
     name: str,
     *,
+    style: str = "",
+    ellipsis: bool = False,
     detail: str | None = None,
     suffix: str | None = None,
 ) -> str:
-    """Build a Rich markup status line."""
-    text = f"{marker} {_escape(name)}"
+    """Build a Rich markup status line.
+
+    *verb* is the action word (``Running``, ``Finished``, …),
+    *noun* is the object type (``task``, ``environment``),
+    *name* is the specific item.
+    """
+    if style:
+        text = f"[{style}]{verb}[/{style}]"
+    else:
+        text = verb
+    text += f" [bold]{_escape(name)}[/bold] {noun}"
+    if ellipsis:
+        text += "[dim]...[/dim]"
     if detail:
-        text += f" ── [dim]{_escape(detail)}[/dim]"
+        text += f"  [dim]{_escape(detail)}[/dim]"
     if suffix:
         text += f" [dim]({suffix})[/dim]"
     return text
 
 
-def _print(
+def message(
     console: Console,
-    marker: str,
+    verb: str,
+    noun: str,
     name: str,
     *,
+    style: str = "bold cyan",
+    ellipsis: bool = False,
     detail: str | None = None,
     suffix: str | None = None,
 ) -> None:
-    console.print(_label(marker, name, detail=detail, suffix=suffix))
+    """Print a verb-based status line.
+
+    Examples::
+
+        status.message(console, "Running", "task", "lint",
+                       style="bold blue", ellipsis=True)
+        # -> Running lint task...
+
+        status.message(console, "Installed", "environment", "default")
+        # -> Installed default environment
+    """
+    console.print(
+        _format(
+            verb,
+            noun,
+            name,
+            style=style,
+            ellipsis=ellipsis,
+            detail=detail,
+            suffix=suffix,
+        )
+    )
 
 
-def done(
-    console: Console,
+def message_label(
+    verb: str,
+    noun: str,
     name: str,
     *,
-    detail: str | None = None,
-    suffix: str | None = None,
-) -> None:
-    """Print a ``✓`` status line."""
-    _print(console, DONE, name, detail=detail, suffix=suffix)
-
-
-def running(
-    console: Console,
-    name: str,
-    *,
-    detail: str | None = None,
-    suffix: str | None = None,
-) -> None:
-    """Print a ``●`` status line."""
-    _print(console, RUNNING, name, detail=detail, suffix=suffix)
-
-
-def failed(
-    console: Console,
-    name: str,
-    *,
-    detail: str | None = None,
-    suffix: str | None = None,
-) -> None:
-    """Print a ``✗`` status line."""
-    _print(console, FAILED, name, detail=detail, suffix=suffix)
-
-
-def cached(
-    console: Console,
-    name: str,
-    *,
-    suffix: str = "cached",
-) -> None:
-    """Print a ``○`` status line (defaults to ``(cached)`` suffix)."""
-    _print(console, CACHED, name, suffix=suffix)
-
-
-def dry_run(
-    console: Console,
-    name: str,
-    *,
-    detail: str | None = None,
-    suffix: str | None = None,
-) -> None:
-    """Print a ``◌`` status line."""
-    _print(console, DRY_RUN, name, detail=detail, suffix=suffix)
-
-
-def dry_run_label(
-    name: str,
-    *,
+    style: str = "bold yellow",
     detail: str | None = None,
 ) -> str:
-    """Build a ``◌`` label string for Rich Tree nodes."""
-    return _label(DRY_RUN, name, detail=detail)
+    """Build a status label string for Rich Tree nodes."""
+    return _format(verb, noun, name, style=style, detail=detail)
