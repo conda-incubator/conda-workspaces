@@ -12,6 +12,7 @@ Animated terminal demos recorded with [VHS](https://github.com/charmbracelet/vhs
 | `lockfile` | Install, lock, clean, reinstall from lockfile |
 | `multi-env` | Multiple environments from one manifest |
 | `pixi-compat` | Use an existing pixi.toml with conda-workspaces |
+| `import` | Import environment.yml and anaconda-project.yml into conda.toml |
 | `shell` | Interactive shell and one-shot commands |
 
 ### Tasks

@@ -1,0 +1,20 @@
+name: my-analysis
+channels:
+  - conda-forge
+packages:
+  - python>=3.12
+  - numpy>=2
+  - pandas>=2.2
+  - bokeh
+commands:
+  notebook:
+    notebook: analysis.ipynb
+  process:
+    unix: python process.py
+    description: Run the data pipeline
+env_specs:
+  default:
+    packages: []
+  test:
+    packages:
+      - pytest

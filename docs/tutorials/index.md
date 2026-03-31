@@ -12,11 +12,11 @@ Step-by-step guides for common workflows.
 Set up a Python project with workspaces, tasks, and multiple environments.
 :::
 
-:::{grid-item-card} {octicon}`arrow-switch` Coming from pixi
-:link: coming-from-pixi
+:::{grid-item-card} {octicon}`arrow-switch` Coming from...
+:link: coming-from/index
 :link-type: doc
 
-Use conda-workspaces alongside or instead of pixi.
+Migrate from conda, pixi, anaconda-project, or conda-project.
 :::
 
 :::{grid-item-card} {octicon}`server` CI pipeline
@@ -32,6 +32,6 @@ Set up conda-workspaces in GitHub Actions.
 :hidden:
 
 first-project
-coming-from-pixi
+coming-from/index
 ci-pipeline
 ```

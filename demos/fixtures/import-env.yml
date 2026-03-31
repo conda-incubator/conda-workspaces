@@ -1,0 +1,9 @@
+name: data-analysis
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.12
+  - numpy>=2
+  - pandas>=2.2
+  - pip:
+    - requests>=2.31

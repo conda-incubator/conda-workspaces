@@ -1,6 +1,6 @@
 # Coming from pixi
 
-![pixi compatibility demo](../../demos/pixi-compat.gif)
+![pixi compatibility demo](../../../demos/pixi-compat.gif)
 
 If you already use pixi for workspace management and tasks,
 conda-workspaces can read the same manifest files. This guide explains
@@ -130,17 +130,25 @@ test = "pytest tests/ -v"
 # (same format pixi uses)
 ```
 
-## Exporting pixi tasks
+## Converting to conda.toml
 
-If you want to convert pixi task definitions to `conda.toml` format,
-use the built-in export command:
+If you want to convert your entire `pixi.toml` manifest (workspace
+configuration, dependencies, and tasks) to `conda.toml`, use the
+import command:
+
+```bash
+conda workspace import pixi.toml
+```
+
+This reads your `pixi.toml` and writes a fully equivalent `conda.toml`.
+Use `--dry-run` to preview the output, or `-o custom.toml` to choose a
+different output path.
+
+To export only tasks, use the task export command instead:
 
 ```bash
 conda task export --file pixi.toml -o conda.toml
 ```
-
-This reads your existing `pixi.toml` tasks (including platform overrides)
-and writes a fully equivalent `conda.toml`.
 
 ## What's not supported
 

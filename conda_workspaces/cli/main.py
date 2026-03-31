@@ -305,6 +305,29 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         help="Optional command to run in the spawned shell.",
     )
 
+    import_parser = sub.add_parser(
+        "import",
+        help="Import a manifest from another format into conda.toml.",
+        add_help=False,
+    )
+    add_parser_help(import_parser)
+    add_output_and_prompt_options(import_parser)
+    import_parser.add_argument(
+        "file",
+        type=Path,
+        help=(
+            "Manifest file to import (environment.yml, anaconda-project.yml, "
+            "conda-project.yml, pixi.toml, pyproject.toml)."
+        ),
+    )
+    import_parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        default=None,
+        help="Output path (default: conda.toml in the current directory).",
+    )
+
 
 def execute_workspace(args: argparse.Namespace) -> int:
     """Main entry point for ``conda workspace``."""
@@ -372,6 +395,10 @@ def _dispatch_workspace(args: argparse.Namespace, subcmd: str) -> int:
         from .workspace.shell import execute_shell
 
         return execute_shell(args)
+    elif subcmd == "import":
+        from .workspace.import_manifest import execute_import
+
+        return execute_import(args)
     else:
         generate_workspace_parser().print_help()
         return 0

@@ -132,7 +132,7 @@ Set up your first workspace and tasks in under a minute.
 :link: tutorials/index
 :link-type: doc
 
-Step-by-step guides: your first project, migrating from pixi, CI setup.
+Your first project, migrating from conda / pixi / anaconda-project / conda-project, CI setup.
 :::
 
 :::{grid-item-card} {octicon}`list-unordered` Features
