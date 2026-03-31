@@ -2,6 +2,11 @@
 
 ## Installation
 
+### As a conda plugin
+
+Install into your conda base environment to get `conda workspace` and
+`conda task` subcommands:
+
 ::::{tab-set}
 
 :::{tab-item} conda
@@ -17,6 +22,42 @@ conda install -c conda-forge conda-workspaces
 ```bash
 pixi global install conda-workspaces
 ```
+
+:::
+
+::::
+
+### Standalone
+
+Install as a standalone tool to get the `cw` and `ct` shortcut commands.
+No conda installation is required — tasks, manifests, and import work
+without it.
+
+::::{tab-set}
+
+:::{tab-item} pipx
+
+```bash
+pipx install conda-workspaces
+```
+
+:::
+
+:::{tab-item} pip
+
+```bash
+pip install conda-workspaces
+```
+
+:::
+
+:::{tab-item} pixi
+
+```bash
+pixi global install conda-workspaces
+```
+
+Exposes `cw` and `ct` as standalone commands.
 
 :::
 
