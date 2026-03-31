@@ -7,25 +7,9 @@
 Install into your conda base environment to get `conda workspace` and
 `conda task` subcommands:
 
-::::{tab-set}
-
-:::{tab-item} conda
-
 ```bash
 conda install -c conda-forge conda-workspaces
 ```
-
-:::
-
-:::{tab-item} pixi
-
-```bash
-pixi global install conda-workspaces
-```
-
-:::
-
-::::
 
 ### Standalone
 
