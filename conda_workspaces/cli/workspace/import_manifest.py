@@ -55,7 +55,7 @@ def execute_import(
 
             console.print(Syntax(text, "toml", theme="ansi_dark"))
         else:
-            console.print(text, end="")
+            print(text, end="", file=console.file)
         raise DryRunExit()
 
     if output.is_file():
