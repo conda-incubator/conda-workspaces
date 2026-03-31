@@ -14,8 +14,8 @@ conda install -c conda-forge conda-workspaces
 ### Standalone
 
 Install as a standalone tool to get the `cw` and `ct` shortcut commands.
-No conda installation is required — tasks, manifests, and import work
-without it.
+Tasks, manifest parsing, and import work without conda. Workspace
+operations (install, lock, solve) require conda at runtime.
 
 ::::{tab-set}
 
