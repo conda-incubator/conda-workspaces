@@ -11,6 +11,14 @@ Install into your conda base environment to get `conda workspace` and
 conda install -c conda-forge conda-workspaces
 ```
 
+### Standalone
+
+Install as a standalone tool to get the `cw` and `ct` shortcut commands:
+
+```bash
+pixi global install conda-workspaces
+```
+
 ## Your first tasks
 
 ![task quickstart demo](../demos/task-quickstart.gif)
