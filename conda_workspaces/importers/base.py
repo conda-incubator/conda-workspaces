@@ -8,12 +8,11 @@ from typing import TYPE_CHECKING
 import tomlkit
 from conda.common.serialize.yaml import load as yaml_load
 from conda.models.match_spec import MatchSpec
+from packaging.requirements import Requirement
 
 if TYPE_CHECKING:
     from pathlib import Path
     from typing import Any, ClassVar
-
-_PIP_OPERATORS = (">=", "<=", "!=", "==", "~=", ">", "<")
 
 
 class ManifestImporter(ABC):
@@ -54,18 +53,9 @@ class ManifestImporter(ABC):
         for pkg in packages:
             if isinstance(pkg, dict) and "pip" in pkg:
                 for pip_pkg in pkg["pip"]:
-                    name, version = self.parse_pip_spec(pip_pkg)
-                    pypi[name] = version
+                    req = Requirement(pip_pkg)
+                    pypi[req.name] = str(req.specifier) or "*"
         return pypi
-
-    @staticmethod
-    def parse_pip_spec(spec: str) -> tuple[str, str]:
-        """Parse a pip requirement string into ``(name, version_constraint)``."""
-        for op in _PIP_OPERATORS:
-            if op in spec:
-                idx = spec.index(op)
-                return spec[:idx].strip(), spec[idx:].strip()
-        return spec.strip(), "*"
 
     def add_features(
         self,
