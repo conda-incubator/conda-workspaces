@@ -70,12 +70,13 @@ def execute_import(args: argparse.Namespace, *, console: Console | None = None) 
 
     output.write_text(text, encoding="utf-8")
     if not quiet:
+        parent = str(output.parent)
         status.message(
             console,
             "Wrote",
             "workspace",
             output.name,
-            detail=str(output.parent),
+            detail=parent if parent != "." else None,
         )
 
     return 0
