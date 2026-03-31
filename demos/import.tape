@@ -16,6 +16,9 @@ Wait /\$/
 Type "rm -rf /tmp/import-demo && mkdir -p /tmp/import-demo && cd /tmp/import-demo"
 Enter
 Wait /\$/
+Type `cp "$FIXTURES/import-env.yml" environment.yml`
+Enter
+Wait /\$/
 Type "clear"
 Enter
 Wait /\$/
@@ -23,11 +26,6 @@ Show
 
 Type "# Import an environment.yml into a conda.toml workspace"
 Enter
-Sleep 500ms
-
-Type@80ms `cp "$FIXTURES/import-env.yml" environment.yml`
-Enter
-Wait /\$/
 Sleep 500ms
 
 Type@80ms "bat environment.yml"
@@ -45,17 +43,20 @@ Enter
 Wait /\$/
 Sleep 4s
 
-Type "# Now import an anaconda-project.yml"
-Enter
-Sleep 500ms
-
-Type@80ms "rm conda.toml"
+Hide
+Type "rm conda.toml"
 Enter
 Wait /\$/
-
-Type@80ms `cp "$FIXTURES/import-ap.yml" anaconda-project.yml`
+Type `cp "$FIXTURES/import-ap.yml" anaconda-project.yml`
 Enter
 Wait /\$/
+Type "clear"
+Enter
+Wait /\$/
+Show
+
+Type "# Import an anaconda-project.yml"
+Enter
 Sleep 500ms
 
 Type@80ms "bat anaconda-project.yml"

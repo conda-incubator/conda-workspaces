@@ -10,7 +10,8 @@ from conda.exceptions import CondaSystemExit, DryRunExit
 from conda.reporters import confirm_yn
 from rich.console import Console
 
-from ...importers import import_manifest
+from ...importers import find_importer
+from .. import status
 
 if TYPE_CHECKING:
     import argparse
@@ -25,18 +26,36 @@ def execute_import(
 
     source: Path = args.file
     if not source.exists():
-        console.print(f"[bold red]Error:[/bold red] {source} not found")
+        status.print_error(console, FileNotFoundError(str(source)))
         return 1
 
     quiet = getattr(args, "quiet", False)
     dry_run = getattr(args, "dry_run", False)
     output: Path = getattr(args, "output", None) or Path("conda.toml")
 
-    doc = import_manifest(source)
+    importer = find_importer(source)
+    if not quiet:
+        status.message(
+            console, "Reading", "manifest", source.name,
+            style="bold blue", ellipsis=True,
+        )
+
+    doc = importer.convert(source)
     text = tomlkit.dumps(doc)
 
+    if not quiet:
+        status.message(
+            console, "Detected", "format", source.name,
+            detail=type(importer).__name__,
+        )
+
     if dry_run:
-        print(text, end="")
+        if console.is_terminal:
+            from rich.syntax import Syntax
+
+            console.print(Syntax(text, "toml", theme="ansi_dark"))
+        else:
+            console.print(text, end="")
         raise DryRunExit()
 
     if output.is_file():
@@ -47,9 +66,9 @@ def execute_import(
 
     output.write_text(text, encoding="utf-8")
     if not quiet:
-        console.print(
-            f"[bold cyan]Imported[/bold cyan] [bold]{source}[/bold] "
-            f"-> [bold]{output}[/bold]"
+        status.message(
+            console, "Wrote", "workspace", output.name,
+            detail=str(output.parent),
         )
 
     return 0

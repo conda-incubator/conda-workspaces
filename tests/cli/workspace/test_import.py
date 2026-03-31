@@ -216,17 +216,17 @@ def test_execute_import_custom_output(
 
 
 def test_execute_import_dry_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / "environment.yml").write_text(_ENVIRONMENT_YML, encoding="utf-8")
     args = make_args(_DEFAULTS, file=tmp_path / "environment.yml", dry_run=True)
-    console = Console(file=StringIO(), width=200)
+    buf = StringIO()
+    console = Console(file=buf, width=200)
     with pytest.raises(DryRunExit):
         execute_import(args, console=console)
     assert not (tmp_path / "conda.toml").exists()
-    captured = capsys.readouterr()
-    assert "[workspace]" in captured.out
+    assert "[workspace]" in buf.getvalue()
 
 
 def test_execute_import_file_not_found(
