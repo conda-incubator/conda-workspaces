@@ -20,6 +20,7 @@ class AnacondaProjectImporter(ManifestImporter):
         "anaconda-project.yml",
         "anaconda-project.yaml",
     )
+    label: ClassVar[str] = "anaconda-project"
 
     def convert(self, path: Path) -> tomlkit.TOMLDocument:
         ap = self.load_yaml(path)

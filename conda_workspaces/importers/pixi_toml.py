@@ -19,6 +19,7 @@ class PixiTomlImporter(ManifestImporter):
     """Convert a ``pixi.toml`` file to a ``conda.toml`` document."""
 
     filenames: ClassVar[tuple[str, ...]] = ("pixi.toml",)
+    label: ClassVar[str] = "pixi"
 
     def convert(self, path: Path) -> tomlkit.TOMLDocument:
         parser = find_parser(path)

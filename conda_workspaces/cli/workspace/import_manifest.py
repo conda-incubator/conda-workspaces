@@ -51,8 +51,7 @@ def execute_import(args: argparse.Namespace, *, console: Console | None = None) 
             console,
             "Detected",
             "format",
-            source.name,
-            detail=type(importer).__name__,
+            importer.label,
         )
 
     if dry_run:

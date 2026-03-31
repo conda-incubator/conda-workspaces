@@ -21,6 +21,7 @@ class CondaProjectImporter(ManifestImporter):
         "conda-project.yml",
         "conda-project.yaml",
     )
+    label: ClassVar[str] = "conda-project"
 
     def convert(self, path: Path) -> tomlkit.TOMLDocument:
         cp = self.load_yaml(path)

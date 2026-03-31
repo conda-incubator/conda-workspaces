@@ -19,6 +19,7 @@ class PyprojectTomlImporter(ManifestImporter):
     """Convert a ``pyproject.toml`` file to a ``conda.toml`` document."""
 
     filenames: ClassVar[tuple[str, ...]] = ("pyproject.toml",)
+    label: ClassVar[str] = "pyproject.toml"
 
     def convert(self, path: Path) -> tomlkit.TOMLDocument:
         parser = find_parser(path)

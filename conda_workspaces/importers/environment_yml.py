@@ -18,6 +18,7 @@ class EnvironmentYmlImporter(ManifestImporter):
     """Convert an ``environment.yml`` file to a ``conda.toml`` document."""
 
     filenames: ClassVar[tuple[str, ...]] = ("environment.yml", "environment.yaml")
+    label: ClassVar[str] = "environment.yml"
 
     def convert(self, path: Path) -> tomlkit.TOMLDocument:
         data = self.load_yaml(path)

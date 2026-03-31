@@ -24,6 +24,7 @@ class ManifestImporter(ABC):
     """
 
     filenames: ClassVar[tuple[str, ...]] = ()
+    label: ClassVar[str] = ""
 
     def can_handle(self, path: Path) -> bool:
         """Return True if this importer handles *path*."""
