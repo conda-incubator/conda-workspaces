@@ -11,48 +11,6 @@ Install into your conda base environment to get `conda workspace` and
 conda install -c conda-forge conda-workspaces
 ```
 
-### Standalone
-
-Install as a standalone tool to get the `cw` and `ct` shortcut commands.
-Tasks, manifest parsing, and import work without conda. Workspace
-operations (install, lock, solve) require conda at runtime.
-
-::::{tab-set}
-
-:::{tab-item} pixi
-
-```bash
-pixi global install conda-workspaces
-```
-
-:::
-
-:::{tab-item} uv
-
-```bash
-uv tool install conda-workspaces
-```
-
-:::
-
-:::{tab-item} pipx
-
-```bash
-pipx install conda-workspaces
-```
-
-:::
-
-:::{tab-item} pip
-
-```bash
-pip install conda-workspaces
-```
-
-:::
-
-::::
-
 ## Your first tasks
 
 ![task quickstart demo](../demos/task-quickstart.gif)
