@@ -17,8 +17,6 @@ from .pyproject_toml import PyprojectTomlImporter
 if TYPE_CHECKING:
     from pathlib import Path
 
-    import tomlkit
-
     from .base import ManifestImporter
 
 _IMPORTERS: list[ManifestImporter] = [
@@ -28,23 +26,6 @@ _IMPORTERS: list[ManifestImporter] = [
     PixiTomlImporter(),
     PyprojectTomlImporter(),
 ]
-
-
-def detect_format(path: Path) -> str:
-    """Return the format identifier for *path* based on its filename.
-
-    Raises ``ValueError`` if the filename is not recognised.
-    """
-    for importer in _IMPORTERS:
-        if importer.can_handle(path):
-            return type(importer).__name__
-    supported = ", ".join(
-        fn for imp in _IMPORTERS for fn in imp.filenames
-    )
-    raise ValueError(
-        f"Unrecognised manifest format: '{path.name}'. "
-        f"Supported filenames: {supported}"
-    )
 
 
 def find_importer(path: Path) -> ManifestImporter:
@@ -62,12 +43,3 @@ def find_importer(path: Path) -> ManifestImporter:
         f"Unrecognised manifest format: '{path.name}'. "
         f"Supported filenames: {supported}"
     )
-
-
-def import_manifest(path: Path) -> tomlkit.TOMLDocument:
-    """Import *path* and return a ``conda.toml``-shaped TOML document.
-
-    Auto-detects the format from the filename and dispatches to the
-    appropriate importer.
-    """
-    return find_importer(path).convert(path)

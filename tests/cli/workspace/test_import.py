@@ -11,7 +11,7 @@ from conda.exceptions import DryRunExit
 from rich.console import Console
 
 from conda_workspaces.cli.workspace.import_manifest import execute_import
-from conda_workspaces.importers import detect_format, import_manifest
+from conda_workspaces.importers import find_importer
 
 from ..conftest import make_args
 
@@ -120,14 +120,14 @@ lint = "ruff check ."
 def test_detect_format(tmp_path: Path, filename: str, expected: str) -> None:
     p = tmp_path / filename
     p.touch()
-    assert detect_format(p) == expected
+    assert type(find_importer(p)).__name__ == expected
 
 
 def test_detect_format_unknown(tmp_path: Path) -> None:
     p = tmp_path / "unknown.txt"
     p.touch()
     with pytest.raises(ValueError, match="Unrecognised manifest format"):
-        detect_format(p)
+        find_importer(p)
 
 
 @pytest.mark.parametrize(
@@ -148,7 +148,7 @@ def test_import_manifest_produces_workspace(
 ) -> None:
     p = tmp_path / filename
     p.write_text(content, encoding="utf-8")
-    doc = import_manifest(p)
+    doc = find_importer(p).convert(p)
     assert doc["workspace"]["name"] == expected_name
     assert "channels" in doc["workspace"]
 
@@ -160,7 +160,9 @@ def test_import_conda_project(tmp_path: Path) -> None:
     (tmp_path / "environment.yml").write_text(
         _CONDA_PROJECT_ENV_YML, encoding="utf-8"
     )
-    doc = import_manifest(tmp_path / "conda-project.yml")
+    doc = find_importer(tmp_path / "conda-project.yml").convert(
+        tmp_path / "conda-project.yml"
+    )
     assert doc["workspace"]["name"] == "cp-demo"
     assert "python" in doc["dependencies"]
 
@@ -168,7 +170,7 @@ def test_import_conda_project(tmp_path: Path) -> None:
 def test_env_yml_dependencies(tmp_path: Path) -> None:
     p = tmp_path / "environment.yml"
     p.write_text(_ENVIRONMENT_YML, encoding="utf-8")
-    doc = import_manifest(p)
+    doc = find_importer(p).convert(p)
     assert "python" in doc["dependencies"]
     assert "numpy" in doc["dependencies"]
     assert "requests" in doc["pypi-dependencies"]
@@ -177,14 +179,14 @@ def test_env_yml_dependencies(tmp_path: Path) -> None:
 def test_ap_commands_become_tasks(tmp_path: Path) -> None:
     p = tmp_path / "anaconda-project.yml"
     p.write_text(_ANACONDA_PROJECT_YML, encoding="utf-8")
-    doc = import_manifest(p)
+    doc = find_importer(p).convert(p)
     assert "serve" in doc["tasks"]
 
 
 def test_pixi_tasks_preserved(tmp_path: Path) -> None:
     p = tmp_path / "pixi.toml"
     p.write_text(_PIXI_TOML, encoding="utf-8")
-    doc = import_manifest(p)
+    doc = find_importer(p).convert(p)
     assert "build" in doc["tasks"]
 
 
