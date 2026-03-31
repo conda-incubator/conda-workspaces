@@ -6,6 +6,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 0.3.0 — 2026-03-31
+
+### Added
+
+- `conda workspace import` command to convert `environment.yml`,
+  `anaconda-project.yml`, `conda-project.yml`, `pixi.toml`, and
+  `pyproject.toml` manifests to `conda.toml`
+- Progress output during import (reading, format detection, write status)
+- Syntax-highlighted TOML preview in `--dry-run` mode
+- `conda task add` and `conda task remove` support for `pixi.toml` and
+  `pyproject.toml` manifests
+- Codecov integration and coverage badge
+- CI, docs, PyPI, and conda-forge badges to README
+- Documentation for `CONDA_PKGS_DIRS` hardlink optimization in CI/Docker
+- Diataxis-organized documentation sidebar
+
+### Changed
+
+- Import format detection uses human-readable labels instead of class names
+- Importers use `packaging.Requirement` for robust pip dependency parsing
+- Simplified importer registry to a single `find_importer` function
+- Unified installation docs (conda install and pixi global install)
+
+### Fixed
+
+- `--dry-run` output no longer strips TOML section headers in non-terminal
+  environments
+- Trailing dot suppressed in import status when output is in the current
+  directory
+
 ## 0.2.0 — 2026-03-30
 
 ### Added
