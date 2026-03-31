@@ -170,13 +170,32 @@ and task execution.
 
 ```{toctree}
 :hidden:
+:caption: Tutorials
 
 quickstart
 tutorials/index
-features
-configuration
+```
+
+```{toctree}
+:hidden:
+:caption: Reference
+
 reference/cli
 reference/api
+configuration
+```
+
+```{toctree}
+:hidden:
+:caption: Explanation
+
+features
 motivation
+```
+
+```{toctree}
+:hidden:
+:caption: Project
+
 changelog
 ```
