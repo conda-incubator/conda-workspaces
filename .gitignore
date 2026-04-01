@@ -58,6 +58,9 @@ Thumbs.db
 .ty/
 .mypy_cache/
 
+# Build output
+output/
+
 # Version file (auto-generated)
 conda_workspaces/_version.py
 

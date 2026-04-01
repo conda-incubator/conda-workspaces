@@ -118,6 +118,13 @@
   configured in `pyproject.toml` under `[tool.coverage.*]`. Run
   `pixi run -e <test-env> test-cov` to generate a coverage report.
 
+## Lockfile maintenance
+
+- After any change to `pyproject.toml` that affects pixi metadata
+  (dependencies, features, tasks, or workspace settings), always run
+  `pixi lock` and commit the updated `pixi.lock` alongside the
+  `pyproject.toml` change. CI will fail if the lockfile is out of date.
+
 ## Conda integration
 
 - Workspace subcommands use `-e`/`--environment` for environment
