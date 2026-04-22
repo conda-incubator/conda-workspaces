@@ -30,18 +30,21 @@ The file layout is::
         ...
 
 On the *write* side, :func:`generate_lockfile` solves each environment
-and records the result.  On the *read* side, :func:`install_from_lockfile`
-extracts the package list for one environment + platform via
-:class:`CondaLockLoader` and installs the exact URLs, bypassing the
-solver entirely.
+and delegates YAML serialisation to the ``multiplatform_export`` hook
+in :mod:`.env_export` (the same path ``conda export`` uses), so every
+``conda.lock`` on disk comes out of a single formatter.  On the *read*
+side, :func:`install_from_lockfile` extracts the package list for one
+environment + platform via :class:`CondaLockLoader` and installs the
+exact URLs, bypassing the solver entirely.
 """
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from conda.common.serialize.yaml import dump as yaml_dump
 from conda.plugins.types import EnvironmentSpecBase
 
 from .exceptions import LockfileNotFoundError, SolveError
@@ -192,47 +195,6 @@ class CondaLockLoader(EnvironmentSpecBase):
         return _rattler_lock_v6_to_env(name=name, platform=platform, **payload)
 
 
-def _build_lockfile_dict(
-    environments: dict[tuple[str, str], list],
-    channels_by_env: dict[str, list[str]],
-) -> dict[str, Any]:
-    """Build the lockfile dict from solved package records.
-
-    *environments* maps ``(env_name, platform)`` pairs to lists of
-    :class:`~conda.models.records.PackageRecord` objects.
-
-    *channels_by_env* maps environment names to ordered channel URLs.
-    """
-    from conda_lockfiles.rattler_lock.v6 import _record_to_dict
-
-    seen_urls: set[str] = set()
-    packages: list[dict[str, Any]] = []
-    envs_dict: dict[str, dict[str, Any]] = {}
-
-    for (env_name, platform), records in sorted(environments.items()):
-        if env_name not in envs_dict:
-            channels = channels_by_env.get(env_name, [])
-            envs_dict[env_name] = {
-                "channels": [{"url": ch} for ch in channels],
-                "packages": {},
-            }
-
-        platform_refs: list[dict[str, str]] = []
-        for pkg in sorted(records, key=lambda p: p.name):
-            platform_refs.append({"conda": pkg.url})
-            if pkg.url not in seen_urls:
-                packages.append(_record_to_dict(pkg))
-                seen_urls.add(pkg.url)
-
-        envs_dict[env_name]["packages"][platform] = platform_refs
-
-    return {
-        "version": LOCKFILE_VERSION,
-        "environments": envs_dict,
-        "packages": packages,
-    }
-
-
 def _solve_for_records(
     ctx: WorkspaceContext,
     resolved: ResolvedEnvironment,
@@ -294,19 +256,20 @@ def generate_lockfile(
 
     Solves each environment in *resolved_envs* and writes the results
     to a single ``conda.lock`` YAML file at the workspace root.
-    Solver output is suppressed to avoid noise since the caller
-    provides its own status messages.
+    Serialisation is delegated to :func:`.env_export.multiplatform_export`
+    so this function and ``conda export --format=conda-workspaces-lock-v1``
+    produce byte-identical output.  Solver output is suppressed to avoid
+    noise since the caller provides its own status messages.
 
     Returns the path to the generated lockfile.
     """
-    import os
-    import sys
-
     from conda.base.context import context as conda_context
+    from conda.models.environment import Environment, EnvironmentConfig
+
+    from .env_export import multiplatform_export
 
     platform = ctx.platform
-    environments: dict[tuple[str, str], list] = {}
-    channels_by_env: dict[str, list[str]] = {}
+    envs: list[Environment] = []
 
     with conda_context._override("quiet", True):
         real_stdout = sys.stdout
@@ -315,17 +278,22 @@ def generate_lockfile(
             sys.stdout = devnull
             for name, resolved in resolved_envs.items():
                 records = _solve_for_records(ctx, resolved)
-                environments[(name, platform)] = records
-                channels_by_env[name] = [str(ch) for ch in resolved.channels]
+                envs.append(
+                    Environment(
+                        name=name,
+                        platform=platform,
+                        config=EnvironmentConfig(
+                            channels=tuple(str(ch) for ch in resolved.channels),
+                        ),
+                        explicit_packages=records,
+                    )
+                )
         finally:
             sys.stdout = real_stdout
             devnull.close()
 
-    data = _build_lockfile_dict(environments, channels_by_env)
-
     path = lockfile_path(ctx)
-    with path.open("w", encoding="utf-8") as fh:
-        yaml_dump(data, fh)
+    path.write_text(multiplatform_export(envs), encoding="utf-8")
     return path
 
 
@@ -363,8 +331,6 @@ def install_from_lockfile(ctx: WorkspaceContext, env_name: str) -> None:
 
     prefix = ctx.env_prefix(env_name)
     prefix.mkdir(parents=True, exist_ok=True)
-
-    import sys
 
     records = get_package_records_from_explicit(urls)
     install_explicit_packages(

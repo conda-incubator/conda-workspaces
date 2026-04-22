@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Internal refactor of the `conda.lock` write path: `generate_lockfile`
+  now builds `conda.models.environment.Environment` objects and
+  delegates YAML serialisation to the same `multiplatform_export` hook
+  used by `conda export --format=conda-workspaces-lock-v1`, removing
+  the previously duplicated `_build_lockfile_dict` helper.  `conda
+  workspace lock` and `conda export` now produce byte-identical
+  output.
 - Internal refactor of the `conda.lock` read path: ``conda_workspaces.lockfile``
   now owns both the write path and the `CondaEnvironmentSpecifier`
   plugin (`CondaLockLoader`), and delegates YAML -> `Environment`

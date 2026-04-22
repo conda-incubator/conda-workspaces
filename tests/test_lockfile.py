@@ -21,7 +21,6 @@ from conda_workspaces.lockfile import (
     LOCKFILE_NAME,
     LOCKFILE_VERSION,
     CondaLockLoader,
-    _build_lockfile_dict,
     generate_lockfile,
     install_from_lockfile,
     lockfile_path,
@@ -125,45 +124,6 @@ def test_record_to_dict() -> None:
     assert result["md5"] == "def456"
     assert result["size"] == 1024
     assert "depends" not in result
-
-
-def test_build_lockfile_dict() -> None:
-    """_build_lockfile_dict produces the lockfile top-level structure."""
-
-    class FakePkg:
-        def __init__(self, name: str, url: str):
-            self.name = name
-            self.url = url
-            self._data: dict = {}
-
-        def get(self, key, default=None):
-            return self._data.get(key, default)
-
-    pkg_a = FakePkg("numpy", "https://example.com/numpy-1.24.conda")
-    pkg_b = FakePkg("python", "https://example.com/python-3.10.conda")
-    pkg_c = FakePkg("pytest", "https://example.com/pytest-8.0.conda")
-
-    environments = {
-        ("default", "linux-64"): [pkg_a, pkg_b],
-        ("test", "linux-64"): [pkg_a, pkg_b, pkg_c],
-    }
-    channels_by_env = {
-        "default": ["conda-forge"],
-        "test": ["conda-forge"],
-    }
-
-    result = _build_lockfile_dict(environments, channels_by_env)  # type: ignore[arg-type]
-
-    assert result["version"] == LOCKFILE_VERSION
-    assert "default" in result["environments"]
-    assert "test" in result["environments"]
-
-    assert len(result["environments"]["default"]["packages"]["linux-64"]) == 2
-    assert len(result["environments"]["test"]["packages"]["linux-64"]) == 3
-
-    assert len(result["packages"]) == 3
-
-    assert result["environments"]["default"]["channels"] == [{"url": "conda-forge"}]
 
 
 @pytest.mark.parametrize(
