@@ -31,6 +31,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   summary if *every* pair fails, so CI never writes an empty lockfile.
   Non-solver errors (missing channel, invalid manifest, etc.) continue
   to abort regardless of the flag.
+- `conda_workspaces.resolver.known_platforms(config, resolved_envs)`
+  centralises the "platforms this workspace could legitimately be
+  solved for" computation (workspace platforms unioned with the
+  platforms surfaced by each resolved environment). `conda workspace
+  lock` now uses it to validate `--platform`, and `conda workspace
+  info` surfaces the reachable set as a `known_platforms` JSON key
+  (and an extra `Known Platforms` row in the text output whenever a
+  feature broadens the workspace-level set).
 
 ### Changed
 

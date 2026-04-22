@@ -8,7 +8,7 @@ from rich.console import Console
 
 from ...exceptions import EnvironmentNotFoundError, PlatformError
 from ...lockfile import generate_lockfile
-from ...resolver import resolve_all_environments, resolve_environment
+from ...resolver import known_platforms, resolve_all_environments, resolve_environment
 from . import workspace_context_from_args
 
 if TYPE_CHECKING:
@@ -40,12 +40,11 @@ def execute_lock(args: argparse.Namespace, *, console: Console | None = None) ->
 
     platforms: tuple[str, ...] | None = None
     if requested_platforms:
-        # A requested platform must be declared either by the workspace
-        # or by at least one of the resolved environments, so CI catches
-        # typos before the solver burns any time.
-        known: set[str] = set(config.platforms)
-        for resolved in resolved_envs.values():
-            known.update(resolved.platforms or config.platforms or [])
+        # Catch --platform typos (e.g. "lixux-64") before the solver
+        # burns any time by validating against the full reachable
+        # platform set — workspace + feature declarations surfaced via
+        # resolved_envs.
+        known = known_platforms(config, resolved_envs.values())
         for platform in requested_platforms:
             if platform not in known:
                 raise PlatformError(platform, sorted(known))

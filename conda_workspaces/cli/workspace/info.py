@@ -9,7 +9,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ...envs import get_environment_info
-from ...resolver import resolve_environment
+from ...resolver import known_platforms, resolve_all_environments, resolve_environment
 from . import workspace_context_from_args
 
 if TYPE_CHECKING:
@@ -41,6 +41,12 @@ def _show_workspace_info(
     json_output: bool,
 ) -> int:
     """Show workspace-level overview."""
+    # Resolving is cheap (no solver, just feature merging) and lets us
+    # surface the reachable platform set when features broaden it
+    # beyond ``config.platforms``.
+    resolved_envs = resolve_all_environments(config)
+    known = sorted(known_platforms(config, resolved_envs.values()))
+
     info = {
         "manifest": config.manifest_path,
         "name": config.name or "(unnamed)",
@@ -48,6 +54,7 @@ def _show_workspace_info(
         "description": config.description or "",
         "channels": [ch.canonical_name for ch in config.channels],
         "platforms": config.platforms,
+        "known_platforms": known,
         "environments": list(config.environments.keys()),
         "features": list(config.features.keys()),
     }
@@ -66,6 +73,10 @@ def _show_workspace_info(
             table.add_row("Description", info["description"])
         table.add_row("Channels", ", ".join(info["channels"]) or "(none)")
         table.add_row("Platforms", ", ".join(info["platforms"]) or "(all)")
+        # Only surface the reachable set when a feature has broadened
+        # it; otherwise the row is redundant with "Platforms".
+        if set(known) != set(info["platforms"]):
+            table.add_row("Known Platforms", ", ".join(known) or "(none)")
         table.add_row("Environments", ", ".join(info["environments"]))
         table.add_row("Features", ", ".join(info["features"]) or "(none)")
         console.print(table)

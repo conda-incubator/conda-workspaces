@@ -269,6 +269,23 @@ llvm-openmp = ">=14.0"
 Platform overrides are merged on top of the base dependencies when
 resolving for a specific platform.
 
+### Known vs. declared platforms
+
+The workspace-level `platforms` list is the default set every
+environment can be solved for. Individual features may declare
+additional platforms, and those are reachable through any
+environment that activates that feature. To see the full reachable
+set, run:
+
+```bash
+conda workspace info            # text view, extra "Known Platforms" row
+conda workspace info --json     # JSON "known_platforms" key
+```
+
+`conda workspace lock --platform <subdir>` validates against this
+reachable set, so typos like `lixux-64` are rejected before the
+solver runs.
+
 ## PyPI dependencies
 
 PyPI dependencies are specified separately from conda dependencies:

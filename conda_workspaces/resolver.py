@@ -16,6 +16,8 @@ from .exceptions import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from .models import Channel, MatchSpec, PyPIDependency, WorkspaceConfig
 
 log = logging.getLogger(__name__)
@@ -111,3 +113,31 @@ def resolve_all_environments(
         name: resolve_environment(config, name, platform)
         for name in config.environments
     }
+
+
+def known_platforms(
+    config: WorkspaceConfig,
+    resolved_envs: Iterable[ResolvedEnvironment] = (),
+) -> set[str]:
+    """All platforms this workspace could legitimately be solved for.
+
+    Returns the union of workspace-level ``config.platforms`` and any
+    feature-declared platforms surfaced through *resolved_envs* (i.e.
+    the intersection of feature platforms per environment, falling
+    back to ``config.platforms`` when no feature declares any).
+
+    A naive ``config.platforms`` check is not sufficient because
+    features may declare platforms beyond the workspace level, and
+    those reach the solver through :attr:`ResolvedEnvironment.platforms`
+    without being clipped against the workspace set.
+
+    Intended for pre-solve CLI validation of ``--platform`` values
+    (so typos like ``lixux-64`` fail before any solver work runs) and
+    for surfacing the reachable platform set in
+    ``conda workspace info``.  Passing an empty *resolved_envs*
+    degrades to "workspace platforms only".
+    """
+    known: set[str] = set(config.platforms)
+    for resolved in resolved_envs:
+        known.update(resolved.platforms or ())
+    return known

@@ -114,6 +114,77 @@ def test_info_json_env(
     assert "channels" in data
 
 
+_BROADENED_WORKSPACE = """\
+[workspace]
+name = "broadened"
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-arm64"]
+
+[dependencies]
+python = ">=3.10"
+
+[feature.windows]
+platforms = ["win-64"]
+
+[environments]
+windows = ["windows"]
+"""
+
+
+@pytest.mark.parametrize(
+    ("json_output", "assertions"),
+    [
+        pytest.param(
+            False,
+            lambda out: ("Known Platforms" in out and "win-64" in out),
+            id="text-row",
+        ),
+        pytest.param(
+            True,
+            lambda out: (
+                json.loads(out)["platforms"] == ["linux-64", "osx-arm64"]
+                and set(json.loads(out)["known_platforms"])
+                == {"linux-64", "osx-arm64", "win-64"}
+            ),
+            id="json-key",
+        ),
+    ],
+)
+def test_info_workspace_known_platforms_when_broadened(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rich_console: Console,
+    json_output: bool,
+    assertions,
+) -> None:
+    """A feature-declared platform surfaces in both text and JSON workspace info.
+
+    ``conda workspace lock --platform <p>`` can solve for platforms no
+    workspace-level ``platforms`` entry names as long as a feature
+    declares them, so the reachable set must be visible alongside the
+    workspace set.
+    """
+    (tmp_path / "pixi.toml").write_text(_BROADENED_WORKSPACE, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    args = make_args(_DEFAULTS, json=json_output)
+    execute_info(args, console=rich_console)
+    assert assertions(rich_console.file.getvalue())
+
+
+def test_info_workspace_hides_known_platforms_when_equal(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rich_console: Console,
+) -> None:
+    """``Known Platforms`` row is omitted when equal to ``Platforms`` (no noise)."""
+    monkeypatch.chdir(pixi_workspace)
+    args = make_args(_DEFAULTS)
+    execute_info(args, console=rich_console)
+    out = rich_console.file.getvalue()
+    assert "Known Platforms" not in out
+
+
 def test_info_shows_pypi_dependencies(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

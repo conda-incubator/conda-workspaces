@@ -13,6 +13,7 @@ from conda_workspaces.models import (
     WorkspaceConfig,
 )
 from conda_workspaces.resolver import (
+    known_platforms,
     resolve_all_environments,
     resolve_environment,
 )
@@ -112,6 +113,83 @@ def test_resolve_platforms(feature_platforms, expected_platforms):
     )
     resolved = resolve_environment(config, env_name)
     assert resolved.platforms == expected_platforms
+
+
+@pytest.mark.parametrize(
+    ("workspace_platforms", "feature_platforms", "env_features", "expected"),
+    [
+        pytest.param(
+            ["linux-64", "osx-arm64"],
+            {"default": None},
+            {"default": []},
+            {"linux-64", "osx-arm64"},
+            id="no-feature-platforms-returns-workspace-set",
+        ),
+        pytest.param(
+            ["linux-64", "osx-arm64"],
+            {"default": None, "gpu": ["linux-64"]},
+            {"default": [], "gpu": ["gpu"]},
+            {"linux-64", "osx-arm64"},
+            id="narrowing-feature-does-not-shrink-known-set",
+        ),
+        pytest.param(
+            ["linux-64", "osx-arm64"],
+            {"default": None, "windows": ["win-64"]},
+            {"default": [], "windows": ["windows"]},
+            {"linux-64", "osx-arm64", "win-64"},
+            id="broadening-feature-adds-to-known-set",
+        ),
+        pytest.param(
+            [],
+            {"default": ["linux-64", "win-64"]},
+            {"default": []},
+            {"linux-64", "win-64"},
+            id="features-supply-platforms-when-workspace-has-none",
+        ),
+    ],
+)
+def test_known_platforms(
+    workspace_platforms: list[str],
+    feature_platforms: dict[str, list[str] | None],
+    env_features: dict[str, list[str]],
+    expected: set[str],
+) -> None:
+    """``known_platforms`` unions workspace + reachable feature platforms."""
+    features: dict[str, Feature] = {}
+    for name, plats in feature_platforms.items():
+        kwargs: dict[str, object] = {"name": name}
+        if name == "default":
+            kwargs["conda_dependencies"] = {"python": MatchSpec("python")}
+        if plats is not None:
+            kwargs["platforms"] = plats
+        features[name] = Feature(**kwargs)
+
+    environments = {
+        env_name: Environment(
+            name=env_name,
+            features=[f for f in feats if f != "default"],
+        )
+        for env_name, feats in env_features.items()
+    }
+
+    config = WorkspaceConfig(
+        channels=[Channel("conda-forge")],
+        platforms=workspace_platforms,
+        features=features,
+        environments=environments,
+    )
+    resolved_envs = resolve_all_environments(config)
+    assert known_platforms(config, resolved_envs.values()) == expected
+
+
+def test_known_platforms_without_resolved_envs() -> None:
+    """Degrades to workspace-only when ``resolved_envs`` is empty."""
+    config = WorkspaceConfig(
+        channels=[Channel("conda-forge")],
+        platforms=["linux-64", "osx-arm64"],
+        features={"default": Feature(name="default")},
+    )
+    assert known_platforms(config) == {"linux-64", "osx-arm64"}
 
 
 def test_resolve_activation_merged():
