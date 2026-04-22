@@ -21,6 +21,12 @@ _DEFAULTS = {
     "pypi": False,
     "feature": None,
     "environment": None,
+    "no_install": False,
+    # Most of the existing tests only care about the manifest edit; skip the
+    # solve/install/lock pipeline by default and opt in where needed.
+    "no_lockfile_update": True,
+    "force_reinstall": False,
+    "dry_run": False,
 }
 
 
@@ -312,3 +318,231 @@ def test_remove_prints_location(
     out = capsys.readouterr().out
     assert expected_text in out
     assert "Removed 1" in out
+
+
+@pytest.fixture
+def sync_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A multi-env workspace: `default` + `test` (composing the `test` feature)."""
+    content = """\
+[workspace]
+name = "sync-test"
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-arm64", "win-64"]
+
+[dependencies]
+python = ">=3.10"
+
+[feature.test.dependencies]
+pytest = ">=8.0"
+
+[environments]
+default = []
+test = {features = ["test"]}
+"""
+    path = tmp_path / "pixi.toml"
+    path.write_text(content, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    return path
+
+
+@pytest.fixture
+def stub_sync(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], dict]]:
+    """Capture ``sync_environments`` invocations from add and remove.
+
+    Returns a list populated on each call with the env names and the flag
+    kwargs, so tests can assert what the auto-install pipeline would do
+    without actually solving or installing.
+    """
+    calls: list[tuple[list[str], dict]] = []
+
+    def fake_sync(
+        config,
+        ctx,
+        env_names,
+        *,
+        no_install=False,
+        force_reinstall=False,
+        dry_run=False,
+        console,
+    ) -> None:
+        calls.append(
+            (
+                list(env_names),
+                {
+                    "no_install": no_install,
+                    "force_reinstall": force_reinstall,
+                    "dry_run": dry_run,
+                },
+            )
+        )
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.add.sync_environments", fake_sync
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.remove.sync_environments", fake_sync
+    )
+    return calls
+
+
+@pytest.mark.parametrize(
+    "execute_fn, spec",
+    [(execute_add, "numpy"), (execute_remove, "python")],
+    ids=["add", "remove"],
+)
+def test_default_feature_syncs_all_envs(
+    sync_workspace: Path,
+    stub_sync: list[tuple[list[str], dict]],
+    execute_fn,
+    spec: str,
+) -> None:
+    """Editing the default feature re-syncs every env without ``no-default-feature``."""
+    args = make_args(
+        _DEFAULTS, file=sync_workspace, specs=[spec], no_lockfile_update=False
+    )
+    assert execute_fn(args) == 0
+
+    assert len(stub_sync) == 1
+    env_names, flags = stub_sync[0]
+    assert set(env_names) == {"default", "test"}
+    assert flags == {"no_install": False, "force_reinstall": False, "dry_run": False}
+
+
+@pytest.mark.parametrize(
+    "execute_fn, spec",
+    [(execute_add, "coverage"), (execute_remove, "pytest")],
+    ids=["add", "remove"],
+)
+def test_named_feature_syncs_only_composing_envs(
+    sync_workspace: Path,
+    stub_sync: list[tuple[list[str], dict]],
+    execute_fn,
+    spec: str,
+) -> None:
+    """``--feature test`` only re-syncs envs whose features list includes ``test``."""
+    args = make_args(
+        _DEFAULTS,
+        file=sync_workspace,
+        specs=[spec],
+        feature="test",
+        no_lockfile_update=False,
+    )
+    execute_fn(args)
+
+    assert len(stub_sync) == 1
+    env_names, _ = stub_sync[0]
+    assert env_names == ["test"]
+
+
+@pytest.mark.parametrize(
+    "execute_fn, spec",
+    [(execute_add, "numpy"), (execute_remove, "python")],
+    ids=["add", "remove"],
+)
+def test_no_lockfile_update_skips_sync(
+    sync_workspace: Path,
+    stub_sync: list[tuple[list[str], dict]],
+    execute_fn,
+    spec: str,
+) -> None:
+    """``--no-lockfile-update`` short-circuits before ``sync_environments``."""
+    args = make_args(_DEFAULTS, file=sync_workspace, specs=[spec])
+    execute_fn(args)
+
+    assert stub_sync == []
+
+
+@pytest.mark.parametrize(
+    "extra_kwargs, expected_flags",
+    [
+        (
+            {"no_install": True},
+            {"no_install": True, "force_reinstall": False, "dry_run": False},
+        ),
+        (
+            {"force_reinstall": True},
+            {"no_install": False, "force_reinstall": True, "dry_run": False},
+        ),
+        (
+            {"dry_run": True},
+            {"no_install": False, "force_reinstall": False, "dry_run": True},
+        ),
+        (
+            {"force_reinstall": True, "dry_run": True},
+            {"no_install": False, "force_reinstall": True, "dry_run": True},
+        ),
+    ],
+    ids=["no-install", "force-reinstall", "dry-run", "force-and-dry"],
+)
+@pytest.mark.parametrize(
+    "execute_fn, spec",
+    [(execute_add, "numpy"), (execute_remove, "python")],
+    ids=["add", "remove"],
+)
+def test_flags_forwarded_to_sync(
+    sync_workspace: Path,
+    stub_sync: list[tuple[list[str], dict]],
+    execute_fn,
+    spec: str,
+    extra_kwargs: dict,
+    expected_flags: dict,
+) -> None:
+    """Flag kwargs pass straight through to ``sync_environments``."""
+    args = make_args(
+        _DEFAULTS,
+        file=sync_workspace,
+        specs=[spec],
+        no_lockfile_update=False,
+        **extra_kwargs,
+    )
+    execute_fn(args)
+
+    _, flags = stub_sync[0]
+    assert flags == expected_flags
+
+
+def test_remove_no_match_skips_sync(
+    sync_workspace: Path, stub_sync: list[tuple[list[str], dict]]
+) -> None:
+    """Removing a missing spec is a no-op — no manifest write, no sync."""
+    args = make_args(
+        _DEFAULTS,
+        file=sync_workspace,
+        specs=["nonexistent"],
+        no_lockfile_update=False,
+    )
+    execute_remove(args)
+    assert stub_sync == []
+
+
+def test_add_no_default_feature_env_not_affected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_sync: list[tuple[list[str], dict]],
+) -> None:
+    """Envs with ``no-default-feature`` are excluded from default-feature syncs."""
+    content = """\
+[workspace]
+name = "no-def"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+python = ">=3.10"
+
+[feature.lint.dependencies]
+ruff = "*"
+
+[environments]
+default = []
+lint = {features = ["lint"], no-default-feature = true}
+"""
+    path = tmp_path / "pixi.toml"
+    path.write_text(content, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    args = make_args(_DEFAULTS, file=path, specs=["numpy"], no_lockfile_update=False)
+    execute_add(args)
+
+    env_names, _ = stub_sync[0]
+    assert env_names == ["default"]

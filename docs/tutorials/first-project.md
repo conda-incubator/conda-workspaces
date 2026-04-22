@@ -31,6 +31,10 @@ platforms = ["linux-64", "osx-arm64"]
 
 ## Add dependencies
 
+Each `conda workspace add` updates the manifest, resolves the
+affected environments, installs into their prefixes, and refreshes
+`conda.lock` — no separate install step is needed.
+
 Add your base dependencies:
 
 ```bash
@@ -77,13 +81,7 @@ test = { features = ["test"] }
 docs = { features = ["docs"] }
 ```
 
-## Install environments
-
-```bash
-conda workspace install
-```
-
-This creates three conda environments under `.conda/envs/`:
+And three conda environments now exist under `.conda/envs/`:
 
 ```
 .conda/envs/
@@ -91,6 +89,20 @@ This creates three conda environments under `.conda/envs/`:
 ├── test/       # + pytest, pytest-cov
 └── docs/       # + sphinx, myst-parser
 ```
+
+Prefer to stage a batch of edits before solving? Pass
+`--no-lockfile-update` to each `add` / `remove`, then run
+`conda workspace install` once to solve, install, and regenerate
+`conda.lock` for every environment:
+
+```bash
+conda workspace add --no-lockfile-update "python>=3.10"
+conda workspace add --no-lockfile-update "numpy>=1.24" "scipy>=1.11"
+conda workspace install
+```
+
+This is also how you reinstall everything on a fresh checkout (e.g.
+after cloning the repo on a new machine).
 
 ## Define tasks
 

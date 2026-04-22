@@ -62,11 +62,11 @@ def test_workspace_install_dry_run(
         )
 
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.install_environment",
+        "conda_workspaces.cli.workspace.sync.install_environment",
         fake_install,
     )
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.generate_lockfile",
+        "conda_workspaces.cli.workspace.sync.generate_lockfile",
         lambda ctx, envs: None,
     )
 
@@ -242,11 +242,11 @@ def test_rich_output_contains_status(
         conda_toml(WORKSPACE_TOML)
 
         monkeypatch.setattr(
-            "conda_workspaces.cli.workspace.install.install_environment",
+            "conda_workspaces.cli.workspace.sync.install_environment",
             lambda ctx, resolved, *, force_reinstall=False, dry_run=False: None,
         )
         monkeypatch.setattr(
-            "conda_workspaces.cli.workspace.install.generate_lockfile",
+            "conda_workspaces.cli.workspace.sync.generate_lockfile",
             lambda ctx, envs: None,
         )
 

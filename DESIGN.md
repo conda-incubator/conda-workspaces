@@ -54,6 +54,7 @@ shortcuts `cw` and `ct` are also available as aliases.
 | `[target.<platform>]` | `target_conda_dependencies` | Per-platform overrides |
 | `channel-priority` | Mapped to conda setting | `strict` / `flexible` / `disabled` |
 | Inline tables `{version = "...", build = "..."}` | Parsed via tomlkit | Dict-form deps |
+| `pixi add` / `pixi remove` | `conda workspace add` / `conda workspace remove` | Solves and installs by default; `--no-install` / `--no-lockfile-update` opt-outs |
 
 ### Accepted but Ignored
 
@@ -163,6 +164,47 @@ cross-platform shell runtime. This trades pixi's `deno_task_shell`
 portability for zero additional dependencies and familiar shell
 behaviour. Platform-specific commands are handled via `[target.<platform>.tasks]`
 overrides or Jinja2 conditionals.
+
+### 7. Add/Remove Auto-Install
+
+`conda workspace add` and `conda workspace remove` edit the manifest,
+re-solve the affected environments, install the changes into their
+prefixes, and regenerate `conda.lock` in a single step.  This matches
+pixi's `pixi add` / `pixi remove` semantics and closes the loop between
+"I edited my manifest" and "my environment reflects that change", which
+matters most when working inside a `conda workspace shell`.
+
+Opt-outs are available for partial workflows:
+
+- `--no-install` — update manifest and lockfile but skip the prefix install.
+- `--no-lockfile-update` — update only the manifest (the pre-0.x behaviour,
+  equivalent to running `conda workspace add` followed by a separate
+  `conda workspace install`).
+- `--force-reinstall` / `--dry-run` — forwarded to the underlying
+  `install_environment` call, matching `conda workspace install`.
+
+**Affected environments**: editing the default feature (the default when
+no `--feature` / `-e` is passed) re-syncs every environment that does not
+set `no-default-feature = true`.  Editing a named feature re-syncs every
+environment whose `features` list contains it.  A shared helper
+`sync_environments` in `conda_workspaces/cli/workspace/sync.py` backs
+both commands as well as `conda workspace install`, so there is a single
+canonical solve/install/lock pipeline.
+
+**Shell re-spawn hint**: `conda-spawn` sources activation scripts once at
+spawn time, so packages that ship `etc/conda/activate.d/*.sh` hooks need
+a re-spawn to take effect in an already-open `conda workspace shell`.
+When new files appear under `activate.d/` after an install and the
+command is running inside a spawned shell (`CONDA_SPAWN=1`), a hint is
+printed asking the user to exit and re-run `conda workspace shell`.
+
+**Lockfile scope**: `generate_lockfile` writes a full `conda.lock` from
+the environments it is given.  When only a subset of environments is
+affected (e.g. `conda workspace add --feature test`), the lockfile is
+replaced with entries for just those environments — identical to how
+`conda workspace install -e <env>` behaves today.  Preserving entries
+for unaffected environments is a separate change and would apply
+equally to `conda workspace install`.
 
 ## Differences from Pixi
 

@@ -93,26 +93,40 @@
   class-based test grouping. Do not group tests in classes; use
   module-level functions with descriptive names.
 
-- Do not use section comments (e.g., `# --- Section ---`) to group
-  tests. Rely on function naming and module structure for organization.
+- Never use `unittest.mock`, `MagicMock`, `patch`, `Mock`, or any other
+  `mock` library. Use `pytest` native fixtures (`tmp_path`,
+  `monkeypatch`, `capsys`, `tmp_path_factory`) and real fakes. Build
+  small local classes or `monkeypatch.setattr` with recording closures
+  when a test needs to observe calls; do not reach for the `mock`
+  package even as a last resort.
 
-- Use `pytest` native fixtures (`tmp_path`, `monkeypatch`, `capsys`)
-  instead of `unittest.mock`. Prefer `monkeypatch.setattr` with simple
-  fakes or recording closures over `MagicMock` / `patch`.
+- Do not use section comments (e.g., `# --- Section ---`,
+  `# -- Feature X ---`) to group tests. Rely on function naming and
+  module structure for organization. If a file feels like it wants
+  section headers, it should probably be split into multiple test
+  modules.
 
 - Use `pytest.mark.parametrize` extensively. When multiple test cases
   exercise the same logic with different inputs, consolidate them into
-  a single parameterized test. Always check whether a new test can be
-  expressed as a new parameter case on an existing test before writing
-  a standalone function.
+  a single parameterized test with `ids=[...]` for readable output.
+  Always check whether a new test can be expressed as a new parameter
+  case on an existing test before writing a standalone function. Stack
+  multiple `@pytest.mark.parametrize` decorators to cross-product
+  independent axes (e.g. `add` vs `remove` × flag combinations).
 
-- After adding or modifying tests, always run the test suite
-  (`pixi run -e test pytest`) and linter (`pixi run ruff check`) to
-  verify the changes pass before considering the work done.
+- Put shared setup in fixtures, not in repeated inline code. Fixtures
+  that return recording closures / call logs (for asserting what a
+  stubbed function was called with) are the preferred alternative to
+  `mock`. Shared fixtures belong in `conftest.py` at the appropriate
+  level (root `tests/conftest.py` for cross-cutting fixtures,
+  subdirectory `conftest.py` for module-specific ones).
 
-- Shared fixtures belong in `conftest.py` at the appropriate level
-  (root `tests/conftest.py` for cross-cutting fixtures, subdirectory
-  `conftest.py` for module-specific ones).
+- After adding or modifying tests or production code, always run the
+  full test suite (`pixi run -e test pytest`) **and** both
+  `pixi run ruff check` and `pixi run ruff format --check` to verify
+  the changes pass before considering the work done. Fix any lint or
+  formatting issues introduced by the changes; do not leave them for
+  CI to catch.
 
 - Coverage is measured with `pytest-cov`. Thresholds and exclusions are
   configured in `pyproject.toml` under `[tool.coverage.*]`. Run

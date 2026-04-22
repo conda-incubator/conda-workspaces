@@ -7,12 +7,11 @@ from typing import TYPE_CHECKING
 
 from rich.console import Console
 
-from ...envs import install_environment
 from ...exceptions import LockfileNotFoundError, LockfileStaleError
-from ...lockfile import generate_lockfile, install_from_lockfile, lockfile_path
-from ...resolver import resolve_all_environments, resolve_environment
+from ...lockfile import install_from_lockfile, lockfile_path
 from .. import status
 from . import workspace_context_from_args
+from .sync import sync_environments
 
 if TYPE_CHECKING:
     import argparse
@@ -40,58 +39,15 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
         _check_lockfile_freshness(ctx, config)
         return _install_from_lockfile(ctx, config, env_name, console=console)
 
-    if env_name:
-        resolved = resolve_environment(config, env_name, ctx.platform)
-        status.message(
-            console,
-            "Installing",
-            "environment",
-            env_name,
-            style="bold blue",
-            ellipsis=True,
-        )
-        install_environment(
-            ctx,
-            resolved,
-            force_reinstall=force,
-            dry_run=dry_run,
-        )
-        status.message(console, "Installed", "environment", env_name)
-        if not dry_run:
-            console.print()
-            console.print(
-                "[bold blue]Updating[/bold blue] [bold]conda.lock[/bold][dim]...[/dim]"
-            )
-            generate_lockfile(ctx, {env_name: resolved})
-            console.print("[bold cyan]Updated[/bold cyan] [bold]conda.lock[/bold]")
-    else:
-        resolved_all = resolve_all_environments(config, ctx.platform)
-        for i, (name, resolved) in enumerate(resolved_all.items()):
-            if i > 0:
-                console.print()
-            status.message(
-                console,
-                "Installing",
-                "environment",
-                name,
-                style="bold blue",
-                ellipsis=True,
-            )
-            install_environment(
-                ctx,
-                resolved,
-                force_reinstall=force,
-                dry_run=dry_run,
-            )
-            status.message(console, "Installed", "environment", name)
-        if not dry_run:
-            console.print()
-            console.print(
-                "[bold blue]Updating[/bold blue] [bold]conda.lock[/bold][dim]...[/dim]"
-            )
-            generate_lockfile(ctx, resolved_all)
-            console.print("[bold cyan]Updated[/bold cyan] [bold]conda.lock[/bold]")
-
+    env_names = [env_name] if env_name else list(config.environments.keys())
+    sync_environments(
+        config,
+        ctx,
+        env_names,
+        force_reinstall=force,
+        dry_run=dry_run,
+        console=console,
+    )
     return 0
 
 

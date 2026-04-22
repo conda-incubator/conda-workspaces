@@ -77,6 +77,19 @@ def _apply_activation_env(prefix: Path, env_vars: dict[str, str]) -> None:
     log.info("Set %d activation environment %s", n, noun)
 
 
+def activate_d_scripts(prefix: Path) -> set[str]:
+    """Return the filenames under ``$PREFIX/etc/conda/activate.d/``.
+
+    Returns an empty set when the directory does not exist.  Used to
+    detect new activation hooks installed into an environment, e.g. to
+    warn that a ``conda workspace shell`` session needs to be re-spawned.
+    """
+    activate_d = prefix / "etc" / "conda" / "activate.d"
+    if not activate_d.is_dir():
+        return set()
+    return {p.name for p in activate_d.iterdir()}
+
+
 def _apply_activation_scripts(prefix: Path, scripts: list[str]) -> None:
     """Copy activation scripts into ``$PREFIX/etc/conda/activate.d/``.
 

@@ -9,6 +9,8 @@ from conda.models.match_spec import MatchSpec
 from rich.console import Console
 
 from ...parsers import detect_workspace_file
+from . import workspace_context_from_args
+from .sync import affected_environments, sync_environments
 
 if TYPE_CHECKING:
     import argparse
@@ -56,6 +58,23 @@ def execute_add(args: argparse.Namespace, *, console: Console | None = None) -> 
         f"[bold cyan]Added[/bold cyan] {n} {label} {noun}"
         f" to {location} in [bold]{manifest_path.name}[/bold]"
     )
+
+    if getattr(args, "no_lockfile_update", False):
+        return 0
+
+    config, ctx = workspace_context_from_args(args)
+    env_names = affected_environments(config, target_feature)
+    if env_names:
+        console.print()
+        sync_environments(
+            config,
+            ctx,
+            env_names,
+            no_install=getattr(args, "no_install", False),
+            force_reinstall=getattr(args, "force_reinstall", False),
+            dry_run=getattr(args, "dry_run", False),
+            console=console,
+        )
     return 0
 
 

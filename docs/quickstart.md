@@ -212,13 +212,18 @@ Or spawn an interactive shell:
 conda workspace shell -e test
 ```
 
-## Add dependencies
+## Add and remove dependencies
 
 ```bash
 conda workspace add numpy
 ```
 
-Add to a specific feature:
+`add` and `remove` update the manifest, resolve the affected
+environments, install into their prefixes, and refresh `conda.lock`
+in one go — the same shape as `pixi add` / `pixi remove`.
+
+Add to a specific feature (only environments composing that feature
+are re-synced):
 
 ```bash
 conda workspace add --feature test pytest
@@ -229,6 +234,27 @@ Add a PyPI dependency:
 ```bash
 conda workspace add --pypi requests
 ```
+
+Remove a dependency:
+
+```bash
+conda workspace remove numpy
+```
+
+If you want the old manifest-only behaviour, or to stage a batch of
+edits before running the solver, opt out per command:
+
+```bash
+conda workspace add numpy --no-install            # update manifest + conda.lock, skip install
+conda workspace add numpy --no-lockfile-update    # update manifest only
+conda workspace add numpy --force-reinstall       # recreate the affected env(s) from scratch
+conda workspace add numpy --dry-run               # solve only, touch nothing on disk
+```
+
+Running `add` or `remove` from inside `conda workspace shell` works,
+but an already-activated shell will not pick up new entries under
+`$PREFIX/etc/conda/activate.d/` — the command prints a hint asking
+you to exit and re-run `conda workspace shell` when that happens.
 
 ## List packages and environments
 

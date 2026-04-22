@@ -211,6 +211,24 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         default=False,
         help="Add as a PyPI dependency instead of conda.",
     )
+    add_parser_cmd.add_argument(
+        "--no-install",
+        action="store_true",
+        default=False,
+        help="Update manifest and lockfile but skip installing into the environment.",
+    )
+    add_parser_cmd.add_argument(
+        "--no-lockfile-update",
+        action="store_true",
+        default=False,
+        help="Only update the manifest; skip solving, lockfile, and install.",
+    )
+    add_parser_cmd.add_argument(
+        "--force-reinstall",
+        action="store_true",
+        default=False,
+        help="Remove and recreate the affected environment(s) from scratch.",
+    )
 
     rm_parser = sub.add_parser(
         "remove",
@@ -240,6 +258,24 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         default=False,
         help="Remove a PyPI dependency.",
+    )
+    rm_parser.add_argument(
+        "--no-install",
+        action="store_true",
+        default=False,
+        help="Update the manifest and lockfile but skip reinstalling the environment.",
+    )
+    rm_parser.add_argument(
+        "--no-lockfile-update",
+        action="store_true",
+        default=False,
+        help="Only update the manifest; skip solving, lockfile, and reinstall.",
+    )
+    rm_parser.add_argument(
+        "--force-reinstall",
+        action="store_true",
+        default=False,
+        help="Remove and recreate the affected environment(s) from scratch.",
     )
 
     clean_parser = sub.add_parser(

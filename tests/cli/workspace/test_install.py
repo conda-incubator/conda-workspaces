@@ -28,7 +28,7 @@ _DEFAULTS = {
 def _stub_lockfile(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stub generate_lockfile to a no-op for tests that don't care about it."""
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.generate_lockfile",
+        "conda_workspaces.cli.workspace.sync.generate_lockfile",
         lambda ctx, resolved_envs: None,
     )
 
@@ -57,12 +57,12 @@ def test_install_envs(
         calls.append(resolved.name)
 
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.install_environment", fake_install
+        "conda_workspaces.cli.workspace.sync.install_environment", fake_install
     )
 
     lock_calls: list[dict] = []
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.generate_lockfile",
+        "conda_workspaces.cli.workspace.sync.generate_lockfile",
         lambda ctx, resolved_envs: lock_calls.append(resolved_envs),
     )
 
@@ -99,7 +99,7 @@ def test_install_flags_forwarded(
         recorded.append((force_reinstall, dry_run))
 
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.install_environment", fake_install
+        "conda_workspaces.cli.workspace.sync.install_environment", fake_install
     )
 
     args = make_args(
@@ -119,13 +119,13 @@ def test_install_dry_run_skips_lockfile(
     monkeypatch.chdir(pixi_workspace)
 
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.install_environment",
+        "conda_workspaces.cli.workspace.sync.install_environment",
         lambda ctx, resolved, **kw: None,
     )
 
     lock_calls: list[dict] = []
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.generate_lockfile",
+        "conda_workspaces.cli.workspace.sync.generate_lockfile",
         lambda ctx, resolved_envs: lock_calls.append(resolved_envs),
     )
 

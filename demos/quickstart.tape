@@ -27,7 +27,7 @@ Enter
 Wait /\$/
 Sleep 1s
 
-Type "# Add some dependencies"
+Type "# Add deps: each 'add' installs and refreshes conda.lock"
 Enter
 Sleep 500ms
 
@@ -41,21 +41,16 @@ Enter
 Wait /\$/
 Sleep 1s
 
+Type "# Inspect the manifest conda-workspaces wrote"
+Enter
+Sleep 500ms
+
 Type@80ms "bat conda.toml"
 Enter
 Wait /\$/
 Sleep 3s
 
-Type "# Install all environments"
-Enter
-Sleep 500ms
-
-Type@80ms "conda workspace install"
-Enter
-Wait /\$/
-Sleep 2s
-
-Type "# See what we built"
+Type "# See the environments it built"
 Enter
 Sleep 500ms
 

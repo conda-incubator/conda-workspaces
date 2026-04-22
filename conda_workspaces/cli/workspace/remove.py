@@ -8,6 +8,8 @@ import tomlkit
 from rich.console import Console
 
 from ...parsers import detect_workspace_file
+from . import workspace_context_from_args
+from .sync import affected_environments, sync_environments
 
 if TYPE_CHECKING:
     import argparse
@@ -50,7 +52,24 @@ def execute_remove(args: argparse.Namespace, *, console: Console | None = None) 
             " Check the package name, or use [bold]--pypi[/bold]"
             " for PyPI dependencies."
         )
+        return 0
 
+    if getattr(args, "no_lockfile_update", False):
+        return 0
+
+    config, ctx = workspace_context_from_args(args)
+    env_names = affected_environments(config, target_feature)
+    if env_names:
+        console.print()
+        sync_environments(
+            config,
+            ctx,
+            env_names,
+            no_install=getattr(args, "no_install", False),
+            force_reinstall=getattr(args, "force_reinstall", False),
+            dry_run=getattr(args, "dry_run", False),
+            console=console,
+        )
     return 0
 
 
