@@ -120,29 +120,32 @@ def test_lock_rejects_undeclared_platform(
         execute_lock(make_args(_DEFAULTS, platform=["freebsd-64"]))
 
 
-def test_lock_default_skip_unsolvable_off(
-    pixi_workspace: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capture_generate_lockfile: list[dict],
-) -> None:
-    """By default fail-fast: ``skip_unsolvable`` is ``False`` and no on_skip."""
-    monkeypatch.chdir(pixi_workspace)
-
-    result = execute_lock(make_args(_DEFAULTS))
-    assert result == 0
-    assert capture_generate_lockfile[0]["skip_unsolvable"] is False
-    assert capture_generate_lockfile[0]["on_skip"] is None
-
-
+@pytest.mark.parametrize(
+    ("flag_value", "expects_on_skip"),
+    [
+        (False, False),
+        (True, True),
+    ],
+    ids=["default-off-fail-fast", "flag-on-skip-mode"],
+)
 def test_lock_forwards_skip_unsolvable(
     pixi_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
     capture_generate_lockfile: list[dict],
+    flag_value: bool,
+    expects_on_skip: bool,
 ) -> None:
-    """``--skip-unsolvable`` turns on skip mode and wires an on_skip callback."""
+    """``--skip-unsolvable`` wires ``skip_unsolvable`` and an on_skip callback.
+
+    With the flag off (the default), the CLI must leave ``on_skip`` as
+    ``None`` so ``generate_lockfile`` falls back to fail-fast.
+    """
     monkeypatch.chdir(pixi_workspace)
 
-    result = execute_lock(make_args(_DEFAULTS, skip_unsolvable=True))
+    result = execute_lock(make_args(_DEFAULTS, skip_unsolvable=flag_value))
     assert result == 0
-    assert capture_generate_lockfile[0]["skip_unsolvable"] is True
-    assert callable(capture_generate_lockfile[0]["on_skip"])
+    assert capture_generate_lockfile[0]["skip_unsolvable"] is flag_value
+    if expects_on_skip:
+        assert callable(capture_generate_lockfile[0]["on_skip"])
+    else:
+        assert capture_generate_lockfile[0]["on_skip"] is None

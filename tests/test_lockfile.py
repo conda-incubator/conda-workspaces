@@ -336,108 +336,92 @@ def fake_solver_factory(monkeypatch: pytest.MonkeyPatch):
     return _factory
 
 
-def test_generate_lockfile_multi_platform(
+@pytest.fixture
+def resolved_envs_factory():
+    """Build a ``{name: ResolvedEnvironment}`` dict from a minimal spec.
+
+    Each keyword argument is an environment name mapped to the list of
+    declared platforms (or ``None`` for "no declared platforms, fall
+    back to the host at lock time"):
+
+        resolved_envs_factory(default=["linux-64", "osx-arm64"], test=["linux-64"])
+    """
+
+    def _factory(**envs: list[str] | None) -> dict[str, ResolvedEnvironment]:
+        return {
+            name: ResolvedEnvironment(
+                name=name,
+                channels=[Channel("conda-forge")],
+                platforms=platforms,
+            )
+            for name, platforms in envs.items()
+        }
+
+    return _factory
+
+
+@pytest.mark.parametrize(
+    ("envs", "host", "requested_platforms", "expected_pairs"),
+    [
+        pytest.param(
+            {"default": ["linux-64", "osx-arm64"], "test": ["linux-64"]},
+            "linux-64",
+            None,
+            {("default", "linux-64"), ("default", "osx-arm64"), ("test", "linux-64")},
+            id="all-declared-platforms",
+        ),
+        pytest.param(
+            {"default": None},
+            "linux-64",
+            None,
+            {("default", "linux-64")},
+            id="host-fallback-when-undeclared",
+        ),
+        pytest.param(
+            {"default": ["linux-64", "osx-arm64"], "test": ["linux-64"]},
+            "linux-64",
+            ("osx-arm64",),
+            {("default", "osx-arm64")},
+            id="requested-platforms-intersect-declared",
+        ),
+    ],
+)
+def test_generate_lockfile_solves_expected_pairs(
     tmp_path: Path,
     workspace_ctx_factory: Callable[..., WorkspaceContext],
     fake_solver_factory,
+    resolved_envs_factory,
+    envs: dict[str, list[str] | None],
+    host: str,
+    requested_platforms: tuple[str, ...] | None,
+    expected_pairs: set[tuple[str, str]],
 ) -> None:
-    """Each resolved environment is solved once per declared platform."""
-    ctx = workspace_ctx_factory(env_names=["default", "test"])
+    """Intersection of declared platforms with the requested subset."""
+    ctx = workspace_ctx_factory(platform=host, env_names=list(envs))
     calls = fake_solver_factory()
+    resolved_envs = resolved_envs_factory(**envs)
 
-    resolved_envs = {
-        "default": ResolvedEnvironment(
-            name="default",
-            channels=[Channel("conda-forge")],
-            platforms=["linux-64", "osx-arm64"],
-        ),
-        "test": ResolvedEnvironment(
-            name="test",
-            channels=[Channel("conda-forge")],
-            platforms=["linux-64"],
-        ),
-    }
-
-    result = generate_lockfile(ctx, resolved_envs)
+    result = generate_lockfile(ctx, resolved_envs, platforms=requested_platforms)
     assert result == tmp_path / LOCKFILE_NAME
-
-    assert set(calls) == {
-        ("default", "linux-64"),
-        ("default", "osx-arm64"),
-        ("test", "linux-64"),
-    }
+    assert set(calls) == expected_pairs
 
     content = result.read_text(encoding="utf-8")
     assert f"version: {LOCKFILE_VERSION}" in content
-    assert "linux-64" in content
-    assert "osx-arm64" in content
-    assert "python-default-linux-64.conda" in content
-    assert "python-default-osx-arm64.conda" in content
-    assert "python-test-linux-64.conda" in content
-
-
-def test_generate_lockfile_host_fallback(
-    workspace_ctx_factory: Callable[..., WorkspaceContext],
-    fake_solver_factory,
-) -> None:
-    """Environments without declared platforms fall back to host platform."""
-    ctx = workspace_ctx_factory(platform="linux-64", env_names=["default"])
-    calls = fake_solver_factory()
-
-    resolved_envs = {
-        "default": ResolvedEnvironment(
-            name="default",
-            channels=[Channel("conda-forge")],
-        ),
-    }
-
-    generate_lockfile(ctx, resolved_envs)
-    assert calls == [("default", "linux-64")]
-
-
-def test_generate_lockfile_platforms_restricts(
-    workspace_ctx_factory: Callable[..., WorkspaceContext],
-    fake_solver_factory,
-) -> None:
-    """``platforms=`` intersects the declared platform set per environment."""
-    ctx = workspace_ctx_factory(env_names=["default", "test"])
-    calls = fake_solver_factory()
-
-    resolved_envs = {
-        "default": ResolvedEnvironment(
-            name="default",
-            channels=[Channel("conda-forge")],
-            platforms=["linux-64", "osx-arm64"],
-        ),
-        "test": ResolvedEnvironment(
-            name="test",
-            channels=[Channel("conda-forge")],
-            platforms=["linux-64"],
-        ),
-    }
-
-    generate_lockfile(ctx, resolved_envs, platforms=("osx-arm64",))
-    assert calls == [("default", "osx-arm64")]
+    for env_name, platform in expected_pairs:
+        assert f"python-{env_name}-{platform}.conda" in content
 
 
 def test_generate_lockfile_progress_callback(
     workspace_ctx_factory: Callable[..., WorkspaceContext],
     fake_solver_factory,
+    resolved_envs_factory,
 ) -> None:
-    """``progress`` is invoked once per ``(env, platform)`` pair."""
+    """``progress`` is invoked once per ``(env, platform)`` pair, in order."""
     ctx = workspace_ctx_factory(env_names=["default"])
     fake_solver_factory()
+    resolved_envs = resolved_envs_factory(default=["linux-64", "osx-arm64"])
 
     events: list[tuple[str, str]] = []
-
-    resolved_envs = {
-        "default": ResolvedEnvironment(
-            name="default",
-            channels=[Channel("conda-forge")],
-            platforms=["linux-64", "osx-arm64"],
-        ),
-    }
-
     generate_lockfile(
         ctx,
         resolved_envs,
@@ -446,25 +430,29 @@ def test_generate_lockfile_progress_callback(
     assert events == [("default", "linux-64"), ("default", "osx-arm64")]
 
 
-def test_generate_lockfile_surface_platform_on_solve_error(
+@pytest.mark.parametrize(
+    "failing_pair",
+    [
+        ("default", "linux-64"),
+        ("default", "osx-arm64"),
+    ],
+    ids=["fails-on-first-platform", "fails-on-second-platform"],
+)
+def test_generate_lockfile_fails_fast_on_solve_error(
     workspace_ctx_factory: Callable[..., WorkspaceContext],
     fake_solver_factory,
+    resolved_envs_factory,
+    failing_pair: tuple[str, str],
 ) -> None:
-    """Solve failure names the platform and aborts without writing a lockfile."""
+    """Default behaviour: first unsolvable pair raises and writes no lockfile."""
     from conda_workspaces.exceptions import SolveError
 
-    ctx = workspace_ctx_factory(env_names=["default"])
-    fake_solver_factory(failures={("default", "osx-arm64")})
+    env_name, failing_platform = failing_pair
+    ctx = workspace_ctx_factory(env_names=[env_name])
+    fake_solver_factory(failures={failing_pair})
+    resolved_envs = resolved_envs_factory(**{env_name: ["linux-64", "osx-arm64"]})
 
-    resolved_envs = {
-        "default": ResolvedEnvironment(
-            name="default",
-            channels=[Channel("conda-forge")],
-            platforms=["linux-64", "osx-arm64"],
-        ),
-    }
-
-    with pytest.raises(SolveError, match="osx-arm64"):
+    with pytest.raises(SolveError, match=failing_platform):
         generate_lockfile(ctx, resolved_envs)
     assert not lockfile_path(ctx).exists()
 
@@ -472,23 +460,15 @@ def test_generate_lockfile_surface_platform_on_solve_error(
 def test_generate_lockfile_skip_unsolvable_partial(
     workspace_ctx_factory: Callable[..., WorkspaceContext],
     fake_solver_factory,
+    resolved_envs_factory,
 ) -> None:
     """``skip_unsolvable=True`` writes the solvable pairs and invokes on_skip."""
     ctx = workspace_ctx_factory(env_names=["default", "test"])
     fake_solver_factory(failures={("default", "osx-arm64")})
-
-    resolved_envs = {
-        "default": ResolvedEnvironment(
-            name="default",
-            channels=[Channel("conda-forge")],
-            platforms=["linux-64", "osx-arm64"],
-        ),
-        "test": ResolvedEnvironment(
-            name="test",
-            channels=[Channel("conda-forge")],
-            platforms=["linux-64"],
-        ),
-    }
+    resolved_envs = resolved_envs_factory(
+        default=["linux-64", "osx-arm64"],
+        test=["linux-64"],
+    )
 
     skipped: list[tuple[str, str, str]] = []
 
@@ -512,58 +492,27 @@ def test_generate_lockfile_skip_unsolvable_partial(
 def test_generate_lockfile_skip_unsolvable_all_fail(
     workspace_ctx_factory: Callable[..., WorkspaceContext],
     fake_solver_factory,
+    resolved_envs_factory,
 ) -> None:
     """When every pair fails, ``skip_unsolvable`` raises AllTargetsUnsolvableError."""
     from conda_workspaces.exceptions import AllTargetsUnsolvableError
 
     ctx = workspace_ctx_factory(env_names=["default", "test"])
-    fake_solver_factory(
-        failures={
-            ("default", "linux-64"),
-            ("default", "osx-arm64"),
-            ("test", "linux-64"),
-        }
-    )
-
-    resolved_envs = {
-        "default": ResolvedEnvironment(
-            name="default",
-            channels=[Channel("conda-forge")],
-            platforms=["linux-64", "osx-arm64"],
-        ),
-        "test": ResolvedEnvironment(
-            name="test",
-            channels=[Channel("conda-forge")],
-            platforms=["linux-64"],
-        ),
+    all_pairs = {
+        ("default", "linux-64"),
+        ("default", "osx-arm64"),
+        ("test", "linux-64"),
     }
+    fake_solver_factory(failures=all_pairs)
+    resolved_envs = resolved_envs_factory(
+        default=["linux-64", "osx-arm64"],
+        test=["linux-64"],
+    )
 
     with pytest.raises(AllTargetsUnsolvableError) as excinfo:
         generate_lockfile(ctx, resolved_envs, skip_unsolvable=True)
-    assert len(excinfo.value.failures) == 3
+    assert len(excinfo.value.failures) == len(all_pairs)
     assert not lockfile_path(ctx).exists()
-
-
-def test_generate_lockfile_skip_unsolvable_off_still_fail_fast(
-    workspace_ctx_factory: Callable[..., WorkspaceContext],
-    fake_solver_factory,
-) -> None:
-    """``skip_unsolvable=False`` (default) re-raises the first SolveError."""
-    from conda_workspaces.exceptions import SolveError
-
-    ctx = workspace_ctx_factory(env_names=["default"])
-    fake_solver_factory(failures={("default", "linux-64")})
-
-    resolved_envs = {
-        "default": ResolvedEnvironment(
-            name="default",
-            channels=[Channel("conda-forge")],
-            platforms=["linux-64", "osx-arm64"],
-        ),
-    }
-
-    with pytest.raises(SolveError, match="linux-64"):
-        generate_lockfile(ctx, resolved_envs)
 
 
 @pytest.mark.parametrize(
