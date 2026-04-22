@@ -18,6 +18,7 @@ _DEFAULTS = {
     "file": None,
     "environment": None,
     "platform": None,
+    "skip_unsolvable": False,
 }
 
 
@@ -26,17 +27,28 @@ def capture_generate_lockfile(monkeypatch: pytest.MonkeyPatch, pixi_workspace: P
     """Patch ``generate_lockfile`` and return a list of captured kwargs.
 
     Each call is recorded as a dict with ``resolved_envs`` (dict of
-    ``ResolvedEnvironment``), ``platforms``, and ``progress`` so tests
-    can assert the CLI forwards ``--platform`` and friends correctly.
+    ``ResolvedEnvironment``), ``platforms``, ``progress``,
+    ``skip_unsolvable``, and ``on_skip`` so tests can assert the CLI
+    forwards ``--platform`` / ``--skip-unsolvable`` correctly.
     """
     calls: list[dict] = []
 
-    def fake_generate(ctx, resolved_envs, *, platforms=None, progress=None):
+    def fake_generate(
+        ctx,
+        resolved_envs,
+        *,
+        platforms=None,
+        progress=None,
+        skip_unsolvable=False,
+        on_skip=None,
+    ):
         calls.append(
             {
                 "resolved_envs": resolved_envs,
                 "platforms": platforms,
                 "progress": progress,
+                "skip_unsolvable": skip_unsolvable,
+                "on_skip": on_skip,
             }
         )
         return pixi_workspace / "conda.lock"
@@ -106,3 +118,31 @@ def test_lock_rejects_undeclared_platform(
 
     with pytest.raises(PlatformError, match="freebsd-64"):
         execute_lock(make_args(_DEFAULTS, platform=["freebsd-64"]))
+
+
+def test_lock_default_skip_unsolvable_off(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capture_generate_lockfile: list[dict],
+) -> None:
+    """By default fail-fast: ``skip_unsolvable`` is ``False`` and no on_skip."""
+    monkeypatch.chdir(pixi_workspace)
+
+    result = execute_lock(make_args(_DEFAULTS))
+    assert result == 0
+    assert capture_generate_lockfile[0]["skip_unsolvable"] is False
+    assert capture_generate_lockfile[0]["on_skip"] is None
+
+
+def test_lock_forwards_skip_unsolvable(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capture_generate_lockfile: list[dict],
+) -> None:
+    """``--skip-unsolvable`` turns on skip mode and wires an on_skip callback."""
+    monkeypatch.chdir(pixi_workspace)
+
+    result = execute_lock(make_args(_DEFAULTS, skip_unsolvable=True))
+    assert result == 0
+    assert capture_generate_lockfile[0]["skip_unsolvable"] is True
+    assert callable(capture_generate_lockfile[0]["on_skip"])

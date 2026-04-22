@@ -24,6 +24,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   raise `PlatformError` before any solve runs.
 - `SolveError` now names the target platform when it is known, so
   per-platform failures are easy to spot in CI logs.
+- `conda workspace lock --skip-unsolvable` keeps locking the remaining
+  `(environment, platform)` pairs when an individual solve fails,
+  emitting a yellow `Skipping ...` line for each skipped pair. The
+  command still raises `AllTargetsUnsolvableError` with an aggregated
+  summary if *every* pair fails, so CI never writes an empty lockfile.
+  Non-solver errors (missing channel, invalid manifest, etc.) continue
+  to abort regardless of the flag.
 
 ### Changed
 

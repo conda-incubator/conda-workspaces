@@ -47,7 +47,7 @@ from typing import TYPE_CHECKING
 
 from conda.plugins.types import EnvironmentSpecBase
 
-from .exceptions import LockfileNotFoundError, SolveError
+from .exceptions import AllTargetsUnsolvableError, LockfileNotFoundError, SolveError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -267,6 +267,8 @@ def generate_lockfile(
     *,
     platforms: tuple[str, ...] | None = None,
     progress: Callable[[str, str], None] | None = None,
+    skip_unsolvable: bool = False,
+    on_skip: Callable[[str, str, SolveError], None] | None = None,
 ) -> Path:
     """Generate a ``conda.lock`` by solving workspace environments.
 
@@ -279,9 +281,14 @@ def generate_lockfile(
     the caller is expected to render status itself via the optional
     *progress* callback.
 
-    Fails fast: the first unsolvable ``(environment, platform)`` pair
-    raises :class:`SolveError` with the platform named, and no
-    lockfile is written.
+    Fails fast by default: the first unsolvable ``(environment,
+    platform)`` pair raises :class:`SolveError` with the platform
+    named, and no lockfile is written.  When *skip_unsolvable* is
+    true, solver failures on an individual pair are reported via
+    *on_skip* (if given) and the lockfile continues with the remaining
+    pairs; :class:`AllTargetsUnsolvableError` is raised only if every
+    pair fails.  Non-solver errors (missing channel, invalid manifest,
+    etc.) always abort.
 
     Returns the path to the generated lockfile.
     """
@@ -292,6 +299,7 @@ def generate_lockfile(
 
     host_platform = ctx.platform
     envs: list[Environment] = []
+    failures: list[SolveError] = []
 
     with conda_context._override("quiet", True):
         real_stdout = sys.stdout
@@ -317,7 +325,19 @@ def generate_lockfile(
                             progress(name, target)
                         finally:
                             sys.stdout = devnull
-                    records = _solve_for_records(ctx, resolved, target)
+                    try:
+                        records = _solve_for_records(ctx, resolved, target)
+                    except SolveError as exc:
+                        if not skip_unsolvable:
+                            raise
+                        failures.append(exc)
+                        if on_skip is not None:
+                            sys.stdout = real_stdout
+                            try:
+                                on_skip(name, target, exc)
+                            finally:
+                                sys.stdout = devnull
+                        continue
                     envs.append(
                         Environment(
                             name=name,
@@ -329,6 +349,9 @@ def generate_lockfile(
         finally:
             sys.stdout = real_stdout
             devnull.close()
+
+    if failures and not envs:
+        raise AllTargetsUnsolvableError(failures)
 
     path = lockfile_path(ctx)
     path.write_text(multiplatform_export(envs), encoding="utf-8")

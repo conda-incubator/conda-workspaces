@@ -469,6 +469,103 @@ def test_generate_lockfile_surface_platform_on_solve_error(
     assert not lockfile_path(ctx).exists()
 
 
+def test_generate_lockfile_skip_unsolvable_partial(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    fake_solver_factory,
+) -> None:
+    """``skip_unsolvable=True`` writes the solvable pairs and invokes on_skip."""
+    ctx = workspace_ctx_factory(env_names=["default", "test"])
+    fake_solver_factory(failures={("default", "osx-arm64")})
+
+    resolved_envs = {
+        "default": ResolvedEnvironment(
+            name="default",
+            channels=[Channel("conda-forge")],
+            platforms=["linux-64", "osx-arm64"],
+        ),
+        "test": ResolvedEnvironment(
+            name="test",
+            channels=[Channel("conda-forge")],
+            platforms=["linux-64"],
+        ),
+    }
+
+    skipped: list[tuple[str, str, str]] = []
+
+    def _on_skip(env: str, platform: str, exc) -> None:
+        skipped.append((env, platform, exc.reason))
+
+    result = generate_lockfile(
+        ctx,
+        resolved_envs,
+        skip_unsolvable=True,
+        on_skip=_on_skip,
+    )
+
+    assert skipped == [("default", "osx-arm64", "unsatisfiable")]
+    content = result.read_text(encoding="utf-8")
+    assert "python-default-linux-64.conda" in content
+    assert "python-test-linux-64.conda" in content
+    assert "python-default-osx-arm64.conda" not in content
+
+
+def test_generate_lockfile_skip_unsolvable_all_fail(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    fake_solver_factory,
+) -> None:
+    """When every pair fails, ``skip_unsolvable`` raises AllTargetsUnsolvableError."""
+    from conda_workspaces.exceptions import AllTargetsUnsolvableError
+
+    ctx = workspace_ctx_factory(env_names=["default", "test"])
+    fake_solver_factory(
+        failures={
+            ("default", "linux-64"),
+            ("default", "osx-arm64"),
+            ("test", "linux-64"),
+        }
+    )
+
+    resolved_envs = {
+        "default": ResolvedEnvironment(
+            name="default",
+            channels=[Channel("conda-forge")],
+            platforms=["linux-64", "osx-arm64"],
+        ),
+        "test": ResolvedEnvironment(
+            name="test",
+            channels=[Channel("conda-forge")],
+            platforms=["linux-64"],
+        ),
+    }
+
+    with pytest.raises(AllTargetsUnsolvableError) as excinfo:
+        generate_lockfile(ctx, resolved_envs, skip_unsolvable=True)
+    assert len(excinfo.value.failures) == 3
+    assert not lockfile_path(ctx).exists()
+
+
+def test_generate_lockfile_skip_unsolvable_off_still_fail_fast(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    fake_solver_factory,
+) -> None:
+    """``skip_unsolvable=False`` (default) re-raises the first SolveError."""
+    from conda_workspaces.exceptions import SolveError
+
+    ctx = workspace_ctx_factory(env_names=["default"])
+    fake_solver_factory(failures={("default", "linux-64")})
+
+    resolved_envs = {
+        "default": ResolvedEnvironment(
+            name="default",
+            channels=[Channel("conda-forge")],
+            platforms=["linux-64", "osx-arm64"],
+        ),
+    }
+
+    with pytest.raises(SolveError, match="linux-64"):
+        generate_lockfile(ctx, resolved_envs)
+
+
 @pytest.mark.parametrize(
     ("platform", "write_lockfile", "env_name", "match"),
     [

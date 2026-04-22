@@ -377,6 +377,9 @@ conda workspace lock
 # Lock only a subset of platforms (repeatable flag)
 conda workspace lock --platform linux-64 --platform osx-arm64
 
+# Keep going when individual (environment, platform) pairs fail to solve
+conda workspace lock --skip-unsolvable
+
 # Install from lockfile, validating freshness against the manifest
 conda workspace install --locked
 
@@ -392,9 +395,14 @@ tighter constraints with `CONDA_OVERRIDE_*` or the
 `[system-requirements]` table when cross-compiling (for example, to
 fix a minimum `__glibc` version when solving `linux-64` from macOS).
 
-Solves are fail-fast: the first platform that cannot be resolved
-raises an error that names the environment and the platform, and no
-lockfile is written.
+Solves are fail-fast by default: the first platform that cannot be
+resolved raises an error that names the environment and the platform,
+and no lockfile is written. Pass `--skip-unsolvable` to keep locking
+the remaining pairs, emitting a yellow `Skipping ...` line for each
+one that failed. If *every* pair fails, the command still raises
+with an aggregated summary rather than writing an empty lockfile —
+non-solver errors (missing channel, invalid manifest, etc.) always
+abort regardless of the flag.
 
 The lockfile contains all environments and their resolved packages:
 

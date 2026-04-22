@@ -149,6 +149,17 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
             " workspace."
         ),
     )
+    lock_parser.add_argument(
+        "--skip-unsolvable",
+        action="store_true",
+        default=False,
+        help=(
+            "Continue locking when the solver fails for an (environment,"
+            " platform) pair instead of aborting. Other errors (missing"
+            " channel, invalid manifest, etc.) still abort. Fails if no"
+            " pair can be solved."
+        ),
+    )
 
     list_parser = sub.add_parser(
         "list",

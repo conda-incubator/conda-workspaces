@@ -152,6 +152,31 @@ class SolveError(CondaWorkspacesError):
         )
 
 
+class AllTargetsUnsolvableError(CondaWorkspacesError):
+    """Every ``(environment, platform)`` pair failed under ``--skip-unsolvable``.
+
+    Raised after the loop when at least one pair failed to solve *and*
+    no pair succeeded, so writing a lockfile would produce an empty
+    file that silently loses every environment.
+    """
+
+    def __init__(self, failures: list[SolveError]) -> None:
+        self.failures = failures
+        summary = "\n".join(
+            f"  - {failure.environment}"
+            + (f" on {failure.platform}" if failure.platform else "")
+            + f": {failure.reason}"
+            for failure in failures
+        )
+        super().__init__(
+            "Every (environment, platform) pair failed to solve:\n" + summary,
+            hints=[
+                "Fix at least one pair, or re-run without --skip-unsolvable"
+                " to see a single fail-fast error.",
+            ],
+        )
+
+
 class ActivationError(CondaWorkspacesError):
     """Environment activation failed."""
 

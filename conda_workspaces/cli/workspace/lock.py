@@ -14,6 +14,8 @@ from . import workspace_context_from_args
 if TYPE_CHECKING:
     import argparse
 
+    from ...exceptions import SolveError
+
 
 def execute_lock(args: argparse.Namespace, *, console: Console | None = None) -> int:
     """Solve workspace environments and write ``conda.lock``."""
@@ -23,6 +25,7 @@ def execute_lock(args: argparse.Namespace, *, console: Console | None = None) ->
 
     env_name = getattr(args, "environment", None)
     requested_platforms: list[str] | None = getattr(args, "platform", None) or None
+    skip_unsolvable: bool = bool(getattr(args, "skip_unsolvable", False))
 
     if env_name:
         if env_name not in config.environments:
@@ -54,10 +57,23 @@ def execute_lock(args: argparse.Namespace, *, console: Console | None = None) ->
             f" for [bold]{platform}[/bold][dim]...[/dim]"
         )
 
+    def _on_skip(env: str, platform: str, exc: SolveError) -> None:
+        console.print(
+            f"[bold yellow]Skipping[/bold yellow] [bold]{env}[/bold]"
+            f" on [bold]{platform}[/bold][dim]:[/dim] {exc.reason}"
+        )
+
     console.print(
         "[bold blue]Updating[/bold blue] [bold]conda.lock[/bold][dim]...[/dim]"
     )
-    generate_lockfile(ctx, resolved_envs, platforms=platforms, progress=_progress)
+    generate_lockfile(
+        ctx,
+        resolved_envs,
+        platforms=platforms,
+        progress=_progress,
+        skip_unsolvable=skip_unsolvable,
+        on_skip=_on_skip if skip_unsolvable else None,
+    )
     console.print("[bold cyan]Updated[/bold cyan] [bold]conda.lock[/bold]")
 
     return 0
