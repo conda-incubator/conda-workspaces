@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 from conda_lockfiles.rattler_lock.v6 import _record_to_dict
@@ -61,30 +62,41 @@ def lockfile_with_platforms(tmp_path: Path, lockfile_content: str) -> Path:
     return path
 
 
-def _make_ctx(
-    tmp_path: Path,
-    platform: str = "linux-64",
-    env_names: list[str] | None = None,
-) -> WorkspaceContext:
-    """Build a workspace context rooted at *tmp_path*."""
-    if env_names is None:
-        env_names = ["default"]
-    config = WorkspaceConfig(
-        name="lock-test",
-        channels=[Channel("conda-forge")],
-        platforms=[platform],
-        features={"default": Feature(name="default")},
-        environments={n: Environment(name=n) for n in env_names},
-        root=str(tmp_path),
-        manifest_path=str(tmp_path / "pixi.toml"),
-    )
-    ctx = WorkspaceContext(config)
-    ctx._cache["platform"] = platform
-    return ctx
+@pytest.fixture
+def make_ctx(tmp_path: Path) -> Callable[..., WorkspaceContext]:
+    """Factory fixture that builds a ``WorkspaceContext`` rooted at tmp_path.
+
+    Accepts ``platform`` (default ``"linux-64"``) and ``env_names``
+    (default ``["default"]``) so each test can tweak just the bits it
+    cares about.
+    """
+
+    def _factory(
+        platform: str = "linux-64",
+        env_names: list[str] | None = None,
+    ) -> WorkspaceContext:
+        if env_names is None:
+            env_names = ["default"]
+        config = WorkspaceConfig(
+            name="lock-test",
+            channels=[Channel("conda-forge")],
+            platforms=[platform],
+            features={"default": Feature(name="default")},
+            environments={n: Environment(name=n) for n in env_names},
+            root=str(tmp_path),
+            manifest_path=str(tmp_path / "pixi.toml"),
+        )
+        ctx = WorkspaceContext(config)
+        ctx._cache["platform"] = platform
+        return ctx
+
+    return _factory
 
 
-def test_lockfile_path_returns_conda_lock(tmp_path: Path) -> None:
-    ctx = _make_ctx(tmp_path)
+def test_lockfile_path_returns_conda_lock(
+    tmp_path: Path, make_ctx: Callable[..., WorkspaceContext]
+) -> None:
+    ctx = make_ctx()
     assert lockfile_path(ctx) == tmp_path / LOCKFILE_NAME
 
 
@@ -322,10 +334,11 @@ def test_conda_lock_loader_env_for_errors(
 
 def test_generate_lockfile(
     tmp_path: Path,
+    make_ctx: Callable[..., WorkspaceContext],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """generate_lockfile solves and writes conda.lock."""
-    ctx = _make_ctx(tmp_path, env_names=["default", "test"])
+    ctx = make_ctx(env_names=["default", "test"])
 
     class FakePkg:
         def __init__(self, name: str, url: str):
@@ -369,11 +382,11 @@ def test_generate_lockfile(
 
 
 def test_generate_lockfile_specific_envs(
-    tmp_path: Path,
+    make_ctx: Callable[..., WorkspaceContext],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """generate_lockfile with only one env generates only for that env."""
-    ctx = _make_ctx(tmp_path, env_names=["default", "test"])
+    ctx = make_ctx(env_names=["default", "test"])
 
     monkeypatch.setattr(
         "conda_workspaces.lockfile._solve_for_records",
@@ -404,6 +417,7 @@ def test_generate_lockfile_specific_envs(
 )
 def test_install_from_lockfile_errors(
     tmp_path: Path,
+    make_ctx: Callable[..., WorkspaceContext],
     lockfile_content: str,
     platform: str,
     write_lockfile: bool,
@@ -413,7 +427,7 @@ def test_install_from_lockfile_errors(
     """``install_from_lockfile`` raises ``LockfileNotFoundError`` for the
     three failure modes: no file at all, wrong env name, wrong platform.
     """
-    ctx = _make_ctx(tmp_path, platform=platform)
+    ctx = make_ctx(platform=platform)
     if write_lockfile:
         (tmp_path / LOCKFILE_NAME).write_text(lockfile_content, encoding="utf-8")
 
@@ -423,10 +437,11 @@ def test_install_from_lockfile_errors(
 
 def test_install_from_lockfile(
     tmp_path: Path,
+    make_ctx: Callable[..., WorkspaceContext],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """install_from_lockfile reads conda.lock, extracts URLs, and installs."""
-    ctx = _make_ctx(tmp_path)
+    ctx = make_ctx()
 
     lockfile = tmp_path / LOCKFILE_NAME
     lockfile.write_text(
