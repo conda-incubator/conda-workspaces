@@ -126,12 +126,14 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
     dry_run = getattr(args, "dry_run", False)
     quiet = getattr(args, "quiet", False)
     verbose = getattr(args, "verbose", 0) or 0
+    user_env = getattr(args, "environment", None)
     conda_prefix = _env_prefix_or_none(args)
 
     default_env_name = tasks[target_name].default_environment
-    user_env = getattr(args, "environment", None)
     if default_env_name and not user_env:
         conda_prefix = _env_prefix_or_none(args, default_env_name) or conda_prefix
+    elif not user_env and conda_prefix is None:
+        conda_prefix = _env_prefix_or_none(args, "default")
 
     task_args = _resolve_task_args(tasks[target_name], args.task_args)
 
@@ -358,6 +360,8 @@ def _run_adhoc(
 
     dry_run = getattr(args, "dry_run", False)
     conda_prefix = _env_prefix_or_none(args)
+    if conda_prefix is None and not getattr(args, "environment", None):
+        conda_prefix = _env_prefix_or_none(args, "default")
 
     if dry_run:
         if not getattr(args, "quiet", False):
