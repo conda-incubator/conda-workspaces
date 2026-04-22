@@ -113,6 +113,7 @@ def test_resolve_task_args_missing_required():
 
 
 def test_execute_run_dry_run_single(tmp_path, capsys):
+    """Dry-run of a single task shows 'Would run' with command."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text('[tasks]\ngreet = "echo hello"\n')
 
@@ -125,6 +126,7 @@ def test_execute_run_dry_run_single(tmp_path, capsys):
 
 
 def test_execute_run_dry_run_with_deps(tmp_path, capsys):
+    """Dry-run with deps shows a tree with 'Would run' labels."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text(
         '[tasks]\nsetup = "echo setup"\n\n'
@@ -139,6 +141,7 @@ def test_execute_run_dry_run_with_deps(tmp_path, capsys):
 
 
 def test_execute_run_dry_run_alias(tmp_path, capsys):
+    """Alias tasks appear as root of the dry-run tree."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text(
         '[tasks]\nlint = "ruff check ."\ntest = "pytest"\n\n'
@@ -155,6 +158,7 @@ def test_execute_run_dry_run_alias(tmp_path, capsys):
 
 
 def test_execute_run_alias_done(tmp_path, capsys, fake_shell):
+    """Alias tasks show Finished after dependencies finish executing."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text(
         '[tasks]\nlint = "ruff check ."\ntest = "pytest"\n\n'
@@ -171,6 +175,7 @@ def test_execute_run_alias_done(tmp_path, capsys, fake_shell):
 
 
 def test_execute_run_alias_quiet(tmp_path, capsys, fake_shell):
+    """Quiet mode suppresses all output for alias tasks."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text(
         '[tasks]\nlint = "ruff check ."\n\n[tasks.check]\ndepends-on = ["lint"]\n'
@@ -183,6 +188,7 @@ def test_execute_run_alias_quiet(tmp_path, capsys, fake_shell):
 
 
 def test_execute_run_list_command(tmp_path, capsys):
+    """List-form commands are joined for dry-run display."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text('[tasks]\nbuild = "cmake --build ."\n')
 
@@ -193,6 +199,7 @@ def test_execute_run_list_command(tmp_path, capsys):
 
 
 def test_execute_run_single_zero_chrome(tmp_path, capsys, fake_shell):
+    """Single task execution produces no status output (zero chrome)."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text('[tasks]\ngreet = "echo hello"\n')
 
@@ -204,6 +211,7 @@ def test_execute_run_single_zero_chrome(tmp_path, capsys, fake_shell):
 
 
 def test_execute_run_quiet(tmp_path, capsys, fake_shell):
+    """Quiet mode suppresses output."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text('[tasks]\ngreet = "echo hello"\n')
 
@@ -214,6 +222,7 @@ def test_execute_run_quiet(tmp_path, capsys, fake_shell):
 
 
 def test_execute_run_failure(tmp_path, fake_shell):
+    """Non-zero exit raises TaskExecutionError."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text('[tasks]\nfail = "exit 1"\n')
 
@@ -223,6 +232,7 @@ def test_execute_run_failure(tmp_path, fake_shell):
 
 
 def test_execute_run_failure_with_deps(tmp_path, capsys, fake_shell):
+    """Failed task in a dep chain shows Failed status."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text(
         '[tasks]\nsetup = "echo setup"\n\n'
@@ -243,6 +253,7 @@ def test_execute_run_failure_with_deps(tmp_path, capsys, fake_shell):
 
 
 def test_execute_run_dep_chain_markers(tmp_path, capsys, fake_shell):
+    """Dep chain shows Running and Finished for each task."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text(
         '[tasks]\nsetup = "echo setup"\n\n'
@@ -260,6 +271,7 @@ def test_execute_run_dep_chain_markers(tmp_path, capsys, fake_shell):
 
 
 def test_execute_run_dep_chain_verbose(tmp_path, capsys, fake_shell):
+    """Verbose mode adds command text to Running status."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text(
         '[tasks]\nsetup = "echo setup"\n\n'
@@ -275,6 +287,7 @@ def test_execute_run_dep_chain_verbose(tmp_path, capsys, fake_shell):
 
 
 def test_execute_run_verbose_with_io(tmp_path, capsys, fake_shell, monkeypatch):
+    """Verbose mode prints inputs/outputs for tasks in a dep chain."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text(
         '[tasks]\nsetup = "echo ready"\n\n'
@@ -292,6 +305,7 @@ def test_execute_run_verbose_with_io(tmp_path, capsys, fake_shell, monkeypatch):
 
 
 def test_execute_run_cached_in_dep_chain(tmp_path, capsys, fake_shell, monkeypatch):
+    """Cached tasks in a dep chain show Skipped status."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text(
         '[tasks.lint]\ncmd = "ruff"\ninputs = ["src/*.py"]\noutputs = [".lint"]\n\n'
@@ -310,6 +324,7 @@ def test_execute_run_cached_in_dep_chain(tmp_path, capsys, fake_shell, monkeypat
 def test_execute_run_cached_single_shows_marker(
     tmp_path, capsys, fake_shell, monkeypatch
 ):
+    """Cached single task (no deps) shows Skipped status."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text(
         '[tasks.build]\ncmd = "make"\ninputs = ["src/*.py"]\noutputs = ["dist/"]\n'
@@ -325,6 +340,7 @@ def test_execute_run_cached_single_shows_marker(
 
 
 def test_execute_run_with_cwd_override(tmp_path, capsys, fake_shell):
+    """--cwd overrides the task's working directory."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text('[tasks]\ngreet = "echo hello"\n')
     subdir = tmp_path / "sub"
@@ -338,6 +354,7 @@ def test_execute_run_with_cwd_override(tmp_path, capsys, fake_shell):
 
 
 def test_execute_run_saves_cache(tmp_path, fake_shell, monkeypatch):
+    """Successful run with inputs/outputs saves to cache."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text(
         '[tasks.build]\ncmd = "make"\ninputs = ["src/*.py"]\noutputs = ["dist/"]\n'
@@ -355,6 +372,7 @@ def test_execute_run_saves_cache(tmp_path, fake_shell, monkeypatch):
 def test_execute_run_defaults_to_workspace_env(
     workspace_task_file, fake_shell, env_prefix_stub, tmp_path
 ):
+    """When no -e flag is given, tasks run in the workspace default env."""
     default_prefix = tmp_path / ".conda" / "envs" / "default"
     env_prefix_stub["default"] = default_prefix
 
@@ -366,6 +384,7 @@ def test_execute_run_defaults_to_workspace_env(
 def test_execute_run_explicit_env_overrides_default(
     workspace_task_file, fake_shell, env_prefix_stub, tmp_path
 ):
+    """The -e flag overrides the workspace default env."""
     env_prefix_stub["default"] = tmp_path / ".conda" / "envs" / "default"
     test_prefix = tmp_path / ".conda" / "envs" / "myenv"
     env_prefix_stub["myenv"] = test_prefix
