@@ -136,7 +136,7 @@ windows = ["windows"]
     [
         pytest.param(
             False,
-            lambda out: ("Known Platforms" in out and "win-64" in out),
+            lambda out: "Known Platforms" in out and "win-64" in out,
             id="text-row",
         ),
         pytest.param(
