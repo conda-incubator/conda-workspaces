@@ -6,6 +6,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Changed
+
+- `conda workspace add` and `conda workspace remove` now install into
+  the affected environment(s) and refresh `conda.lock` by default,
+  matching `pixi add` / `pixi remove`. Use `--no-install` to update
+  the manifest and lockfile without touching the prefix,
+  `--no-lockfile-update` to keep the old manifest-only behaviour,
+  `--force-reinstall` to recreate affected environments from scratch,
+  or `--dry-run` to solve without writing anything to disk.
+- `conda workspace install` now shares a single solve/install/lock
+  pipeline with `add` and `remove` (`conda_workspaces/cli/workspace/sync.py`).
+
+### Added
+
+- Inside a `conda workspace shell` session, `add` / `remove` / `install`
+  print a hint to re-spawn the shell when a newly installed package
+  drops activation scripts into `$PREFIX/etc/conda/activate.d/`.
+
 ## 0.3.0 — 2026-03-31
 
 ### Added

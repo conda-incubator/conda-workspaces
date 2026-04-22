@@ -30,8 +30,8 @@ are real conda prefixes you can inspect with `conda list`.
 | `conda create -n myenv python=3.10` | `conda workspace init` + `conda workspace add python=3.10` |
 | `conda activate myenv` | `conda workspace shell` (or `conda workspace shell -e myenv`) |
 | `conda deactivate` | `exit` |
-| `conda install numpy` | `conda workspace add numpy` |
-| `conda remove numpy` | `conda workspace remove numpy` |
+| `conda install numpy` | `conda workspace add numpy` (edits the manifest and installs) |
+| `conda remove numpy` | `conda workspace remove numpy` (edits the manifest and uninstalls) |
 | `conda list` | `conda workspace list` |
 | `conda run -n myenv CMD` | `conda workspace run -- CMD` |
 | `conda env export > environment.yml` | `conda workspace lock` (generates `conda.lock`) |
