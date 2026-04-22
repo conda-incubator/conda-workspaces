@@ -139,6 +139,16 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Generate lockfile for this environment only (default: all).",
     )
+    lock_parser.add_argument(
+        "--platform",
+        action="append",
+        default=None,
+        help=(
+            "Lock only for this platform (e.g. linux-64). May be passed"
+            " multiple times. Defaults to all platforms declared in the"
+            " workspace."
+        ),
+    )
 
     list_parser = sub.add_parser(
         "list",

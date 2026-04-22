@@ -129,13 +129,25 @@ class PlatformError(CondaWorkspacesError):
 
 
 class SolveError(CondaWorkspacesError):
-    """Dependency solving failed for an environment."""
+    """Dependency solving failed for an environment, optionally scoped to a platform."""
 
-    def __init__(self, environment: str, reason: str) -> None:
+    def __init__(
+        self,
+        environment: str,
+        reason: str,
+        *,
+        platform: str | None = None,
+    ) -> None:
         self.environment = environment
         self.reason = reason
+        self.platform = platform
+        target = (
+            f"environment '{environment}' for platform '{platform}'"
+            if platform
+            else f"environment '{environment}'"
+        )
         super().__init__(
-            f"Failed to solve environment '{environment}': {reason}",
+            f"Failed to solve {target}: {reason}",
             hints=["Check your dependency specifications and channel configuration."],
         )
 

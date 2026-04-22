@@ -292,35 +292,64 @@ def test_conda_lock_loader_env_for_errors(
         loader.env_for(**env_for_kwargs)
 
 
-def test_generate_lockfile(
+class _FakePkg:
+    """Minimal stand-in for ``PackageRecord`` used by lockfile tests."""
+
+    def __init__(self, name: str, url: str) -> None:
+        self.name = name
+        self.url = url
+
+    def get(self, key: str, default: object = None) -> object:
+        return default
+
+
+@pytest.fixture
+def fake_solver_factory(monkeypatch: pytest.MonkeyPatch):
+    """Replace ``_solve_for_records`` with a deterministic stub.
+
+    The stub returns one package per ``(env, platform)`` pair whose URL
+    encodes both, so tests can assert platform-specific records landed
+    in the right slots of the lockfile.  Each call is recorded so tests
+    can assert the order and platform targets passed through.
+    """
+    calls: list[tuple[str, str]] = []
+
+    def _factory(failures: set[tuple[str, str]] | None = None) -> list:
+        failures = failures or set()
+
+        def fake_solve(ctx_arg, resolved, platform):
+            calls.append((resolved.name, platform))
+            if (resolved.name, platform) in failures:
+                from conda_workspaces.exceptions import SolveError
+
+                raise SolveError(resolved.name, "unsatisfiable", platform=platform)
+            return [
+                _FakePkg(
+                    "python",
+                    f"https://example.com/python-{resolved.name}-{platform}.conda",
+                ),
+            ]
+
+        monkeypatch.setattr("conda_workspaces.lockfile._solve_for_records", fake_solve)
+        return calls
+
+    return _factory
+
+
+def test_generate_lockfile_multi_platform(
     tmp_path: Path,
     workspace_ctx_factory: Callable[..., WorkspaceContext],
-    monkeypatch: pytest.MonkeyPatch,
+    fake_solver_factory,
 ) -> None:
-    """generate_lockfile solves and writes conda.lock."""
+    """Each resolved environment is solved once per declared platform."""
     ctx = workspace_ctx_factory(env_names=["default", "test"])
-
-    class FakePkg:
-        def __init__(self, name: str, url: str):
-            self.name = name
-            self.url = url
-
-        def get(self, key, default=None):
-            return default
-
-    def fake_solve(ctx_arg, resolved):
-        pkgs = [FakePkg("python", "https://example.com/python.conda")]
-        if resolved.name == "test":
-            pkgs.append(FakePkg("pytest", "https://example.com/pytest.conda"))
-        return pkgs
-
-    monkeypatch.setattr("conda_workspaces.lockfile._solve_for_records", fake_solve)
+    calls = fake_solver_factory()
 
     resolved_envs = {
         "default": ResolvedEnvironment(
             name="default",
             channels=[Channel("conda-forge")],
-            platforms=["linux-64"],
+            platforms=["linux-64", "osx-arm64"],
         ),
         "test": ResolvedEnvironment(
             name="test",
@@ -331,39 +360,113 @@ def test_generate_lockfile(
 
     result = generate_lockfile(ctx, resolved_envs)
     assert result == tmp_path / LOCKFILE_NAME
-    assert result.is_file()
+
+    assert set(calls) == {
+        ("default", "linux-64"),
+        ("default", "osx-arm64"),
+        ("test", "linux-64"),
+    }
 
     content = result.read_text(encoding="utf-8")
     assert f"version: {LOCKFILE_VERSION}" in content
-    assert "default" in content
-    assert "test" in content
-    assert "https://example.com/python.conda" in content
-    assert "https://example.com/pytest.conda" in content
+    assert "linux-64" in content
+    assert "osx-arm64" in content
+    assert "python-default-linux-64.conda" in content
+    assert "python-default-osx-arm64.conda" in content
+    assert "python-test-linux-64.conda" in content
 
 
-def test_generate_lockfile_specific_envs(
+def test_generate_lockfile_host_fallback(
     workspace_ctx_factory: Callable[..., WorkspaceContext],
-    monkeypatch: pytest.MonkeyPatch,
+    fake_solver_factory,
 ) -> None:
-    """generate_lockfile with only one env generates only for that env."""
-    ctx = workspace_ctx_factory(env_names=["default", "test"])
-
-    monkeypatch.setattr(
-        "conda_workspaces.lockfile._solve_for_records",
-        lambda ctx_arg, resolved: [],
-    )
+    """Environments without declared platforms fall back to host platform."""
+    ctx = workspace_ctx_factory(platform="linux-64", env_names=["default"])
+    calls = fake_solver_factory()
 
     resolved_envs = {
         "default": ResolvedEnvironment(
             name="default",
             channels=[Channel("conda-forge")],
+        ),
+    }
+
+    generate_lockfile(ctx, resolved_envs)
+    assert calls == [("default", "linux-64")]
+
+
+def test_generate_lockfile_platforms_restricts(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    fake_solver_factory,
+) -> None:
+    """``platforms=`` intersects the declared platform set per environment."""
+    ctx = workspace_ctx_factory(env_names=["default", "test"])
+    calls = fake_solver_factory()
+
+    resolved_envs = {
+        "default": ResolvedEnvironment(
+            name="default",
+            channels=[Channel("conda-forge")],
+            platforms=["linux-64", "osx-arm64"],
+        ),
+        "test": ResolvedEnvironment(
+            name="test",
+            channels=[Channel("conda-forge")],
             platforms=["linux-64"],
         ),
     }
 
-    result = generate_lockfile(ctx, resolved_envs)
-    content = result.read_text(encoding="utf-8")
-    assert "default" in content
+    generate_lockfile(ctx, resolved_envs, platforms=("osx-arm64",))
+    assert calls == [("default", "osx-arm64")]
+
+
+def test_generate_lockfile_progress_callback(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    fake_solver_factory,
+) -> None:
+    """``progress`` is invoked once per ``(env, platform)`` pair."""
+    ctx = workspace_ctx_factory(env_names=["default"])
+    fake_solver_factory()
+
+    events: list[tuple[str, str]] = []
+
+    resolved_envs = {
+        "default": ResolvedEnvironment(
+            name="default",
+            channels=[Channel("conda-forge")],
+            platforms=["linux-64", "osx-arm64"],
+        ),
+    }
+
+    generate_lockfile(
+        ctx,
+        resolved_envs,
+        progress=lambda env, platform: events.append((env, platform)),
+    )
+    assert events == [("default", "linux-64"), ("default", "osx-arm64")]
+
+
+def test_generate_lockfile_surface_platform_on_solve_error(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    fake_solver_factory,
+) -> None:
+    """Solve failure names the platform and aborts without writing a lockfile."""
+    from conda_workspaces.exceptions import SolveError
+
+    ctx = workspace_ctx_factory(env_names=["default"])
+    fake_solver_factory(failures={("default", "osx-arm64")})
+
+    resolved_envs = {
+        "default": ResolvedEnvironment(
+            name="default",
+            channels=[Channel("conda-forge")],
+            platforms=["linux-64", "osx-arm64"],
+        ),
+    }
+
+    with pytest.raises(SolveError, match="osx-arm64"):
+        generate_lockfile(ctx, resolved_envs)
+    assert not lockfile_path(ctx).exists()
 
 
 @pytest.mark.parametrize(

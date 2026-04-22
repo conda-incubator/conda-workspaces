@@ -151,6 +151,32 @@ To export only tasks, use the task export command instead:
 conda task export --file pixi.toml -o conda.toml
 ```
 
+## Cross-platform solving
+
+`conda workspace lock` writes a multi-platform `conda.lock` just like
+`pixi lock`. It iterates over every platform listed under
+`[workspace]` / `[project]` and solves each one in isolation, pointing
+conda's `context._subdir` at the target so `__linux` / `__osx` /
+`__win` virtual packages line up with the target platform.
+
+One difference to keep in mind: pixi (via rattler) ships conservative
+baseline versions for virtual packages that the host machine can't
+detect — e.g. solving `linux-64` from macOS still picks up a baseline
+`__glibc` so `glibc`-gated packages resolve. conda-workspaces relies
+on conda's own virtual package plugins, which only emit entries the
+host can detect. Fill in the blanks with either `CONDA_OVERRIDE_*`
+environment variables or an explicit `[system-requirements]` table in
+the manifest:
+
+```toml
+[system-requirements]
+glibc = "2.28"
+cuda = "12.0"
+```
+
+Both settings are also honoured by `pixi`, so this is compatible
+either way.
+
 ## What's not supported
 
 Some pixi-only concepts don't apply to conda-workspaces:
@@ -160,6 +186,9 @@ Some pixi-only concepts don't apply to conda-workspaces:
 - `deno_task_shell` — conda-workspaces uses native platform shells
 - `solve-group` — accepted for compatibility but has no effect (conda's
   solver operates on a single environment at a time)
+- pixi's built-in conservative virtual package defaults for
+  cross-compiled targets — pin minimums via `[system-requirements]`
+  or `CONDA_OVERRIDE_*` instead (tracked in [DESIGN.md](https://github.com/conda-incubator/conda-workspaces/blob/main/DESIGN.md) under "Future Work")
 
 See [DESIGN.md](https://github.com/conda-incubator/conda-workspaces/blob/main/DESIGN.md)
 for the full compatibility mapping.

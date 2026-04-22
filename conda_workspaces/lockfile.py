@@ -50,6 +50,7 @@ from conda.plugins.types import EnvironmentSpecBase
 from .exceptions import LockfileNotFoundError, SolveError
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from typing import Any, ClassVar, Final
 
     from conda.common.path import PathType
@@ -198,14 +199,25 @@ class CondaLockLoader(EnvironmentSpecBase):
 def _solve_for_records(
     ctx: WorkspaceContext,
     resolved: ResolvedEnvironment,
+    platform: str,
 ) -> list:
-    """Solve an environment and return the resulting package records.
+    """Solve an environment for *platform* and return package records.
 
     Uses conda's solver API to resolve dependencies without installing,
     producing the list of exact packages that would be installed.
     Applies the same transformations as ``install_environment``:
     PyPI deps are translated and merged, system requirements are added
     as virtual package constraints, and channel priority is honoured.
+
+    The solver is targeted at *platform* by (a) constructing it with
+    ``subdirs=(platform, "noarch")`` and (b) overriding
+    ``context._subdir`` for the duration of the solve.  Conda's virtual
+    package plugins (``__linux``, ``__osx``, ``__win``) gate on
+    ``context.subdir``, so this single override also yields the correct
+    cross-platform virtual package set.  Users can still tighten or
+    relax those via ``[system-requirements]`` in the manifest and the
+    ``CONDA_OVERRIDE_*`` environment variables, both of which continue
+    to flow through the normal code paths.
     """
     from conda.base.context import context as conda_context
     from conda.exceptions import UnsatisfiableError
@@ -230,36 +242,69 @@ def _solve_for_records(
 
     solver_backend = conda_context.plugin_manager.get_cached_solver_backend()
     if solver_backend is None:
-        raise SolveError(resolved.name, "No solver backend found")
+        raise SolveError(resolved.name, "No solver backend found", platform=platform)
 
     prefix = str(ctx.env_prefix(resolved.name))
+    subdirs = (platform, "noarch")
 
-    with _channel_priority_override(resolved.channel_priority):
+    with (
+        _channel_priority_override(resolved.channel_priority),
+        conda_context._override("_subdir", platform),
+    ):
         solver = solver_backend(
             prefix,
             list(resolved.channels),
-            conda_context.subdirs,
+            subdirs,
             specs_to_add=specs,
         )
 
         try:
             return list(solver.solve_final_state())
         except (UnsatisfiableError, SystemExit) as exc:
-            raise SolveError(resolved.name, str(exc)) from exc
+            raise SolveError(resolved.name, str(exc), platform=platform) from exc
+
+
+def _platforms_for(
+    resolved: ResolvedEnvironment,
+    host_platform: str,
+    requested: tuple[str, ...] | None,
+) -> list[str]:
+    """Return the sorted list of platforms to lock *resolved* for.
+
+    When *requested* is ``None``, uses the platforms declared on the
+    resolved environment, falling back to the host platform for
+    workspaces that do not pin any platforms.  When *requested* is
+    given, intersects with the declared platforms so callers cannot
+    silently produce a lockfile entry for a platform the environment
+    is not advertised to support.
+    """
+    declared = list(resolved.platforms) if resolved.platforms else [host_platform]
+    if requested is None:
+        return sorted(set(declared))
+    return sorted(set(requested) & set(declared))
 
 
 def generate_lockfile(
     ctx: WorkspaceContext,
     resolved_envs: dict[str, ResolvedEnvironment],
+    *,
+    platforms: tuple[str, ...] | None = None,
+    progress: Callable[[str, str], None] | None = None,
 ) -> Path:
     """Generate a ``conda.lock`` by solving workspace environments.
 
-    Solves each environment in *resolved_envs* and writes the results
-    to a single ``conda.lock`` YAML file at the workspace root.
-    Serialisation is delegated to :func:`.env_export.multiplatform_export`
-    so this function and ``conda export --format=conda-workspaces-lock-v1``
-    produce byte-identical output.  Solver output is suppressed to avoid
-    noise since the caller provides its own status messages.
+    Solves each environment in *resolved_envs* for every platform it
+    declares (intersected with *platforms* when given) and writes the
+    results to ``<workspace>/conda.lock``.  Serialisation is delegated
+    to :func:`.env_export.multiplatform_export` so this function and
+    ``conda export --format=conda-workspaces-lock-v1`` produce
+    byte-identical output.  Solver stdout is silenced to avoid noise;
+    the caller is expected to render status itself via the optional
+    *progress* callback.
+
+    Fails fast: the first unsolvable ``(environment, platform)`` pair
+    raises :class:`SolveError` with the platform named, and no
+    lockfile is written.
 
     Returns the path to the generated lockfile.
     """
@@ -268,7 +313,7 @@ def generate_lockfile(
 
     from .env_export import multiplatform_export
 
-    platform = ctx.platform
+    host_platform = ctx.platform
     envs: list[Environment] = []
 
     with conda_context._override("quiet", True):
@@ -277,17 +322,27 @@ def generate_lockfile(
         try:
             sys.stdout = devnull
             for name, resolved in resolved_envs.items():
-                records = _solve_for_records(ctx, resolved)
-                envs.append(
-                    Environment(
-                        name=name,
-                        platform=platform,
-                        config=EnvironmentConfig(
-                            channels=tuple(str(ch) for ch in resolved.channels),
-                        ),
-                        explicit_packages=records,
+                env_platforms = _platforms_for(resolved, host_platform, platforms)
+                if not env_platforms:
+                    continue
+                channels = tuple(str(ch) for ch in resolved.channels)
+                for target in env_platforms:
+                    if progress is not None:
+                        # Render outside the devnull stdout redirection.
+                        sys.stdout = real_stdout
+                        try:
+                            progress(name, target)
+                        finally:
+                            sys.stdout = devnull
+                    records = _solve_for_records(ctx, resolved, target)
+                    envs.append(
+                        Environment(
+                            name=name,
+                            platform=target,
+                            config=EnvironmentConfig(channels=channels),
+                            explicit_packages=records,
+                        )
                     )
-                )
         finally:
             sys.stdout = real_stdout
             devnull.close()

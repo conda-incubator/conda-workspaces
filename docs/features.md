@@ -371,8 +371,11 @@ and records the solution — it does not require environments to be
 installed first.
 
 ```bash
-# Generate or update the lockfile
+# Generate or update the lockfile for every platform declared in the manifest
 conda workspace lock
+
+# Lock only a subset of platforms (repeatable flag)
+conda workspace lock --platform linux-64 --platform osx-arm64
 
 # Install from lockfile, validating freshness against the manifest
 conda workspace install --locked
@@ -380,6 +383,18 @@ conda workspace install --locked
 # Install from lockfile as-is without checking freshness
 conda workspace install --frozen
 ```
+
+`conda workspace lock` solves every environment for every platform it
+declares in the manifest. Each solve runs with conda's
+`context._subdir` pointed at the target platform so virtual packages
+(`__linux`, `__osx`, `__win`) match the target, not the host. Pin
+tighter constraints with `CONDA_OVERRIDE_*` or the
+`[system-requirements]` table when cross-compiling (for example, to
+fix a minimum `__glibc` version when solving `linux-64` from macOS).
+
+Solves are fail-fast: the first platform that cannot be resolved
+raises an error that names the environment and the platform, and no
+lockfile is written.
 
 The lockfile contains all environments and their resolved packages:
 

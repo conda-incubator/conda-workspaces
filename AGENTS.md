@@ -247,3 +247,14 @@
   `conda_lockfiles.rattler_lock.v6`'s conversion helper via an
   in-memory `version: 1 -> 6` swap instead of re-implementing YAML ->
   `Environment` conversion.
+
+- Cross-platform solving (multi-platform `conda.lock`): target each
+  declared platform by (a) constructing the solver with
+  `subdirs=(platform, "noarch")` and (b) overriding `context._subdir`
+  for the duration of the solve. Conda's virtual package plugins gate
+  on `context.subdir`, so this single override handles both the
+  repodata lookup and the `__linux` / `__osx` / `__win` virtual
+  packages consistently. Do not try to suppress host virtuals
+  manually; that path is already covered. `CONDA_OVERRIDE_*` and the
+  manifest `[system-requirements]` table stay the user-facing knobs
+  for virtual package versions.

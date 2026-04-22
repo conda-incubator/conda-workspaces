@@ -367,7 +367,50 @@ conda-workspaces is installed.
 - **Multi-package workspaces**: Support monorepo layouts where
   subdirectories are independent packages that can depend on each other
   (pixi's `[package]` concept, reimagined for conda-build).
-- **Multi-platform lockfiles**: Record packages for all declared
-  platforms in `conda.lock`, not only the current host platform.
-  Requires cross-platform solving or collecting data from CI runners
-  on each platform.
+- **Virtual package defaults for cross-compiled targets**: `pixi`
+  ships conservative baseline versions for virtual packages that
+  cannot be detected on the host machine (e.g. solving `linux-64`
+  from macOS returns a baseline `__glibc` version so `glibc`-gated
+  packages still resolve). `conda-workspaces` currently relies on
+  conda's own virtual package plugins, which gate on the target
+  subdir, plus the `CONDA_OVERRIDE_*` environment variables and the
+  manifest `[system-requirements]` table. Porting pixi/rattler's
+  conservative defaults to Python would remove the need for users to
+  pin these explicitly when cross-compiling.
+
+## Lockfile generation
+
+`conda.lock` covers every declared platform of every environment in
+the workspace. `conda workspace lock` iterates over each
+`(environment, platform)` pair and asks conda's solver for the
+records that would be installed on that target subdir.
+
+Two mechanisms keep each solve targeted at the right subdir:
+
+- The solver is instantiated with `subdirs=(target, "noarch")`, so
+  only repodata for the target platform and `noarch` is considered.
+- `context._subdir` is overridden for the duration of the solve via
+  `context._override`. Conda's virtual package plugins
+  (`__linux`, `__osx`, `__win`) gate on `context.subdir.startswith(...)`,
+  so a single override yields the correct virtual package set for the
+  target platform without any explicit suppression logic.
+
+Users can still influence virtual packages through the usual channels:
+
+- Per-feature `[system-requirements]` entries are translated into
+  `MatchSpec("__<name> >=<version>")` and fed to the solver (see
+  `envs._apply_system_requirements`).
+- `CONDA_OVERRIDE_*` environment variables are honoured because they
+  flow through `context._override_virtual_packages` untouched.
+
+Cross-platform solves are fail-fast: the first unsatisfiable
+`(environment, platform)` pair raises `SolveError` with the platform
+in the message, and no `conda.lock` is written. This matches conda's
+and conda-workspaces' convention of refusing to produce partial
+artifacts; a `--skip-failed-platforms` escape hatch is tracked as a
+follow-up.
+
+Users can restrict a run with `conda workspace lock --platform
+<subdir>` (repeatable) to regenerate just a subset, e.g. when a new
+dependency only affects one platform. Unknown platforms raise
+`PlatformError` before any solve runs.
