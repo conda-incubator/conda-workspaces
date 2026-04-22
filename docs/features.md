@@ -253,6 +253,8 @@ removed.
 
 ## Platform targeting
 
+![multi-platform demo](../demos/multi-platform.gif)
+
 Per-platform dependency overrides use `[target.<platform>]` tables:
 
 ```toml

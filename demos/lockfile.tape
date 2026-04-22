@@ -24,7 +24,7 @@ Enter
 Wait /\$/
 Show
 
-Type "# Install and solve dependencies"
+Type "# Install and solve for the current platform"
 Enter
 Sleep 500ms
 
@@ -33,7 +33,7 @@ Enter
 Wait /\$/
 Sleep 2s
 
-Type "# Generate a lockfile for reproducible installs"
+Type "# Lock every platform declared in conda.toml"
 Enter
 Sleep 500ms
 
@@ -42,7 +42,16 @@ Enter
 Wait /\$/
 Sleep 2s
 
-Type@80ms "head -20 conda.lock"
+Type "# Both platforms are captured in a single conda.lock"
+Enter
+Sleep 500ms
+
+Type@80ms `rg '^      (linux-64|osx-arm64):$' conda.lock`
+Enter
+Wait /\$/
+Sleep 2s
+
+Type@80ms "head -15 conda.lock"
 Enter
 Wait /\$/
 Sleep 3s

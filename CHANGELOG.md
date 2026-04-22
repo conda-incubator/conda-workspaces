@@ -39,6 +39,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   info` surfaces the reachable set as a `known_platforms` JSON key
   (and an extra `Known Platforms` row in the text output whenever a
   feature broadens the workspace-level set).
+- New `demos/multi-platform.{tape,gif,mp4}` demo showcasing
+  cross-platform locking, the reachable-platform row in
+  `conda workspace info`, and the `--platform` subset flag. The
+  existing `demos/lockfile` recording was refreshed to show the
+  multi-platform default output.
 
 ### Changed
 
