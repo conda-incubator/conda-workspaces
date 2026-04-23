@@ -16,7 +16,7 @@ from conda.models.match_spec import MatchSpec
 from conda_lockfiles.rattler_lock.v6 import _record_to_dict
 
 from conda_workspaces.context import WorkspaceContext
-from conda_workspaces.exceptions import LockfileNotFoundError
+from conda_workspaces.exceptions import LockfileNotFoundError, SolveError
 from conda_workspaces.lockfile import (
     ALIASES,
     DEFAULT_FILENAMES,
@@ -24,7 +24,6 @@ from conda_workspaces.lockfile import (
     LOCKFILE_NAME,
     LOCKFILE_VERSION,
     CondaLockLoader,
-    _solve_for_records,
     generate_lockfile,
     install_from_lockfile,
     lockfile_path,
@@ -309,7 +308,7 @@ class _FakePkg:
 
 @pytest.fixture
 def fake_solver_factory(monkeypatch: pytest.MonkeyPatch):
-    """Replace ``_solve_for_records`` with a deterministic stub.
+    """Replace ``ResolvedEnvironment.solve_for_platform`` with a deterministic stub.
 
     The stub returns one package per ``(env, platform)`` pair whose URL
     encodes both, so tests can assert platform-specific records landed
@@ -321,20 +320,18 @@ def fake_solver_factory(monkeypatch: pytest.MonkeyPatch):
     def _factory(failures: set[tuple[str, str]] | None = None) -> list:
         failures = failures or set()
 
-        def fake_solve(ctx_arg, resolved, platform):
-            calls.append((resolved.name, platform))
-            if (resolved.name, platform) in failures:
-                from conda_workspaces.exceptions import SolveError
-
-                raise SolveError(resolved.name, "unsatisfiable", platform=platform)
+        def fake_solve(self, platform, *, prefix):
+            calls.append((self.name, platform))
+            if (self.name, platform) in failures:
+                raise SolveError(self.name, "unsatisfiable", platform=platform)
             return [
                 _FakePkg(
                     "python",
-                    f"https://example.com/python-{resolved.name}-{platform}.conda",
+                    f"https://example.com/python-{self.name}-{platform}.conda",
                 ),
             ]
 
-        monkeypatch.setattr("conda_workspaces.lockfile._solve_for_records", fake_solve)
+        monkeypatch.setattr(ResolvedEnvironment, "solve_for_platform", fake_solve)
         return calls
 
     return _factory
@@ -691,7 +688,7 @@ def test_virtual_package_overrides_lift_system_requirements(
     assert env.virtual_package_overrides("linux-64") == expected
 
 
-def test_solve_for_records_applies_virtual_package_overrides(
+def test_solve_for_platform_applies_virtual_package_overrides(
     monkeypatch: pytest.MonkeyPatch,
     workspace_ctx_factory: Callable[..., WorkspaceContext],
     resolved_envs_factory,
@@ -720,7 +717,7 @@ def test_solve_for_records_applies_virtual_package_overrides(
         lambda: FakeSolver,
     )
 
-    _solve_for_records(ctx, resolved, "linux-64")
+    resolved.solve_for_platform("linux-64", prefix=ctx.env_prefix(resolved.name))
 
     assert observed["CONDA_OVERRIDE_GLIBC"] == "2.17"
     assert observed["_subdir"] == "linux-64"
@@ -728,7 +725,7 @@ def test_solve_for_records_applies_virtual_package_overrides(
     assert os.environ.get("CONDA_OVERRIDE_GLIBC") is None
 
 
-def test_solve_for_records_native_solve_leaves_env_unchanged(
+def test_solve_for_platform_native_solve_leaves_env_unchanged(
     monkeypatch: pytest.MonkeyPatch,
     workspace_ctx_factory: Callable[..., WorkspaceContext],
     resolved_envs_factory,
@@ -756,6 +753,6 @@ def test_solve_for_records_native_solve_leaves_env_unchanged(
         lambda: FakeSolver,
     )
 
-    _solve_for_records(ctx, resolved, "linux-64")
+    resolved.solve_for_platform("linux-64", prefix=ctx.env_prefix(resolved.name))
 
     assert seen_env["CONDA_OVERRIDE_GLIBC"] is None

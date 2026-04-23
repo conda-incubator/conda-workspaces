@@ -19,6 +19,9 @@ from .exceptions import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
+    from pathlib import Path
+
+    from conda.models.records import PackageRecord
 
     from .models import Channel, MatchSpec, PyPIDependency, WorkspaceConfig
 
@@ -130,6 +133,102 @@ class ResolvedEnvironment:
                     os.environ.pop(name, None)
                 else:
                     os.environ[name] = previous
+
+    def solve_for_platform(
+        self,
+        platform: str,
+        *,
+        prefix: str | Path,
+    ) -> list[PackageRecord]:
+        """Solve this environment for *platform* and return package records.
+
+        Uses conda's solver API to resolve dependencies without
+        installing, producing the list of exact packages that would be
+        installed.  Applies the same transformations as
+        :func:`conda_workspaces.envs.install_environment`: PyPI deps
+        are translated and merged, system requirements are added as
+        virtual package constraints, and channel priority is honoured.
+
+        The solver is targeted at *platform* by (a) constructing it
+        with ``subdirs=(platform, "noarch")`` and (b) overriding
+        ``context._subdir`` for the duration of the solve.  Conda's
+        virtual package plugins (``__linux``, ``__osx``, ``__win``)
+        gate on ``context.subdir``, so this single override also
+        yields the correct cross-platform virtual package set.
+
+        On cross-compiled targets the host cannot detect
+        libc/kernel/macOS versions, so
+        :meth:`scoped_virtual_packages` seeds conservative
+        ``CONDA_OVERRIDE_*`` defaults for the duration of the solve.
+        User knobs stay authoritative: explicit ``CONDA_OVERRIDE_*``
+        env vars are left untouched, and ``[system-requirements]``
+        versions are lifted into the override so ``__glibc >=2.28``
+        in the manifest and the baseline record agree.
+
+        *prefix* is the environment prefix path the solver should
+        target — workspace-owned, so callers that run under a
+        :class:`~conda_workspaces.context.WorkspaceContext` pass
+        ``ctx.env_prefix(resolved.name)``.
+
+        Raises :class:`~conda_workspaces.exceptions.SolveError` when
+        the solver cannot satisfy the specs or no backend is
+        registered.
+        """
+        from conda.base.context import context as conda_context
+        from conda.common.io import captured
+        from conda.exceptions import UnsatisfiableError
+        from conda.models.match_spec import MatchSpec as CondaMatchSpec
+
+        from .envs import (
+            _apply_system_requirements,
+            _build_pypi_specs,
+            _channel_priority_override,
+        )
+        from .exceptions import SolveError
+
+        specs = [
+            CondaMatchSpec(dep.conda_build_form())
+            for dep in self.conda_dependencies.values()
+        ]
+
+        specs.extend(_build_pypi_specs(self))
+        _apply_system_requirements(self, specs)
+
+        if not specs:
+            return []
+
+        solver_backend = conda_context.plugin_manager.get_cached_solver_backend()
+        if solver_backend is None:
+            raise SolveError(self.name, "No solver backend found", platform=platform)
+
+        subdirs = (platform, "noarch")
+
+        # The solver unconditionally prints ``Collecting package
+        # metadata`` and ``Solving environment`` status lines through
+        # conda's reporter plugin (even when ``context.quiet`` is set
+        # — ``QuietSpinner`` still writes to stdout).  Route stdout
+        # and stderr through ``conda.common.io.captured`` so the Rich
+        # progress rendered by the caller is the only thing the user
+        # sees.  Any captured output is discarded; diagnostics survive
+        # via ``SolveError(str(exc))``.
+        with (
+            self.scoped_virtual_packages(platform),
+            _channel_priority_override(self.channel_priority),
+            conda_context._override("_subdir", platform),
+            conda_context._override("quiet", True),
+            captured(),
+        ):
+            solver = solver_backend(
+                str(prefix),
+                list(self.channels),
+                subdirs,
+                specs_to_add=specs,
+            )
+
+            try:
+                return list(solver.solve_final_state())
+            except (UnsatisfiableError, SystemExit) as exc:
+                raise SolveError(self.name, str(exc), platform=platform) from exc
 
 
 def resolve_environment(

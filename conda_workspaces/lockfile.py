@@ -192,90 +192,6 @@ class CondaLockLoader(EnvironmentSpecBase):
         return environments[name]
 
 
-def _solve_for_records(
-    ctx: WorkspaceContext,
-    resolved: ResolvedEnvironment,
-    platform: str,
-) -> list:
-    """Solve an environment for *platform* and return package records.
-
-    Uses conda's solver API to resolve dependencies without installing,
-    producing the list of exact packages that would be installed.
-    Applies the same transformations as ``install_environment``:
-    PyPI deps are translated and merged, system requirements are added
-    as virtual package constraints, and channel priority is honoured.
-
-    The solver is targeted at *platform* by (a) constructing it with
-    ``subdirs=(platform, "noarch")`` and (b) overriding
-    ``context._subdir`` for the duration of the solve.  Conda's virtual
-    package plugins (``__linux``, ``__osx``, ``__win``) gate on
-    ``context.subdir``, so this single override also yields the correct
-    cross-platform virtual package set.
-
-    On cross-compiled targets the host cannot detect libc/kernel/macOS
-    versions, so :meth:`ResolvedEnvironment.scoped_virtual_packages` seeds
-    conservative ``CONDA_OVERRIDE_*`` defaults for the duration of the
-    solve.  User knobs stay authoritative: explicit ``CONDA_OVERRIDE_*``
-    env vars are left untouched, and ``[system-requirements]`` versions
-    are lifted into the override so ``__glibc >=2.28`` in the manifest
-    and the baseline record agree.
-    """
-    from conda.base.context import context as conda_context
-    from conda.common.io import captured
-    from conda.exceptions import UnsatisfiableError
-    from conda.models.match_spec import MatchSpec
-
-    from .envs import (
-        _apply_system_requirements,
-        _build_pypi_specs,
-        _channel_priority_override,
-    )
-
-    specs = [
-        MatchSpec(dep.conda_build_form())
-        for dep in resolved.conda_dependencies.values()
-    ]
-
-    specs.extend(_build_pypi_specs(resolved))
-    _apply_system_requirements(resolved, specs)
-
-    if not specs:
-        return []
-
-    solver_backend = conda_context.plugin_manager.get_cached_solver_backend()
-    if solver_backend is None:
-        raise SolveError(resolved.name, "No solver backend found", platform=platform)
-
-    prefix = str(ctx.env_prefix(resolved.name))
-    subdirs = (platform, "noarch")
-
-    # The solver unconditionally prints ``Collecting package metadata``
-    # and ``Solving environment`` status lines through conda's reporter
-    # plugin (even when ``context.quiet`` is set — ``QuietSpinner``
-    # still writes to stdout).  Route stdout and stderr through
-    # ``conda.common.io.captured`` so the Rich progress rendered by
-    # the caller is the only thing the user sees.  Any captured output
-    # is discarded; diagnostics survive via ``SolveError(str(exc))``.
-    with (
-        resolved.scoped_virtual_packages(platform),
-        _channel_priority_override(resolved.channel_priority),
-        conda_context._override("_subdir", platform),
-        conda_context._override("quiet", True),
-        captured(),
-    ):
-        solver = solver_backend(
-            prefix,
-            list(resolved.channels),
-            subdirs,
-            specs_to_add=specs,
-        )
-
-        try:
-            return list(solver.solve_final_state())
-        except (UnsatisfiableError, SystemExit) as exc:
-            raise SolveError(resolved.name, str(exc), platform=platform) from exc
-
-
 def generate_lockfile(
     ctx: WorkspaceContext,
     resolved_envs: dict[str, ResolvedEnvironment],
@@ -293,9 +209,9 @@ def generate_lockfile(
     to :func:`.env_export.multiplatform_export` so this function and
     ``conda export --format=conda-workspaces-lock-v1`` produce
     byte-identical output.  Solver chatter is silenced inside
-    :func:`_solve_for_records` itself, so the caller is free to render
-    status through the optional *progress* callback without stdout
-    bookkeeping.
+    :meth:`ResolvedEnvironment.solve_for_platform` itself, so the
+    caller is free to render status through the optional *progress*
+    callback without stdout bookkeeping.
 
     Fails fast by default: the first unsolvable ``(environment,
     platform)`` pair raises :class:`SolveError` with the platform
@@ -329,7 +245,9 @@ def generate_lockfile(
             if progress is not None:
                 progress(name, target)
             try:
-                records = _solve_for_records(ctx, resolved, target)
+                records = resolved.solve_for_platform(
+                    target, prefix=ctx.env_prefix(resolved.name)
+                )
             except SolveError as exc:
                 if not skip_unsolvable:
                     raise
