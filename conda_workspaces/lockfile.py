@@ -40,6 +40,7 @@ exact URLs, bypassing the solver entirely.
 
 from __future__ import annotations
 
+import io
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -385,8 +386,6 @@ def merge_lockfiles(paths: Sequence[Path], ctx: WorkspaceContext) -> Path:
 
     Returns the path to the merged lockfile.
     """
-    import io
-
     from conda.common.serialize.yaml import dump as yaml_dump
 
     if not paths:
