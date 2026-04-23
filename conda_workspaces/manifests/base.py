@@ -108,6 +108,39 @@ class ManifestParser(ABC):
         shutil.copyfile(manifest, target)
         return target
 
+    def write_workspace_stub(
+        self,
+        base_dir: Path,
+        name: str,
+        channels: list[str],
+        platforms: list[str],
+    ) -> tuple[Path, str]:
+        """Create a minimal workspace manifest under *base_dir*.
+
+        Writes a fresh TOML document with ``[workspace]`` and an empty
+        ``[dependencies]`` table at :meth:`manifest_path` and returns
+        ``(path, "Created")``.  Raises :class:`ManifestExistsError` if
+        the target file is already present — subclasses that share
+        their file with other tooling (see
+        :class:`PyprojectTomlParser`) override this method to append
+        their configuration under a nested table instead of refusing
+        outright, and report ``"Updated"`` when they did so.
+        """
+        path = self.manifest_path(base_dir)
+        if path.exists():
+            raise ManifestExistsError(path)
+
+        doc = tomlkit.document()
+        ws = tomlkit.table()
+        ws.add("name", name)
+        ws.add("channels", channels)
+        ws.add("platforms", platforms)
+        doc.add("workspace", ws)
+        doc.add("dependencies", tomlkit.table())
+
+        path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+        return path, "Created"
+
     @abstractmethod
     def can_handle(self, path: Path) -> bool:
         """Return True if this parser can read *path*."""

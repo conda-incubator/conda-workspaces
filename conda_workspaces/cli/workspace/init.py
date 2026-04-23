@@ -5,11 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import tomlkit
 from conda.base.context import context as conda_context
 from rich.console import Console
 
-from ...exceptions import ManifestExistsError
 from ...manifests.base import ManifestParser
 from .. import status
 
@@ -18,97 +16,26 @@ if TYPE_CHECKING:
 
 
 def execute_init(args: argparse.Namespace, *, console: Console | None = None) -> int:
-    """Create a new workspace manifest in the current directory."""
+    """Create a new workspace manifest in the current directory.
+
+    Delegates the actual file layout to
+    :meth:`ManifestParser.write_workspace_stub` on the parser selected
+    by ``--format``.  The default implementation writes a fresh
+    ``conda.toml`` / ``pixi.toml``; :class:`PyprojectTomlParser`
+    overrides it to append ``[tool.conda]`` to an existing
+    ``pyproject.toml`` when one is present.  ``init`` itself stays
+    format-agnostic and only owns argument wiring and the user-visible
+    status message.
+    """
     if console is None:
         console = Console(highlight=False)
-    fmt = args.manifest_format
+
     name = args.name or Path.cwd().name
     channels = args.channels or ["conda-forge"]
-
-    if args.platforms:
-        platforms = args.platforms
-    else:
-        platforms = _detect_platforms()
-
+    platforms = args.platforms or [conda_context.subdir]
     base_dir = Path(args.file).parent if args.file else Path.cwd()
 
-    parser = ManifestParser.for_format(fmt)
-    if fmt == "pyproject":
-        return _write_pyproject_toml(
-            name, channels, platforms, base_dir, console=console
-        )
-    return _write_workspace_toml(
-        parser.manifest_filename, name, channels, platforms, base_dir, console=console
-    )
-
-
-def _detect_platforms() -> list[str]:
-    """Return the current platform as detected by conda."""
-    return [conda_context.subdir]
-
-
-def _write_workspace_toml(
-    filename: str,
-    name: str,
-    channels: list[str],
-    platforms: list[str],
-    base_dir: Path,
-    *,
-    console: Console,
-) -> int:
-    path = base_dir / filename
-    if path.exists():
-        raise ManifestExistsError(path)
-
-    doc = tomlkit.document()
-
-    ws = tomlkit.table()
-    ws.add("name", name)
-    ws.add("channels", channels)
-    ws.add("platforms", platforms)
-    doc.add("workspace", ws)
-
-    deps = tomlkit.table()
-    doc.add("dependencies", deps)
-
-    path.write_text(tomlkit.dumps(doc), encoding="utf-8")
-    status.message(console, "Created", "workspace", path.name, detail=str(path.parent))
-    return 0
-
-
-def _write_pyproject_toml(
-    name: str,
-    channels: list[str],
-    platforms: list[str],
-    base_dir: Path,
-    *,
-    console: Console,
-) -> int:
-    path = base_dir / "pyproject.toml"
-    existed = path.exists()
-
-    if existed:
-        text = path.read_text(encoding="utf-8")
-        doc = tomlkit.loads(text)
-    else:
-        doc = tomlkit.document()
-
-    tool = doc.setdefault("tool", tomlkit.table())
-    if "conda" in tool:
-        raise ManifestExistsError("[tool.conda] in pyproject.toml")
-    if "pixi" in tool:
-        raise ManifestExistsError("[tool.pixi] in pyproject.toml")
-
-    conda = tomlkit.table()
-    ws = tomlkit.table()
-    ws.add("name", name)
-    ws.add("channels", channels)
-    ws.add("platforms", platforms)
-    conda.add("workspace", ws)
-    conda.add("dependencies", tomlkit.table())
-    tool.add("conda", conda)
-
-    path.write_text(tomlkit.dumps(doc), encoding="utf-8")
-    verb = "Updated" if existed else "Created"
+    parser = ManifestParser.for_format(args.manifest_format)
+    path, verb = parser.write_workspace_stub(base_dir, name, channels, platforms)
     status.message(console, verb, "workspace", path.name, detail=str(path.parent))
     return 0
