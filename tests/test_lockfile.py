@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import pytest
@@ -10,6 +11,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+from conda.base.context import context as conda_context
+from conda.models.match_spec import MatchSpec
 from conda_lockfiles.rattler_lock.v6 import _record_to_dict
 
 from conda_workspaces.context import WorkspaceContext
@@ -21,6 +24,7 @@ from conda_workspaces.lockfile import (
     LOCKFILE_NAME,
     LOCKFILE_VERSION,
     CondaLockLoader,
+    _solve_for_records,
     generate_lockfile,
     install_from_lockfile,
     lockfile_path,
@@ -632,35 +636,31 @@ def test_install_from_lockfile(
         "noarch-target",
     ],
 )
-def test_baseline_virtual_package_env_by_target(
+def test_virtual_package_overrides_by_target(
     monkeypatch: pytest.MonkeyPatch,
     host: str,
     target: str,
     expected: dict[str, str],
 ) -> None:
-    """Baselines trigger only when host family differs from the target family."""
-    from conda.base.context import context as conda_context
-
+    """Overrides trigger only when host family differs from the target family."""
     monkeypatch.setattr(conda_context, "_subdir", host)
     monkeypatch.delenv("CONDA_OVERRIDE_GLIBC", raising=False)
     monkeypatch.delenv("CONDA_OVERRIDE_OSX", raising=False)
     monkeypatch.delenv("CONDA_OVERRIDE_WIN", raising=False)
 
     env = ResolvedEnvironment(name="test")
-    assert env.baseline_virtual_package_env(target) == expected
+    assert env.virtual_package_overrides(target) == expected
 
 
-def test_baseline_virtual_package_env_respects_existing_env(
+def test_virtual_package_overrides_respect_existing_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Explicit ``CONDA_OVERRIDE_*`` values win over the baseline."""
-    from conda.base.context import context as conda_context
-
     monkeypatch.setattr(conda_context, "_subdir", "osx-arm64")
     monkeypatch.setenv("CONDA_OVERRIDE_GLIBC", "2.28")
 
     env = ResolvedEnvironment(name="test")
-    assert env.baseline_virtual_package_env("linux-64") == {}
+    assert env.virtual_package_overrides("linux-64") == {}
 
 
 @pytest.mark.parametrize(
@@ -678,34 +678,25 @@ def test_baseline_virtual_package_env_respects_existing_env(
         "unrelated-requirement-ignored",
     ],
 )
-def test_baseline_virtual_package_env_lifts_system_requirements(
+def test_virtual_package_overrides_lift_system_requirements(
     monkeypatch: pytest.MonkeyPatch,
     system_requirements: dict[str, str],
     expected: dict[str, str],
 ) -> None:
-    """``[system-requirements]`` versions are lifted into the baseline."""
-    from conda.base.context import context as conda_context
-
+    """``[system-requirements]`` versions are lifted into the overrides."""
     monkeypatch.setattr(conda_context, "_subdir", "osx-arm64")
     monkeypatch.delenv("CONDA_OVERRIDE_GLIBC", raising=False)
 
     env = ResolvedEnvironment(name="test", system_requirements=system_requirements)
-    assert env.baseline_virtual_package_env("linux-64") == expected
+    assert env.virtual_package_overrides("linux-64") == expected
 
 
-def test_solve_for_records_applies_baseline_env_during_solve(
+def test_solve_for_records_applies_virtual_package_overrides(
     monkeypatch: pytest.MonkeyPatch,
     workspace_ctx_factory: Callable[..., WorkspaceContext],
     resolved_envs_factory,
 ) -> None:
     """Cross-compiled solves see the baseline ``CONDA_OVERRIDE_*`` in os.environ."""
-    import os
-
-    from conda.base.context import context as conda_context
-    from conda.models.match_spec import MatchSpec
-
-    from conda_workspaces.lockfile import _solve_for_records
-
     monkeypatch.setattr(conda_context, "_subdir", "osx-arm64")
     monkeypatch.delenv("CONDA_OVERRIDE_GLIBC", raising=False)
 
@@ -743,13 +734,6 @@ def test_solve_for_records_native_solve_leaves_env_unchanged(
     resolved_envs_factory,
 ) -> None:
     """Native ``(host, target)`` solves do not mutate any ``CONDA_OVERRIDE_*``."""
-    import os
-
-    from conda.base.context import context as conda_context
-    from conda.models.match_spec import MatchSpec
-
-    from conda_workspaces.lockfile import _solve_for_records
-
     monkeypatch.setattr(conda_context, "_subdir", "linux-64")
     monkeypatch.delenv("CONDA_OVERRIDE_GLIBC", raising=False)
 

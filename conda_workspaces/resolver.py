@@ -43,7 +43,7 @@ class ResolvedEnvironment:
     system_requirements: dict[str, str] = field(default_factory=dict)
     channel_priority: str | None = None
 
-    def baseline_virtual_package_env(self, platform: str) -> dict[str, str]:
+    def virtual_package_overrides(self, platform: str) -> dict[str, str]:
         """Return ``CONDA_OVERRIDE_*`` env vars that enable a cross-platform solve.
 
         Mirrors ``rattler_virtual_packages::VirtualPackages::detect_for_platform``
@@ -102,8 +102,8 @@ class ResolvedEnvironment:
         return {k: v for k, v in baseline.items() if k not in os.environ}
 
     @contextmanager
-    def scoped_solver_env(self, platform: str) -> Iterator[None]:
-        """Scope :meth:`baseline_virtual_package_env` around a solver call.
+    def scoped_virtual_packages(self, platform: str) -> Iterator[None]:
+        """Scope :meth:`virtual_package_overrides` around a solver call.
 
         Conda deprecated :func:`conda.common.io.env_vars` and its siblings
         in 26.9 (removal targeted for 27.3) and recommends
@@ -114,7 +114,7 @@ class ResolvedEnvironment:
         local context manager until conda exposes one (tracked in
         ``conda/conda#14095`` / PR ``conda/conda#15728``).
         """
-        overrides = self.baseline_virtual_package_env(platform)
+        overrides = self.virtual_package_overrides(platform)
         if not overrides:
             yield
             return

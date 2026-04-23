@@ -403,7 +403,7 @@ Users can still influence virtual packages through the usual channels:
 Cross-compiled targets (e.g. solving `linux-64` from macOS) get a
 conservative baseline for virtual packages the host cannot detect,
 mirroring `rattler_virtual_packages::VirtualPackages::detect_for_platform`:
-`ResolvedEnvironment.baseline_virtual_package_env` seeds `CONDA_OVERRIDE_GLIBC`
+`ResolvedEnvironment.virtual_package_overrides` seeds `CONDA_OVERRIDE_GLIBC`
 (`2.17` for non-native `linux-*`), `CONDA_OVERRIDE_OSX`
 (`11.0` for `osx-arm64`, `10.15` for `osx-64`), and
 `CONDA_OVERRIDE_WIN` (`0`) for the duration of the solve. User knobs

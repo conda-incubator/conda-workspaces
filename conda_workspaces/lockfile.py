@@ -213,7 +213,7 @@ def _solve_for_records(
     cross-platform virtual package set.
 
     On cross-compiled targets the host cannot detect libc/kernel/macOS
-    versions, so :meth:`ResolvedEnvironment.scoped_solver_env` seeds
+    versions, so :meth:`ResolvedEnvironment.scoped_virtual_packages` seeds
     conservative ``CONDA_OVERRIDE_*`` defaults for the duration of the
     solve.  User knobs stay authoritative: explicit ``CONDA_OVERRIDE_*``
     env vars are left untouched, and ``[system-requirements]`` versions
@@ -257,7 +257,7 @@ def _solve_for_records(
     # the caller is the only thing the user sees.  Any captured output
     # is discarded; diagnostics survive via ``SolveError(str(exc))``.
     with (
-        resolved.scoped_solver_env(platform),
+        resolved.scoped_virtual_packages(platform),
         _channel_priority_override(resolved.channel_priority),
         conda_context._override("_subdir", platform),
         conda_context._override("quiet", True),
