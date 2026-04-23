@@ -46,6 +46,7 @@ class CondaTomlParser(ManifestParser):
 
     format_alias = "conda"
     filenames = ("conda.toml",)
+    exporter_format = "conda-toml"
 
     def can_handle(self, path: Path) -> bool:
         return path.name in self.filenames

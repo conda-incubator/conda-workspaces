@@ -65,6 +65,7 @@ def conda_environment_specifiers() -> Iterable[CondaEnvironmentSpecifier]:
 @hookimpl
 def conda_environment_exporters() -> Iterable[CondaEnvironmentExporter]:
     from . import export, lockfile
+    from .manifests import _PARSERS
 
     yield CondaEnvironmentExporter(
         name=lockfile.FORMAT,
@@ -72,6 +73,22 @@ def conda_environment_exporters() -> Iterable[CondaEnvironmentExporter]:
         default_filenames=lockfile.DEFAULT_FILENAMES,
         multiplatform_export=export.multiplatform_export,
     )
+
+    # Manifest-format exporters: each ManifestParser subclass that
+    # sets ``exporter_format`` becomes a ``conda export --format <name>``
+    # target.  The writer is the parser's ``export`` method, which
+    # defaults to the shared top-level-TOML implementation in
+    # ``ManifestParser.export`` and is overridden for nested shapes
+    # (see ``PyprojectTomlParser.export``).
+    for parser in _PARSERS:
+        if not parser.exporter_format:
+            continue
+        yield CondaEnvironmentExporter(
+            name=parser.exporter_format,
+            aliases=parser.exporter_aliases,
+            default_filenames=parser.filenames,
+            multiplatform_export=parser.export,
+        )
 
 
 @hookimpl

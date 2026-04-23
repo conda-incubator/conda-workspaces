@@ -8,6 +8,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- `conda workspace export` gained three new manifest-format exporter
+  plugins: `conda-toml`, `pixi-toml`, and `pyproject-toml`. They
+  register via the same `conda_environment_exporters` hook as
+  `environment-yaml` and `conda-workspaces-lock-v1`, so existing CLI
+  behaviour (per-platform projection, `--file` inference from
+  `conda.toml` / `pixi.toml` / `pyproject.toml` basenames,
+  `--output` streaming) lights up for free. Each serializer is the
+  `export` method on the matching `ManifestParser` subclass:
+  declared specs shared across all requested platforms land under
+  the top-level `[dependencies]` / `[pypi-dependencies]` tables,
+  per-platform deltas under `[target.<platform>.*]`. The
+  `pyproject-toml` exporter wraps the same content under
+  `[tool.conda]` so the output drops straight into an existing PEP
+  621 `pyproject.toml` — when the target file already exists, the
+  exporter splices its `[tool.conda]` subtree into the existing
+  document so peer `[project]`, `[build-system]`, `[tool.ruff]`,
+  and `[tool.pixi]` tables survive untouched (any stale
+  `[tool.conda]` is replaced). `conda.toml` and `pixi.toml` keep
+  the default overwrite semantics of every other conda exporter.
+  Together with the existing `conda workspace import` direction,
+  `conda workspace` is now a bidirectional translator across every
+  manifest dialect it understands.
 - `conda workspace lock` gained `--output <path>` and `--merge <glob>`
   for CI-split locking pipelines. `--output` writes the solved
   lockfile to an arbitrary path (e.g. `conda.lock.linux-64`) instead

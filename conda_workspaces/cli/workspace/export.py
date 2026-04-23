@@ -21,6 +21,7 @@ from rich.console import Console
 
 from ...exceptions import EnvironmentNotFoundError
 from ...export import resolve_exporter, run_exporter
+from ...manifests.base import ManifestParser
 from . import workspace_context_from_args
 
 if TYPE_CHECKING:
@@ -105,6 +106,16 @@ def execute_export(
         return 0
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.is_file():
+        # Give the parser a chance to merge the exported content into
+        # an existing file rather than wholesale overwriting it.  The
+        # default is still overwrite (same as ``conda export -f
+        # environment.yaml``); :class:`PyprojectTomlParser` opts into a
+        # nested-table merge so peer ``[project]`` / ``[build-system]``
+        # tables survive.
+        parser = ManifestParser.for_exporter_format(resolved_format)
+        if parser is not None:
+            content = parser.merge_export(output_path, content)
     output_path.write_text(content, encoding="utf-8")
 
     if json_output:

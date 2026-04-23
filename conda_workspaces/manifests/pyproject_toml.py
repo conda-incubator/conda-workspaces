@@ -25,8 +25,10 @@ from .normalize import parse_feature_tasks, parse_tasks_and_targets
 from .toml import _parse_channels, _parse_features_and_envs
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from pathlib import Path
 
+    from conda.models.environment import Environment
     from tomlkit.items import Table
 
     from ..models import Task
@@ -43,6 +45,7 @@ class PyprojectTomlParser(ManifestParser):
 
     format_alias = "pyproject"
     filenames = ("pyproject.toml",)
+    exporter_format = "pyproject-toml"
 
     def can_handle(self, path: Path) -> bool:
         return path.name in self.filenames
@@ -91,6 +94,52 @@ class PyprojectTomlParser(ManifestParser):
 
         path.write_text(tomlkit.dumps(doc), encoding="utf-8")
         return path, "Updated" if existed else "Created"
+
+    def export(self, envs: Iterable[Environment]) -> str:
+        """Serialize *envs* as a ``pyproject.toml`` with ``[tool.conda.*]``.
+
+        Same content as :meth:`ManifestParser.export` — workspace
+        table, dependencies, optional pypi-dependencies, optional
+        per-platform overrides — but wrapped under ``[tool.conda]``
+        so the output drops straight into PEP 621 / ``pyproject.toml``
+        alongside ``[project]``, ``[build-system]``, and peer tables.
+        """
+        doc = tomlkit.document()
+        tool = tomlkit.table(is_super_table=True)
+        conda = tomlkit.table()
+        self._emit_manifest(conda, self.manifest_data(envs))
+        tool.add("conda", conda)
+        doc.add("tool", tool)
+        return tomlkit.dumps(doc)
+
+    def merge_export(self, existing_path: Path, exported: str) -> str:
+        """Splice *exported*'s ``[tool.conda]`` into *existing_path*.
+
+        ``pyproject.toml`` is a shared packaging manifest owned by
+        the Python ecosystem; the default "overwrite the file
+        wholesale" behaviour of :meth:`ManifestParser.merge_export`
+        would silently destroy ``[project]`` / ``[build-system]`` /
+        ``[tool.ruff]`` / etc.  Instead we parse the existing
+        document, replace its ``[tool.conda]`` subtree with the one
+        :meth:`export` just produced, and serialise the result.
+
+        This is the export-side companion to
+        :meth:`write_workspace_stub`, which does the same kind of
+        nested-table merge for ``conda workspace init``.  Existing
+        ``[tool.pixi]`` content is preserved untouched — users who
+        mix both tools stay functional.
+        """
+        exported_doc = tomlkit.loads(exported)
+        exported_conda = exported_doc.get("tool", {}).get("conda")
+        if exported_conda is None:
+            return exported
+
+        doc = tomlkit.loads(existing_path.read_text(encoding="utf-8"))
+        tool = doc.setdefault("tool", tomlkit.table())
+        if "conda" in tool:
+            del tool["conda"]
+        tool["conda"] = exported_conda
+        return tomlkit.dumps(doc)
 
     def has_workspace(self, path: Path) -> bool:
         if not path.exists():

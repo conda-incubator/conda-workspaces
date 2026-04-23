@@ -125,7 +125,8 @@ def execute_quickstart(
             "[bold blue]Would create[/bold blue] workspace manifest in"
             f" [bold]{workspace_root}[/bold]"
         )
-        manifest_path = ManifestParser.for_format(fmt).manifest_path(workspace_root)
+        parser = ManifestParser.for_format_alias(fmt)
+        manifest_path = parser.manifest_path(workspace_root)
     else:
         execute_init(
             with_prompts(
@@ -136,7 +137,8 @@ def execute_quickstart(
                 platforms=args.platforms,
             )
         )
-        manifest_path = ManifestParser.for_format(fmt).manifest_path(workspace_root)
+        parser = ManifestParser.for_format_alias(fmt)
+        manifest_path = parser.manifest_path(workspace_root)
 
     if dry_run:
         # No manifest on disk yet; skip add/install side effects.

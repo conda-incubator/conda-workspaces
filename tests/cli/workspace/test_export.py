@@ -7,6 +7,7 @@ from io import StringIO
 from typing import TYPE_CHECKING
 
 import pytest
+import tomlkit
 from conda.common.serialize.yaml import loads as yaml_loads
 from conda.exceptions import CondaValueError
 from rich.console import Console
@@ -81,8 +82,19 @@ def test_resolve_exporter_by_format(format_name: str, expected_name: str) -> Non
         ("environment.yml", "environment-yaml"),
         ("environment.json", "environment-json"),
         ("conda.lock", "conda-workspaces-lock-v1"),
+        ("conda.toml", "conda-toml"),
+        ("pixi.toml", "pixi-toml"),
+        ("pyproject.toml", "pyproject-toml"),
     ],
-    ids=["yaml-default", "yml-default", "json-default", "conda-lock-name"],
+    ids=[
+        "yaml-default",
+        "yml-default",
+        "json-default",
+        "conda-lock-name",
+        "conda-toml-name",
+        "pixi-toml-name",
+        "pyproject-toml-name",
+    ],
 )
 def test_resolve_exporter_detects_by_filename(
     tmp_path: Path, filename: str, expected_name: str
@@ -342,3 +354,110 @@ def test_run_exporter_falls_back_to_single() -> None:
 
     content = run_exporter(FakeExporter(), ["a"])  # type: ignore[list-item]
     assert content == "ano-trailing-newline\n"
+
+
+@pytest.mark.parametrize(
+    ("format_name", "filename", "top_table", "path"),
+    [
+        ("conda-toml", "out-conda.toml", "workspace", ("workspace",)),
+        ("pixi-toml", "out-pixi.toml", "workspace", ("workspace",)),
+        (
+            "pyproject-toml",
+            "out-pyproject.toml",
+            "tool",
+            ("tool", "conda", "workspace"),
+        ),
+    ],
+    ids=["conda-toml", "pixi-toml", "pyproject-toml"],
+)
+def test_export_manifest_format_plugin_hook(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    export_console: Console,
+    format_name: str,
+    filename: str,
+    top_table: str,
+    path: tuple[str, ...],
+) -> None:
+    """The three manifest exporters are reachable via ``--format`` end-to-end.
+
+    Exercises the full plugin-hook path: ``execute_export`` →
+    ``resolve_exporter`` (looks up the new ``CondaEnvironmentExporter``
+    in the plugin registry) → ``ManifestParser.export`` (the writer
+    registered as ``multiplatform_export``).  Drives all three
+    targets through a single parametrised test because the CLI
+    contract is identical modulo where the ``[workspace]`` table
+    lands in the output document.
+    """
+    monkeypatch.chdir(pixi_workspace)
+    output = pixi_workspace / filename
+
+    result = execute_export(
+        make_args(
+            _DEFAULTS,
+            file=output,
+            format=format_name,
+            export_platforms=["linux-64", "osx-arm64"],
+        ),
+        console=export_console,
+    )
+
+    assert result == 0
+    data = tomlkit.loads(output.read_text(encoding="utf-8")).unwrap()
+    assert top_table in data
+
+    cursor: object = data
+    for key in path:
+        cursor = cursor[key]  # type: ignore[index]
+    assert cursor["platforms"] == ["linux-64", "osx-arm64"]
+
+
+def test_export_pyproject_merges_into_existing_file(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    export_console: Console,
+) -> None:
+    """``--format pyproject-toml --file pyproject.toml`` preserves peer tables.
+
+    Regression guard for #41: a naive exporter that just
+    ``Path.write_text``s the plugin output would destroy
+    ``[project]`` / ``[build-system]`` / ``[tool.ruff]`` and any
+    other section in an existing ``pyproject.toml``.
+    :meth:`PyprojectTomlParser.merge_export`, wired in
+    :func:`execute_export`, splices the exporter's ``[tool.conda]``
+    subtree in instead.
+    """
+    monkeypatch.chdir(pixi_workspace)
+    pyproject = pixi_workspace / "pyproject.toml"
+    pyproject.write_text(
+        """\
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "my-pkg"
+version = "0.1.0"
+
+[tool.ruff]
+line-length = 120
+""",
+        encoding="utf-8",
+    )
+
+    result = execute_export(
+        make_args(
+            _DEFAULTS,
+            file=pyproject,
+            format="pyproject-toml",
+            export_platforms=["linux-64"],
+        ),
+        console=export_console,
+    )
+
+    assert result == 0
+    data = tomlkit.loads(pyproject.read_text(encoding="utf-8")).unwrap()
+    assert data["build-system"]["build-backend"] == "hatchling.build"
+    assert data["project"] == {"name": "my-pkg", "version": "0.1.0"}
+    assert data["tool"]["ruff"] == {"line-length": 120}
+    assert data["tool"]["conda"]["workspace"]["platforms"] == ["linux-64"]

@@ -28,6 +28,7 @@ class PixiTomlParser(ManifestParser):
 
     format_alias = "pixi"
     filenames = ("pixi.toml",)
+    exporter_format = "pixi-toml"
 
     def can_handle(self, path: Path) -> bool:
         return path.name in self.filenames
