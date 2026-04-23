@@ -21,7 +21,7 @@ from rich.console import Console
 
 from ...exceptions import EnvironmentNotFoundError
 from ...export import resolve_exporter, run_exporter
-from ...manifests import _PARSERS
+from ...manifests.base import ManifestParser
 from . import workspace_context_from_args
 
 if TYPE_CHECKING:
@@ -113,10 +113,7 @@ def execute_export(
         # environment.yaml``); :class:`PyprojectTomlParser` opts into a
         # nested-table merge so peer ``[project]`` / ``[build-system]``
         # tables survive.
-        parser = next(
-            (p for p in _PARSERS if p.exporter_format == resolved_format),
-            None,
-        )
+        parser = ManifestParser.for_exporter_format(resolved_format)
         if parser is not None:
             content = parser.merge_export(output_path, content)
     output_path.write_text(content, encoding="utf-8")

@@ -168,8 +168,28 @@ class ManifestParser(ABC):
         only when ``--file`` points to an existing file, so a fresh
         export still writes the exporter output verbatim.
         """
-        del existing_path
         return exported
+
+    @classmethod
+    def for_exporter_format(cls, name: str) -> ManifestParser | None:
+        """Return the registered parser whose :attr:`exporter_format` matches *name*.
+
+        Companion to :meth:`for_format` for the
+        ``conda_environment_exporters`` plugin side: ``conda workspace
+        export --format <name>`` uses the exporter plugin name (e.g.
+        ``pyproject-toml``), which is stored on
+        :attr:`exporter_format` rather than :attr:`format_alias`.
+        Returns ``None`` when *name* is not a manifest-format exporter
+        — the CLI uses this to decide whether to route writes through
+        :meth:`merge_export`, and a ``None`` result simply means "not
+        one of ours, write verbatim".
+        """
+        from . import _PARSERS
+
+        for parser in _PARSERS:
+            if parser.exporter_format and parser.exporter_format == name:
+                return parser
+        return None
 
     def export(self, envs: Iterable[Environment]) -> str:
         """Serialize *envs* to this parser's manifest format.

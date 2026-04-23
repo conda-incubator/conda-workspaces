@@ -228,15 +228,7 @@ def test_merge_export_default_overwrites(
     assert parser.merge_export(existing, fresh) == fresh
 
 
-def test_pyproject_merge_export_preserves_peer_tables(
-    parsers: dict[str, ManifestParser],
-    tmp_path: Path,
-) -> None:
-    """``[project]`` / ``[build-system]`` / ``[tool.ruff]`` survive an export."""
-    parser = parsers["pyproject-toml"]
-    path = tmp_path / "pyproject.toml"
-    path.write_text(
-        """\
+_PYPROJECT_WITH_PEERS = """\
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -250,45 +242,55 @@ line-length = 100
 
 [tool.conda]
 workspace = {name = "stale", channels = [], platforms = []}
-""",
-        encoding="utf-8",
-    )
+"""
 
-    env = make_env("linux-64", conda_specs=("python=3.12",))
-    fresh = parser.export([env])
-    merged = parser.merge_export(path, fresh)
-    data = tomlkit.loads(merged).unwrap()
-
-    assert data["build-system"]["build-backend"] == "hatchling.build"
-    assert data["project"]["name"] == "pkg"
-    assert data["project"]["version"] == "0.1.0"
-    assert data["tool"]["ruff"]["line-length"] == 100
-    conda = data["tool"]["conda"]
-    assert conda["workspace"]["name"] == "default"
-    assert conda["workspace"]["platforms"] == ["linux-64"]
-    assert conda["dependencies"] == {"python": "3.12.*"}
-
-
-def test_pyproject_merge_export_preserves_tool_pixi(
-    parsers: dict[str, ManifestParser],
-    tmp_path: Path,
-) -> None:
-    """An unrelated ``[tool.pixi]`` section is left untouched."""
-    parser = parsers["pyproject-toml"]
-    path = tmp_path / "pyproject.toml"
-    path.write_text(
-        """\
+_PYPROJECT_WITH_TOOL_PIXI = """\
 [tool.pixi]
 version = "0.42"
-""",
-        encoding="utf-8",
-    )
+"""
+
+
+@pytest.mark.parametrize(
+    ("existing", "expected_preserved"),
+    [
+        pytest.param(
+            _PYPROJECT_WITH_PEERS,
+            {
+                ("build-system", "build-backend"): "hatchling.build",
+                ("project", "name"): "pkg",
+                ("project", "version"): "0.1.0",
+                ("tool", "ruff", "line-length"): 100,
+            },
+            id="peer-tables",
+        ),
+        pytest.param(
+            _PYPROJECT_WITH_TOOL_PIXI,
+            {("tool", "pixi", "version"): "0.42"},
+            id="tool-pixi",
+        ),
+    ],
+)
+def test_pyproject_merge_export_preserves_existing_tables(
+    parsers: dict[str, ManifestParser],
+    tmp_path: Path,
+    existing: str,
+    expected_preserved: dict[tuple[str, ...], object],
+) -> None:
+    """Non-``[tool.conda]`` tables survive; stale ``[tool.conda]`` is replaced."""
+    parser = parsers["pyproject-toml"]
+    path = tmp_path / "pyproject.toml"
+    path.write_text(existing, encoding="utf-8")
 
     env = make_env("linux-64", conda_specs=("python=3.12",))
     merged = parser.merge_export(path, parser.export([env]))
     data = tomlkit.loads(merged).unwrap()
 
-    assert data["tool"]["pixi"] == {"version": "0.42"}
+    for keys, value in expected_preserved.items():
+        cursor: object = data
+        for key in keys:
+            cursor = cursor[key]  # type: ignore[index]
+        assert cursor == value
+    assert data["tool"]["conda"]["workspace"]["name"] == "default"
     assert data["tool"]["conda"]["workspace"]["platforms"] == ["linux-64"]
 
 

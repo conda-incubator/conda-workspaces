@@ -106,13 +106,16 @@
   and the public surface stays discoverable. The canonical examples
   are `ResolvedEnvironment.virtual_package_overrides` /
   `scoped_virtual_packages` in `resolver.py` (moved out of
-  `lockfile.py` private helpers) and `ManifestParser.for_format` /
-  `resolve_source` / `copy_manifest` / `write_workspace_stub` /
-  `export` in `manifests/base.py` (moved out of
-  `cli/workspace/quickstart.py` / `cli/workspace/init.py` private
-  helpers; `export` is also what the ``conda-toml`` / ``pixi-toml``
-  / ``pyproject-toml`` exporter plugins in `plugin.py` register as
-  ``multiplatform_export``).
+  `lockfile.py` private helpers) and   `ManifestParser.for_format` /
+  `for_exporter_format` / `resolve_source` / `copy_manifest` /
+  `write_workspace_stub` / `export` / `merge_export` in
+  `manifests/base.py` (moved out of `cli/workspace/quickstart.py`
+  / `cli/workspace/init.py` / `cli/workspace/export.py` private
+  helpers; `export` is what the ``conda-toml`` / ``pixi-toml`` /
+  ``pyproject-toml`` exporter plugins in `plugin.py` register as
+  ``multiplatform_export``, and `merge_export` lets
+  `PyprojectTomlParser` splice ``[tool.conda]`` into an existing
+  ``pyproject.toml`` instead of overwriting peer tables).
 
 - Before adding a new private module-level helper, check in order:
   1. Does conda (or another existing dependency like
