@@ -24,7 +24,7 @@ Enter
 Wait /\$/
 Show
 
-Type "# Export the manifest to environment.yml — no install required"
+Type "# conda workspace export plugs into conda's exporter plugin system"
 Enter
 Sleep 500ms
 
@@ -38,16 +38,25 @@ Enter
 Wait /\$/
 Sleep 3s
 
-Type "# Same plugin system as 'conda export' — JSON works by filename alone"
+Type "# Cross-format: emit conda.toml for the workspace across two platforms"
 Enter
 Sleep 500ms
 
-Type@80ms "conda workspace export --file environment.json --platform linux-64"
+Type@80ms "conda workspace export --format conda-toml --platform linux-64 --platform osx-arm64"
 Enter
 Wait /\$/
-Sleep 2s
+Sleep 4s
 
-Type "# Re-emit the lockfile across every declared platform"
+Type "# Same content, nested under [tool.conda] — drops straight into pyproject.toml"
+Enter
+Sleep 500ms
+
+Type@80ms "conda workspace export --format pyproject-toml --platform linux-64 --platform osx-arm64"
+Enter
+Wait /\$/
+Sleep 4s
+
+Type "# Lock once, then re-emit in any format without re-solving"
 Enter
 Sleep 500ms
 
@@ -56,12 +65,12 @@ Enter
 Wait /\$/
 Sleep 2s
 
-Type@80ms "conda workspace export --from-lockfile --format conda-workspaces-lock-v1 --file conda.lock.copy"
+Type@80ms "conda workspace export --from-lockfile --format conda-lock-v1 --file env.conda-lock.yml"
 Enter
 Wait /\$/
 Sleep 2s
 
-Type@80ms "diff conda.lock conda.lock.copy && echo 'byte-identical'"
+Type@80ms "head -8 env.conda-lock.yml"
 Enter
 Wait /\$/
 Sleep 3s
