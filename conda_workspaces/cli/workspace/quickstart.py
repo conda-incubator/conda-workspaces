@@ -33,8 +33,8 @@ from pathlib import Path
 from rich.console import Console
 
 from ...exceptions import (
-    CondaWorkspacesError,
     ManifestExistsError,
+    QuickstartCopyError,
     WorkspaceNotFoundError,
 )
 from ...manifests.base import ManifestParser
@@ -55,10 +55,6 @@ _PROMPT_KEYS: tuple[str, ...] = (
     "debug",
     "trace",
 )
-
-
-class QuickstartCopyError(CondaWorkspacesError):
-    """``--copy`` / ``--clone`` pointed at something we cannot use."""
 
 
 def execute_quickstart(
@@ -234,7 +230,4 @@ def _copy_manifest(
     return target
 
 
-__all__ = [
-    "QuickstartCopyError",
-    "execute_quickstart",
-]
+__all__ = ["execute_quickstart"]

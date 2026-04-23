@@ -99,6 +99,19 @@ class ManifestExistsError(CondaWorkspacesError):
         )
 
 
+class QuickstartCopyError(CondaWorkspacesError):
+    """``conda workspace quickstart --copy`` / ``--clone`` cannot use the source.
+
+    Raised by :func:`conda_workspaces.cli.workspace.quickstart` when
+    ``--copy`` / ``--clone`` points at something we can't turn into a
+    manifest: a missing path, a directory without a recognisable
+    manifest, or a destination where one already exists.  Lives here
+    (not in the CLI module) so callers outside the CLI — tests,
+    downstream tooling — can catch it without importing the command
+    module itself.
+    """
+
+
 class FeatureNotFoundError(CondaWorkspacesError):
     """A feature referenced by an environment does not exist."""
 

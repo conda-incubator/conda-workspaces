@@ -10,10 +10,8 @@ import pytest
 from rich.console import Console
 
 from conda_workspaces.cli.workspace import quickstart as quickstart_module
-from conda_workspaces.cli.workspace.quickstart import (
-    QuickstartCopyError,
-    execute_quickstart,
-)
+from conda_workspaces.cli.workspace.quickstart import execute_quickstart
+from conda_workspaces.exceptions import QuickstartCopyError
 
 from ..conftest import make_args
 
