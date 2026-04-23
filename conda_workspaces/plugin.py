@@ -64,13 +64,13 @@ def conda_environment_specifiers() -> Iterable[CondaEnvironmentSpecifier]:
 
 @hookimpl
 def conda_environment_exporters() -> Iterable[CondaEnvironmentExporter]:
-    from . import env_export, lockfile
+    from . import export, lockfile
 
     yield CondaEnvironmentExporter(
         name=lockfile.FORMAT,
         aliases=lockfile.ALIASES,
         default_filenames=lockfile.DEFAULT_FILENAMES,
-        multiplatform_export=env_export.multiplatform_export,
+        multiplatform_export=export.multiplatform_export,
     )
 
 

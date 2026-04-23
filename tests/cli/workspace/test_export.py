@@ -9,17 +9,14 @@ from typing import TYPE_CHECKING
 import pytest
 from rich.console import Console
 
-from conda_workspaces.cli.workspace.export import (
-    execute_export,
-    resolve_exporter,
-    run_exporter,
-)
+from conda_workspaces.cli.workspace.export import execute_export
 from conda_workspaces.exceptions import (
     EnvironmentNotFoundError,
     EnvironmentNotInstalledError,
     LockfileNotFoundError,
     PlatformError,
 )
+from conda_workspaces.export import resolve_exporter, run_exporter
 from conda_workspaces.resolver import ResolvedEnvironment
 
 from ..conftest import make_args

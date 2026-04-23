@@ -4,7 +4,7 @@ Single source of truth for every ``conda.lock`` concern.  The file owns
 the read path, the write path, the ``CondaEnvironmentSpecifier`` plugin
 class (:class:`CondaLockLoader`), and the plugin metadata (name,
 aliases, default filename) consumed by ``plugin.py`` and
-``env_export.py``.
+:mod:`.export`.
 
 The ``conda.lock`` format is a *derivative* of rattler-lock v6
 (``pixi.lock``): same schema machinery, same top-level keys
@@ -31,7 +31,7 @@ The file layout is::
 
 On the *write* side, :func:`generate_lockfile` solves each environment
 and delegates YAML serialisation to the ``multiplatform_export`` hook
-in :mod:`.env_export` (the same path ``conda export`` uses), so every
+in :mod:`.export` (the same path ``conda export`` uses), so every
 ``conda.lock`` on disk comes out of a single formatter.  On the *read*
 side, :func:`install_from_lockfile` extracts the package list for one
 environment + platform via :class:`CondaLockLoader` and installs the
@@ -206,7 +206,7 @@ def generate_lockfile(
     Solves each environment in *resolved_envs* for every platform it
     declares (intersected with *platforms* when given) and writes the
     results to ``<workspace>/conda.lock``.  Serialisation is delegated
-    to :func:`.env_export.multiplatform_export` so this function and
+    to :func:`.export.multiplatform_export` so this function and
     ``conda export --format=conda-workspaces-lock-v1`` produce
     byte-identical output.  Solver chatter is silenced inside
     :meth:`ResolvedEnvironment.solve_for_platform` itself, so the
@@ -226,7 +226,7 @@ def generate_lockfile(
     """
     from conda.models.environment import Environment, EnvironmentConfig
 
-    from .env_export import multiplatform_export
+    from .export import multiplatform_export
 
     host_platform = ctx.platform
     envs: list[Environment] = []

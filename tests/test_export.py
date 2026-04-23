@@ -1,8 +1,8 @@
-"""Tests for conda_workspaces.env_export."""
+"""Tests for conda_workspaces.export."""
 
 from __future__ import annotations
 
-from conda_workspaces.env_export import (
+from conda_workspaces.export import (
     _envs_to_dict,
     multiplatform_export,
 )
