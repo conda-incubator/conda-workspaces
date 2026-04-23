@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-from conda_workspaces.export import (
-    build_lockfile_dict,
-    multiplatform_export,
-)
-from conda_workspaces.lockfile import LOCKFILE_VERSION
+from conda_workspaces.export import multiplatform_export
+from conda_workspaces.lockfile import LOCKFILE_VERSION, CondaLockLoader
 
 
 class FakeRecord:
@@ -40,7 +37,7 @@ class FakeEnvironment:
         self.external_packages = external or {}
 
 
-def test_build_lockfile_dict_single_env() -> None:
+def test_compose_single_env() -> None:
     pkg = FakeRecord("python", "https://example.com/python-3.10.conda")
     env = FakeEnvironment(
         name="default",
@@ -49,7 +46,7 @@ def test_build_lockfile_dict_single_env() -> None:
         packages=[pkg],
     )
 
-    result = build_lockfile_dict([env])  # type: ignore[arg-type]
+    result = CondaLockLoader.compose([env])  # type: ignore[arg-type]
 
     assert result["version"] == LOCKFILE_VERSION
     assert "default" in result["environments"]
@@ -60,26 +57,26 @@ def test_build_lockfile_dict_single_env() -> None:
     assert refs == [{"conda": "https://example.com/python-3.10.conda"}]
 
 
-def test_build_lockfile_dict_deduplicates_packages() -> None:
+def test_compose_deduplicates_packages() -> None:
     """Same URL across environments appears only once in packages list."""
     pkg = FakeRecord("python", "https://example.com/python-3.10.conda")
     env1 = FakeEnvironment("default", "linux-64", ("conda-forge",), [pkg])
     env2 = FakeEnvironment("test", "linux-64", ("conda-forge",), [pkg])
 
-    result = build_lockfile_dict([env1, env2])  # type: ignore[arg-type]
+    result = CondaLockLoader.compose([env1, env2])  # type: ignore[arg-type]
 
     assert len(result["packages"]) == 1
     assert "default" in result["environments"]
     assert "test" in result["environments"]
 
 
-def test_build_lockfile_dict_multiple_platforms() -> None:
+def test_compose_multiple_platforms() -> None:
     pkg_lin = FakeRecord("python", "https://example.com/python-linux.conda")
     pkg_mac = FakeRecord("python", "https://example.com/python-osx.conda")
     env_lin = FakeEnvironment("default", "linux-64", ("conda-forge",), [pkg_lin])
     env_mac = FakeEnvironment("default", "osx-arm64", ("conda-forge",), [pkg_mac])
 
-    result = build_lockfile_dict([env_lin, env_mac])  # type: ignore[arg-type]
+    result = CondaLockLoader.compose([env_lin, env_mac])  # type: ignore[arg-type]
 
     pkgs_by_plat = result["environments"]["default"]["packages"]
     assert "linux-64" in pkgs_by_plat
@@ -87,7 +84,7 @@ def test_build_lockfile_dict_multiple_platforms() -> None:
     assert len(result["packages"]) == 2
 
 
-def test_build_lockfile_dict_includes_external_packages() -> None:
+def test_compose_includes_external_packages() -> None:
     env = FakeEnvironment(
         name="default",
         platform="linux-64",
@@ -95,25 +92,25 @@ def test_build_lockfile_dict_includes_external_packages() -> None:
         external={"pip": ["https://pypi.org/simple/requests/"]},
     )
 
-    result = build_lockfile_dict([env])  # type: ignore[arg-type]
+    result = CondaLockLoader.compose([env])  # type: ignore[arg-type]
 
     refs = result["environments"]["default"]["packages"]["linux-64"]
     assert {"pip": "https://pypi.org/simple/requests/"} in refs
 
 
-def test_build_lockfile_dict_no_name_defaults() -> None:
+def test_compose_no_name_defaults() -> None:
     """Environment with name=None gets filed under 'default'."""
     env = FakeEnvironment(None, "linux-64", ("conda-forge",))  # type: ignore[arg-type]
 
-    result = build_lockfile_dict([env])  # type: ignore[arg-type]
+    result = CondaLockLoader.compose([env])  # type: ignore[arg-type]
 
     assert "default" in result["environments"]
 
 
-def test_build_lockfile_dict_channels() -> None:
+def test_compose_channels() -> None:
     env = FakeEnvironment("default", "linux-64", ("conda-forge", "bioconda"))
 
-    result = build_lockfile_dict([env])  # type: ignore[arg-type]
+    result = CondaLockLoader.compose([env])  # type: ignore[arg-type]
 
     channels = result["environments"]["default"]["channels"]
     assert channels == [{"url": "conda-forge"}, {"url": "bioconda"}]

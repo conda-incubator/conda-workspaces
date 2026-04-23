@@ -20,13 +20,7 @@ from conda.exceptions import CondaValueError
 from rich.console import Console
 
 from ...exceptions import EnvironmentNotFoundError
-from ...export import (
-    build_from_declared,
-    build_from_lockfile,
-    build_from_prefix,
-    resolve_exporter,
-    run_exporter,
-)
+from ...export import resolve_exporter, run_exporter
 from . import workspace_context_from_args
 
 if TYPE_CHECKING:
@@ -61,25 +55,21 @@ def execute_export(
     )
 
     if from_lockfile:
-        envs = build_from_lockfile(
-            ctx=ctx,
-            env_name=env_name,
+        envs = ctx.envs_from_lockfile(
+            env_name,
             requested_platforms=requested_platforms,
         )
     elif from_prefix:
-        envs = build_from_prefix(
-            ctx=ctx,
-            env_name=env_name,
+        envs = ctx.envs_from_prefix(
+            env_name,
             requested_platforms=requested_platforms,
             from_history=bool(getattr(args, "from_history", False)),
             no_builds=bool(getattr(args, "no_builds", False)),
             ignore_channels=bool(getattr(args, "ignore_channels", False)),
         )
     else:
-        envs = build_from_declared(
-            config=config,
-            ctx=ctx,
-            env_name=env_name,
+        envs = ctx.envs_from_manifest(
+            env_name,
             requested_platforms=requested_platforms,
         )
 

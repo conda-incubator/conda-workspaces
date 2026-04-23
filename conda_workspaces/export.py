@@ -14,29 +14,31 @@ Two responsibilities sit side by side:
   up and invoke *any* exporter registered on
   ``conda_context.plugin_manager`` (built-in ``environment-yaml`` /
   ``environment-json``, our own ``conda-workspaces-lock-v1``, any
-  third-party plugin).  :func:`build_from_declared`,
-  :func:`build_from_prefix` and :func:`build_from_lockfile` turn the
+  third-party plugin).  The three ``envs_from_*`` builders turn the
   three supported workspace sources — manifest, installed prefix,
   existing lockfile — into the
   :class:`~conda.models.environment.Environment` objects an exporter
-  consumes.
+  consumes.  Public methods on :class:`WorkspaceContext`
+  (:meth:`WorkspaceContext.envs_from_manifest`, etc.) delegate here;
+  this keeps the heavy conda imports out of ``context.py``.
 
 The CLI handler at :mod:`conda_workspaces.cli.workspace.export` is a
 thin argparse shim over these helpers; third-party code that wants
-the same capabilities without the CLI should import from here
+the same capabilities without the CLI should go through
+:class:`WorkspaceContext` (preferred) or import the builders
 directly.
 
 Each builder reuses an existing primitive where one exists:
 
-* :func:`build_from_prefix` — same :meth:`Environment.from_prefix` /
+* :func:`envs_from_prefix` — same :meth:`Environment.from_prefix` /
   :meth:`Environment.extrapolate` pair that
   :func:`conda.cli.main_export.execute` uses.
-* :func:`build_from_lockfile` — our own
+* :func:`envs_from_lockfile` — our own
   :class:`~conda_workspaces.lockfile.CondaLockLoader`
   ``EnvironmentSpecBase`` plugin (``env_for``), identical to the path
   conda takes when it reads ``--file conda.lock`` through
   :meth:`Environment.from_cli_with_file_envs`.
-* :func:`build_from_declared` — the only source without a conda
+* :func:`envs_from_manifest` — the only source without a conda
   equivalent.  Turning a declared-but-unsolved ``conda.toml``
   manifest into an :class:`Environment` is the capability that
   distinguishes ``conda workspace export`` from ``conda export``.
@@ -53,26 +55,22 @@ from conda.exceptions import CondaValueError, EnvironmentExporterNotDetected
 from conda.models.environment import Environment
 from conda.models.environment import EnvironmentConfig as CondaEnvConfig
 from conda.models.match_spec import MatchSpec
-from conda_lockfiles.rattler_lock.v6 import _record_to_dict
-from conda_lockfiles.validate_urls import validate_urls
 
 from .exceptions import (
     EnvironmentNotInstalledError,
     LockfileNotFoundError,
     PlatformError,
 )
-from .lockfile import FORMAT, LOCKFILE_VERSION, CondaLockLoader, lockfile_path
+from .lockfile import CondaLockLoader, lockfile_path
 from .resolver import resolve_environment
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
-    from typing import Any
 
     from conda.plugins.types import CondaEnvironmentExporter
 
     from .context import WorkspaceContext
-    from .models import WorkspaceConfig
 
 
 DEFAULT_FORMAT = "environment-yaml"
@@ -84,98 +82,35 @@ DEFAULT_FORMAT = "environment-yaml"
 _EXTERNAL_PACKAGES_PYPI_KEY = "pip"
 
 
-def build_lockfile_dict(envs: Iterable[Environment]) -> dict[str, Any]:
-    """Build a ``conda.lock`` YAML-ready dict from ``Environment`` objects.
-
-    The dict-level counterpart to :func:`multiplatform_export`: same
-    output shape (``version`` / ``environments`` / ``packages``)
-    minus the final YAML dump.  Public so callers that want to
-    inspect, merge, or hand off to a different serialiser can reuse
-    the same composition logic that backs
-    ``conda-workspaces-lock-v1``.  The ``build_*`` prefix mirrors the
-    env-side builders (:func:`build_from_declared`,
-    :func:`build_from_prefix`, :func:`build_from_lockfile`) so the
-    module reads consistently end-to-end.
-    """
-    seen_urls: set[str] = set()
-    packages: list[dict[str, Any]] = []
-    environments: dict[str, dict[str, Any]] = {}
-
-    for env in envs:
-        validate_urls(env, FORMAT)
-        # ruamel.yaml dispatches representers by exact type on dict
-        # keys, so any ``str`` subclass reaching this point (e.g. a
-        # leaked ``tomlkit.items.String``) raises ``TypeError: Object
-        # of type ... is not YAML serializable``.  Workspace parsers
-        # unwrap tomlkit docs at load time; this is the last-line
-        # guard for callers that build ``Environment`` objects through
-        # other paths (``conda export`` plugin, tests, third parties).
-        env_name = str(env.name or "default")
-        platform = str(env.platform)
-
-        if env_name not in environments:
-            environments[env_name] = {
-                "channels": [{"url": ch} for ch in env.config.channels],
-                "packages": {},
-            }
-
-        platform_refs: list[dict[str, str]] = []
-
-        for pkg in sorted(env.explicit_packages, key=lambda p: p.name):
-            platform_refs.append({"conda": pkg.url})
-            if pkg.url not in seen_urls:
-                packages.append(_record_to_dict(pkg))
-                seen_urls.add(pkg.url)
-
-        for manager, urls in env.external_packages.items():
-            for url in urls:
-                platform_refs.append({manager: url})
-
-        environments[env_name]["packages"][platform] = platform_refs
-
-    return {
-        "version": LOCKFILE_VERSION,
-        "environments": environments,
-        "packages": packages,
-    }
-
-
 def multiplatform_export(envs: Iterable[Environment]) -> str:
     """Export ``Environment`` objects to a ``conda.lock`` YAML string.
 
     Registered as the ``multiplatform_export`` callable on our
-    ``CondaEnvironmentExporter``; conda calls it with one
-    ``Environment`` per platform.  Composition runs through
-    :func:`build_lockfile_dict` so callers that want the pre-YAML
-    dict representation share the exact same logic.
+    :class:`~conda.plugins.types.CondaEnvironmentExporter`; conda
+    calls it with one :class:`Environment` per platform.  Composition
+    runs through :meth:`CondaLockLoader.compose` so callers that want
+    the pre-YAML dict representation share the exact same logic.
     """
-    env_dict = build_lockfile_dict(envs)
+    env_dict = CondaLockLoader.compose(envs)
     buf = io.StringIO()
     yaml_dump(env_dict, buf)
     return buf.getvalue()
 
 
-def build_from_declared(
-    *,
-    config: WorkspaceConfig,
+def envs_from_manifest(
     ctx: WorkspaceContext,
     env_name: str,
+    *,
     requested_platforms: tuple[str, ...] = (),
 ) -> list[Environment]:
-    """Resolve declared specs from the manifest into one ``Environment`` per platform.
+    """Implementation backing :meth:`WorkspaceContext.envs_from_manifest`.
 
-    Produces an :class:`Environment` with ``requested_packages`` only
-    (no solver, no installed packages required) — the novel piece of
-    ``conda workspace export``.  conda itself has no primitive for
-    "build an :class:`Environment` from a manifest without installing
-    it", which is why this lives here rather than in upstream conda.
-
-    Public because it is the distinguishing capability of
-    ``conda workspace export`` and the natural entry point for
-    third-party exporter plugins (or other tooling) that want to turn
-    a ``conda.toml`` manifest into a list of :class:`Environment`
-    objects without going through the CLI.
+    Kept at module level so the heavy conda imports
+    (``conda.models.environment``, ``conda.models.match_spec``) load
+    only when the consumer actually asks for an export, not every
+    time :class:`WorkspaceContext` is instantiated.
     """
+    config = ctx.config
     try:
         declared = resolve_environment(config, env_name)
     except PlatformError:
@@ -222,28 +157,16 @@ def build_from_declared(
     return envs
 
 
-def build_from_prefix(
-    *,
+def envs_from_prefix(
     ctx: WorkspaceContext,
     env_name: str,
+    *,
     requested_platforms: tuple[str, ...] = (),
     from_history: bool = False,
     no_builds: bool = False,
     ignore_channels: bool = False,
 ) -> list[Environment]:
-    """Build ``Environment`` objects from an installed workspace prefix.
-
-    Thin wrapper around the same :meth:`Environment.from_prefix` +
-    :meth:`Environment.extrapolate` pair that
-    :func:`conda.cli.main_export.execute` uses; the only workspace-specific
-    piece is the prefix lookup (:meth:`WorkspaceContext.env_prefix`)
-    and the :class:`EnvironmentNotInstalledError` guard.
-
-    When *requested_platforms* is empty or equals ``(ctx.platform,)``,
-    a single ``Environment`` for the host platform is returned.
-    Otherwise one ``Environment`` per requested platform is produced
-    via :meth:`Environment.extrapolate`.
-    """
+    """Implementation backing :meth:`WorkspaceContext.envs_from_prefix`."""
     if not ctx.env_exists(env_name):
         raise EnvironmentNotInstalledError(env_name)
     prefix_env = Environment.from_prefix(
@@ -260,24 +183,13 @@ def build_from_prefix(
     return [prefix_env.extrapolate(p) for p in requested_platforms]
 
 
-def build_from_lockfile(
-    *,
+def envs_from_lockfile(
     ctx: WorkspaceContext,
     env_name: str,
+    *,
     requested_platforms: tuple[str, ...] = (),
 ) -> list[Environment]:
-    """Load ``Environment`` objects from an existing workspace ``conda.lock``.
-
-    Delegates to :class:`~conda_workspaces.lockfile.CondaLockLoader`
-    (our ``EnvironmentSpecBase`` plugin), the same entry point conda
-    uses when it reads ``--file conda.lock`` through
-    :meth:`Environment.from_cli_with_file_envs`.
-
-    When *requested_platforms* is empty, every platform present in
-    the lockfile is returned.  Otherwise the list is filtered and
-    :class:`PlatformError` is raised for any requested platform that
-    the lockfile does not contain.
-    """
+    """Implementation backing :meth:`WorkspaceContext.envs_from_lockfile`."""
     path = lockfile_path(ctx)
     if not path.is_file():
         raise LockfileNotFoundError(env_name, path)

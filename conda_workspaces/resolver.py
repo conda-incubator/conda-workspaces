@@ -245,9 +245,9 @@ class ResolvedEnvironment:
         that set, preserving caller-supplied order; any value not in
         the declared set raises :class:`PlatformError`.
 
-        Used by :func:`conda_workspaces.export.envs_from_manifest` to
-        decide which platforms a manifest-only export emits, and safe
-        to use by any caller that needs the same policy.
+        Used by :meth:`WorkspaceContext.envs_from_manifest` to decide
+        which platforms a manifest-only export emits, and safe to use
+        by any caller that needs the same policy.
         """
         declared_set = set(self.platforms) or {fallback}
         if not requested:

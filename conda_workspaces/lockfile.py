@@ -49,7 +49,7 @@ from conda.plugins.types import EnvironmentSpecBase
 from .exceptions import AllTargetsUnsolvableError, LockfileNotFoundError, SolveError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
     from typing import Any, ClassVar, Final
 
     from conda.common.path import PathType
@@ -190,6 +190,66 @@ class CondaLockLoader(EnvironmentSpecBase):
                 f"Available environments: {dashlist(sorted(environments))}"
             )
         return environments[name]
+
+    @classmethod
+    def compose(cls, envs: Iterable[Environment]) -> dict[str, Any]:
+        """Compose ``Environment`` objects into a ``conda.lock`` dict.
+
+        The write-side companion to :meth:`env_for`: same loader class
+        owns both directions.  Returned dict has the canonical
+        ``version`` / ``environments`` / ``packages`` shape that
+        :func:`.export.multiplatform_export` (our
+        ``conda-workspaces-lock-v1`` plugin callable) then hands to
+        conda's YAML dumper.  Exposed as a public classmethod because
+        callers that want to inspect, merge, or hand off to a
+        different serialiser can reuse the same composition logic
+        without re-implementing it.
+        """
+        from conda_lockfiles.rattler_lock.v6 import _record_to_dict
+        from conda_lockfiles.validate_urls import validate_urls
+
+        seen_urls: set[str] = set()
+        packages: list[dict[str, Any]] = []
+        environments: dict[str, dict[str, Any]] = {}
+
+        for env in envs:
+            validate_urls(env, FORMAT)
+            # ruamel.yaml dispatches representers by exact type on dict
+            # keys, so any ``str`` subclass reaching this point (e.g. a
+            # leaked ``tomlkit.items.String``) raises ``TypeError:
+            # Object of type ... is not YAML serializable``.  Workspace
+            # parsers unwrap tomlkit docs at load time; this is the
+            # last-line guard for callers that build ``Environment``
+            # objects through other paths (``conda export`` plugin,
+            # tests, third parties).
+            env_name = str(env.name or "default")
+            platform = str(env.platform)
+
+            if env_name not in environments:
+                environments[env_name] = {
+                    "channels": [{"url": ch} for ch in env.config.channels],
+                    "packages": {},
+                }
+
+            platform_refs: list[dict[str, str]] = []
+
+            for pkg in sorted(env.explicit_packages, key=lambda p: p.name):
+                platform_refs.append({"conda": pkg.url})
+                if pkg.url not in seen_urls:
+                    packages.append(_record_to_dict(pkg))
+                    seen_urls.add(pkg.url)
+
+            for manager, urls in env.external_packages.items():
+                for url in urls:
+                    platform_refs.append({manager: url})
+
+            environments[env_name]["packages"][platform] = platform_refs
+
+        return {
+            "version": LOCKFILE_VERSION,
+            "environments": environments,
+            "packages": packages,
+        }
 
 
 def generate_lockfile(
