@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from conda.common.serialize.yaml import loads as yaml_loads
+from conda.exceptions import CondaValueError
 from rich.console import Console
 
 from conda_workspaces.cli.workspace.export import execute_export
@@ -93,8 +94,6 @@ def test_resolve_exporter_detects_by_filename(
 
 
 def test_resolve_exporter_unknown_format_raises() -> None:
-    from conda.exceptions import CondaValueError
-
     with pytest.raises(CondaValueError, match="Unknown export format"):
         resolve_exporter(format_name="not-a-real-format", file_path=None)
 
@@ -251,8 +250,6 @@ def test_export_multi_platform_with_single_platform_exporter_fails(
     pixi_workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """YAML/JSON exporters only accept one platform; extra platforms error out."""
-    from conda.exceptions import CondaValueError
-
     monkeypatch.chdir(pixi_workspace)
 
     with pytest.raises(CondaValueError, match="Multiple platforms"):
@@ -311,8 +308,6 @@ def test_export_from_prefix_not_installed_raises(
 def test_export_from_lockfile_and_from_prefix_are_mutex(
     pixi_workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from conda.exceptions import CondaValueError
-
     monkeypatch.chdir(pixi_workspace)
     with pytest.raises(CondaValueError, match="mutually exclusive"):
         execute_export(make_args(_DEFAULTS, from_lockfile=True, from_prefix=True))

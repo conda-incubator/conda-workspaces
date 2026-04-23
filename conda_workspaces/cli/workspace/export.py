@@ -38,34 +38,30 @@ def execute_export(
         console = Console(highlight=False)
 
     config, ctx = workspace_context_from_args(args)
-    env_name: str = getattr(args, "environment", None) or "default"
+    env_name: str = args.environment or "default"
 
     if env_name not in config.environments:
         raise EnvironmentNotFoundError(env_name, list(config.environments.keys()))
 
-    from_lockfile = bool(getattr(args, "from_lockfile", False))
-    from_prefix = bool(getattr(args, "from_prefix", False))
-    if from_lockfile and from_prefix:
+    if args.from_lockfile and args.from_prefix:
         raise CondaValueError(
             "--from-lockfile and --from-prefix are mutually exclusive."
         )
 
-    requested_platforms: tuple[str, ...] = tuple(
-        getattr(args, "export_platforms", None) or ()
-    )
+    requested_platforms: tuple[str, ...] = tuple(args.export_platforms or ())
 
-    if from_lockfile:
+    if args.from_lockfile:
         envs = ctx.envs_from_lockfile(
             env_name,
             requested_platforms=requested_platforms,
         )
-    elif from_prefix:
+    elif args.from_prefix:
         envs = ctx.envs_from_prefix(
             env_name,
             requested_platforms=requested_platforms,
-            from_history=bool(getattr(args, "from_history", False)),
-            no_builds=bool(getattr(args, "no_builds", False)),
-            ignore_channels=bool(getattr(args, "ignore_channels", False)),
+            from_history=args.from_history,
+            no_builds=args.no_builds,
+            ignore_channels=args.ignore_channels,
         )
     else:
         envs = ctx.envs_from_manifest(
@@ -74,8 +70,8 @@ def execute_export(
         )
 
     exporter, resolved_format = resolve_exporter(
-        format_name=getattr(args, "format", None),
-        file_path=getattr(args, "file", None),
+        format_name=args.format,
+        file_path=args.file,
     )
 
     if len(envs) > 1 and not exporter.multiplatform_export:
@@ -85,9 +81,9 @@ def execute_export(
 
     content = run_exporter(exporter, envs)
 
-    output_path: Path | None = getattr(args, "file", None)
-    dry_run = bool(getattr(args, "dry_run", False))
-    json_output = bool(getattr(args, "json", False))
+    output_path: Path | None = args.file
+    dry_run: bool = args.dry_run
+    json_output: bool = args.json
 
     if dry_run or output_path is None:
         # Always mirror to stdout when there's no file (or the user
