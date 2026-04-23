@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 import tomlkit
+from packaging.requirements import InvalidRequirement, Requirement
 
 from ..exceptions import ManifestExistsError
+
+_PYPI_NAME_TAIL_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(.*)$")
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -322,12 +326,6 @@ class ManifestParser(ABC):
         # non-identifier character — matches what ``environment-yaml``
         # does in the same case: pass the input through as-is rather
         # than crashing.
-        import re
-
-        from packaging.requirements import InvalidRequirement, Requirement
-
-        name_tail_re = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(.*)$")
-
         per_platform_conda: dict[str, dict[str, str]] = {}
         per_platform_pypi: dict[str, dict[str, str]] = {}
         for env in envs:
@@ -343,7 +341,7 @@ class ManifestParser(ABC):
                     req = Requirement(raw)
                     pypi_row[req.name] = str(req.specifier) or "*"
                 except InvalidRequirement:
-                    match = name_tail_re.match(raw.strip())
+                    match = _PYPI_NAME_TAIL_RE.match(raw.strip())
                     if match:
                         name_part, tail = match.groups()
                         pypi_row[name_part] = tail.strip() or "*"
