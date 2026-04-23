@@ -215,6 +215,32 @@ def test_parser_exporter_class_attrs(
     assert parser_cls.filenames[0] == filename
 
 
+def test_export_handles_wildcard_pypi_spec(
+    parsers: dict[str, ManifestParser],
+) -> None:
+    """Wildcard PyPI specs (``name = "*"``) round-trip through invalid PEP 508.
+
+    :meth:`~conda_workspaces.models.PyPIDependency.__str__` returns
+    ``"requests*"`` for ``requests = "*"``, which is not a valid PEP
+    508 requirement and makes
+    :class:`packaging.requirements.Requirement` raise.  The exporter
+    falls back to splitting name from tail so the output matches
+    ``environment-yaml``'s resilience (emit ``requests*`` /
+    ``requests = "*"`` rather than crashing).
+    """
+    parser = parsers["conda-toml"]
+    env = Environment(
+        name="default",
+        platform="linux-64",
+        config=CondaEnvConfig(channels=("conda-forge",)),
+        requested_packages=[MatchSpec("python=3.12")],
+        external_packages={"pip": ["requests*"]},
+    )
+
+    data = tomlkit.loads(parser.export([env])).unwrap()
+    assert data["pypi-dependencies"] == {"requests": "*"}
+
+
 def test_intersect_rows_filters_mismatches() -> None:
     """Rows only survive the intersection when every platform has the same value."""
     per_platform = {

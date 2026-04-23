@@ -266,8 +266,20 @@ class ManifestParser(ABC):
         # ``toml._parse_conda_deps`` / ``toml._parse_pypi_deps`` — a
         # name-only MatchSpec round-trips as ``"*"``, versioned
         # MatchSpecs keep their ``conda_build_form`` suffix, PyPI
-        # entries keep their ``Requirement.specifier`` string.
-        from packaging.requirements import Requirement
+        # entries keep their ``Requirement.specifier`` string.  When
+        # a PyPI entry is not a valid PEP 508 string (e.g. the
+        # ``"requests*"`` that
+        # :meth:`~conda_workspaces.models.PyPIDependency.__str__`
+        # emits for a ``requests = "*"`` manifest wildcard), fall
+        # back to splitting name from specifier at the first
+        # non-identifier character — matches what ``environment-yaml``
+        # does in the same case: pass the input through as-is rather
+        # than crashing.
+        import re
+
+        from packaging.requirements import InvalidRequirement, Requirement
+
+        name_tail_re = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(.*)$")
 
         per_platform_conda: dict[str, dict[str, str]] = {}
         per_platform_pypi: dict[str, dict[str, str]] = {}
@@ -280,8 +292,14 @@ class ManifestParser(ABC):
 
             pypi_row: dict[str, str] = {}
             for raw in env.external_packages.get("pip", []):
-                req = Requirement(raw)
-                pypi_row[req.name] = str(req.specifier) or "*"
+                try:
+                    req = Requirement(raw)
+                    pypi_row[req.name] = str(req.specifier) or "*"
+                except InvalidRequirement:
+                    match = name_tail_re.match(raw.strip())
+                    if match:
+                        name_part, tail = match.groups()
+                        pypi_row[name_part] = tail.strip() or "*"
             per_platform_pypi[env.platform] = pypi_row
 
         common_conda = cls._intersect_rows(per_platform_conda)
