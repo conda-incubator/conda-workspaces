@@ -26,6 +26,7 @@ without guessing.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import sys
 from pathlib import Path
@@ -56,6 +57,22 @@ def execute_quickstart(
     dry_run: bool = args.dry_run
     json_output: bool = args.json
     no_shell: bool = args.no_shell or json_output
+
+    # --json promises a single JSON object on stdout and nothing else.
+    # ``execute_init`` / ``execute_add`` / ``execute_install`` are
+    # unaware of ``--json`` — they emit Rich status lines via
+    # :mod:`conda_workspaces.cli.status` unconditionally — so under
+    # ``--json`` we hand them (and every ``console.print`` call
+    # inside quickstart itself) a throwaway Console whose output
+    # goes to an in-memory buffer.  Only the final ``json.dumps``
+    # write at the end of this function reaches real stdout.
+    if json_output:
+        console = Console(
+            file=io.StringIO(),
+            highlight=False,
+            force_terminal=False,
+            no_color=True,
+        )
     copy_from: Path | None = args.copy_from
     specs: list[str] = list(args.specs or [])
     env_name: str = args.environment or "default"
@@ -64,11 +81,16 @@ def execute_quickstart(
     workspace_root = Path.cwd()
 
     # Global prompt / output flags every sub-handler must see
-    # (``--json`` / ``--dry-run`` / ``--yes`` / ``-v`` / ``-q`` /
-    # ``--debug`` / ``--trace``) so terminal output and machine-readable
-    # output stay coherent across the pipeline.  ``add_output_and_prompt_options``
-    # on the parent parser guarantees each attribute exists.
-    prompt_keys = ("json", "yes", "dry_run", "quiet", "verbosity", "debug", "trace")
+    # (``--dry-run`` / ``--yes`` / ``-v`` / ``-q`` / ``--debug`` /
+    # ``--trace``) so terminal output stays coherent across the
+    # pipeline.  ``--json`` is deliberately not forwarded: quickstart
+    # owns the JSON surface (one structured payload on stdout at the
+    # end of this function), and sub-handlers stay in human-output
+    # mode — we just hand them a silent ``Console`` above so their
+    # Rich status lines land in a throwaway buffer instead of
+    # corrupting the payload.  ``add_output_and_prompt_options`` on
+    # the parent parser guarantees each remaining attribute exists.
+    prompt_keys = ("yes", "dry_run", "quiet", "verbosity", "debug", "trace")
 
     def with_prompts(**kwargs: object) -> argparse.Namespace:
         """Build a sub-handler ``Namespace`` from *kwargs* + ``prompt_keys``."""
@@ -135,7 +157,8 @@ def execute_quickstart(
                 name=args.name,
                 channels=args.channels,
                 platforms=args.platforms,
-            )
+            ),
+            console=console,
         )
         parser = ManifestParser.for_format_alias(fmt)
         manifest_path = parser.manifest_path(workspace_root)
@@ -154,7 +177,8 @@ def execute_quickstart(
                 no_install=False,
                 no_lockfile_update=False,
                 force_reinstall=args.force_reinstall,
-            )
+            ),
+            console=console,
         )
     else:
         execute_install(
@@ -164,7 +188,8 @@ def execute_quickstart(
                 force_reinstall=args.force_reinstall,
                 locked=args.locked,
                 frozen=args.frozen,
-            )
+            ),
+            console=console,
         )
 
     shell_spawned = False
