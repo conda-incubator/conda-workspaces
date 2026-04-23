@@ -36,23 +36,34 @@ _DEFAULTS = {
     "yes": False,
     "dry_run": False,
     "quiet": False,
-    "verbose": 0,
+    "verbosity": 0,
     "debug": False,
     "trace": False,
 }
 
 
 class _RecordingRunner:
-    """Callable that records each ``Namespace`` it was invoked with."""
+    """Callable that records each ``Namespace`` (and optional ``console``) it saw.
+
+    Mirrors the ``execute_X(args, *, console=None)`` signature the real
+    workspace sub-handlers expose, so tests can assert both the args
+    ``quickstart`` forwards *and* the ``Console`` it routed output
+    through (used to guard against ``--json`` leaking sub-handler
+    Rich output onto real stdout).
+    """
 
     def __init__(self, *, effect=None) -> None:
         self.calls: list[argparse.Namespace] = []
+        self.consoles: list[Console | None] = []
         self._effect = effect
 
-    def __call__(self, ns: argparse.Namespace) -> int:
+    def __call__(
+        self, ns: argparse.Namespace, *, console: Console | None = None
+    ) -> int:
         self.calls.append(ns)
+        self.consoles.append(console)
         if self._effect is not None:
-            self._effect(ns)
+            self._effect(ns, console=console)
         return 0
 
 
@@ -71,8 +82,11 @@ def orchestrated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """
     monkeypatch.chdir(tmp_path)
 
-    def _touch_manifest(ns: argparse.Namespace) -> None:
+    def _touch_manifest(
+        ns: argparse.Namespace, *, console: Console | None = None
+    ) -> None:
         """``execute_init`` would write a manifest; simulate it."""
+        del console
         fmt = getattr(ns, "manifest_format", "conda") or "conda"
         filename = {"conda": "conda.toml", "pixi": "pixi.toml"}.get(
             fmt, "pyproject.toml"
@@ -220,6 +234,56 @@ def test_quickstart_json_suppresses_shell_and_emits_payload(
     assert payload["specs_added"] == ["python=3.14"]
     assert payload["shell_spawned"] is False
     assert payload["manifest"] == "conda.toml"
+
+
+def test_quickstart_json_does_not_forward_flag_to_subhandlers(
+    orchestrated: dict,
+) -> None:
+    """``--json`` is owned by quickstart; sub-handlers never see it.
+
+    Quickstart silences their Rich output via a throwaway Console
+    instead of asking them to honour ``--json`` themselves, so
+    neither ``init`` nor ``add`` / ``install`` should observe the
+    attribute on the ``Namespace`` they receive.
+    """
+    orchestrated["run"](specs=["python=3.14"], json=True)
+
+    for name in ("init", "add"):
+        ns = orchestrated["runners"][name].calls[0]
+        assert not hasattr(ns, "json"), (
+            f"execute_{name} unexpectedly received --json; quickstart"
+            " should own the JSON surface and keep sub-handlers in"
+            " human-output mode"
+        )
+
+
+def test_quickstart_json_routes_subhandlers_through_silent_console(
+    orchestrated: dict,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Rich output from sub-handlers must not leak onto stdout under --json.
+
+    Simulates the real sub-handlers by having the fake ``init`` /
+    ``add`` runners print status lines through the ``Console`` they
+    receive; under ``--json`` that console must be a StringIO-backed
+    sink, so stdout only carries the final JSON payload.
+    """
+
+    def _noisy(ns, *, console):  # type: ignore[no-untyped-def]
+        del ns
+        if console is not None:
+            console.print("[bold cyan]Created[/bold cyan] workspace stub")
+
+    orchestrated["runners"]["init"]._effect = _noisy
+    orchestrated["runners"]["add"]._effect = _noisy
+
+    orchestrated["run"](specs=["python=3.14"], json=True)
+
+    captured = capsys.readouterr()
+    lines = [line for line in captured.out.splitlines() if line]
+    assert len(lines) == 1, f"expected a single JSON line on stdout, got: {lines!r}"
+    payload = json.loads(lines[0])
+    assert payload["specs_added"] == ["python=3.14"]
 
 
 def test_quickstart_dry_run_skips_side_effects(

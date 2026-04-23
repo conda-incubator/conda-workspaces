@@ -23,7 +23,7 @@ def _remove_args(
         task_name=task_name,
         dry_run=dry_run,
         quiet=False,
-        verbose=0,
+        verbosity=0,
         json=False,
     )
 

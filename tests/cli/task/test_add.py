@@ -31,7 +31,7 @@ def test_add_task(tmp_path, capsys, dry_run, expect_file_exists):
         description="A new task" if not dry_run else None,
         dry_run=dry_run,
         quiet=False,
-        verbose=0,
+        verbosity=0,
         json=False,
     )
     result = execute_add(args)
@@ -57,7 +57,7 @@ def test_add_task_auto_detect_creates_default_file(tmp_path, monkeypatch, capsys
         description=None,
         dry_run=False,
         quiet=False,
-        verbose=0,
+        verbosity=0,
         json=False,
     )
     result = execute_add(args)

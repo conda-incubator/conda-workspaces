@@ -210,6 +210,53 @@
   `conda_settings`, `conda_pre_commands`) and the
   `[project.entry-points.conda]` entry point.
 
+## `--json` contract
+
+- `--json` is an **output format**, not a behaviour switch. It belongs
+  on subcommands whose job is to produce data worth serializing
+  (queries, state dumps, structured result envelopes). Side-effect
+  subcommands — ones whose job is to mutate the workspace, drop into
+  a shell, or exec another process — must not advertise `--json`,
+  because they have nothing meaningful to emit and a noisy
+  human-readable stream on stdout would break a caller's JSON parser.
+
+- Which workspace / task subcommands emit structured JSON today, and
+  which don't:
+
+  | Emits JSON (use `add_output_and_prompt_options`)         | Side-effect only (use `_accept_json_silently`)          |
+  |----------------------------------------------------------|---------------------------------------------------------|
+  | `info`, `list`, `envs`, `export`, `quickstart`,          | `init`, `activate`, `run`, `shell`                      |
+  | `install`, `lock`, `add`, `remove`, `clean`, `import`,   |                                                         |
+  | `task run`, `task list`, `task add`, `task remove`,      |                                                         |
+  | `task export`                                            |                                                         |
+
+  When a side-effect subcommand grows a genuinely structured result
+  (e.g. ``init`` could emit ``{"manifest": "...", "format": "..."}``),
+  promote it to the left column — switch from `_accept_json_silently`
+  to `add_output_and_prompt_options` and teach the handler to honour
+  the flag.
+
+- Subcommands in the right column still have to **tolerate** `--json`.
+  Scripts and CI wrappers pass `--json` globally, and argparse-level
+  crashes with ``unrecognized arguments: --json`` are a worse UX than
+  silent acceptance. Call `_accept_json_silently(parser)` (in
+  ``cli/main.py``) on those parsers; it mirrors conda's own
+  pre-parser trick (``conda/cli/conda_argparse.py`` registers
+  ``--json`` with ``help=SUPPRESS`` on the pre-parser so every
+  top-level command tolerates the flag). The handler produces no
+  output on ``--json`` and relies on the exit code for status.
+
+- Orchestrator subcommands that call other subcommands (`quickstart`,
+  any future composite) own the JSON surface themselves: they emit
+  one structured payload on stdout at the end, and route every
+  nested handler through a silent Rich `Console` so the sub-handler's
+  status lines land in a throwaway buffer instead of corrupting the
+  payload. Do not propagate `--json` into the sub-handler's
+  ``Namespace`` — the nested handlers stay in human-output mode, and
+  the orchestrator silences their ``Console`` instead. See
+  ``execute_quickstart`` in ``cli/workspace/quickstart.py`` for the
+  canonical pattern.
+
 ## Parser search order
 
 - The parser registry searches for workspace manifests in this order:

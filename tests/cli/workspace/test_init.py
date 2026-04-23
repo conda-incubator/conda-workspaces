@@ -152,6 +152,36 @@ def test_init_default_name_from_dir(
     assert doc["workspace"]["name"] == tmp_path.name
 
 
+def test_init_silent_on_stdout_under_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``init --json`` must not print Rich status to stdout.
+
+    ``init`` has no structured JSON payload, but a caller that passes
+    ``--json`` (accepted silently via ``_accept_json_silently`` in
+    ``cli/main.py``) is piping stdout through a JSON parser. Leaking
+    the "Created ..." status line would corrupt that stream. See the
+    ``--json contract`` section in ``AGENTS.md``.
+    """
+    from conda_workspaces.cli.workspace import init as init_module
+
+    class _JsonContext:
+        json = True
+
+    monkeypatch.setattr(init_module, "conda_context", _JsonContext())
+    monkeypatch.chdir(tmp_path)
+    args = make_args(_DEFAULTS, manifest_format="conda", name="quiet")
+
+    result = execute_init(args)
+
+    assert result == 0
+    assert (tmp_path / "conda.toml").exists()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+
+
 def test_init_default_channels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     args = make_args(_DEFAULTS, manifest_format="pixi", name="ch-test", channels=None)

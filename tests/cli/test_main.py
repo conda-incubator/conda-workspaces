@@ -237,6 +237,30 @@ def test_shell_accepts_environment_flag() -> None:
 
 
 @pytest.mark.parametrize(
+    "argv",
+    [
+        ["init", "--json"],
+        ["activate", "--json"],
+        ["run", "--json", "--", "echo", "hi"],
+        ["shell", "--json"],
+    ],
+    ids=["init", "activate", "run", "shell"],
+)
+def test_side_effect_subcommands_accept_json_silently(argv: list[str]) -> None:
+    """Side-effect subcommands must tolerate ``--json`` without argparse errors.
+
+    These subcommands register ``--json`` with ``help=SUPPRESS`` via
+    :func:`_accept_json_silently` because they have no structured output
+    to emit, but CI wrappers still pass ``--json`` globally; crashing
+    with ``unrecognized arguments: --json`` is the wrong UX. See the
+    ``--json contract`` section in ``AGENTS.md``.
+    """
+    parser = generate_workspace_parser()
+    parsed = parser.parse_args(argv)
+    assert parsed.subcmd == argv[0]
+
+
+@pytest.mark.parametrize(
     "args, expected_attr, expected_value",
     [
         (["run", "test"], "task_name", "test"),

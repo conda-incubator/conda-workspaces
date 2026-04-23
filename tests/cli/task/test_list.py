@@ -23,7 +23,7 @@ def _make_console() -> tuple[Console, io.StringIO]:
 
 def _list_args(file: Path, *, use_json: bool = False) -> argparse.Namespace:
     return argparse.Namespace(
-        file=file, json=use_json, quiet=False, verbose=0, dry_run=False
+        file=file, json=use_json, quiet=False, verbosity=0, dry_run=False
     )
 
 

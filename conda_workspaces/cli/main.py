@@ -6,6 +6,7 @@ Argparse configuration and dispatch for both subcommands.
 from __future__ import annotations
 
 import argparse
+from argparse import SUPPRESS
 from pathlib import Path
 
 from conda.base.context import context as conda_context
@@ -14,7 +15,34 @@ from conda.cli.helpers import (
     add_output_and_prompt_options,
     add_parser_help,
 )
+from conda.common.constants import NULL
 from conda.exceptions import CondaError, CondaSystemExit, DryRunExit
+
+
+def _accept_json_silently(parser: argparse.ArgumentParser) -> None:
+    """Accept ``--json`` on a side-effect subcommand without advertising it.
+
+    Mirrors conda's own pre-parser trick (``conda/cli/conda_argparse.py``
+    registers ``--json`` with ``help=SUPPRESS`` on the pre-parser, so
+    every top-level conda command tolerates the flag). Our subcommands
+    that do not have structured output to emit — ``init``, ``activate``,
+    ``run``, ``shell`` — still get piped by scripts and CI wrappers that
+    set ``--json`` globally; crashing with ``unrecognized arguments:
+    --json`` is the wrong UX. This helper lets those commands silently
+    accept the flag, produce no output on ``--json`` (so the caller's
+    JSON parser still sees a clean stream on stdout), and rely on the
+    exit code for status.
+
+    Only register ``--json`` via this helper on commands that do **not**
+    call :func:`add_output_and_prompt_options`; otherwise argparse
+    raises ``ArgumentError: conflicting option string``.
+    """
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        default=NULL,
+        help=SUPPRESS,
+    )
 
 
 def _handle_error(exc: CondaError) -> int:
@@ -66,6 +94,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         add_help=False,
     )
     add_parser_help(init_parser)
+    _accept_json_silently(init_parser)
     init_parser.add_argument(
         "--format",
         choices=["pixi", "conda", "pyproject"],
@@ -439,6 +468,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         add_help=False,
     )
     add_parser_help(activate_parser)
+    _accept_json_silently(activate_parser)
     activate_parser.add_argument(
         "-e",
         "--environment",
@@ -452,6 +482,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         add_help=False,
     )
     add_parser_help(run_parser)
+    _accept_json_silently(run_parser)
     run_parser.add_argument(
         "-e",
         "--environment",
@@ -470,6 +501,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         add_help=False,
     )
     add_parser_help(shell_parser)
+    _accept_json_silently(shell_parser)
     shell_parser.add_argument(
         "-e",
         "--environment",

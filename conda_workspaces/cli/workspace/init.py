@@ -37,5 +37,11 @@ def execute_init(args: argparse.Namespace, *, console: Console | None = None) ->
 
     parser = ManifestParser.for_format_alias(args.manifest_format)
     path, verb = parser.write_workspace_stub(base_dir, name, channels, platforms)
-    status.message(console, verb, "workspace", path.name, detail=str(path.parent))
+    # ``init`` has no structured output of its own, but a caller that
+    # passes ``--json`` (accepted silently by ``_accept_json_silently``
+    # in ``cli/main.py``) is piping stdout through a JSON parser — the
+    # Rich status line would corrupt that. See the "--json contract"
+    # section in ``AGENTS.md``.
+    if not conda_context.json:
+        status.message(console, verb, "workspace", path.name, detail=str(path.parent))
     return 0
