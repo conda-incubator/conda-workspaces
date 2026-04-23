@@ -688,17 +688,28 @@ def test_virtual_package_overrides_lift_system_requirements(
     assert env.virtual_package_overrides("linux-64") == expected
 
 
-def test_solve_for_platform_applies_virtual_package_overrides(
+@pytest.mark.parametrize(
+    ("host", "target", "expected_glibc_during_solve"),
+    [
+        ("osx-arm64", "linux-64", "2.17"),
+        ("linux-64", "linux-64", None),
+    ],
+    ids=["cross-compile-seeds-baseline", "native-leaves-env-unchanged"],
+)
+def test_solve_for_platform_virtual_package_env(
     monkeypatch: pytest.MonkeyPatch,
     workspace_ctx_factory: Callable[..., WorkspaceContext],
     resolved_envs_factory,
+    host: str,
+    target: str,
+    expected_glibc_during_solve: str | None,
 ) -> None:
-    """Cross-compiled solves see the baseline ``CONDA_OVERRIDE_*`` in os.environ."""
-    monkeypatch.setattr(conda_context, "_subdir", "osx-arm64")
+    """``solve_for_platform`` seeds baselines only when host differs from target."""
+    monkeypatch.setattr(conda_context, "_subdir", host)
     monkeypatch.delenv("CONDA_OVERRIDE_GLIBC", raising=False)
 
     ctx = workspace_ctx_factory()
-    resolved = resolved_envs_factory(default=["linux-64"])["default"]
+    resolved = resolved_envs_factory(default=[target])["default"]
     resolved.conda_dependencies = {"python": MatchSpec("python=3.12")}
 
     observed: dict[str, str | None] = {}
@@ -717,42 +728,10 @@ def test_solve_for_platform_applies_virtual_package_overrides(
         lambda: FakeSolver,
     )
 
-    resolved.solve_for_platform("linux-64", prefix=ctx.env_prefix(resolved.name))
+    resolved.solve_for_platform(target, prefix=ctx.env_prefix(resolved.name))
 
-    assert observed["CONDA_OVERRIDE_GLIBC"] == "2.17"
-    assert observed["_subdir"] == "linux-64"
-    # After the solve, the baseline must have been restored.
+    assert observed["CONDA_OVERRIDE_GLIBC"] == expected_glibc_during_solve
+    assert observed["_subdir"] == target
+    # After the solve, any baseline the context manager applied must
+    # have been restored — nothing leaks into the surrounding process.
     assert os.environ.get("CONDA_OVERRIDE_GLIBC") is None
-
-
-def test_solve_for_platform_native_solve_leaves_env_unchanged(
-    monkeypatch: pytest.MonkeyPatch,
-    workspace_ctx_factory: Callable[..., WorkspaceContext],
-    resolved_envs_factory,
-) -> None:
-    """Native ``(host, target)`` solves do not mutate any ``CONDA_OVERRIDE_*``."""
-    monkeypatch.setattr(conda_context, "_subdir", "linux-64")
-    monkeypatch.delenv("CONDA_OVERRIDE_GLIBC", raising=False)
-
-    ctx = workspace_ctx_factory()
-    resolved = resolved_envs_factory(default=["linux-64"])["default"]
-    resolved.conda_dependencies = {"python": MatchSpec("python=3.12")}
-
-    seen_env: dict[str, str | None] = {}
-
-    class FakeSolver:
-        def __init__(self, *args, **kwargs) -> None:
-            seen_env["CONDA_OVERRIDE_GLIBC"] = os.environ.get("CONDA_OVERRIDE_GLIBC")
-
-        def solve_final_state(self) -> list:
-            return []
-
-    monkeypatch.setattr(
-        conda_context.plugin_manager,
-        "get_cached_solver_backend",
-        lambda: FakeSolver,
-    )
-
-    resolved.solve_for_platform("linux-64", prefix=ctx.env_prefix(resolved.name))
-
-    assert seen_env["CONDA_OVERRIDE_GLIBC"] is None

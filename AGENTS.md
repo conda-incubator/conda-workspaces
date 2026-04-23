@@ -52,9 +52,10 @@
   cases: `plugin.py` hooks (loaded on every `conda` invocation),
   `__main__.py` entry point (defers parser setup until invoked),
   `cli/main.py` subcommand dispatch (only the chosen handler is
-  loaded),   `context.py` methods (lazy by design to keep plugin load
-  under 1 ms), solver helpers inside
-  `ResolvedEnvironment.solve_for_platform` and
+  loaded), `context.py` methods (lazy by design to keep plugin load
+  under 1 ms), solver and virtual-package helpers inside
+  `ResolvedEnvironment` (`solve_for_platform`,
+  `virtual_package_overrides`, `scoped_virtual_packages`) and
   `lockfile.install_from_lockfile` (avoids pulling in heavy
   solver/envs machinery for lockfile-read operations),
   `template.py` where `_get_jinja_env()` lazily imports jinja2,
