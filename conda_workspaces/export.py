@@ -84,7 +84,7 @@ DEFAULT_FORMAT = "environment-yaml"
 _EXTERNAL_PACKAGES_PYPI_KEY = "pip"
 
 
-def envs_to_dict(envs: Iterable[Environment]) -> dict[str, Any]:
+def build_lockfile_dict(envs: Iterable[Environment]) -> dict[str, Any]:
     """Build a ``conda.lock`` YAML-ready dict from ``Environment`` objects.
 
     The dict-level counterpart to :func:`multiplatform_export`: same
@@ -92,7 +92,10 @@ def envs_to_dict(envs: Iterable[Environment]) -> dict[str, Any]:
     minus the final YAML dump.  Public so callers that want to
     inspect, merge, or hand off to a different serialiser can reuse
     the same composition logic that backs
-    ``conda-workspaces-lock-v1``.
+    ``conda-workspaces-lock-v1``.  The ``build_*`` prefix mirrors the
+    env-side builders (:func:`build_from_declared`,
+    :func:`build_from_prefix`, :func:`build_from_lockfile`) so the
+    module reads consistently end-to-end.
     """
     seen_urls: set[str] = set()
     packages: list[dict[str, Any]] = []
@@ -143,10 +146,10 @@ def multiplatform_export(envs: Iterable[Environment]) -> str:
     Registered as the ``multiplatform_export`` callable on our
     ``CondaEnvironmentExporter``; conda calls it with one
     ``Environment`` per platform.  Composition runs through
-    :func:`envs_to_dict` so callers that want the pre-YAML dict
-    representation share the exact same logic.
+    :func:`build_lockfile_dict` so callers that want the pre-YAML
+    dict representation share the exact same logic.
     """
-    env_dict = envs_to_dict(envs)
+    env_dict = build_lockfile_dict(envs)
     buf = io.StringIO()
     yaml_dump(env_dict, buf)
     return buf.getvalue()
