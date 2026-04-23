@@ -52,15 +52,18 @@ required — you can start with tasks alone and add workspace features later.
 
 ## Your first workspace
 
-![quickstart demo](../demos/quickstart.gif)
+![workspace-quickstart demo](../demos/workspace-quickstart.gif)
 
 The fastest path from "empty directory" to "installed environment with
 an activated shell" is `conda workspace quickstart`:
 
 ```bash
 conda workspace quickstart python=3.14 numpy
-# or:
+# or copy an existing workspace's manifest instead of running init
 conda workspace quickstart --copy ../other-workspace
+# scripted / CI: skip the interactive shell, emit a JSON summary
+conda workspace quickstart --no-shell --name demo "python=3.12" "numpy>=2"
+conda workspace quickstart --json --name demo "python=3.12"
 ```
 
 `quickstart` composes the other commands for you: it runs `init`
@@ -71,11 +74,28 @@ you already know from `init` (`--format`, `--name`, `-c/--channel`,
 `--platform`), `install` (`-e/--environment`, `--force-reinstall`,
 `--locked`, `--frozen`), and conda's shared flags (`--dry-run`,
 `--json`, `--yes`). Use `--no-shell` for CI or scripted runs; `--json`
-implies `--no-shell` and prints a single structured result at the
-end.
+implies `--no-shell`, silences the status banners the nested
+`init` / `add` / `install` handlers would otherwise print, and emits
+a single structured `{workspace, environment, manifest, specs_added,
+shell_spawned}` payload on stdout — safe to pipe into `jq`.
 
-If you prefer a manual setup, add workspace configuration to a
-`conda.toml` yourself:
+### Manual setup
+
+![quickstart demo](../demos/quickstart.gif)
+
+If you prefer to wire the commands together yourself, start from
+`conda workspace init` and incrementally add dependencies — each
+`add` installs into the affected environment and refreshes
+`conda.lock`:
+
+```bash
+conda workspace init --name my-project
+conda workspace add "python>=3.12" "numpy>=2"
+conda workspace add -e test "pytest>=8.0"
+conda workspace envs
+```
+
+Or add workspace configuration to a `conda.toml` by hand:
 
 ::::{tab-set}
 

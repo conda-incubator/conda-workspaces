@@ -8,6 +8,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Documented and enforced a consistent ``--json`` contract across
+  every `conda workspace` and `conda task` subcommand (see the
+  ``--json contract`` section in ``AGENTS.md``). Commands with
+  structured output (``info``, ``envs``, ``list``, ``export``,
+  ``import``, ``add``, ``remove``, ``install``, ``lock``,
+  ``quickstart``, and the ``conda task`` query commands) keep
+  emitting a single JSON payload on stdout. Side-effect-only
+  commands (``init``, ``activate``, ``run``, ``shell``) used to
+  crash with ``unrecognized arguments: --json`` when CI wrappers
+  passed the flag globally; they now accept it silently — the
+  flag is registered with ``argparse.SUPPRESS`` so it does not
+  show up in ``--help`` — produce no human-readable output, and
+  rely on the exit code for status. ``conda workspace quickstart
+  --json`` now owns the JSON surface end-to-end: sub-handlers
+  (``init`` / ``add`` / ``install``) are routed through a silent
+  Rich console so no status banners leak before the structured
+  payload. ``conda workspace init`` similarly suppresses its
+  ``Created conda.toml workspace`` status line under
+  ``conda_context.json``.
 - `conda workspace export` gained three new manifest-format exporter
   plugins: `conda-toml`, `pixi-toml`, and `pyproject-toml`. They
   register via the same `conda_environment_exporters` hook as

@@ -457,6 +457,8 @@ checks entirely and install the lockfile as-is.
 
 ### CI-split locking with `--merge`
 
+![ci-split demo](../demos/ci-split.gif)
+
 Solving every platform in one job becomes expensive as a workspace
 grows. `conda workspace lock` supports matrix pipelines that split
 solving across runners and stitch the fragments back together on a
@@ -492,14 +494,18 @@ conda workspace install -f path/to/conda.toml
 
 ## Export
 
+![export demo](../demos/export.gif)
+
 `conda workspace export` converts a workspace environment into any
 format registered through conda's `conda_environment_exporters`
 plugin hook: the built-in `environment-yaml` / `environment-json`
 exporters, the `conda-workspaces-lock-v1` exporter registered by
-conda-workspaces itself, and any third-party exporter (e.g.
-`conda-lockfiles`' rattler-lock-v6) the moment it is installed. There
-is no separate writer — every exporter reachable through `conda
-export` is reachable through `conda workspace export` and vice versa.
+conda-workspaces itself, the `conda-toml` / `pixi-toml` /
+`pyproject-toml` manifest exporters, and any third-party exporter
+(e.g. `conda-lockfiles`' rattler-lock-v6) the moment it is installed.
+There is no separate writer — every exporter reachable through
+`conda export` is reachable through `conda workspace export` and
+vice versa.
 
 ```bash
 # Default: environment-yaml from the declared manifest (no install needed)
@@ -507,6 +513,13 @@ conda workspace export -e default --file environment.yml
 
 # environment.json; format auto-detected from the filename
 conda workspace export -e default --file environment.json
+
+# Re-emit the workspace as a conda.toml manifest (cross-format export)
+conda workspace export --format conda-toml --file conda.toml
+
+# Same content, nested under [tool.conda] — drops into an existing
+# pyproject.toml next to [project], [build-system], [tool.ruff], ...
+conda workspace export --format pyproject-toml --file pyproject.toml
 
 # Multi-platform conda.lock re-emit via the lockfile exporter
 conda workspace export --format conda-workspaces-lock-v1 \
@@ -534,8 +547,35 @@ Three sources feed the exporter:
 `--platform` (repeatable) intersects declared / available platforms
 with the chosen subset. Passing multiple platforms requires an
 exporter that opts into `multiplatform_export` — the
-`conda-workspaces-lock-v1` and rattler-lock exporters do; the
+`conda-workspaces-lock-v1`, rattler-lock, and the three manifest
+exporters (`conda-toml`, `pixi-toml`, `pyproject-toml`) do; the
 single-platform yaml / json ones raise a clear error.
+
+### Manifest-format exporters
+
+The `conda-toml`, `pixi-toml`, and `pyproject-toml` exporters round-trip
+a workspace back into any of the manifest dialects conda-workspaces
+already reads, so `conda workspace import` and `conda workspace
+export` together form a bidirectional translator across every
+supported format. Declared specs that appear on every requested
+platform land under the top-level `[dependencies]` /
+`[pypi-dependencies]` tables; platform-specific deltas move under
+`[target.<platform>.*]`. The `pyproject-toml` exporter wraps the
+same content under `[tool.conda]`, and when the target
+`pyproject.toml` already exists it splices the `[tool.conda]`
+subtree into the existing document so peer `[project]`,
+`[build-system]`, `[tool.ruff]`, `[tool.pixi]`, and friends
+survive untouched (any stale `[tool.conda]` is replaced).
+`conda.toml` and `pixi.toml` keep the default overwrite semantics
+of every other conda exporter.
+
+When `--file` is not passed, the format is inferred from the
+basename (`conda.toml` → `conda-toml`, `pixi.toml` → `pixi-toml`,
+`pyproject.toml` → `pyproject-toml`, `environment.yml` /
+`environment.yaml` → `environment-yaml`, `environment.json` →
+`environment-json`, `conda.lock` → `conda-workspaces-lock-v1`).
+See [Format aliases](reference/format-aliases.md) for the full
+alias table.
 
 ## Project-local environments
 
