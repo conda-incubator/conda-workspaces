@@ -9,6 +9,7 @@ Animated terminal demos recorded with [VHS](https://github.com/charmbracelet/vhs
 | Demo | Description |
 |---|---|
 | `quickstart` | Init a workspace, add deps, install, list envs, run a command |
+| `workspace-quickstart` | Single-command bootstrap with `conda workspace quickstart` |
 | `lockfile` | Install, lock, clean, reinstall from lockfile |
 | `export` | Export manifests to environment.yml / environment.json / conda.lock via the plugin hook |
 | `ci-split` | Split locking across a CI matrix and merge fragments with `--merge` |
