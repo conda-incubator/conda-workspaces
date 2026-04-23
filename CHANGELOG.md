@@ -21,6 +21,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   agree on the version. `__cuda` and `__archspec` are never
   auto-baselined — declare them in `[system-requirements]` or via
   `CONDA_OVERRIDE_*` when you need them.
+- New `conda workspace export` command. Delegates to conda's
+  `conda_environment_exporters` plugin hook, so the built-in
+  `environment-yaml` / `environment-json` exporters, the
+  `conda-workspaces-lock-v1` exporter, and any third-party exporter
+  (e.g. `conda-lockfiles`' rattler-lock) are all reachable through
+  the same CLI — `conda workspace export --format ...` produces
+  byte-identical output to `conda export --format ...` for the same
+  `Environment`. Three sources feed the exporter: the declared
+  manifest (default, no solver or install required), `--from-lockfile`
+  (reads an existing `conda.lock` via `CondaLockLoader`), and
+  `--from-prefix` (mirrors `conda export` semantics including
+  `--no-builds`, `--ignore-channels`, `--from-history`). The format
+  is picked by `--format`, auto-detected from `--file`'s basename,
+  or falls back to `environment-yaml`. `--platform` (repeatable)
+  restricts the export and requires a `multiplatform_export`-capable
+  exporter when more than one platform is given. `--dry-run` prints
+  to stdout without writing; `--json` emits a structured result.
 - `conda workspace lock` now writes a single `conda.lock` that covers
   every platform declared by each environment, not just the host
   platform. Target-platform solves run with `context._subdir`

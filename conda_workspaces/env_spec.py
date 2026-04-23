@@ -7,7 +7,7 @@ them.
 
 The sibling lockfile specifier (:class:`~.lockfile.CondaLockLoader`)
 handles ``conda.lock`` and lives alongside its write path in
-:mod:`.lockfile`; the two modules mirror ``env_export.py`` in that each
+:mod:`.lockfile`; the two modules mirror :mod:`.export` in that each
 is the complete plugin surface for its format.
 """
 

@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from conda.models.environment import Environment
+
     from .models import WorkspaceConfig
 
 
@@ -73,6 +75,93 @@ class WorkspaceContext:
 
         prefix = self.env_prefix(env_name)
         return PrefixData(str(prefix)).is_environment()
+
+    def envs_from_manifest(
+        self,
+        env_name: str,
+        *,
+        requested_platforms: tuple[str, ...] = (),
+    ) -> list[Environment]:
+        """Build ``Environment`` objects from the workspace manifest.
+
+        Produces an :class:`~conda.models.environment.Environment` per
+        target platform with ``requested_packages`` populated from the
+        manifest's declared specs (no solver, no installed packages
+        required) — the novel capability of ``conda workspace export``
+        vs. ``conda export``, which always operates on an installed
+        prefix.  When the manifest declares platforms conda doesn't
+        know, falls back to :attr:`platform` so the export still
+        produces something useful rather than crashing on validation.
+
+        This is the natural entry point for third-party exporter
+        plugins (or other tooling) that want to turn a ``conda.toml``
+        into a list of :class:`Environment` objects without going
+        through the CLI.
+        """
+        from .export import envs_from_manifest
+
+        return envs_from_manifest(
+            self, env_name, requested_platforms=requested_platforms
+        )
+
+    def envs_from_prefix(
+        self,
+        env_name: str,
+        *,
+        requested_platforms: tuple[str, ...] = (),
+        from_history: bool = False,
+        no_builds: bool = False,
+        ignore_channels: bool = False,
+    ) -> list[Environment]:
+        """Build ``Environment`` objects from an installed workspace prefix.
+
+        Thin wrapper around the same :meth:`Environment.from_prefix` +
+        :meth:`Environment.extrapolate` pair that
+        :func:`conda.cli.main_export.execute` uses; the only
+        workspace-specific pieces are the prefix lookup
+        (:meth:`env_prefix`) and the
+        :class:`EnvironmentNotInstalledError` guard.
+
+        When *requested_platforms* is empty or equals
+        ``(self.platform,)``, a single :class:`Environment` for the
+        host platform is returned.  Otherwise one
+        :class:`Environment` per requested platform is produced via
+        :meth:`Environment.extrapolate`.
+        """
+        from .export import envs_from_prefix
+
+        return envs_from_prefix(
+            self,
+            env_name,
+            requested_platforms=requested_platforms,
+            from_history=from_history,
+            no_builds=no_builds,
+            ignore_channels=ignore_channels,
+        )
+
+    def envs_from_lockfile(
+        self,
+        env_name: str,
+        *,
+        requested_platforms: tuple[str, ...] = (),
+    ) -> list[Environment]:
+        """Load ``Environment`` objects from the workspace ``conda.lock``.
+
+        Delegates to :class:`~conda_workspaces.lockfile.CondaLockLoader`,
+        the same entry point conda uses when it reads ``--file
+        conda.lock`` through
+        :meth:`Environment.from_cli_with_file_envs`.
+
+        When *requested_platforms* is empty, every platform present in
+        the lockfile is returned.  Otherwise the list is filtered and
+        :class:`PlatformError` is raised for any requested platform the
+        lockfile does not contain.
+        """
+        from .export import envs_from_lockfile
+
+        return envs_from_lockfile(
+            self, env_name, requested_platforms=requested_platforms
+        )
 
 
 class CondaContext:

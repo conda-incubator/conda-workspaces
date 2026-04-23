@@ -28,8 +28,8 @@
   task normalization: `manifests/normalize.py`. Base class:
   `manifests/base.py` (`ManifestParser`). The `manifests/` package is
   an internal substrate; public plugin API surfaces (`env_spec.py`,
-  `lockfile.py`, `env_export.py`) sit at the package root and own one
-  format each.
+  `lockfile.py`, `export.py`) sit at the package root and own one
+  format or concern each.
 
 - Tests mirror the source structure. Tests for
   `conda_workspaces/cli/workspace/install.py` live in

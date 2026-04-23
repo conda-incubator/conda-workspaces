@@ -8,7 +8,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from conda.base.context import context as conda_context
 from conda.cli.helpers import (
+    LazyChoicesAction,
     add_output_and_prompt_options,
     add_parser_help,
 )
@@ -21,8 +23,6 @@ def _handle_error(exc: CondaError) -> int:
     In JSON or debug mode, re-raises so conda's own handler takes over
     (preserving tracebacks and structured JSON output).
     """
-    from conda.base.context import context as conda_context
-
     if conda_context.json or conda_context.debug:
         raise exc
 
@@ -158,6 +158,102 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
             " platform) pair instead of aborting. Other errors (missing"
             " channel, invalid manifest, etc.) still abort. Fails if no"
             " pair can be solved."
+        ),
+    )
+
+    export_parser = sub.add_parser(
+        "export",
+        help="Export a workspace environment to environment.yml / conda.lock / ...",
+        add_help=False,
+    )
+    add_parser_help(export_parser)
+    add_output_and_prompt_options(export_parser)
+
+    export_parser.add_argument(
+        "-e",
+        "--environment",
+        default="default",
+        help="Environment to export (default: default).",
+    )
+
+    # Format choices are resolved lazily via
+    # context.plugin_manager.get_exporter_format_mapping() so any
+    # exporter plugin (conda-workspaces' own conda.lock, conda's
+    # built-in environment-yaml / environment-json, third-party
+    # rattler-lock, ...) appears the moment it is installed.
+    def _format_choices() -> list[str]:
+        return sorted(conda_context.plugin_manager.get_exporter_format_mapping().keys())
+
+    export_parser.add_argument(
+        "--format",
+        default=None,
+        action=LazyChoicesAction,
+        choices_func=_format_choices,
+        help=(
+            "Export format name or alias (e.g. environment-yaml, json, "
+            "conda-workspaces-lock-v1). Defaults to environment-yaml when "
+            "--file is omitted, or detected from --file's basename."
+        ),
+    )
+    export_parser.add_argument(
+        "-f",
+        "--file",
+        type=Path,
+        default=None,
+        help="Write output to this file (default: stdout).",
+    )
+    export_parser.add_argument(
+        "--platform",
+        action="append",
+        default=None,
+        dest="export_platforms",
+        help=(
+            "Restrict export to this platform (e.g. linux-64). Repeatable."
+            " When multiple platforms are given, the chosen format must"
+            " support multi-platform export (e.g. conda-workspaces-lock-v1)."
+        ),
+    )
+
+    source_group = export_parser.add_mutually_exclusive_group()
+    source_group.add_argument(
+        "--from-lockfile",
+        action="store_true",
+        default=False,
+        help=(
+            "Build the export from an existing conda.lock via the"
+            " CondaLockLoader, instead of the declared manifest."
+        ),
+    )
+    source_group.add_argument(
+        "--from-prefix",
+        action="store_true",
+        default=False,
+        help=(
+            "Build the export from the installed prefix, matching"
+            " `conda export` semantics (enables --no-builds,"
+            " --ignore-channels, --from-history)."
+        ),
+    )
+
+    export_parser.add_argument(
+        "--no-builds",
+        action="store_true",
+        default=False,
+        help="Omit build strings from the exported specs (requires --from-prefix).",
+    )
+    export_parser.add_argument(
+        "--ignore-channels",
+        action="store_true",
+        default=False,
+        help="Do not include channel metadata (requires --from-prefix).",
+    )
+    export_parser.add_argument(
+        "--from-history",
+        action="store_true",
+        default=False,
+        help=(
+            "Export only explicit specs from the prefix's history"
+            " (requires --from-prefix)."
         ),
     )
 
@@ -415,6 +511,10 @@ def _dispatch_workspace(args: argparse.Namespace, subcmd: str) -> int:
         from .workspace.lock import execute_lock
 
         return execute_lock(args)
+    elif subcmd == "export":
+        from .workspace.export import execute_export
+
+        return execute_export(args)
     elif subcmd == "list":
         from .workspace.list import execute_list
 

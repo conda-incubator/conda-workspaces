@@ -461,6 +461,53 @@ You can also point to a specific manifest with `--file` / `-f`:
 conda workspace install -f path/to/conda.toml
 ```
 
+## Export
+
+`conda workspace export` converts a workspace environment into any
+format registered through conda's `conda_environment_exporters`
+plugin hook: the built-in `environment-yaml` / `environment-json`
+exporters, the `conda-workspaces-lock-v1` exporter registered by
+conda-workspaces itself, and any third-party exporter (e.g.
+`conda-lockfiles`' rattler-lock-v6) the moment it is installed. There
+is no separate writer — every exporter reachable through `conda
+export` is reachable through `conda workspace export` and vice versa.
+
+```bash
+# Default: environment-yaml from the declared manifest (no install needed)
+conda workspace export -e default --file environment.yml
+
+# environment.json; format auto-detected from the filename
+conda workspace export -e default --file environment.json
+
+# Multi-platform conda.lock re-emit via the lockfile exporter
+conda workspace export --format conda-workspaces-lock-v1 \
+    --platform linux-64 --platform osx-arm64 --file conda.lock
+
+# Build the export from an existing conda.lock rather than re-solving
+conda workspace export --from-lockfile --file environment.yml
+
+# Mirror ``conda export`` semantics on an installed prefix
+conda workspace export --from-prefix --no-builds --from-history
+```
+
+Three sources feed the exporter:
+
+- **Declared (default)**: resolves the declared specs from the
+  manifest per platform. No solver, no installed environment required
+  — this is what makes the command useful before the first
+  `conda workspace install`.
+- **`--from-lockfile`**: reconstructs `Environment` objects from an
+  existing `conda.lock` via the `CondaLockLoader`.
+- **`--from-prefix`**: reads the live installed prefix the same way
+  `conda export` does, so `--no-builds`, `--ignore-channels`, and
+  `--from-history` behave identically.
+
+`--platform` (repeatable) intersects declared / available platforms
+with the chosen subset. Passing multiple platforms requires an
+exporter that opts into `multiplatform_export` — the
+`conda-workspaces-lock-v1` and rattler-lock exporters do; the
+single-platform yaml / json ones raise a clear error.
+
 ## Project-local environments
 
 All environments are installed under `.conda/envs/` in your project

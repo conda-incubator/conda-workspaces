@@ -37,4 +37,4 @@ reference](https://github.com/conda-incubator/conda-lockfiles/blob/main/docs/for
 The single source of truth for these constants is
 `conda_workspaces/env_spec.py` (manifest) and
 `conda_workspaces/lockfile.py` (lockfile); `plugin.py` and
-`env_export.py` import from there so the three code paths never drift.
+`export.py` import from there so the three code paths never drift.

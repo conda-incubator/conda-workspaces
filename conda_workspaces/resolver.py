@@ -230,6 +230,33 @@ class ResolvedEnvironment:
             except (UnsatisfiableError, SystemExit) as exc:
                 raise SolveError(self.name, str(exc), platform=platform) from exc
 
+    def target_platforms(
+        self,
+        *,
+        requested: tuple[str, ...] = (),
+        fallback: str,
+    ) -> tuple[str, ...]:
+        """Return the platforms this environment should emit for.
+
+        :attr:`platforms` is the declared set (feature ∩ workspace,
+        already merged by :func:`resolve_environment`); if empty,
+        *fallback* (typically the host subdir) is used instead.  When
+        *requested* is supplied, the result is the intersection with
+        that set, preserving caller-supplied order; any value not in
+        the declared set raises :class:`PlatformError`.
+
+        Used by :meth:`WorkspaceContext.envs_from_manifest` to decide
+        which platforms a manifest-only export emits, and safe to use
+        by any caller that needs the same policy.
+        """
+        declared_set = set(self.platforms) or {fallback}
+        if not requested:
+            return tuple(sorted(declared_set))
+        unknown = [p for p in requested if p not in declared_set]
+        if unknown:
+            raise PlatformError(unknown[0], sorted(declared_set))
+        return tuple(p for p in requested if p in declared_set)
+
 
 def resolve_environment(
     config: WorkspaceConfig,

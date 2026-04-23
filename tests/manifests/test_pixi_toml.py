@@ -250,7 +250,7 @@ def test_parse_returns_plain_str_values(tmp_path):
     Regression guard for a lockfile-write failure: ``tomlkit.loads``
     returns ``tomlkit.items.String`` instances (a ``str`` subclass).
     YAML serialisation uses exact-type dispatch on dict keys, so any
-    ``tomlkit`` string that reaches ``env_export`` as a key (platform
+    ``tomlkit`` string that reaches ``export`` as a key (platform
     or environment name) raises ``TypeError: Object of type String is
     not YAML serializable``.  Normalising at the parser keeps
     everything downstream oblivious to the TOML backend.
