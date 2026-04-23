@@ -227,6 +227,27 @@
   single monolithic page. The index uses `sphinx-design` grid cards
   for navigation.
 
+## Pull request and issue descriptions
+
+- GitHub renders Markdown with GitHub Flavored Markdown (GFM), which
+  does **not** reflow hand-wrapped prose the way CommonMark does in
+  plain text. Hard-wrapping a paragraph at ~72 columns inside a list
+  item, blockquote, or bullet produces ragged line breaks on the PR
+  page because GFM treats the extra indentation as continuation and
+  keeps the physical newlines visible. Write PR and issue bodies
+  (titles, summaries, bullet lists, test plans) as **one line per
+  paragraph or bullet** — let GitHub wrap them in the browser. Reserve
+  hard wraps for code fences, tables, and CLI help text where column
+  width actually matters.
+
+- Keep the same rule for commit messages only in the *subject line*
+  (~72 chars). Commit bodies can use hand-wrapped paragraphs because
+  they're read in terminals via `git log`, not rendered through GFM.
+
+- When passing bodies through `gh pr create` / `gh issue create`, use
+  a heredoc (`--body "$(cat <<'EOF' ... EOF)"`) and write each bullet
+  on a single line. Do not pre-wrap.
+
 ## Plugin design
 
 - Each public plugin module at the package root owns exactly one
