@@ -21,11 +21,12 @@ Each of the three ``Environment`` sources reuses an existing primitive:
   ``--file conda.lock`` through
   :meth:`Environment.from_cli_with_file_envs`.
 * (default) ``declared`` — the only source without a conda equivalent,
-  kept out-of-line as :func:`_build_from_declared`.  This is the
+  exposed as the public :func:`build_from_declared`.  This is the
   capability that distinguishes ``conda workspace export`` from
   ``conda export``: emit an ``environment.yml`` / ``conda.lock`` /
   anything directly from the manifest without installing or solving
-  first.
+  first, and the hook point for plugin exporters that want to consume
+  declared-but-unsolved workspace environments directly.
 """
 
 from __future__ import annotations
@@ -142,7 +143,7 @@ def execute_export(
         else:
             envs = [prefix_env.extrapolate(p) for p in requested_platforms]
     else:
-        envs = _build_from_declared(
+        envs = build_from_declared(
             config=config,
             ctx=ctx,
             env_name=env_name,
@@ -208,7 +209,7 @@ def execute_export(
     return 0
 
 
-def _build_from_declared(
+def build_from_declared(
     *,
     config: WorkspaceConfig,
     ctx: WorkspaceContext,
@@ -221,7 +222,13 @@ def _build_from_declared(
     (no solver, no installed packages required) — the novel piece of
     ``conda workspace export``.  conda itself has no primitive for
     "build an :class:`Environment` from a manifest without installing
-    it", hence the dedicated helper.
+    it", which is why this lives here rather than in upstream conda.
+
+    Public because it is the distinguishing capability of
+    ``conda workspace export`` and the natural entry point for
+    third-party exporter plugins (or other tooling) that want to turn
+    a ``conda.toml`` manifest into a list of :class:`Environment`
+    objects without going through the CLI.
     """
     try:
         declared = resolve_environment(config, env_name)
