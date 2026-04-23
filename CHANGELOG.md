@@ -21,6 +21,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   byte-stable with a single-run `conda workspace lock` over the same
   inputs. `--merge` is mutually exclusive with `--environment`,
   `--platform`, `--skip-unsolvable`, and `--output`.
+- New `conda workspace quickstart` command that bootstraps a workspace
+  in one step. It composes the existing `init`, `add`, `install`, and
+  `shell` handlers: run it in an empty directory to scaffold a
+  manifest, immediately add any specs passed on the command line
+  (e.g. `conda workspace quickstart python=3.14 numpy`), install the
+  selected environment, and drop into an activated shell. `--copy`
+  (alias `--clone`) copies an existing workspace's manifest from a
+  directory or file path instead of running `init`; `--format` is
+  then ignored with a warning since the copied manifest dictates the
+  format. Flags from `init` (`--name`, `-c/--channel`, `--platform`,
+  `--format`) and `install` (`-e/--environment`, `--force-reinstall`,
+  `--locked`, `--frozen`) are forwarded verbatim, alongside conda's
+  shared output/prompt options (`--dry-run`, `--json`, `--yes`,
+  `-v/-q`, `--debug`, `--trace`, `--console`). `--no-shell` skips the
+  final `shell` step (for CI), `--json` implies `--no-shell` and
+  prints a single structured `{workspace, environment, manifest,
+  specs_added, shell_spawned}` payload, and `--dry-run` reports the
+  pipeline without touching the filesystem.
 - `conda workspace lock` now writes a single `conda.lock` that covers
   every platform declared by each environment, not just the host
   platform. Target-platform solves run with `context._subdir`

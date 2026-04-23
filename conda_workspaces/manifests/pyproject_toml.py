@@ -13,7 +13,12 @@ from typing import TYPE_CHECKING
 
 import tomlkit
 
-from ..exceptions import TaskNotFoundError, TaskParseError, WorkspaceParseError
+from ..exceptions import (
+    ManifestExistsError,
+    TaskNotFoundError,
+    TaskParseError,
+    WorkspaceParseError,
+)
 from ..models import WorkspaceConfig
 from .base import ManifestParser
 from .normalize import parse_feature_tasks, parse_tasks_and_targets
@@ -36,10 +41,56 @@ class PyprojectTomlParser(ManifestParser):
     2. ``[tool.pixi.*]`` – pixi compatibility
     """
 
+    format_alias = "pyproject"
     filenames = ("pyproject.toml",)
 
     def can_handle(self, path: Path) -> bool:
         return path.name in self.filenames
+
+    def write_workspace_stub(
+        self,
+        base_dir: Path,
+        name: str,
+        channels: list[str],
+        platforms: list[str],
+    ) -> tuple[Path, str]:
+        """Add ``[tool.conda.workspace]`` to *base_dir*/``pyproject.toml``.
+
+        Unlike the default :meth:`ManifestParser.write_workspace_stub`
+        (which refuses to touch an existing file),
+        ``pyproject.toml`` is a shared packaging manifest owned by the
+        Python ecosystem — PEP 621 ``[project]``, ``[build-system]``,
+        and other tooling tables routinely coexist with ours.  We read
+        the existing document if any, add our configuration under the
+        nested ``[tool.conda]`` table, and report ``"Updated"`` so the
+        CLI can distinguish an append from a create.  An existing
+        ``[tool.conda]`` or ``[tool.pixi]`` raises
+        :class:`ManifestExistsError`.
+        """
+        path = self.manifest_path(base_dir)
+        existed = path.exists()
+        if existed:
+            doc = tomlkit.loads(path.read_text(encoding="utf-8"))
+        else:
+            doc = tomlkit.document()
+
+        tool = doc.setdefault("tool", tomlkit.table())
+        if "conda" in tool:
+            raise ManifestExistsError("[tool.conda] in pyproject.toml")
+        if "pixi" in tool:
+            raise ManifestExistsError("[tool.pixi] in pyproject.toml")
+
+        conda = tomlkit.table()
+        ws = tomlkit.table()
+        ws.add("name", name)
+        ws.add("channels", channels)
+        ws.add("platforms", platforms)
+        conda.add("workspace", ws)
+        conda.add("dependencies", tomlkit.table())
+        tool.add("conda", conda)
+
+        path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+        return path, "Updated" if existed else "Created"
 
     def has_workspace(self, path: Path) -> bool:
         if not path.exists():

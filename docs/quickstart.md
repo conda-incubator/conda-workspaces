@@ -54,7 +54,28 @@ required — you can start with tasks alone and add workspace features later.
 
 ![quickstart demo](../demos/quickstart.gif)
 
-Add workspace configuration to the same `conda.toml`:
+The fastest path from "empty directory" to "installed environment with
+an activated shell" is `conda workspace quickstart`:
+
+```bash
+conda workspace quickstart python=3.14 numpy
+# or:
+conda workspace quickstart --copy ../other-workspace
+```
+
+`quickstart` composes the other commands for you: it runs `init`
+(unless you pass `--copy` / `--clone` to copy an existing workspace's
+manifest), adds any specs passed on the command line, installs the
+selected environment, and drops into a shell. It forwards the flags
+you already know from `init` (`--format`, `--name`, `-c/--channel`,
+`--platform`), `install` (`-e/--environment`, `--force-reinstall`,
+`--locked`, `--frozen`), and conda's shared flags (`--dry-run`,
+`--json`, `--yes`). Use `--no-shell` for CI or scripted runs; `--json`
+implies `--no-shell` and prints a single structured result at the
+end.
+
+If you prefer a manual setup, add workspace configuration to a
+`conda.toml` yourself:
 
 ::::{tab-set}
 

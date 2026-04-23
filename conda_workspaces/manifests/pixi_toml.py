@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 class PixiTomlParser(ManifestParser):
     """Parse ``pixi.toml`` manifests (workspace and tasks)."""
 
+    format_alias = "pixi"
     filenames = ("pixi.toml",)
 
     def can_handle(self, path: Path) -> bool:

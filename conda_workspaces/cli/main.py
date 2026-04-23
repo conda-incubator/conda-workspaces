@@ -482,6 +482,99 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         help="Optional command to run in the spawned shell.",
     )
 
+    quickstart_parser = sub.add_parser(
+        "quickstart",
+        help=(
+            "Bootstrap a workspace in one command: init (or copy an existing"
+            " manifest), add the given specs, install the environment,"
+            " and drop into a shell."
+        ),
+        add_help=False,
+    )
+    add_parser_help(quickstart_parser)
+    add_output_and_prompt_options(quickstart_parser)
+    quickstart_parser.add_argument(
+        "specs",
+        nargs="*",
+        default=[],
+        help=(
+            "Optional package specs to add immediately (same grammar as"
+            " `conda workspace add`, e.g. 'python=3.14' 'numpy>=2.4')."
+        ),
+    )
+    quickstart_parser.add_argument(
+        "--format",
+        choices=["pixi", "conda", "pyproject"],
+        default="conda",
+        dest="manifest_format",
+        help=(
+            "Manifest format for the generated workspace (default: conda)."
+            " Ignored with a warning when --copy/--clone is used."
+        ),
+    )
+    quickstart_parser.add_argument(
+        "--name",
+        default=None,
+        help="Workspace name (defaults to directory name).",
+    )
+    quickstart_parser.add_argument(
+        "--channel",
+        "-c",
+        action="append",
+        default=None,
+        dest="channels",
+        help="Channels to include (repeatable, default: conda-forge).",
+    )
+    quickstart_parser.add_argument(
+        "--platform",
+        action="append",
+        default=None,
+        dest="platforms",
+        help="Platforms to support (repeatable, auto-detected if omitted).",
+    )
+    quickstart_parser.add_argument(
+        "-e",
+        "--environment",
+        default="default",
+        help="Environment to install and spawn a shell in (default: default).",
+    )
+    quickstart_parser.add_argument(
+        "--force-reinstall",
+        action="store_true",
+        default=False,
+        help="Re-run install from scratch even if the environment exists.",
+    )
+    quickstart_parser.add_argument(
+        "--locked",
+        action="store_true",
+        default=False,
+        help="Install from existing lockfiles, verifying they are up-to-date.",
+    )
+    quickstart_parser.add_argument(
+        "--frozen",
+        action="store_true",
+        default=False,
+        help="Install from existing lockfiles without checking freshness.",
+    )
+    quickstart_parser.add_argument(
+        "--copy",
+        "--clone",
+        dest="copy_from",
+        type=Path,
+        default=None,
+        help=(
+            "Copy a source workspace's manifest (conda.toml / pixi.toml /"
+            " pyproject.toml) into the current directory instead of"
+            " running `init`. Accepts a directory or a manifest file."
+        ),
+    )
+    quickstart_parser.add_argument(
+        "--no-shell",
+        action="store_true",
+        default=False,
+        help="Skip the final `conda workspace shell` step (useful for CI).",
+    )
+
     import_parser = sub.add_parser(
         "import",
         help="Import a manifest from another format into conda.toml.",
@@ -580,6 +673,10 @@ def _dispatch_workspace(args: argparse.Namespace, subcmd: str) -> int:
         from .workspace.import_manifest import execute_import
 
         return execute_import(args)
+    elif subcmd == "quickstart":
+        from .workspace.quickstart import execute_quickstart
+
+        return execute_quickstart(args)
     else:
         generate_workspace_parser().print_help()
         return 0

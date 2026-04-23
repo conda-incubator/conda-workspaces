@@ -44,6 +44,7 @@ class CondaTomlParser(ManifestParser):
     but uses ``[workspace]`` exclusively (no ``[project]`` fallback).
     """
 
+    format_alias = "conda"
     filenames = ("conda.toml",)
 
     def can_handle(self, path: Path) -> bool:
