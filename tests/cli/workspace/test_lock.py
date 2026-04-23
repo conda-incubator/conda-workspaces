@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 from conda.exceptions import CondaValueError
@@ -11,9 +11,6 @@ from conda_workspaces.cli.workspace.lock import execute_lock
 from conda_workspaces.exceptions import EnvironmentNotFoundError, PlatformError
 
 from ..conftest import make_args
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 _DEFAULTS = {
     "file": None,
@@ -243,8 +240,6 @@ def test_lock_merge_rejects_incompatible_flags(
     incompatible: dict,
 ) -> None:
     """``--merge`` is mutually exclusive with solver-side flags."""
-    from pathlib import Path
-
     monkeypatch.chdir(pixi_workspace)
     frag = pixi_workspace / "conda.lock.linux-64"
     frag.write_text("placeholder", encoding="utf-8")

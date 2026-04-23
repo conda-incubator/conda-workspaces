@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 from conda.base.context import context as conda_context
 from conda.models.match_spec import MatchSpec
+from conda_lockfiles.load_yaml import load_yaml
 from conda_lockfiles.rattler_lock.v6 import _record_to_dict
 
 from conda_workspaces.context import WorkspaceContext
@@ -742,32 +743,35 @@ def test_solve_for_platform_virtual_package_env(
     assert os.environ.get("CONDA_OVERRIDE_GLIBC") is None
 
 
-def _write_fragment(
-    ctx: WorkspaceContext,
-    resolved_envs,
-    platform: str,
-) -> Path:
-    """Run ``generate_lockfile`` for exactly one platform into a fragment."""
-    target = ctx.root / f"conda.lock.{platform}"
-    generate_lockfile(
-        ctx,
-        resolved_envs,
-        platforms=(platform,),
-        output_path=target,
-    )
-    # conda_lockfiles.load_yaml caches by path; fragment files are
-    # rewritten between tests, so evict any stale parse before callers
-    # re-read the same path.
-    from conda_lockfiles.load_yaml import load_yaml
+@pytest.fixture
+def write_fragment() -> Callable[[WorkspaceContext, dict, str], Path]:
+    """Factory that solves one platform into a ``conda.lock.<platform>`` fragment.
 
-    load_yaml.cache_clear()
-    return target
+    ``conda_lockfiles.load_yaml`` caches parsed YAML by path; fragment
+    files are rewritten between calls in the merge tests, so the
+    factory evicts the cache after every write to keep subsequent
+    reads fresh.
+    """
+
+    def _factory(ctx: WorkspaceContext, resolved_envs, platform: str) -> Path:
+        target = ctx.root / f"conda.lock.{platform}"
+        generate_lockfile(
+            ctx,
+            resolved_envs,
+            platforms=(platform,),
+            output_path=target,
+        )
+        load_yaml.cache_clear()
+        return target
+
+    return _factory
 
 
 def test_merge_lockfiles_byte_stable_with_single_run(
     workspace_ctx_factory: Callable[..., WorkspaceContext],
     fake_solver_factory,
     resolved_envs_factory,
+    write_fragment: Callable[[WorkspaceContext, dict, str], Path],
 ) -> None:
     """Merging per-platform fragments must match a single-run lockfile byte-for-byte."""
     ctx_single = workspace_ctx_factory(env_names=["default", "test"])
@@ -785,8 +789,8 @@ def test_merge_lockfiles_byte_stable_with_single_run(
         default=["linux-64", "osx-arm64"],
         test=["linux-64", "osx-arm64"],
     )
-    frag_linux = _write_fragment(ctx_split, resolved_envs_split, "linux-64")
-    frag_osx = _write_fragment(ctx_split, resolved_envs_split, "osx-arm64")
+    frag_linux = write_fragment(ctx_split, resolved_envs_split, "linux-64")
+    frag_osx = write_fragment(ctx_split, resolved_envs_split, "osx-arm64")
 
     # Delete any lockfile left behind by the fragment solves so the
     # merge writes into a clean slate.
@@ -835,11 +839,12 @@ def test_merge_lockfiles_channel_mismatch(
     workspace_ctx_factory: Callable[..., WorkspaceContext],
     fake_solver_factory,
     resolved_envs_factory,
+    write_fragment: Callable[[WorkspaceContext, dict, str], Path],
 ) -> None:
     ctx = workspace_ctx_factory(env_names=["default"])
     fake_solver_factory()
     resolved_envs = resolved_envs_factory(default=["linux-64"])
-    frag_a = _write_fragment(ctx, resolved_envs, "linux-64")
+    frag_a = write_fragment(ctx, resolved_envs, "linux-64")
 
     # Produce a second fragment with a different channel list by
     # tweaking the saved content directly.
@@ -853,8 +858,6 @@ def test_merge_lockfiles_channel_mismatch(
         )
     )
     frag_b.write_text(content, encoding="utf-8")
-    from conda_lockfiles.load_yaml import load_yaml
-
     load_yaml.cache_clear()
 
     with pytest.raises(LockfileMergeError, match="channels differ"):
@@ -865,16 +868,15 @@ def test_merge_lockfiles_duplicate_platform(
     workspace_ctx_factory: Callable[..., WorkspaceContext],
     fake_solver_factory,
     resolved_envs_factory,
+    write_fragment: Callable[[WorkspaceContext, dict, str], Path],
 ) -> None:
     ctx = workspace_ctx_factory(env_names=["default"])
     fake_solver_factory()
     resolved_envs = resolved_envs_factory(default=["linux-64"])
-    frag_a = _write_fragment(ctx, resolved_envs, "linux-64")
+    frag_a = write_fragment(ctx, resolved_envs, "linux-64")
 
     frag_b = ctx.root / "conda.lock.linux-64.dup"
     frag_b.write_text(frag_a.read_text(encoding="utf-8"), encoding="utf-8")
-    from conda_lockfiles.load_yaml import load_yaml
-
     load_yaml.cache_clear()
 
     with pytest.raises(LockfileMergeError, match="present in both"):
