@@ -63,14 +63,20 @@ class ManifestParser(ABC):
         return root / self.manifest_filename
 
     @classmethod
-    def for_format(cls, alias: str) -> ManifestParser:
+    def for_format_alias(cls, alias: str) -> ManifestParser:
         """Return the registered parser whose :attr:`format_alias` matches *alias*.
 
-        Raises :class:`ValueError` when no parser claims *alias*.  The
-        registry is :data:`conda_workspaces.manifests._PARSERS`; this
-        classmethod is the canonical way for CLI code to translate a
-        ``--format`` value into the parser (and therefore the filename)
-        it implies.
+        Used by ``conda workspace init`` / ``quickstart`` to turn a
+        ``--format`` value like ``"pyproject"`` / ``"conda"`` /
+        ``"pixi"`` into the parser (and therefore the filename) it
+        implies.  Raises :class:`ValueError` when no parser claims
+        *alias*.  The companion lookup for
+        ``conda workspace export --format`` is
+        :meth:`for_exporter_format` — that side matches the longer
+        ``conda_environment_exporters`` plugin name
+        (``"pyproject-toml"``, ``"conda-toml"``, ``"pixi-toml"``)
+        which is stored on :attr:`exporter_format`.  The registry is
+        :data:`conda_workspaces.manifests._PARSERS`.
         """
         from . import _PARSERS
 
@@ -174,7 +180,7 @@ class ManifestParser(ABC):
     def for_exporter_format(cls, name: str) -> ManifestParser | None:
         """Return the registered parser whose :attr:`exporter_format` matches *name*.
 
-        Companion to :meth:`for_format` for the
+        Companion to :meth:`for_format_alias` for the
         ``conda_environment_exporters`` plugin side: ``conda workspace
         export --format <name>`` uses the exporter plugin name (e.g.
         ``pyproject-toml``), which is stored on

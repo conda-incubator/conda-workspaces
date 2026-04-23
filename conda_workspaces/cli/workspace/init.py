@@ -35,7 +35,7 @@ def execute_init(args: argparse.Namespace, *, console: Console | None = None) ->
     platforms = args.platforms or [conda_context.subdir]
     base_dir = Path(args.file).parent if args.file else Path.cwd()
 
-    parser = ManifestParser.for_format(args.manifest_format)
+    parser = ManifestParser.for_format_alias(args.manifest_format)
     path, verb = parser.write_workspace_stub(base_dir, name, channels, platforms)
     status.message(console, verb, "workspace", path.name, detail=str(path.parent))
     return 0

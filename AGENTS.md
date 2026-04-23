@@ -106,7 +106,7 @@
   and the public surface stays discoverable. The canonical examples
   are `ResolvedEnvironment.virtual_package_overrides` /
   `scoped_virtual_packages` in `resolver.py` (moved out of
-  `lockfile.py` private helpers) and   `ManifestParser.for_format` /
+  `lockfile.py` private helpers) and   `ManifestParser.for_format_alias` /
   `for_exporter_format` / `resolve_source` / `copy_manifest` /
   `write_workspace_stub` / `export` / `merge_export` in
   `manifests/base.py` (moved out of `cli/workspace/quickstart.py`
