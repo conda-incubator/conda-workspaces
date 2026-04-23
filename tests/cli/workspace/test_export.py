@@ -7,6 +7,7 @@ from io import StringIO
 from typing import TYPE_CHECKING
 
 import pytest
+from conda.common.serialize.yaml import loads as yaml_loads
 from rich.console import Console
 
 from conda_workspaces.cli.workspace.export import execute_export
@@ -137,8 +138,6 @@ def test_export_declared_source_writes_yaml(
     export_console: Console,
 ) -> None:
     """Default ``environment-yaml`` export round-trips to valid YAML."""
-    from conda.common.serialize.yaml import loads as yaml_loads
-
     monkeypatch.chdir(pixi_workspace)
     output = pixi_workspace / "environment.yaml"
 
@@ -272,8 +271,6 @@ def test_export_workspace_lock_multiplatform(
     export_console: Console,
 ) -> None:
     """conda-workspaces-lock-v1 accepts multiple platforms via multiplatform_export."""
-    from conda.common.serialize.yaml import loads as yaml_loads
-
     monkeypatch.chdir(pixi_workspace)
     output = pixi_workspace / "conda.lock"
 

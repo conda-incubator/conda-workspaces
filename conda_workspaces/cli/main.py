@@ -8,7 +8,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from conda.base.context import context as conda_context
 from conda.cli.helpers import (
+    LazyChoicesAction,
     add_output_and_prompt_options,
     add_parser_help,
 )
@@ -21,8 +23,6 @@ def _handle_error(exc: CondaError) -> int:
     In JSON or debug mode, re-raises so conda's own handler takes over
     (preserving tracebacks and structured JSON output).
     """
-    from conda.base.context import context as conda_context
-
     if conda_context.json or conda_context.debug:
         raise exc
 
@@ -476,8 +476,6 @@ def _configure_export_parser(sub) -> None:
     built-in ``environment-yaml`` / ``environment-json``, third-party
     rattler-lock, ...) appears the moment it is installed.
     """
-    from conda.cli.helpers import LazyChoicesAction
-
     export_parser = sub.add_parser(
         "export",
         help="Export a workspace environment to environment.yml / conda.lock / ...",
@@ -494,8 +492,6 @@ def _configure_export_parser(sub) -> None:
     )
 
     def _format_choices() -> list[str]:
-        from conda.base.context import context as conda_context
-
         return sorted(conda_context.plugin_manager.get_exporter_format_mapping().keys())
 
     export_parser.add_argument(
