@@ -23,7 +23,7 @@ def _export_args(file: Path, output: Path | None = None) -> argparse.Namespace:
         file=file,
         output=output,
         quiet=False,
-        verbose=0,
+        verbosity=0,
         json=False,
         dry_run=False,
     )

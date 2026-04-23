@@ -68,7 +68,7 @@ def execute_quickstart(
     # ``--debug`` / ``--trace``) so terminal output and machine-readable
     # output stay coherent across the pipeline.  ``add_output_and_prompt_options``
     # on the parent parser guarantees each attribute exists.
-    prompt_keys = ("json", "yes", "dry_run", "quiet", "verbose", "debug", "trace")
+    prompt_keys = ("json", "yes", "dry_run", "quiet", "verbosity", "debug", "trace")
 
     def with_prompts(**kwargs: object) -> argparse.Namespace:
         """Build a sub-handler ``Namespace`` from *kwargs* + ``prompt_keys``."""

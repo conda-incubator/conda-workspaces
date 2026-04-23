@@ -36,7 +36,7 @@ _DEFAULTS = {
     "yes": False,
     "dry_run": False,
     "quiet": False,
-    "verbose": 0,
+    "verbosity": 0,
     "debug": False,
     "trace": False,
 }

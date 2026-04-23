@@ -125,7 +125,7 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
 
     dry_run = getattr(args, "dry_run", False)
     quiet = getattr(args, "quiet", False)
-    verbose = getattr(args, "verbose", 0) or 0
+    verbose = getattr(args, "verbosity", 0) or 0
     user_env = getattr(args, "environment", None)
     conda_prefix = _env_prefix_or_none(args)
 

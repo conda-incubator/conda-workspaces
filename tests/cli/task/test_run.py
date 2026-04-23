@@ -24,7 +24,7 @@ def _run_args(
         skip_deps=False,
         dry_run=False,
         quiet=False,
-        verbose=0,
+        verbosity=0,
         clean_env=False,
         cwd=None,
         environment=None,
@@ -278,7 +278,7 @@ def test_execute_run_dep_chain_verbose(tmp_path, capsys, fake_shell):
         '[tasks.build]\ncmd = "echo build"\ndepends-on = ["setup"]\n'
     )
 
-    result = execute_run(_run_args(task_file, task_name="build", verbose=1))
+    result = execute_run(_run_args(task_file, task_name="build", verbosity=1))
 
     assert result == 0
     output = capsys.readouterr().out
@@ -296,7 +296,7 @@ def test_execute_run_verbose_with_io(tmp_path, capsys, fake_shell, monkeypatch):
     )
 
     monkeypatch.setattr(run_mod, "is_cached", lambda *a, **kw: False)
-    result = execute_run(_run_args(task_file, task_name="build", verbose=1))
+    result = execute_run(_run_args(task_file, task_name="build", verbosity=1))
 
     assert result == 0
     output = capsys.readouterr().out
