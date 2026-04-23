@@ -153,6 +153,21 @@ conda task export --file pixi.toml -o conda.toml
 
 ## Cross-platform solving
 
+:::{versionchanged} 0.4.0
+`conda workspace lock` now writes a single multi-platform
+`conda.lock` covering every platform declared in the manifest,
+matching `pixi lock`.
+:::
+
+:::{versionadded} 0.4.0
+Conservative virtual package baselines are seeded automatically
+for cross-platform solves: `CONDA_OVERRIDE_GLIBC=2.17` for
+`linux-64`, `CONDA_OVERRIDE_OSX=11.0` for `osx-arm64`, `10.15` for
+`osx-64`, and a `CONDA_OVERRIDE_WIN=0` presence marker for `win-*`.
+This mirrors rattler's `VirtualPackages::detect_for_platform`, so
+most cross-compiles resolve without any manifest changes.
+:::
+
 `conda workspace lock` writes a multi-platform `conda.lock` just like
 `pixi lock`. It iterates over every platform listed under
 `[workspace]` / `[project]` and solves each one in isolation, pointing

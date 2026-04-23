@@ -172,8 +172,17 @@ clean = "{% if conda.is_win %}rd /s /q build{% else %}rm -rf build/{% endif %}"
 
 ### Task environment targeting
 
-Tasks run in your current conda environment by default. When used with
-a workspace, you can target a specific environment:
+:::{versionchanged} 0.4.0
+When a task is defined in a manifest that also declares workspace
+environments, `conda task run` now falls back to the workspace's
+`default` environment instead of whatever conda environment happens
+to be active. Tasks without a workspace (tasks-only manifests)
+still use the current conda environment. `-e <env>` and a task's
+`default-environment` key continue to take precedence.
+:::
+
+Tasks defined alongside workspace environments run in the workspace's
+`default` environment. Override with `-e <env>`:
 
 ```bash
 conda task run test -e myenv
@@ -272,6 +281,14 @@ Platform overrides are merged on top of the base dependencies when
 resolving for a specific platform.
 
 ### Known vs. declared platforms
+
+:::{versionadded} 0.4.0
+`conda workspace info` surfaces the reachable platform set as a
+`known_platforms` JSON key (and a matching `Known Platforms` row in
+the text view whenever a feature broadens the workspace-level set).
+`conda workspace lock --platform <subdir>` validates against this
+same set.
+:::
 
 The workspace-level `platforms` list is the default set every
 environment can be solved for. Individual features may declare
@@ -384,6 +401,24 @@ conda's default channel priority applies.
 
 ## Lock
 
+:::{versionchanged} 0.4.0
+`conda workspace lock` now writes a single `conda.lock` that covers
+every platform declared by each environment, not just the host
+platform. Target-platform solves run with `context._subdir`
+overridden so conda's virtual package plugins (`__linux`, `__osx`,
+`__win`) match the target platform.
+:::
+
+:::{versionadded} 0.4.0
+`--platform <subdir>` (repeatable) restricts the lock run to a
+subset of declared platforms; unknown platforms raise
+`PlatformError` before any solve runs. `--skip-unsolvable` keeps
+locking the remaining `(environment, platform)` pairs when an
+individual solve fails, aggregating the failures into
+`AllTargetsUnsolvableError` only if *every* pair fails.
+`SolveError` now names the target platform for easier CI triage.
+:::
+
 conda-workspaces generates a `conda.lock` file in YAML format based on
 the rattler-lock v6 specification. The `conda workspace lock` command runs the solver
 and records the solution — it does not require environments to be
@@ -459,6 +494,14 @@ checks entirely and install the lockfile as-is.
 
 ![ci-split demo](../demos/ci-split.gif)
 
+:::{versionadded} 0.4.0
+`conda workspace lock --output <path>` writes the solved lockfile
+to an arbitrary path so matrix runners can each emit one fragment.
+`--merge <glob>` stitches fragments into a single `conda.lock`
+without running the solver, validating schema version, channel
+lists, and rejecting overlapping `(environment, platform)` pairs.
+:::
+
 Solving every platform in one job becomes expensive as a workspace
 grows. `conda workspace lock` supports matrix pipelines that split
 solving across runners and stitch the fragments back together on a
@@ -495,6 +538,17 @@ conda workspace install -f path/to/conda.toml
 ## Export
 
 ![export demo](../demos/export.gif)
+
+:::{versionadded} 0.4.0
+`conda workspace export` plugs into conda's
+`conda_environment_exporters` plugin hook, so every format
+reachable through `conda export` — and anything registered by a
+third-party plugin such as `conda-lockfiles` — is also reachable
+through `conda workspace export`. `--from-lockfile` and
+`--from-prefix` select alternative sources; `--platform`
+(repeatable) drives multi-platform exports for exporters that opt
+into `multiplatform_export`.
+:::
 
 `conda workspace export` converts a workspace environment into any
 format registered through conda's `conda_environment_exporters`
@@ -552,6 +606,14 @@ exporters (`conda-toml`, `pixi-toml`, `pyproject-toml`) do; the
 single-platform yaml / json ones raise a clear error.
 
 ### Manifest-format exporters
+
+:::{versionadded} 0.4.0
+Three new exporter plugins — `conda-toml`, `pixi-toml`, and
+`pyproject-toml` — round-trip a workspace back into any manifest
+dialect conda-workspaces already reads. Combined with
+`conda workspace import`, this makes `conda workspace` a
+bidirectional translator across every supported manifest format.
+:::
 
 The `conda-toml`, `pixi-toml`, and `pyproject-toml` exporters round-trip
 a workspace back into any of the manifest dialects conda-workspaces

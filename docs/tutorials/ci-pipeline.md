@@ -88,6 +88,10 @@ jobs:
 
 ![ci-split demo](../../demos/ci-split.gif)
 
+:::{versionadded} 0.4.0
+Requires `--output` and `--merge`, both introduced in 0.4.0.
+:::
+
 `conda workspace lock` can split solving across a matrix and stitch
 the per-platform fragments back into a single `conda.lock` on a
 coordinator job. This keeps lock refreshes fast as the platform

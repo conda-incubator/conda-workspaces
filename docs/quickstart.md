@@ -54,6 +54,12 @@ required — you can start with tasks alone and add workspace features later.
 
 ![workspace-quickstart demo](../demos/workspace-quickstart.gif)
 
+:::{versionadded} 0.4.0
+`conda workspace quickstart` composes `init`, `add`, `install`, and
+`shell` into a single bootstrap command; pass `--no-shell` for CI or
+`--json` for a scriptable summary.
+:::
+
 The fastest path from "empty directory" to "installed environment with
 an activated shell" is `conda workspace quickstart`:
 
@@ -254,6 +260,14 @@ conda workspace shell -e test
 ```
 
 ## Add and remove dependencies
+
+:::{versionchanged} 0.4.0
+`conda workspace add` / `remove` now install into the affected
+environment(s) and refresh `conda.lock` by default (matching
+`pixi add` / `pixi remove`). Use `--no-install` to update the
+manifest and lockfile without touching the prefix, or
+`--no-lockfile-update` for the previous manifest-only behaviour.
+:::
 
 ```bash
 conda workspace add numpy
