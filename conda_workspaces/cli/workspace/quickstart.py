@@ -28,7 +28,6 @@ import json
 import shutil
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from rich.console import Console
 
@@ -39,18 +38,9 @@ from .init import execute_init
 from .install import execute_install
 from .shell import execute_shell
 
-if TYPE_CHECKING:
-    from collections.abc import Iterable
-
-
-#: Keys forwarded from ``quickstart`` to the respective sub-handler.
-_INIT_KEYS: tuple[str, ...] = ("manifest_format", "name", "channels", "platforms")
-_INSTALL_KEYS: tuple[str, ...] = (
-    "environment",
-    "force_reinstall",
-    "locked",
-    "frozen",
-)
+#: Global prompt / output flags every sub-handler sees (``--json``,
+#: ``--dry-run``, ``--yes``, ``-v``/``-q``, ``--debug``, ``--trace``).
+#: Forwarded verbatim through :func:`execute_quickstart.with_prompts`.
 _PROMPT_KEYS: tuple[str, ...] = (
     "json",
     "yes",
@@ -64,24 +54,6 @@ _PROMPT_KEYS: tuple[str, ...] = (
 
 class QuickstartCopyError(CondaWorkspacesError):
     """``--copy`` / ``--clone`` pointed at something we cannot use."""
-
-
-def _forward(
-    args: argparse.Namespace,
-    keys: Iterable[str],
-    **extras: object,
-) -> argparse.Namespace:
-    """Build a sub-handler ``Namespace`` by copying *keys* and ``_PROMPT_KEYS``.
-
-    *extras* overlay the copied values so callers can pin handler-specific
-    defaults (e.g. ``file=None`` for init, ``cmd=None`` for shell).
-    """
-    ns = argparse.Namespace()
-    for key in (*keys, *_PROMPT_KEYS):
-        setattr(ns, key, getattr(args, key, None))
-    for key, value in extras.items():
-        setattr(ns, key, value)
-    return ns
 
 
 def execute_quickstart(
@@ -104,6 +76,22 @@ def execute_quickstart(
     if getattr(args, "file", None):
         workspace_root = Path(args.file).resolve().parent
 
+    common_file = getattr(args, "file", None)
+
+    def with_prompts(**kwargs: object) -> argparse.Namespace:
+        """Build a sub-handler ``Namespace`` from *kwargs* + ``_PROMPT_KEYS``.
+
+        Each sub-handler call site lists the flags it cares about
+        explicitly; this closure fills in the global prompt/output
+        flags (``--json`` / ``--dry-run`` / etc.) that every handler
+        must see so terminal output and machine-readable output stay
+        coherent across the pipeline.
+        """
+        ns = argparse.Namespace(**kwargs)
+        for key in _PROMPT_KEYS:
+            setattr(ns, key, getattr(args, key, None))
+        return ns
+
     if copy_from is not None:
         if getattr(args, "manifest_format", None) not in (None, "conda"):
             console.print(
@@ -124,15 +112,21 @@ def execute_quickstart(
         )
         manifest_path = _guess_manifest_path(workspace_root, args)
     else:
-        execute_init(_forward(args, _INIT_KEYS, file=None))
+        execute_init(
+            with_prompts(
+                file=None,
+                manifest_format=getattr(args, "manifest_format", None),
+                name=getattr(args, "name", None),
+                channels=getattr(args, "channels", None),
+                platforms=getattr(args, "platforms", None),
+            )
+        )
         manifest_path = _guess_manifest_path(workspace_root, args)
 
-    common_file = getattr(args, "file", None)
     if specs:
         execute_add(
-            _forward(
-                args,
-                (),
+            with_prompts(
+                file=common_file,
                 specs=list(specs),
                 environment=None,
                 feature=None,
@@ -140,21 +134,26 @@ def execute_quickstart(
                 no_install=False,
                 no_lockfile_update=False,
                 force_reinstall=bool(getattr(args, "force_reinstall", False)),
-                file=common_file,
             )
         )
     else:
-        execute_install(_forward(args, _INSTALL_KEYS, file=common_file))
+        execute_install(
+            with_prompts(
+                file=common_file,
+                environment=getattr(args, "environment", None),
+                force_reinstall=getattr(args, "force_reinstall", None),
+                locked=getattr(args, "locked", None),
+                frozen=getattr(args, "frozen", None),
+            )
+        )
 
     shell_spawned = False
     if not no_shell and not dry_run:
         execute_shell(
-            _forward(
-                args,
-                (),
+            with_prompts(
+                file=common_file,
                 environment=env_name,
                 cmd=None,
-                file=common_file,
             )
         )
         shell_spawned = True
