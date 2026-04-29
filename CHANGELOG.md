@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 0.4.0 — 2026-04-29
+
 ### Added
 
 - `conda workspace quickstart` bootstraps a workspace in one step,
@@ -111,6 +113,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   the double-prompt / PowerShell `-NoExit` / `$CONDA_ROOT/condabin`
   fixes. The integration in `cli/workspace/shell.py` is unchanged
   (`conda_spawn.main.spawn` is still the entry point).
+- `conda task run <task>` (and the `ct run` alias) now falls back to
+  the workspace's `default` environment when the task doesn't declare
+  a `default_environment`, instead of inheriting whichever conda env
+  happened to be active at the call site. Pass `-e` explicitly to
+  override.
+
+### Fixed
+
+- `conda workspace quickstart` crashed every invocation with
+  `AttributeError: 'Namespace' object has no attribute 'verbose'`
+  after conda renamed the namespace dest to `verbosity`.
+- `conda workspace quickstart --json` no longer leaks Rich status
+  lines from the sub-handlers (`init`, `add`, `install`) into stdout;
+  the JSON payload is the only thing emitted on stdout, matching the
+  documented `--json contract`.
 
 ## 0.3.0 — 2026-03-31
 
