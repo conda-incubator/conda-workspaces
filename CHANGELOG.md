@@ -106,6 +106,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   `conda_lockfiles.rattler_lock.v6`. `conda.lock` is documented as a
   derivative of rattler-lock v6 (`pixi.lock`): same schema family,
   distinct filename and on-disk version byte.
+- Bumped the optional `conda-spawn` dependency floor from `>=0.0.5` to
+  `>=0.1.0` to pick up the new fish/csh/tcsh/xonsh shell support and
+  the double-prompt / PowerShell `-NoExit` / `$CONDA_ROOT/condabin`
+  fixes. The integration in `cli/workspace/shell.py` is unchanged
+  (`conda_spawn.main.spawn` is still the entry point).
 
 ## 0.3.0 — 2026-03-31
 

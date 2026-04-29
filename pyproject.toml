@@ -24,7 +24,7 @@ dependencies = [
   # These are required but only available via conda, not PyPI:
   # "conda >=24.7",
   # "conda-lockfiles >=0.1.1",  # shares rattler-lock v6 schema with conda.lock
-  # "conda-spawn >=0.0.5",
+  # "conda-spawn >=0.1.0",
   #
   # These are optional (gracefully skipped when absent):
   # "conda-pypi >=0.5.0",         # PyPI dependency support
@@ -109,7 +109,7 @@ conda = ">=24.7"
 conda-lockfiles = ">=0.1.1"
 conda-pypi = ">=0.5.0"
 conda-rattler-solver = ">=0.0.6"
-conda-spawn = ">=0.0.5"
+conda-spawn = ">=0.1.0"
 
 [tool.pixi.pypi-dependencies]
 conda-workspaces = { path = ".", editable = true }
