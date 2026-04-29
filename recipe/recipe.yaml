@@ -32,7 +32,7 @@ requirements:
     - python >=${{ python_min }}
     - conda >=24.7
     - conda-lockfiles >=0.1
-    - conda-spawn >=0.0.5
+    - conda-spawn >=0.1.0
     - rich >=13.0
     - tomlkit >=0.13
     - platformdirs >=3.0

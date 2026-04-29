@@ -34,7 +34,7 @@ Sleep 500ms
 Type@80ms "bat conda.toml"
 Enter
 Wait /\$/
-Sleep 3s
+Sleep 2s
 
 Type@80ms "conda workspace shell -e default"
 Enter
@@ -44,12 +44,12 @@ Sleep 1s
 Type@80ms "python --version"
 Enter
 Wait /\(default\)/
-Sleep 2s
+Sleep 1500ms
 
 Type@80ms "which python"
 Enter
 Wait /\(default\)/
-Sleep 2s
+Sleep 1500ms
 
 Type "# Exit to return to the parent shell"
 Enter
@@ -58,4 +58,4 @@ Sleep 500ms
 Type@80ms "exit"
 Enter
 Wait /\$/
-Sleep 3s
+Sleep 1500ms
