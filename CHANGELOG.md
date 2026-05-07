@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added
+
+- User-level task definitions: tasks defined in `~/.conda/tasks.toml`
+  are now available across all projects without repeating them in every
+  manifest. Project tasks override user tasks on name collision.
+  `conda task list` annotates user-sourced tasks with `(user)` in text
+  output and `"source": "user"` in JSON output. XDG paths are also
+  supported (`$XDG_CONFIG_HOME/conda/tasks.toml`). (#53, #54)
+
 ## 0.4.0 — 2026-04-29
 
 ### Added

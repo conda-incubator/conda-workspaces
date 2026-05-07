@@ -1,5 +1,11 @@
 # Configuration
 
+:::{note}
+All paths below use `~/` as shorthand for your home directory:
+`/home/<user>/` or `/Users/<user>/` on macOS/Linux,
+`%USERPROFILE%` (typically `C:\Users\<user>\`) on Windows.
+:::
+
 conda-workspaces searches for manifests in the current directory and its
 parents. The first matching file is used.
 
@@ -34,6 +40,46 @@ loaded. To use pixi tasks, either remove `[tool.conda]` entirely or
 define your tasks under `[tool.conda.tasks]`.
 
 When a file defines both workspace and task sections, both are used.
+
+## User-level tasks
+
+Tasks can also be defined in a user-level file that applies across all
+projects. This is useful for personal utility tasks (formatting, linting,
+cleanup) that you want available everywhere without repeating them in
+every project manifest.
+
+### User task file search order
+
+1. `$XDG_CONFIG_HOME/conda/tasks.toml` (if `XDG_CONFIG_HOME` is set)
+2. `~/.config/conda/tasks.toml` (XDG default)
+3. `~/.conda/tasks.toml` (legacy fallback)
+
+First file found wins. If none exist, user-level tasks are not loaded.
+
+The format is the same `[tasks]` table as in `conda.toml`:
+
+```toml
+[tasks]
+fmt = { cmd = "ruff format .", description = "Format Python files" }
+clean = { cmd = "git clean -fdx -e .conda", description = "Remove untracked files" }
+check = { cmd = "ruff check --fix .", description = "Lint and auto-fix" }
+```
+
+### Merge semantics
+
+User tasks act as a base layer beneath project tasks:
+
+- Project tasks override user tasks on name collision (project always wins)
+- User-only tasks (not defined in the project) are included as-is
+- `depends-on` can reference tasks from either layer
+- `conda task list` shows user tasks with a `(user)` annotation
+
+### No project manifest required
+
+User tasks work even without a project `conda.toml` in the current
+directory. Running `conda task run fmt` in any directory executes the
+user-defined task. If neither a project manifest nor a user task file
+exists, `conda task run` falls back to ad-hoc command execution.
 
 ## Lockfile format
 

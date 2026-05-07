@@ -17,7 +17,9 @@ if TYPE_CHECKING:
 def execute_list(args: argparse.Namespace, *, console: Console | None = None) -> int:
     """Execute the ``conda task list`` subcommand."""
     file_path = getattr(args, "file", None)
-    task_file, tasks = detect_and_parse_tasks(file_path=file_path)
+    task_file, tasks, user_only_names = detect_and_parse_tasks(
+        file_path=file_path,
+    )
 
     if console is None:
         console = Console(highlight=False)
@@ -38,6 +40,8 @@ def execute_list(args: argparse.Namespace, *, console: Console | None = None) ->
                 entry["depends_on"] = [d.task for d in task.depends_on]
             if task.is_alias:
                 entry["alias"] = True
+            if name in user_only_names:
+                entry["source"] = "user"
             data[name] = entry
 
         console.print(
@@ -78,7 +82,8 @@ def execute_list(args: argparse.Namespace, *, console: Console | None = None) ->
             dep_names = ", ".join(d.task for d in task.depends_on)
             deps_col = f"← {dep_names}"
 
-        row: list[str] = [name]
+        label = f"{name} [dim](user)[/dim]" if name in user_only_names else name
+        row: list[str] = [label]
         if has_cmds:
             row.append(cmd_col)
         if has_deps:

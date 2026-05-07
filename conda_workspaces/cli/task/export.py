@@ -21,7 +21,7 @@ def execute_export(args: argparse.Namespace, *, console: Console | None = None) 
     if console is None:
         console = Console(highlight=False)
     file_path = getattr(args, "file", None)
-    task_file, tasks = detect_and_parse_tasks(file_path=file_path)
+    task_file, tasks, _ = detect_and_parse_tasks(file_path=file_path)
 
     quiet = getattr(args, "quiet", False)
     output: Path | None = getattr(args, "output", None)

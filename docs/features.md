@@ -196,6 +196,35 @@ cmd = "pytest"
 default-environment = "py38-compat"
 ```
 
+### User-level tasks
+
+Define tasks in `~/.config/conda/tasks.toml` to make them available in
+every project without repeating definitions:
+
+```toml
+[tasks]
+fmt = { cmd = "ruff format .", description = "Format Python files" }
+clean = { cmd = "git clean -fdx -e .conda", description = "Remove untracked files" }
+check = { cmd = "ruff check --fix .", description = "Lint and auto-fix" }
+```
+
+User tasks act as defaults — if a project defines a task with the same
+name, the project version takes precedence. `conda task list` marks
+user-sourced tasks with `(user)` so you can tell where each task comes
+from:
+
+```console
+$ conda task list
+  build    python -m build
+  test     pytest tests/ -v
+  fmt      ruff format .        (user)
+  clean    git clean -fdx ...   (user)
+```
+
+User tasks work even outside a workspace. See
+[User-level tasks](configuration.md#user-level-tasks) for file location
+details and merge semantics.
+
 ---
 
 ## Environments
