@@ -1,29 +1,10 @@
 # Configuration
 
 :::{note}
-All paths in this documentation use `~/` to denote your home directory.
+All paths below use `~/` as shorthand for your home directory:
+`/home/<user>/` or `/Users/<user>/` on macOS/Linux,
+`%USERPROFILE%` (typically `C:\Users\<user>\`) on Windows.
 :::
-
-:::::{tab-set}
-
-::::{tab-item} macOS / Linux
-```
-~/           →  /home/<user>/  or  /Users/<user>/
-~/.conda/    →  /home/<user>/.conda/
-~/.config/   →  /home/<user>/.config/
-```
-::::
-
-::::{tab-item} Windows
-```
-~/           →  C:\Users\<user>\
-~/.conda\    →  C:\Users\<user>\.conda\
-~/.config\   →  C:\Users\<user>\.config\
-```
-On Windows, `~` is `%USERPROFILE%`. You can verify with `echo %USERPROFILE%` in a terminal.
-::::
-
-:::::
 
 conda-workspaces searches for manifests in the current directory and its
 parents. The first matching file is used.
