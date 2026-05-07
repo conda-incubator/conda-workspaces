@@ -70,9 +70,10 @@ every project manifest.
 ### User task file search order
 
 ```{mermaid}
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "16px", "primaryColor": "#e8f4f8", "primaryBorderColor": "#5b9bd5", "primaryTextColor": "#333", "lineColor": "#666"}}}%%
 graph LR
-    X1["$XDG_CONFIG_HOME/conda/tasks.toml"] -.->|fallback| X2["~/.config/conda/tasks.toml"]
-    X2 -.->|fallback| X3["~/.conda/tasks.toml"]
+    X1["XDG/conda/tasks.toml"] -.->|fallback| X2[".config/conda/tasks.toml"]
+    X2 -.->|fallback| X3[".conda/tasks.toml"]
 ```
 
 First file found wins. If none exist, user-level tasks are not loaded.
@@ -91,9 +92,10 @@ check = { cmd = "ruff check --fix .", description = "Lint and auto-fix" }
 User tasks act as a base layer beneath project tasks:
 
 ```{mermaid}
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "16px", "primaryColor": "#e8f4f8", "primaryBorderColor": "#5b9bd5", "primaryTextColor": "#333", "lineColor": "#666"}}}%%
 graph TD
-    A["User tasks<br/><code>~/.config/conda/tasks.toml</code>"] --> C["Merged task set"]
-    B["Project tasks<br/><code>&lt;project&gt;/conda.toml</code>"] --> C
+    A["User tasks<br/>~/.config/conda/tasks.toml"] --> C["Merged task set"]
+    B["Project tasks<br/>project/conda.toml"] --> C
     C --> D{Name collision?}
     D -- "Yes" --> E["Project task wins"]
     D -- "No" --> F["Both included"]
