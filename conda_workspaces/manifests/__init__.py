@@ -137,13 +137,10 @@ def cached_task_parse(path_str: str) -> dict[str, Task]:
     return parser.parse_tasks(p)
 
 
-_CONDA_TOML_PARSER = CondaTomlParser()
-
-
 @lru_cache(maxsize=1)
 def cached_user_task_parse(path_str: str) -> dict[str, Task]:
     """Parse tasks from the user-level ``tasks.toml`` (conda.toml format)."""
-    return _CONDA_TOML_PARSER.parse_tasks(Path(path_str))
+    return _PARSERS[0].parse_tasks(Path(path_str))
 
 
 def user_task_file() -> Path | None:
