@@ -52,13 +52,7 @@ class CondaTomlParser(ManifestParser):
         return path.name in self.filenames
 
     def has_workspace(self, path: Path) -> bool:
-        if not path.exists():
-            return False
-        try:
-            data = tomlkit.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return False
-        return "workspace" in data
+        return "workspace" in self.read_toml(str(path))
 
     def parse(self, path: Path) -> WorkspaceConfig:
         # Import inline to avoid circular dependency (pixi_toml imports toml).
@@ -75,13 +69,7 @@ class CondaTomlParser(ManifestParser):
         return config
 
     def has_tasks(self, path: Path) -> bool:
-        if not path.exists():
-            return False
-        try:
-            data = tomlkit.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return False
-        return bool(data.get("tasks"))
+        return bool(self.read_toml(str(path)).get("tasks"))
 
     def parse_tasks(self, path: Path) -> dict[str, Task]:
         try:

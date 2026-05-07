@@ -15,10 +15,11 @@ if TYPE_CHECKING:
 
 @lru_cache(maxsize=1)
 def _get_jinja_env() -> JinjaEnvironment:
-    """Create and cache a Jinja2 Environment (singleton)."""
-    from jinja2 import Environment, StrictUndefined
+    """Create and cache a sandboxed Jinja2 Environment (singleton)."""
+    from jinja2 import StrictUndefined
+    from jinja2.sandbox import SandboxedEnvironment
 
-    return Environment(undefined=StrictUndefined)
+    return SandboxedEnvironment(undefined=StrictUndefined)
 
 
 def render(

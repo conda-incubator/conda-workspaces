@@ -142,16 +142,11 @@ class PyprojectTomlParser(ManifestParser):
         return tomlkit.dumps(doc)
 
     def has_workspace(self, path: Path) -> bool:
-        if not path.exists():
-            return False
-        try:
-            data = tomlkit.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return False
-        tool = data.get("tool", {})
-        conda = tool.get("conda", {})
-        pixi = tool.get("pixi", {})
-        return bool(conda.get("workspace") or pixi.get("workspace"))
+        tool = self.read_toml(str(path)).get("tool", {})
+        return bool(
+            tool.get("conda", {}).get("workspace")
+            or tool.get("pixi", {}).get("workspace")
+        )
 
     def parse(self, path: Path) -> WorkspaceConfig:
         try:
@@ -196,13 +191,7 @@ class PyprojectTomlParser(ManifestParser):
         return config
 
     def has_tasks(self, path: Path) -> bool:
-        if not path.exists():
-            return False
-        try:
-            data = tomlkit.loads(path.read_text(encoding="utf-8")).unwrap()
-        except Exception:
-            return False
-        tool = data.get("tool", {})
+        tool = self.read_toml(str(path)).get("tool", {})
         return bool(
             tool.get("conda", {}).get("tasks") or tool.get("pixi", {}).get("tasks")
         )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shutil
 from abc import ABC, abstractmethod
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 import tomlkit
@@ -50,6 +51,17 @@ class ManifestParser(ABC):
     #: Optional user-friendly aliases for the exporter plugin (e.g.
     #: ``("conda",)`` for ``conda-toml``).  Empty tuple is fine.
     exporter_aliases: ClassVar[tuple[str, ...]] = ()
+
+    @staticmethod
+    @lru_cache(maxsize=16)
+    def read_toml(path_str: str) -> dict:
+        """Read and parse a TOML file, returning empty dict on failure."""
+        from pathlib import Path
+
+        try:
+            return tomlkit.loads(Path(path_str).read_text(encoding="utf-8"))
+        except Exception:
+            return {}
 
     @property
     def manifest_filename(self) -> str:

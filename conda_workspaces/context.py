@@ -269,5 +269,8 @@ def build_template_context(
     ctx = CondaContext(manifest_path=manifest_path)
     result: dict[str, object] = {"conda": ctx, "pixi": ctx}
     if task_args:
-        result.update(task_args)
+        reserved = {"conda", "pixi"}
+        for key, value in task_args.items():
+            if key not in reserved:
+                result[key] = value
     return result

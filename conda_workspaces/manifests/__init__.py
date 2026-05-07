@@ -41,6 +41,10 @@ _SEARCH_FILES: list[str] = [
     "pyproject.toml",
 ]
 
+PARSER_BY_FILENAME: dict[str, ManifestParser] = {
+    fname: parser for parser in _PARSERS for fname in parser.filenames
+}
+
 
 def walk_manifests(
     start_dir: Path,
@@ -57,11 +61,9 @@ def walk_manifests(
         for fname in _SEARCH_FILES:
             candidate = current / fname
             if candidate.is_file():
-                for parser in _PARSERS:
-                    if parser.can_handle(candidate) and getattr(parser, predicate)(
-                        candidate
-                    ):
-                        return candidate
+                parser = PARSER_BY_FILENAME.get(fname)
+                if parser is not None and getattr(parser, predicate)(candidate):
+                    return candidate
         parent = current.parent
         if parent == current:
             break
