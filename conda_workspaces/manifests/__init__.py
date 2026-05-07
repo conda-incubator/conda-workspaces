@@ -11,6 +11,7 @@ The first file that exists *and* contains the relevant configuration wins.
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -136,6 +137,67 @@ def _cached_task_parse(path_str: str) -> dict[str, Task]:
     return parser.parse_tasks(p)
 
 
+_CONDA_TOML_PARSER = CondaTomlParser()
+
+
+@lru_cache(maxsize=1)
+def _cached_user_task_parse(path_str: str) -> dict[str, Task]:
+    """Parse tasks from the user-level ``tasks.toml`` (conda.toml format)."""
+    return _CONDA_TOML_PARSER.parse_tasks(Path(path_str))
+
+
+def _user_task_file() -> Path | None:
+    """Return the user-level task file path, or ``None``."""
+    candidates: list[Path] = []
+    xdg = os.environ.get("XDG_CONFIG_HOME", "")
+    if xdg:
+        candidates.append(Path(xdg) / "conda" / "tasks.toml")
+    candidates.append(Path.home() / ".config" / "conda" / "tasks.toml")
+    candidates.append(Path.home() / ".conda" / "tasks.toml")
+    for c in candidates:
+        if c.is_file():
+            return c
+    return None
+
+
+def detect_and_parse_tasks_with_origin(
+    file_path: Path | None = None,
+    start_dir: Path | None = None,
+) -> tuple[Path, dict[str, Task], set[str]]:
+    """Detect task files and parse them, tracking user-level task origin.
+
+    Returns ``(resolved_path, {task_name: Task}, user_only_names)`` where
+    *user_only_names* is the set of task names that came from the user-level
+    file and were not overridden by the project.
+
+    Raises ``NoTaskFileError`` when neither a project nor a user task file
+    is found.
+    """
+    project_path: Path | None = None
+    if file_path is not None:
+        project_path = file_path.resolve()
+    else:
+        project_path = detect_task_file(start_dir)
+
+    user_path = _user_task_file()
+
+    if project_path is None and user_path is None:
+        raise NoTaskFileError(str(start_dir or Path.cwd()))
+
+    user_tasks: dict[str, Task] = {}
+    if user_path is not None:
+        user_tasks = _cached_user_task_parse(str(user_path))
+
+    if project_path is not None:
+        project_tasks = _cached_task_parse(str(project_path))
+        merged = {**user_tasks, **project_tasks}
+        user_only = set(user_tasks) - set(project_tasks)
+        return project_path, merged, user_only
+
+    assert user_path is not None
+    return user_path, dict(user_tasks), set(user_tasks)
+
+
 def detect_and_parse_tasks(
     file_path: Path | None = None,
     start_dir: Path | None = None,
@@ -145,12 +207,5 @@ def detect_and_parse_tasks(
     Returns ``(resolved_path, {task_name: Task})``.
     Raises ``NoTaskFileError`` when no file is found.
     """
-    if file_path is not None:
-        path = file_path.resolve()
-    else:
-        found = detect_task_file(start_dir)
-        if found is None:
-            raise NoTaskFileError(str(start_dir or Path.cwd()))
-        path = found
-    tasks = _cached_task_parse(str(path))
+    path, tasks, _ = detect_and_parse_tasks_with_origin(file_path, start_dir)
     return path, tasks
