@@ -1,17 +1,1 @@
 /* Custom CSS for conda-workspaces docs */
-
-.mermaid svg {
-    height: auto !important;
-    max-width: 100% !important;
-}
-
-pre.mermaid {
-    background: none;
-    border: none;
-    text-align: center;
-}
-
-pre.mermaid svg {
-    max-width: 700px;
-    margin: 0 auto;
-}
