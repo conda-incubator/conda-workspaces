@@ -69,12 +69,15 @@ every project manifest.
 
 ### User task file search order
 
-1. `$XDG_CONFIG_HOME/conda/tasks.toml` (if `XDG_CONFIG_HOME` is set)
-2. `~/.config/conda/tasks.toml` (XDG default)
-3. `~/.conda/tasks.toml` (legacy fallback)
+```{mermaid}
+graph LR
+    X1["$XDG_CONFIG_HOME/conda/tasks.toml"] -.->|fallback| X2["~/.config/conda/tasks.toml"]
+    X2 -.->|fallback| X3["~/.conda/tasks.toml"]
+```
 
-The first file found is used. The format is the same `[tasks]` table
-as in `conda.toml`:
+First file found wins. If none exist, user-level tasks are not loaded.
+
+The format is the same `[tasks]` table as in `conda.toml`:
 
 ```toml
 [tasks]
@@ -86,6 +89,15 @@ check = { cmd = "ruff check --fix .", description = "Lint and auto-fix" }
 ### Merge semantics
 
 User tasks act as a base layer beneath project tasks:
+
+```{mermaid}
+graph TD
+    A["User tasks<br/><code>~/.config/conda/tasks.toml</code>"] --> C["Merged task set"]
+    B["Project tasks<br/><code>&lt;project&gt;/conda.toml</code>"] --> C
+    C --> D{Name collision?}
+    D -- "Yes" --> E["Project task wins"]
+    D -- "No" --> F["Both included"]
+```
 
 - Project tasks override user tasks on name collision (project always wins)
 - User-only tasks (not defined in the project) are included as-is

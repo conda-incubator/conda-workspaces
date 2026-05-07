@@ -134,6 +134,7 @@ sphinx-copybutton = ">=0.5"
 sphinx-reredirects = ">=0.1"
 sphinx-sitemap = ">=2.5"
 sphinx-argparse = ">=0.4"
+sphinxcontrib-mermaid = ">=0.9"
 
 [tool.pixi.environments]
 dev = {features = ["dev"], solve-group = "default"}

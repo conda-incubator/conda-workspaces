@@ -20,6 +20,7 @@ extensions = [
     "sphinx_reredirects",
     "sphinx_sitemap",
     "sphinxarg.ext",
+    "sphinxcontrib.mermaid",
 ]
 
 myst_enable_extensions = [
