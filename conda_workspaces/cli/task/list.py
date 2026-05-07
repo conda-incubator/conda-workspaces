@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from rich.console import Console
 from rich.table import Table
 
-from ...manifests import detect_and_parse_tasks_with_origin
+from ...manifests import detect_and_parse_tasks
 
 if TYPE_CHECKING:
     import argparse
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 def execute_list(args: argparse.Namespace, *, console: Console | None = None) -> int:
     """Execute the ``conda task list`` subcommand."""
     file_path = getattr(args, "file", None)
-    task_file, tasks, user_only_names = detect_and_parse_tasks_with_origin(
+    task_file, tasks, user_only_names = detect_and_parse_tasks(
         file_path=file_path,
     )
 

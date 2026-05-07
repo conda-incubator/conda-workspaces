@@ -11,7 +11,6 @@ from conda_workspaces.manifests import (
     cached_task_parse,
     cached_user_task_parse,
     detect_and_parse_tasks,
-    detect_and_parse_tasks_with_origin,
     user_task_file,
 )
 
@@ -123,12 +122,12 @@ def test_merge_project_overrides_user(
     monkeypatch.chdir(project_dir)
 
     if use_file_path:
-        path, tasks, user_only = detect_and_parse_tasks_with_origin(
+        path, tasks, user_only = detect_and_parse_tasks(
             file_path=project_file,
         )
         assert path == project_file.resolve()
     else:
-        path, tasks, user_only = detect_and_parse_tasks_with_origin(
+        path, tasks, user_only = detect_and_parse_tasks(
             start_dir=project_dir,
         )
         assert path == project_file
@@ -154,7 +153,7 @@ def test_user_tasks_only_when_no_project(
     project_dir.mkdir()
     monkeypatch.chdir(project_dir)
 
-    path, tasks, user_only = detect_and_parse_tasks_with_origin(
+    path, tasks, user_only = detect_and_parse_tasks(
         start_dir=project_dir,
     )
 
@@ -176,20 +175,3 @@ def test_no_files_raises_error(
         detect_and_parse_tasks(start_dir=project_dir)
 
 
-def test_backward_compat_detect_and_parse_tasks(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    fake_home: Path,
-):
-    """detect_and_parse_tasks returns the two-element tuple as before."""
-    user_file = fake_home / ".config" / "conda" / "tasks.toml"
-    user_file.parent.mkdir(parents=True)
-    user_file.write_text(USER_TASKS_TOML)
-
-    project_dir = tmp_path / "proj"
-    project_dir.mkdir()
-    monkeypatch.chdir(project_dir)
-
-    path, tasks = detect_and_parse_tasks(start_dir=project_dir)
-    assert path == user_file
-    assert "greet" in tasks

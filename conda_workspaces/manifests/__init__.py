@@ -157,11 +157,11 @@ def user_task_file() -> Path | None:
     return None
 
 
-def detect_and_parse_tasks_with_origin(
+def detect_and_parse_tasks(
     file_path: Path | None = None,
     start_dir: Path | None = None,
 ) -> tuple[Path, dict[str, Task], set[str]]:
-    """Detect task files and parse them, tracking user-level task origin.
+    """Detect task files and parse them, merging user-level tasks.
 
     Returns ``(resolved_path, {task_name: Task}, user_only_names)`` where
     *user_only_names* is the set of task names that came from the user-level
@@ -193,16 +193,3 @@ def detect_and_parse_tasks_with_origin(
 
     assert user_path is not None
     return user_path, dict(user_tasks), set(user_tasks)
-
-
-def detect_and_parse_tasks(
-    file_path: Path | None = None,
-    start_dir: Path | None = None,
-) -> tuple[Path, dict[str, Task]]:
-    """Detect (or use *file_path*) a task file and parse it.
-
-    Returns ``(resolved_path, {task_name: Task})``.
-    Raises ``NoTaskFileError`` when no file is found.
-    """
-    path, tasks, _ = detect_and_parse_tasks_with_origin(file_path, start_dir)
-    return path, tasks

@@ -105,7 +105,7 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
     if console is None:
         console = Console(highlight=False)
 
-    task_file, tasks = detect_and_parse_tasks(file_path=getattr(args, "file", None))
+    task_file, tasks, _ = detect_and_parse_tasks(file_path=getattr(args, "file", None))
     project_root = task_file.parent
 
     subdir = context.subdir
