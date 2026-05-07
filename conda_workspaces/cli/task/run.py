@@ -105,8 +105,11 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
     if console is None:
         console = Console(highlight=False)
 
-    task_file, tasks, _ = detect_and_parse_tasks(file_path=getattr(args, "file", None))
-    project_root = task_file.parent
+    task_file, tasks, user_only_names = detect_and_parse_tasks(
+        file_path=getattr(args, "file", None)
+    )
+    is_user_only = user_only_names == set(tasks)
+    project_root = Path.cwd() if is_user_only else task_file.parent
 
     subdir = context.subdir
     tasks = {name: t.resolve_for_platform(subdir) for name, t in tasks.items()}
@@ -369,7 +372,7 @@ def _run_adhoc(
         return 0
 
     shell = SubprocessShell()
-    cwd = Path(getattr(args, "cwd", None) or task_file.parent)
+    cwd = Path(getattr(args, "cwd", None) or Path.cwd())
     exit_code = shell.run(
         full_cmd,
         {},

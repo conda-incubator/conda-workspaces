@@ -173,5 +173,3 @@ def test_no_files_raises_error(
 
     with pytest.raises(NoTaskFileError):
         detect_and_parse_tasks(start_dir=project_dir)
-
-

@@ -191,7 +191,7 @@ def test_get_task_parser_unknown(tmp_project):
 
 
 def test_detect_and_parse_tasks_with_file(sample_yaml):
-    path, tasks = detect_and_parse_tasks(file_path=sample_yaml)
+    path, tasks, _ = detect_and_parse_tasks(file_path=sample_yaml)
     assert path == sample_yaml.resolve()
     assert "build" in tasks
 
