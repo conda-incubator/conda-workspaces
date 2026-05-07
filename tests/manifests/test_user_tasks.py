@@ -8,19 +8,19 @@ import pytest
 
 from conda_workspaces.exceptions import NoTaskFileError
 from conda_workspaces.manifests import (
-    _cached_task_parse,
-    _cached_user_task_parse,
-    _user_task_file,
+    cached_task_parse,
+    cached_user_task_parse,
     detect_and_parse_tasks,
     detect_and_parse_tasks_with_origin,
+    user_task_file,
 )
 
 
 @pytest.fixture(autouse=True)
 def _clear_caches():
     """Clear LRU caches between tests."""
-    _cached_task_parse.cache_clear()
-    _cached_user_task_parse.cache_clear()
+    cached_task_parse.cache_clear()
+    cached_user_task_parse.cache_clear()
 
 
 USER_TASKS_TOML = """\
@@ -72,7 +72,7 @@ def test_user_task_file_discovery(
     task_file.parent.mkdir(parents=True, exist_ok=True)
     task_file.write_text(USER_TASKS_TOML)
 
-    result = _user_task_file()
+    result = user_task_file()
     assert result == task_file
 
 
@@ -93,11 +93,11 @@ def test_user_task_file_xdg_takes_priority(
     default_file.parent.mkdir(parents=True)
     default_file.write_text(USER_TASKS_TOML)
 
-    assert _user_task_file() == xdg_file
+    assert user_task_file() == xdg_file
 
 
 def test_user_task_file_none_when_missing(fake_home: Path):
-    assert _user_task_file() is None
+    assert user_task_file() is None
 
 
 @pytest.mark.parametrize(

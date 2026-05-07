@@ -42,7 +42,7 @@ _SEARCH_FILES: list[str] = [
 ]
 
 
-def _walk_manifests(
+def walk_manifests(
     start_dir: Path,
     predicate: str,
 ) -> Path | None:
@@ -82,7 +82,7 @@ def detect_workspace_file(
     else:
         start_dir = Path(start_dir)
 
-    result = _walk_manifests(start_dir, "has_workspace")
+    result = walk_manifests(start_dir, "has_workspace")
     if result is None:
         raise WorkspaceNotFoundError(start_dir)
     return result
@@ -100,8 +100,8 @@ def find_parser(path: Path) -> ManifestParser:
 
 
 @lru_cache(maxsize=4)
-def _cached_parse(path_str: str) -> WorkspaceConfig:
-    """LRU-cached wrapper around parser dispatch."""
+def cached_parse(path_str: str) -> WorkspaceConfig:
+    """Parse a workspace config from *path_str* (cached by path string)."""
     path = Path(path_str)
     parser = find_parser(path)
     return parser.parse(path)
@@ -115,7 +115,7 @@ def detect_and_parse(
     Returns ``(manifest_path, workspace_config)``.
     """
     path = detect_workspace_file(start_dir)
-    config = _cached_parse(str(path))
+    config = cached_parse(str(path))
     return path, config
 
 
@@ -126,11 +126,11 @@ def detect_task_file(start_dir: Path | None = None) -> Path | None:
     """
     if start_dir is None:
         start_dir = Path.cwd()
-    return _walk_manifests(Path(start_dir), "has_tasks")
+    return walk_manifests(Path(start_dir), "has_tasks")
 
 
 @lru_cache(maxsize=4)
-def _cached_task_parse(path_str: str) -> dict[str, Task]:
+def cached_task_parse(path_str: str) -> dict[str, Task]:
     """Parse tasks from a manifest file (cached by path string)."""
     p = Path(path_str)
     parser = find_parser(p)
@@ -141,12 +141,12 @@ _CONDA_TOML_PARSER = CondaTomlParser()
 
 
 @lru_cache(maxsize=1)
-def _cached_user_task_parse(path_str: str) -> dict[str, Task]:
+def cached_user_task_parse(path_str: str) -> dict[str, Task]:
     """Parse tasks from the user-level ``tasks.toml`` (conda.toml format)."""
     return _CONDA_TOML_PARSER.parse_tasks(Path(path_str))
 
 
-def _user_task_file() -> Path | None:
+def user_task_file() -> Path | None:
     """Return the user-level task file path, or ``None``."""
     candidates: list[Path] = []
     xdg = os.environ.get("XDG_CONFIG_HOME", "")
@@ -179,17 +179,17 @@ def detect_and_parse_tasks_with_origin(
     else:
         project_path = detect_task_file(start_dir)
 
-    user_path = _user_task_file()
+    user_path = user_task_file()
 
     if project_path is None and user_path is None:
         raise NoTaskFileError(str(start_dir or Path.cwd()))
 
     user_tasks: dict[str, Task] = {}
     if user_path is not None:
-        user_tasks = _cached_user_task_parse(str(user_path))
+        user_tasks = cached_user_task_parse(str(user_path))
 
     if project_path is not None:
-        project_tasks = _cached_task_parse(str(project_path))
+        project_tasks = cached_task_parse(str(project_path))
         merged = {**user_tasks, **project_tasks}
         user_only = set(user_tasks) - set(project_tasks)
         return project_path, merged, user_only

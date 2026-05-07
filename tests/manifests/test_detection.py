@@ -12,7 +12,7 @@ from conda_workspaces.exceptions import (
     WorkspaceParseError,
 )
 from conda_workspaces.manifests import (
-    _cached_parse,
+    cached_parse,
     detect_and_parse,
     detect_and_parse_tasks,
     detect_task_file,
@@ -109,7 +109,7 @@ def test_find_parser_unknown():
 
 
 def test_detect_and_parse(sample_pixi_toml):
-    _cached_parse.cache_clear()
+    cached_parse.cache_clear()
     path, config = detect_and_parse(sample_pixi_toml.parent)
     assert path == sample_pixi_toml
     assert config.name == "test-project"
