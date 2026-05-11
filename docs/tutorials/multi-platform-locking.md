@@ -200,7 +200,7 @@ conda workspace info --json | jq .known_platforms
 ## Next steps
 
 - Split locking across CI runners with `--output` and `--merge` (see
-  [CI pipeline](ci-pipeline.md#matrix-split-locking-with---merge))
-- Add [features](../features.md) with per-feature platform lists
-- Check the [Lock reference](../features.md#lock) for all flags and
+  [CI pipeline](ci-pipeline.md#matrix-split-locking))
+- Add [features](../features.md#platform-targeting) with per-feature platform lists
+- Check the [Lock section](../features.md#lock) for all flags and
   error handling details
