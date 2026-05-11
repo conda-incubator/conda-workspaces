@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # Tutorials
 
 Step-by-step guides for common workflows.
@@ -34,12 +38,3 @@ Set up conda-workspaces in GitHub Actions.
 :::
 
 ::::
-
-```{toctree}
-:hidden:
-
-first-project
-multi-platform-locking
-coming-from/index
-ci-pipeline
-```
