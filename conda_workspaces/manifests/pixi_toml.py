@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import tomlkit
 
 from ..exceptions import TaskNotFoundError, TaskParseError, WorkspaceParseError
-from ..models import WorkspaceConfig
+from ..models import ArchiveConfig, WorkspaceConfig
 from .base import ManifestParser
 from .normalize import parse_feature_tasks, parse_tasks_and_targets
 from .toml import _parse_channels, _parse_features_and_envs
@@ -21,6 +21,13 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ..models import Task
+
+
+def _parse_archive_config(ws: dict) -> ArchiveConfig:
+    """Parse [workspace.archive] into an ArchiveConfig."""
+    archive_data = ws.get("archive", {})
+    exclude = tuple(archive_data.get("exclude", []))
+    return ArchiveConfig(exclude=exclude)
 
 
 class PixiTomlParser(ManifestParser):
@@ -66,6 +73,7 @@ class PixiTomlParser(ManifestParser):
             root=root,
             manifest_path=str(path),
             channel_priority=ws.get("channel-priority"),
+            archive=_parse_archive_config(ws),
         )
 
         _parse_features_and_envs(data, config, path)
