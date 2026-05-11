@@ -456,3 +456,50 @@ def test_inspect_archive_not_workspace(tmp_path: Path) -> None:
 
     result = inspect_archive(archive)
     assert result["has_manifest"] is False
+
+
+# ---------------------------------------------------------------------------
+# Task 13: full integration tests (round-trip)
+# ---------------------------------------------------------------------------
+
+
+def test_archive_roundtrip(git_project: Path, tmp_path: Path) -> None:
+    """Full round-trip: create archive, extract, verify contents match."""
+    config = ArchiveConfig()
+    archive_path = tmp_path / "roundtrip.tar.gz"
+    create_archive(git_project, archive_path, config)
+
+    target = tmp_path / "extracted"
+    extract_archive(archive_path, target)
+
+    assert (target / "conda.toml").read_text() == (git_project / "conda.toml").read_text()
+    assert (target / "conda.lock").read_text() == (git_project / "conda.lock").read_text()
+    assert (target / "src" / "main.py").read_text() == (
+        git_project / "src" / "main.py"
+    ).read_text()
+
+    assert not (target / ".env").exists()
+    assert not (target / "data").exists()
+
+
+def test_archive_roundtrip_with_bundle(lockfile_with_packages: Path, tmp_path: Path) -> None:
+    """Round-trip with bundled packages: archive, extract, prime cache."""
+    cache_dir = lockfile_with_packages / "pkg_cache"
+    lockfile = lockfile_with_packages / "conda.lock"
+    packages = collect_bundle_packages(lockfile, [cache_dir])
+
+    archive_path = tmp_path / "bundled.tar.gz"
+    config = ArchiveConfig()
+    create_archive(lockfile_with_packages, archive_path, config, bundle_packages=packages)
+
+    target = tmp_path / "extracted"
+    extract_archive(archive_path, target)
+
+    new_cache = tmp_path / "fresh_cache"
+    new_cache.mkdir()
+    count = prime_package_cache(target, new_cache)
+    assert count == 2
+
+    cached_files = {f.name for f in new_cache.iterdir()}
+    assert "zlib-1.2.13-h4dc568a_6.conda" in cached_files
+    assert "zlib-1.2.13-h53f4e23_6.conda" in cached_files
