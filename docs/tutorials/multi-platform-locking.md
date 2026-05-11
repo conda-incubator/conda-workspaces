@@ -12,7 +12,15 @@ environments from the same `conda.lock`.
 
 ## Declare your platforms
 
-Open your `conda.toml` and list every platform your team targets:
+If you are starting a new project, pass `--platform` (repeatable) to
+`workspace init`:
+
+```bash
+conda workspace init --platform linux-64 --platform osx-arm64 --platform win-64
+```
+
+Or if you already have a `conda.toml`, edit the `platforms` list
+directly:
 
 ```toml
 [workspace]
@@ -25,7 +33,9 @@ python = ">=3.11"
 numpy = ">=1.26"
 ```
 
-The `platforms` list tells the lock command which subdirs to solve for.
+If you omit `--platform` during init, only your current platform is
+added. The `platforms` list tells the lock command which subdirs to
+solve for.
 
 ## Generate the lockfile
 
