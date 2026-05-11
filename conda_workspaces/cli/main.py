@@ -514,6 +514,76 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         help="Optional command to run in the spawned shell.",
     )
 
+    archive_parser = sub.add_parser(
+        "archive",
+        help="Create a workspace archive.",
+        add_help=False,
+    )
+    add_parser_help(archive_parser)
+    add_output_and_prompt_options(archive_parser)
+    archive_parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        default=None,
+        help=(
+            "Output archive path (default: <workspace-name>.tar.gz)."
+            " Supports .tar.gz and .tar.zst extensions."
+        ),
+    )
+    archive_parser.add_argument(
+        "--bundle",
+        action="store_true",
+        default=False,
+        help=(
+            "Bundle .conda packages from the local cache for"
+            " offline/air-gapped deployment."
+        ),
+    )
+    archive_parser.add_argument(
+        "-e",
+        "--environment",
+        default=None,
+        help="Archive packages for this environment only (with --bundle).",
+    )
+    archive_parser.add_argument(
+        "--exclude",
+        action="append",
+        default=None,
+        help="Additional exclude patterns (repeatable). Added to [workspace.archive] exclude.",
+    )
+
+    unarchive_parser = sub.add_parser(
+        "unarchive",
+        help="Extract a workspace archive.",
+        add_help=False,
+    )
+    add_parser_help(unarchive_parser)
+    add_output_and_prompt_options(unarchive_parser)
+    unarchive_parser.add_argument(
+        "archive_path",
+        type=Path,
+        help="Path to the workspace archive.",
+    )
+    unarchive_parser.add_argument(
+        "--target",
+        type=Path,
+        default=None,
+        help="Target directory (default: directory named after the archive).",
+    )
+    unarchive_parser.add_argument(
+        "--install",
+        action="store_true",
+        default=False,
+        help="Install environments from the lockfile after extraction.",
+    )
+    unarchive_parser.add_argument(
+        "--no-install",
+        action="store_true",
+        default=False,
+        help="Skip installing environments.",
+    )
+
     quickstart_parser = sub.add_parser(
         "quickstart",
         help=(
@@ -705,6 +775,14 @@ def _dispatch_workspace(args: argparse.Namespace, subcmd: str) -> int:
         from .workspace.import_manifest import execute_import
 
         return execute_import(args)
+    elif subcmd == "archive":
+        from .workspace.archive import execute_archive
+
+        return execute_archive(args)
+    elif subcmd == "unarchive":
+        from .workspace.archive import execute_unarchive
+
+        return execute_unarchive(args)
     elif subcmd == "quickstart":
         from .workspace.quickstart import execute_quickstart
 
