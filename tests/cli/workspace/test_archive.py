@@ -176,4 +176,5 @@ def test_execute_unarchive_no_install_by_default(
 
     assert result == 0
     output = console.file.getvalue()
-    assert "not signed" in output.lower() or "unsigned" in output.lower() or "WARNING" in output
+    lower = output.lower()
+    assert "not signed" in lower or "unsigned" in lower or "WARNING" in output

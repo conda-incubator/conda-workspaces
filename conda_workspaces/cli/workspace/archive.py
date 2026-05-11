@@ -127,9 +127,7 @@ def execute_unarchive(
     status.message(console, "Extracted", "archive", str(target))
 
     if info["has_packages"]:
-        console.print(
-            f"  Archive includes {info['package_count']} bundled packages"
-        )
+        console.print(f"  Archive includes {info['package_count']} bundled packages")
         if not args.no_install:
             from conda.base.context import context as conda_context
 

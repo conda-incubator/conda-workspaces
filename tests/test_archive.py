@@ -1,14 +1,30 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import subprocess
 import tarfile
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
-from conda_workspaces.archive import collect_archive_files
+from conda_workspaces.archive import (
+    collect_archive_files,
+    collect_bundle_packages,
+    create_archive,
+    extract_archive,
+    inspect_archive,
+    prime_package_cache,
+    verify_package_hashes,
+)
+from conda_workspaces.exceptions import (
+    ArchiveHashMismatchError,
+    ArchivePathTraversalError,
+)
 from conda_workspaces.models import ArchiveConfig
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture
@@ -30,20 +46,73 @@ def git_project(project_dir: Path) -> Path:
     subprocess.run(["git", "init"], cwd=project_dir, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
-        cwd=project_dir, check=True, capture_output=True,
+        cwd=project_dir,
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "Test"],
-        cwd=project_dir, check=True, capture_output=True,
+        cwd=project_dir,
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "add", "conda.toml", "conda.lock", "src/main.py"],
-        cwd=project_dir, check=True, capture_output=True,
+        cwd=project_dir,
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "commit", "-m", "init"],
-        cwd=project_dir, check=True, capture_output=True,
+        cwd=project_dir,
+        check=True,
+        capture_output=True,
     )
+    return project_dir
+
+
+@pytest.fixture
+def lockfile_with_packages(project_dir: Path) -> Path:
+    """Create a conda.lock with fake package entries and matching .conda files."""
+    pkg_content = b"fake conda package data"
+    sha256 = hashlib.sha256(pkg_content).hexdigest()
+
+    lockfile_content = f"""\
+version: 1
+environments:
+  default:
+    channels:
+      - url: https://conda.anaconda.org/conda-forge/
+    packages:
+      linux-64:
+        - conda: https://conda.anaconda.org/conda-forge/linux-64/zlib-1.2.13-h4dc568a_6.conda
+      osx-arm64:
+        - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zlib-1.2.13-h53f4e23_6.conda
+packages:
+  - conda: https://conda.anaconda.org/conda-forge/linux-64/zlib-1.2.13-h4dc568a_6.conda
+    sha256: {sha256}
+    md5: abc123
+    name: zlib
+    version: 1.2.13
+    build: h4dc568a_6
+    subdir: linux-64
+    depends: []
+  - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zlib-1.2.13-h53f4e23_6.conda
+    sha256: {sha256}
+    md5: def456
+    name: zlib
+    version: 1.2.13
+    build: h53f4e23_6
+    subdir: osx-arm64
+    depends: []
+"""
+    (project_dir / "conda.lock").write_text(lockfile_content, encoding="utf-8")
+
+    cache_dir = project_dir / "pkg_cache"
+    cache_dir.mkdir()
+    (cache_dir / "zlib-1.2.13-h4dc568a_6.conda").write_bytes(pkg_content)
+    (cache_dir / "zlib-1.2.13-h53f4e23_6.conda").write_bytes(pkg_content)
+
     return project_dir
 
 
@@ -95,13 +164,6 @@ def test_collect_files_custom_exclude(project_dir: Path) -> None:
     assert "conda.toml" in rel_paths
 
 
-# ---------------------------------------------------------------------------
-# Task 4: tarball creation
-# ---------------------------------------------------------------------------
-
-from conda_workspaces.archive import create_archive
-
-
 def test_create_archive_tar_gz(project_dir: Path, tmp_path: Path) -> None:
     output = tmp_path / "out" / "project.tar.gz"
     config = ArchiveConfig()
@@ -146,14 +208,6 @@ def test_create_archive_output_dir_created(project_dir: Path, tmp_path: Path) ->
     config = ArchiveConfig()
     create_archive(project_dir, output, config)
     assert output.is_file()
-
-
-# ---------------------------------------------------------------------------
-# Task 5: safe extraction with path traversal protection
-# ---------------------------------------------------------------------------
-
-from conda_workspaces.archive import extract_archive
-from conda_workspaces.exceptions import ArchivePathTraversalError
 
 
 def test_extract_archive_basic(project_dir: Path, tmp_path: Path) -> None:
@@ -221,64 +275,6 @@ def test_extract_archive_zst(project_dir: Path, tmp_path: Path) -> None:
     assert (target / "src" / "main.py").is_file()
 
 
-# ---------------------------------------------------------------------------
-# Task 6: package bundling and hash verification
-# ---------------------------------------------------------------------------
-
-import hashlib
-
-from conda_workspaces.archive import (
-    collect_bundle_packages,
-    verify_package_hashes,
-)
-from conda_workspaces.exceptions import ArchiveHashMismatchError
-
-
-@pytest.fixture
-def lockfile_with_packages(project_dir: Path) -> Path:
-    """Create a conda.lock with fake package entries and matching .conda files."""
-    pkg_content = b"fake conda package data"
-    sha256 = hashlib.sha256(pkg_content).hexdigest()
-
-    lockfile_content = f"""\
-version: 1
-environments:
-  default:
-    channels:
-      - url: https://conda.anaconda.org/conda-forge/
-    packages:
-      linux-64:
-        - conda: https://conda.anaconda.org/conda-forge/linux-64/zlib-1.2.13-h4dc568a_6.conda
-      osx-arm64:
-        - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zlib-1.2.13-h53f4e23_6.conda
-packages:
-  - conda: https://conda.anaconda.org/conda-forge/linux-64/zlib-1.2.13-h4dc568a_6.conda
-    sha256: {sha256}
-    md5: abc123
-    name: zlib
-    version: 1.2.13
-    build: h4dc568a_6
-    subdir: linux-64
-    depends: []
-  - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zlib-1.2.13-h53f4e23_6.conda
-    sha256: {sha256}
-    md5: def456
-    name: zlib
-    version: 1.2.13
-    build: h53f4e23_6
-    subdir: osx-arm64
-    depends: []
-"""
-    (project_dir / "conda.lock").write_text(lockfile_content, encoding="utf-8")
-
-    cache_dir = project_dir / "pkg_cache"
-    cache_dir.mkdir()
-    (cache_dir / "zlib-1.2.13-h4dc568a_6.conda").write_bytes(pkg_content)
-    (cache_dir / "zlib-1.2.13-h53f4e23_6.conda").write_bytes(pkg_content)
-
-    return project_dir
-
-
 def test_collect_bundle_packages(lockfile_with_packages: Path) -> None:
     cache_dir = lockfile_with_packages / "pkg_cache"
     lockfile = lockfile_with_packages / "conda.lock"
@@ -305,7 +301,10 @@ def test_verify_package_hashes_fail(lockfile_with_packages: Path) -> None:
         verify_package_hashes(packages, lockfile)
 
 
-def test_create_archive_with_bundle(lockfile_with_packages: Path, tmp_path: Path) -> None:
+def test_create_archive_with_bundle(
+    lockfile_with_packages: Path,
+    tmp_path: Path,
+) -> None:
     cache_dir = lockfile_with_packages / "pkg_cache"
     lockfile = lockfile_with_packages / "conda.lock"
     packages = collect_bundle_packages(lockfile, [cache_dir])
@@ -319,13 +318,6 @@ def test_create_archive_with_bundle(lockfile_with_packages: Path, tmp_path: Path
     assert "packages/zlib-1.2.13-h4dc568a_6.conda" in names
     assert "packages/zlib-1.2.13-h53f4e23_6.conda" in names
     assert "conda.toml" in names
-
-
-# ---------------------------------------------------------------------------
-# Task 7: cache priming
-# ---------------------------------------------------------------------------
-
-from conda_workspaces.archive import prime_package_cache
 
 
 def test_prime_package_cache(tmp_path: Path) -> None:
@@ -370,7 +362,9 @@ packages:
 def test_prime_package_cache_no_packages(tmp_path: Path) -> None:
     extracted = tmp_path / "project"
     extracted.mkdir()
-    (extracted / "conda.lock").write_text("version: 1\nenvironments: {}\npackages: []\n")
+    (extracted / "conda.lock").write_text(
+        "version: 1\nenvironments: {}\npackages: []\n"
+    )
 
     cache_dir = tmp_path / "pkgs"
     cache_dir.mkdir()
@@ -412,13 +406,6 @@ packages:
         prime_package_cache(extracted, cache_dir)
 
 
-# ---------------------------------------------------------------------------
-# Task 8: archive inspection helper
-# ---------------------------------------------------------------------------
-
-from conda_workspaces.archive import inspect_archive
-
-
 def test_inspect_archive_lightweight(project_dir: Path, tmp_path: Path) -> None:
     output = tmp_path / "test.tar.gz"
     config = ArchiveConfig()
@@ -458,11 +445,6 @@ def test_inspect_archive_not_workspace(tmp_path: Path) -> None:
     assert result["has_manifest"] is False
 
 
-# ---------------------------------------------------------------------------
-# Task 13: full integration tests (round-trip)
-# ---------------------------------------------------------------------------
-
-
 def test_archive_roundtrip(git_project: Path, tmp_path: Path) -> None:
     """Full round-trip: create archive, extract, verify contents match."""
     config = ArchiveConfig()
@@ -472,8 +454,12 @@ def test_archive_roundtrip(git_project: Path, tmp_path: Path) -> None:
     target = tmp_path / "extracted"
     extract_archive(archive_path, target)
 
-    assert (target / "conda.toml").read_text() == (git_project / "conda.toml").read_text()
-    assert (target / "conda.lock").read_text() == (git_project / "conda.lock").read_text()
+    assert (target / "conda.toml").read_text() == (
+        git_project / "conda.toml"
+    ).read_text()
+    assert (target / "conda.lock").read_text() == (
+        git_project / "conda.lock"
+    ).read_text()
     assert (target / "src" / "main.py").read_text() == (
         git_project / "src" / "main.py"
     ).read_text()
@@ -482,7 +468,10 @@ def test_archive_roundtrip(git_project: Path, tmp_path: Path) -> None:
     assert not (target / "data").exists()
 
 
-def test_archive_roundtrip_with_bundle(lockfile_with_packages: Path, tmp_path: Path) -> None:
+def test_archive_roundtrip_with_bundle(
+    lockfile_with_packages: Path,
+    tmp_path: Path,
+) -> None:
     """Round-trip with bundled packages: archive, extract, prime cache."""
     cache_dir = lockfile_with_packages / "pkg_cache"
     lockfile = lockfile_with_packages / "conda.lock"
@@ -490,7 +479,12 @@ def test_archive_roundtrip_with_bundle(lockfile_with_packages: Path, tmp_path: P
 
     archive_path = tmp_path / "bundled.tar.gz"
     config = ArchiveConfig()
-    create_archive(lockfile_with_packages, archive_path, config, bundle_packages=packages)
+    create_archive(
+        lockfile_with_packages,
+        archive_path,
+        config,
+        bundle_packages=packages,
+    )
 
     target = tmp_path / "extracted"
     extract_archive(archive_path, target)

@@ -9,6 +9,9 @@ from conda.exceptions import CondaError
 
 from conda_workspaces.exceptions import (
     ActivationError,
+    ArchiveError,
+    ArchiveHashMismatchError,
+    ArchivePathTraversalError,
     CondaWorkspacesError,
     EnvironmentNotFoundError,
     EnvironmentNotInstalledError,
@@ -140,13 +143,6 @@ def test_error_message_and_hints_separate(exc):
     for hint in exc.hints:
         assert hint in str(exc)
     assert exc.error_message != str(exc) or not exc.hints
-
-
-from conda_workspaces.exceptions import (
-    ArchiveError,
-    ArchivePathTraversalError,
-    ArchiveHashMismatchError,
-)
 
 
 def test_archive_error():

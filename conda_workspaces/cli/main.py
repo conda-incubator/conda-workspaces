@@ -550,7 +550,8 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         "--exclude",
         action="append",
         default=None,
-        help="Additional exclude patterns (repeatable). Added to [workspace.archive] exclude.",
+        help="Additional exclude patterns (repeatable)."
+        " Added to [workspace.archive] exclude.",
     )
 
     unarchive_parser = sub.add_parser(

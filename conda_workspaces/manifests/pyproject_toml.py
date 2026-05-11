@@ -19,10 +19,10 @@ from ..exceptions import (
     TaskParseError,
     WorkspaceParseError,
 )
-from ..models import ArchiveConfig, WorkspaceConfig
+from ..models import WorkspaceConfig
 from .base import ManifestParser
 from .normalize import parse_feature_tasks, parse_tasks_and_targets
-from .toml import _parse_channels, _parse_features_and_envs
+from .toml import _parse_channels, _parse_features_and_envs, parse_archive_config
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -32,13 +32,6 @@ if TYPE_CHECKING:
     from tomlkit.items import Table
 
     from ..models import Task
-
-
-def _parse_archive_config(ws: dict) -> ArchiveConfig:
-    """Parse [workspace.archive] into an ArchiveConfig."""
-    archive_data = ws.get("archive", {})
-    exclude = tuple(archive_data.get("exclude", []))
-    return ArchiveConfig(exclude=exclude)
 
 
 class PyprojectTomlParser(ManifestParser):
@@ -192,7 +185,7 @@ class PyprojectTomlParser(ManifestParser):
             root=root,
             manifest_path=str(path),
             channel_priority=ws.get("channel-priority"),
-            archive=_parse_archive_config(ws),
+            archive=parse_archive_config(ws),
         )
 
         _parse_features_and_envs(source, config, path)

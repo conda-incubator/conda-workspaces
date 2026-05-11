@@ -1,4 +1,9 @@
-"""Archive creation and extraction for conda workspaces."""
+"""Archive creation and extraction for conda workspaces.
+
+Provides functions for collecting workspace files, creating tar archives
+(gzip or zstandard), extracting with path traversal protection, bundling
+conda packages for offline use, and inspecting archive contents.
+"""
 
 from __future__ import annotations
 
@@ -11,20 +16,31 @@ import tarfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .exceptions import ArchiveError, ArchiveHashMismatchError, ArchivePathTraversalError
+from .exceptions import (
+    ArchiveError,
+    ArchiveHashMismatchError,
+    ArchivePathTraversalError,
+)
 
 if TYPE_CHECKING:
     from .models import ArchiveConfig
 
-BUILTIN_EXCLUDE_DIRS: frozenset[str] = frozenset({
-    ".git",
-    ".conda/envs",
-    ".pixi",
-    "__pycache__",
-})
+BUILTIN_EXCLUDE_DIRS: frozenset[str] = frozenset(
+    {
+        ".git",
+        ".conda/envs",
+        ".pixi",
+        "__pycache__",
+    }
+)
+"""Directories excluded from archives regardless of user configuration."""
+
+ZSTD_COMPRESSION_LEVEL = 19
+"""Zstandard compression level for archive creation (1=fastest, 22=smallest)."""
 
 
-def _is_git_repo(root: Path) -> bool:
+def is_git_repo(root: Path) -> bool:
+    """Return True if *root* is inside a git working tree."""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--is-inside-work-tree"],
@@ -37,7 +53,8 @@ def _is_git_repo(root: Path) -> bool:
         return False
 
 
-def _git_tracked_files(root: Path) -> list[Path]:
+def git_tracked_files(root: Path) -> list[Path]:
+    """Return absolute paths for all git-tracked files under *root*."""
     result = subprocess.run(
         ["git", "ls-files", "-z"],
         cwd=root,
@@ -54,14 +71,16 @@ def _git_tracked_files(root: Path) -> list[Path]:
     return paths
 
 
-def _is_excluded_by_builtins(rel_path: str) -> bool:
+def is_excluded_by_builtins(rel_path: str) -> bool:
+    """Return True if *rel_path* falls under a builtin-excluded directory."""
     for excl in BUILTIN_EXCLUDE_DIRS:
         if rel_path == excl or rel_path.startswith(excl + "/"):
             return True
     return False
 
 
-def _is_excluded_by_patterns(rel_path: str, patterns: tuple[str, ...]) -> bool:
+def is_excluded_by_patterns(rel_path: str, patterns: tuple[str, ...]) -> bool:
+    """Return True if *rel_path* matches any of the user-supplied glob *patterns*."""
     for pattern in patterns:
         if fnmatch.fnmatch(rel_path, pattern):
             return True
@@ -77,29 +96,30 @@ def collect_archive_files(
     root: Path,
     archive_config: ArchiveConfig,
 ) -> list[Path]:
-    if _is_git_repo(root):
-        candidates = _git_tracked_files(root)
+    """Collect workspace files eligible for archiving.
+
+    In git repos, only tracked files are included. Otherwise all files
+    under *root* are considered, filtered by builtin and user excludes.
+    """
+    if is_git_repo(root):
+        candidates = git_tracked_files(root)
     else:
         candidates = [p for p in root.rglob("*") if p.is_file()]
 
     result: list[Path] = []
     for path in candidates:
         rel = str(path.relative_to(root))
-        if _is_excluded_by_builtins(rel):
+        if is_excluded_by_builtins(rel):
             continue
-        if _is_excluded_by_patterns(rel, archive_config.exclude):
+        if is_excluded_by_patterns(rel, archive_config.exclude):
             continue
         result.append(path)
 
     return sorted(result)
 
 
-# ---------------------------------------------------------------------------
-# Task 4: tarball creation
-# ---------------------------------------------------------------------------
-
-
-def _detect_compression(output: Path) -> str:
+def detect_compression(output: Path) -> str:
+    """Infer compression format from the archive filename extension."""
     name = output.name
     if name.endswith(".tar.zst") or name.endswith(".tar.zstd"):
         return "zst"
@@ -117,63 +137,71 @@ def create_archive(
     *,
     bundle_packages: list[Path] | None = None,
 ) -> Path:
+    """Create a tar archive of the workspace at *root*.
+
+    Writes to *output*, creating parent directories as needed.
+    If *bundle_packages* is provided, the listed ``.conda`` files
+    are added under a ``packages/`` prefix inside the archive.
+    """
     output = output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
 
     files = collect_archive_files(root, archive_config)
     files = [f for f in files if f.resolve() != output]
 
-    compression = _detect_compression(output)
+    compression = detect_compression(output)
 
     if compression == "zst":
-        _write_tar_zst(root, output, files, bundle_packages)
+        write_tar_zst(root, output, files, bundle_packages)
     else:
         mode = f"w:{compression}"
         with tarfile.open(output, mode) as tf:
-            _add_files_to_tar(tf, root, files)
+            add_files_to_tar(tf, root, files)
             if bundle_packages:
-                _add_packages_to_tar(tf, bundle_packages)
+                add_packages_to_tar(tf, bundle_packages)
 
     return output
 
 
-def _add_files_to_tar(tf: tarfile.TarFile, root: Path, files: list[Path]) -> None:
+def add_files_to_tar(tf: tarfile.TarFile, root: Path, files: list[Path]) -> None:
+    """Add workspace *files* to the tar, using paths relative to *root*."""
     for path in files:
         arcname = str(path.relative_to(root))
         tf.add(str(path), arcname=arcname)
 
 
-def _add_packages_to_tar(tf: tarfile.TarFile, packages: list[Path]) -> None:
+def add_packages_to_tar(tf: tarfile.TarFile, packages: list[Path]) -> None:
+    """Add ``.conda`` *packages* under the ``packages/`` archive prefix."""
     for pkg in packages:
         arcname = f"packages/{pkg.name}"
         tf.add(str(pkg), arcname=arcname)
 
 
-def _write_tar_zst(
+def write_tar_zst(
     root: Path,
     output: Path,
     files: list[Path],
     bundle_packages: list[Path] | None,
 ) -> None:
+    """Write a zstandard-compressed tar archive to *output*."""
     import zstandard
 
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:") as tf:
-        _add_files_to_tar(tf, root, files)
+        add_files_to_tar(tf, root, files)
         if bundle_packages:
-            _add_packages_to_tar(tf, bundle_packages)
+            add_packages_to_tar(tf, bundle_packages)
 
-    cctx = zstandard.ZstdCompressor(level=3)
+    cctx = zstandard.ZstdCompressor(level=ZSTD_COMPRESSION_LEVEL)
     compressed = cctx.compress(buf.getvalue())
     output.write_bytes(compressed)
 
 
-# ---------------------------------------------------------------------------
-# Task 5: safe extraction with path traversal protection
-# ---------------------------------------------------------------------------
+def validate_tar_member(member: tarfile.TarInfo, target: Path) -> None:
+    """Raise :class:`ArchivePathTraversalError` if *member* escapes *target*.
 
-
-def _validate_tar_member(member: tarfile.TarInfo, target: Path) -> None:
+    Checks absolute paths, ``..`` components, and symlink targets.
+    """
     member_path = Path(member.name)
 
     if member_path.is_absolute():
@@ -199,8 +227,9 @@ def _validate_tar_member(member: tarfile.TarInfo, target: Path) -> None:
             raise ArchivePathTraversalError(member.name)
 
 
-def _open_tar(archive_path: Path) -> tarfile.TarFile:
-    compression = _detect_compression(archive_path)
+def open_tar(archive_path: Path) -> tarfile.TarFile:
+    """Open a tar archive, handling zstandard decompression transparently."""
+    compression = detect_compression(archive_path)
     if compression == "zst":
         import zstandard
 
@@ -213,30 +242,32 @@ def _open_tar(archive_path: Path) -> tarfile.TarFile:
 
 
 def extract_archive(archive_path: Path, target: Path) -> Path:
+    """Extract *archive_path* into *target* with path traversal protection.
+
+    Every member is validated before extraction. Uses Python 3.12+
+    ``filter="data"`` for defense-in-depth.
+    """
     target = target.resolve()
     target.mkdir(parents=True, exist_ok=True)
 
-    with _open_tar(archive_path) as tf:
+    with open_tar(archive_path) as tf:
         for member in tf.getmembers():
-            _validate_tar_member(member, target)
+            validate_tar_member(member, target)
         tf.extractall(path=target, filter="data")
 
     return target
 
 
-# ---------------------------------------------------------------------------
-# Task 6: package bundling and hash verification
-# ---------------------------------------------------------------------------
-
-
-def _parse_lockfile_packages(lockfile_path: Path) -> list[dict]:
+def parse_lockfile_packages(lockfile_path: Path) -> list[dict]:
+    """Parse the ``packages`` list from a conda lockfile."""
     from conda_lockfiles.load_yaml import load_yaml
 
     data = load_yaml(lockfile_path)
     return data.get("packages", []) or []
 
 
-def _url_to_filename(url: str) -> str:
+def url_to_filename(url: str) -> str:
+    """Extract the filename from a conda package URL."""
     return url.rsplit("/", 1)[-1]
 
 
@@ -244,7 +275,11 @@ def collect_bundle_packages(
     lockfile_path: Path,
     cache_dirs: list[Path],
 ) -> list[Path]:
-    packages_data = _parse_lockfile_packages(lockfile_path)
+    """Locate ``.conda`` packages referenced by the lockfile in local caches.
+
+    Raises :class:`ArchiveError` if any package is missing from all caches.
+    """
+    packages_data = parse_lockfile_packages(lockfile_path)
     result: list[Path] = []
     seen: set[str] = set()
 
@@ -252,7 +287,7 @@ def collect_bundle_packages(
         url = pkg.get("conda") or pkg.get("url", "")
         if not url:
             continue
-        filename = _url_to_filename(url)
+        filename = url_to_filename(url)
         if filename in seen:
             continue
         seen.add(filename)
@@ -277,14 +312,15 @@ def collect_bundle_packages(
     return sorted(result, key=lambda p: p.name)
 
 
-def _build_hash_index(lockfile_path: Path) -> dict[str, str]:
-    packages_data = _parse_lockfile_packages(lockfile_path)
+def build_hash_index(lockfile_path: Path) -> dict[str, str]:
+    """Build a filename-to-SHA256 mapping from lockfile package entries."""
+    packages_data = parse_lockfile_packages(lockfile_path)
     index: dict[str, str] = {}
     for pkg in packages_data:
         url = pkg.get("conda") or pkg.get("url", "")
         sha256 = pkg.get("sha256")
         if url and sha256 is not None:
-            index[_url_to_filename(url)] = str(sha256)
+            index[url_to_filename(url)] = str(sha256)
     return index
 
 
@@ -292,7 +328,11 @@ def verify_package_hashes(
     packages: list[Path],
     lockfile_path: Path,
 ) -> None:
-    expected = _build_hash_index(lockfile_path)
+    """Verify SHA256 hashes of *packages* against the lockfile.
+
+    Raises :class:`ArchiveHashMismatchError` on the first mismatch.
+    """
+    expected = build_hash_index(lockfile_path)
 
     for pkg_path in packages:
         exp_hash = expected.get(pkg_path.name)
@@ -305,15 +345,15 @@ def verify_package_hashes(
             )
 
 
-# ---------------------------------------------------------------------------
-# Task 7: unarchive with cache priming
-# ---------------------------------------------------------------------------
-
-
 def prime_package_cache(
     extracted_dir: Path,
     cache_dir: Path,
 ) -> int:
+    """Copy bundled packages from an extracted archive into the conda cache.
+
+    Verifies SHA256 hashes against the lockfile before copying.
+    Returns the number of packages added to the cache.
+    """
     packages_dir = extracted_dir / "packages"
     if not packages_dir.is_dir():
         return 0
@@ -336,16 +376,14 @@ def prime_package_cache(
     return count
 
 
-# ---------------------------------------------------------------------------
-# Task 8: archive inspection helper
-# ---------------------------------------------------------------------------
-
-
 def inspect_archive(archive_path: Path) -> dict[str, object]:
-    with _open_tar(archive_path) as tf:
+    """Return metadata about an archive without extracting it."""
+    with open_tar(archive_path) as tf:
         names = set(tf.getnames())
 
-    package_members = [n for n in names if n.startswith("packages/") and n.endswith(".conda")]
+    package_members = [
+        n for n in names if n.startswith("packages/") and n.endswith(".conda")
+    ]
 
     return {
         "has_manifest": "conda.toml" in names,

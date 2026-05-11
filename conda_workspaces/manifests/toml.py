@@ -17,6 +17,7 @@ import tomlkit
 
 from ..exceptions import TaskNotFoundError, TaskParseError, WorkspaceParseError
 from ..models import (
+    ArchiveConfig,
     Channel,
     Environment,
     Feature,
@@ -149,6 +150,13 @@ def tasks_to_toml(tasks: dict[str, Task]) -> str:
         )
 
     return tomlkit.dumps(doc)
+
+
+def parse_archive_config(ws: dict[str, Any]) -> ArchiveConfig:
+    """Parse ``[workspace.archive]`` into an ArchiveConfig."""
+    archive_data = ws.get("archive", {})
+    exclude = tuple(archive_data.get("exclude", []))
+    return ArchiveConfig(exclude=exclude)
 
 
 def _parse_channels(raw: list[Any]) -> list[Channel]:
