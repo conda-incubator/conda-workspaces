@@ -37,6 +37,41 @@ If you omit `--platform` during init, only your current platform is
 added. The `platforms` list tells the lock command which subdirs to
 solve for.
 
+## Add a platform to an existing workspace
+
+There is no dedicated CLI command to add a platform after the fact.
+Edit the `platforms` array in your `conda.toml` directly:
+
+```toml
+[workspace]
+platforms = ["linux-64", "osx-arm64", "win-64"]  # added win-64
+```
+
+Then re-lock to generate solutions for the new platform:
+
+```bash
+conda workspace lock
+```
+
+If you only want to solve the newly added platform (faster for large
+workspaces), target it explicitly:
+
+```bash
+conda workspace lock --platform win-64
+```
+
+This writes a lockfile covering just `win-64`. To fold it into your
+existing `conda.lock` that already covers the other platforms, use
+`--output` and `--merge`:
+
+```bash
+conda workspace lock --platform win-64 --output conda.lock.win-64
+conda workspace lock --merge "conda.lock.*"
+```
+
+Or simply re-run `conda workspace lock` without flags to regenerate
+the full lockfile from scratch.
+
 ## Generate the lockfile
 
 Run `conda workspace lock` from the project root:
