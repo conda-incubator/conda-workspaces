@@ -30,7 +30,6 @@ _UNARCHIVE_DEFAULTS = {
     "file": None,
     "archive_path": None,
     "target": None,
-    "install": False,
     "no_install": False,
     "dry_run": False,
     "json": False,

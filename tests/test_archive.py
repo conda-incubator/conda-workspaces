@@ -18,6 +18,7 @@ from conda_workspaces.archive import (
     verify_package_hashes,
 )
 from conda_workspaces.exceptions import (
+    ArchiveError,
     ArchiveHashMismatchError,
     ArchivePathTraversalError,
 )
@@ -273,6 +274,16 @@ def test_extract_archive_zst(project_dir: Path, tmp_path: Path) -> None:
 
     assert (target / "conda.toml").is_file()
     assert (target / "src" / "main.py").is_file()
+
+
+def test_collect_bundle_packages_missing(
+    lockfile_with_packages: Path,
+) -> None:
+    empty_cache = lockfile_with_packages / "empty_cache"
+    empty_cache.mkdir()
+    lockfile = lockfile_with_packages / "conda.lock"
+    with pytest.raises(ArchiveError, match="not found in cache"):
+        collect_bundle_packages(lockfile, [empty_cache])
 
 
 def test_collect_bundle_packages(lockfile_with_packages: Path) -> None:

@@ -12,9 +12,12 @@ import hashlib
 import io
 import shutil
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from conda_lockfiles.load_yaml import load_yaml
 
 from .exceptions import (
     ArchiveError,
@@ -244,8 +247,8 @@ def open_tar(archive_path: Path) -> tarfile.TarFile:
 def extract_archive(archive_path: Path, target: Path) -> Path:
     """Extract *archive_path* into *target* with path traversal protection.
 
-    Every member is validated before extraction. Uses Python 3.12+
-    ``filter="data"`` for defense-in-depth.
+    Every member is validated before extraction. On Python 3.12+ the
+    ``filter="data"`` parameter provides additional defense-in-depth.
     """
     target = target.resolve()
     target.mkdir(parents=True, exist_ok=True)
@@ -253,15 +256,16 @@ def extract_archive(archive_path: Path, target: Path) -> Path:
     with open_tar(archive_path) as tf:
         for member in tf.getmembers():
             validate_tar_member(member, target)
-        tf.extractall(path=target, filter="data")
+        if sys.version_info >= (3, 12):
+            tf.extractall(path=target, filter="data")
+        else:
+            tf.extractall(path=target)
 
     return target
 
 
 def parse_lockfile_packages(lockfile_path: Path) -> list[dict]:
     """Parse the ``packages`` list from a conda lockfile."""
-    from conda_lockfiles.load_yaml import load_yaml
-
     data = load_yaml(lockfile_path)
     return data.get("packages", []) or []
 

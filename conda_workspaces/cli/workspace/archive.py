@@ -142,18 +142,7 @@ def execute_unarchive(
                     detail="into conda cache",
                 )
 
-    has_attestation = info["has_attestation"]
-
-    if args.install:
-        pass
-    elif args.no_install:
-        pass
-    elif has_attestation:
-        console.print(
-            "  [bold yellow]WARNING:[/bold yellow] Attestation verification"
-            " is not yet implemented. Skipping auto-install."
-        )
-    else:
+    if not args.no_install and not info["has_attestation"]:
         console.print(
             "  [bold yellow]WARNING:[/bold yellow] Archive is not signed."
             " Cannot verify origin or integrity."

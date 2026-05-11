@@ -573,16 +573,10 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         help="Target directory (default: directory named after the archive).",
     )
     unarchive_parser.add_argument(
-        "--install",
-        action="store_true",
-        default=False,
-        help="Install environments from the lockfile after extraction.",
-    )
-    unarchive_parser.add_argument(
         "--no-install",
         action="store_true",
         default=False,
-        help="Skip installing environments.",
+        help="Skip cache priming for bundled packages.",
     )
 
     quickstart_parser = sub.add_parser(
