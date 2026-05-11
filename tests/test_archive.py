@@ -319,3 +319,94 @@ def test_create_archive_with_bundle(lockfile_with_packages: Path, tmp_path: Path
     assert "packages/zlib-1.2.13-h4dc568a_6.conda" in names
     assert "packages/zlib-1.2.13-h53f4e23_6.conda" in names
     assert "conda.toml" in names
+
+
+# ---------------------------------------------------------------------------
+# Task 7: cache priming
+# ---------------------------------------------------------------------------
+
+from conda_workspaces.archive import prime_package_cache
+
+
+def test_prime_package_cache(tmp_path: Path) -> None:
+    pkg_content = b"fake package content"
+    sha256 = hashlib.sha256(pkg_content).hexdigest()
+
+    extracted = tmp_path / "project"
+    extracted.mkdir()
+    (extracted / "packages").mkdir()
+    (extracted / "packages" / "numpy-1.26-h1234.conda").write_bytes(pkg_content)
+
+    lockfile_content = f"""\
+version: 1
+environments:
+  default:
+    channels:
+      - url: https://conda.anaconda.org/conda-forge/
+    packages:
+      linux-64:
+        - conda: https://conda.anaconda.org/conda-forge/linux-64/numpy-1.26-h1234.conda
+packages:
+  - conda: https://conda.anaconda.org/conda-forge/linux-64/numpy-1.26-h1234.conda
+    sha256: {sha256}
+    name: numpy
+    version: "1.26"
+    build: h1234
+    subdir: linux-64
+    depends: []
+"""
+    (extracted / "conda.lock").write_text(lockfile_content, encoding="utf-8")
+
+    cache_dir = tmp_path / "pkgs"
+    cache_dir.mkdir()
+
+    count = prime_package_cache(extracted, cache_dir)
+
+    assert count == 1
+    assert (cache_dir / "numpy-1.26-h1234.conda").is_file()
+    assert (cache_dir / "numpy-1.26-h1234.conda").read_bytes() == pkg_content
+
+
+def test_prime_package_cache_no_packages(tmp_path: Path) -> None:
+    extracted = tmp_path / "project"
+    extracted.mkdir()
+    (extracted / "conda.lock").write_text("version: 1\nenvironments: {}\npackages: []\n")
+
+    cache_dir = tmp_path / "pkgs"
+    cache_dir.mkdir()
+
+    count = prime_package_cache(extracted, cache_dir)
+    assert count == 0
+
+
+def test_prime_package_cache_hash_mismatch(tmp_path: Path) -> None:
+    extracted = tmp_path / "project"
+    extracted.mkdir()
+    (extracted / "packages").mkdir()
+    (extracted / "packages" / "bad-1.0-h000.conda").write_bytes(b"tampered")
+
+    lockfile_content = """\
+version: 1
+environments:
+  default:
+    channels:
+      - url: https://conda.anaconda.org/conda-forge/
+    packages:
+      linux-64:
+        - conda: https://conda.anaconda.org/conda-forge/linux-64/bad-1.0-h000.conda
+packages:
+  - conda: https://conda.anaconda.org/conda-forge/linux-64/bad-1.0-h000.conda
+    sha256: 0000000000000000000000000000000000000000000000000000000000000000
+    name: bad
+    version: "1.0"
+    build: h000
+    subdir: linux-64
+    depends: []
+"""
+    (extracted / "conda.lock").write_text(lockfile_content, encoding="utf-8")
+
+    cache_dir = tmp_path / "pkgs"
+    cache_dir.mkdir()
+
+    with pytest.raises(ArchiveHashMismatchError, match="bad-1.0-h000"):
+        prime_package_cache(extracted, cache_dir)

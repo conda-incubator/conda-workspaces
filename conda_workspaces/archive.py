@@ -282,9 +282,9 @@ def _build_hash_index(lockfile_path: Path) -> dict[str, str]:
     index: dict[str, str] = {}
     for pkg in packages_data:
         url = pkg.get("conda") or pkg.get("url", "")
-        sha256 = pkg.get("sha256", "")
-        if url and sha256:
-            index[_url_to_filename(url)] = sha256
+        sha256 = pkg.get("sha256")
+        if url and sha256 is not None:
+            index[_url_to_filename(url)] = str(sha256)
     return index
 
 
@@ -303,3 +303,34 @@ def verify_package_hashes(
             raise ArchiveHashMismatchError(
                 pkg_path.name, expected=exp_hash, actual=actual_hash
             )
+
+
+# ---------------------------------------------------------------------------
+# Task 7: unarchive with cache priming
+# ---------------------------------------------------------------------------
+
+
+def prime_package_cache(
+    extracted_dir: Path,
+    cache_dir: Path,
+) -> int:
+    packages_dir = extracted_dir / "packages"
+    if not packages_dir.is_dir():
+        return 0
+
+    lockfile = extracted_dir / "conda.lock"
+    packages = sorted(packages_dir.glob("*.conda"))
+    if not packages:
+        return 0
+
+    verify_package_hashes(packages, lockfile)
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    count = 0
+    for pkg in packages:
+        dest = cache_dir / pkg.name
+        if not dest.exists():
+            shutil.copy2(pkg, dest)
+            count += 1
+
+    return count
