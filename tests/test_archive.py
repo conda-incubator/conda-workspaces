@@ -93,3 +93,56 @@ def test_collect_files_custom_exclude(project_dir: Path) -> None:
     rel_paths = {str(f.relative_to(project_dir)) for f in files}
     assert "data/big.bin" not in rel_paths
     assert "conda.toml" in rel_paths
+
+
+# ---------------------------------------------------------------------------
+# Task 4: tarball creation
+# ---------------------------------------------------------------------------
+
+from conda_workspaces.archive import create_archive
+
+
+def test_create_archive_tar_gz(project_dir: Path, tmp_path: Path) -> None:
+    output = tmp_path / "out" / "project.tar.gz"
+    config = ArchiveConfig()
+    create_archive(project_dir, output, config)
+
+    assert output.is_file()
+    with tarfile.open(output, "r:gz") as tf:
+        names = tf.getnames()
+    assert "conda.toml" in names
+    assert "conda.lock" in names
+    assert "src/main.py" in names
+
+
+def test_create_archive_tar_zst(project_dir: Path, tmp_path: Path) -> None:
+    output = tmp_path / "out" / "project.tar.zst"
+    config = ArchiveConfig()
+    create_archive(project_dir, output, config)
+
+    assert output.is_file()
+    import zstandard
+
+    dctx = zstandard.ZstdDecompressor()
+    with open(output, "rb") as fh:
+        decompressed = dctx.decompress(fh.read())
+    with tarfile.open(fileobj=io.BytesIO(decompressed), mode="r:") as tf:
+        names = tf.getnames()
+    assert "conda.toml" in names
+
+
+def test_create_archive_excludes_self(project_dir: Path) -> None:
+    output = project_dir / "project.tar.gz"
+    config = ArchiveConfig()
+    create_archive(project_dir, output, config)
+
+    with tarfile.open(output, "r:gz") as tf:
+        names = tf.getnames()
+    assert "project.tar.gz" not in names
+
+
+def test_create_archive_output_dir_created(project_dir: Path, tmp_path: Path) -> None:
+    output = tmp_path / "deep" / "nested" / "archive.tar.gz"
+    config = ArchiveConfig()
+    create_archive(project_dir, output, config)
+    assert output.is_file()

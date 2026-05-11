@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import fnmatch
+import io
 import subprocess
+import tarfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -86,3 +88,77 @@ def collect_archive_files(
         result.append(path)
 
     return sorted(result)
+
+
+# ---------------------------------------------------------------------------
+# Task 4: tarball creation
+# ---------------------------------------------------------------------------
+
+
+def _detect_compression(output: Path) -> str:
+    name = output.name
+    if name.endswith(".tar.zst") or name.endswith(".tar.zstd"):
+        return "zst"
+    if name.endswith(".tar.gz") or name.endswith(".tgz"):
+        return "gz"
+    if name.endswith(".tar.bz2"):
+        return "bz2"
+    return "gz"
+
+
+def create_archive(
+    root: Path,
+    output: Path,
+    archive_config: ArchiveConfig,
+    *,
+    bundle_packages: list[Path] | None = None,
+) -> Path:
+    output = output.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    files = collect_archive_files(root, archive_config)
+    files = [f for f in files if f.resolve() != output]
+
+    compression = _detect_compression(output)
+
+    if compression == "zst":
+        _write_tar_zst(root, output, files, bundle_packages)
+    else:
+        mode = f"w:{compression}"
+        with tarfile.open(output, mode) as tf:
+            _add_files_to_tar(tf, root, files)
+            if bundle_packages:
+                _add_packages_to_tar(tf, bundle_packages)
+
+    return output
+
+
+def _add_files_to_tar(tf: tarfile.TarFile, root: Path, files: list[Path]) -> None:
+    for path in files:
+        arcname = str(path.relative_to(root))
+        tf.add(str(path), arcname=arcname)
+
+
+def _add_packages_to_tar(tf: tarfile.TarFile, packages: list[Path]) -> None:
+    for pkg in packages:
+        arcname = f"packages/{pkg.name}"
+        tf.add(str(pkg), arcname=arcname)
+
+
+def _write_tar_zst(
+    root: Path,
+    output: Path,
+    files: list[Path],
+    bundle_packages: list[Path] | None,
+) -> None:
+    import zstandard
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:") as tf:
+        _add_files_to_tar(tf, root, files)
+        if bundle_packages:
+            _add_packages_to_tar(tf, bundle_packages)
+
+    cctx = zstandard.ZstdCompressor(level=3)
+    compressed = cctx.compress(buf.getvalue())
+    output.write_bytes(compressed)
