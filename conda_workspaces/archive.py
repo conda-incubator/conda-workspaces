@@ -334,3 +334,23 @@ def prime_package_cache(
             count += 1
 
     return count
+
+
+# ---------------------------------------------------------------------------
+# Task 8: archive inspection helper
+# ---------------------------------------------------------------------------
+
+
+def inspect_archive(archive_path: Path) -> dict[str, object]:
+    with _open_tar(archive_path) as tf:
+        names = set(tf.getnames())
+
+    package_members = [n for n in names if n.startswith("packages/") and n.endswith(".conda")]
+
+    return {
+        "has_manifest": "conda.toml" in names,
+        "has_lockfile": "conda.lock" in names,
+        "has_attestation": "conda.lock.sigstore" in names,
+        "has_packages": len(package_members) > 0,
+        "package_count": len(package_members),
+    }

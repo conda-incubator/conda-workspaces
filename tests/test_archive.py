@@ -410,3 +410,49 @@ packages:
 
     with pytest.raises(ArchiveHashMismatchError, match="bad-1.0-h000"):
         prime_package_cache(extracted, cache_dir)
+
+
+# ---------------------------------------------------------------------------
+# Task 8: archive inspection helper
+# ---------------------------------------------------------------------------
+
+from conda_workspaces.archive import inspect_archive
+
+
+def test_inspect_archive_lightweight(project_dir: Path, tmp_path: Path) -> None:
+    output = tmp_path / "test.tar.gz"
+    config = ArchiveConfig()
+    create_archive(project_dir, output, config)
+
+    info = inspect_archive(output)
+    assert info["has_manifest"] is True
+    assert info["has_lockfile"] is True
+    assert info["has_packages"] is False
+    assert info["has_attestation"] is False
+
+
+def test_inspect_archive_bundled(lockfile_with_packages: Path, tmp_path: Path) -> None:
+    cache_dir = lockfile_with_packages / "pkg_cache"
+    lockfile = lockfile_with_packages / "conda.lock"
+    packages = collect_bundle_packages(lockfile, [cache_dir])
+
+    output = tmp_path / "bundled.tar.gz"
+    config = ArchiveConfig()
+    create_archive(lockfile_with_packages, output, config, bundle_packages=packages)
+
+    info = inspect_archive(output)
+    assert info["has_manifest"] is True
+    assert info["has_lockfile"] is True
+    assert info["has_packages"] is True
+    assert info["package_count"] == 2
+
+
+def test_inspect_archive_not_workspace(tmp_path: Path) -> None:
+    archive = tmp_path / "random.tar.gz"
+    with tarfile.open(archive, "w:gz") as tf:
+        info = tarfile.TarInfo(name="readme.txt")
+        info.size = 5
+        tf.addfile(info, io.BytesIO(b"hello"))
+
+    result = inspect_archive(archive)
+    assert result["has_manifest"] is False
