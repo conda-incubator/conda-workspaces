@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import io
+import shutil
 import subprocess
 import tarfile
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from .exceptions import ArchiveError, ArchiveHashMismatchError, ArchivePathTraversalError
 
 if TYPE_CHECKING:
     from .models import ArchiveConfig
@@ -168,8 +172,6 @@ def _write_tar_zst(
 # Task 5: safe extraction with path traversal protection
 # ---------------------------------------------------------------------------
 
-from .exceptions import ArchivePathTraversalError
-
 
 def _validate_tar_member(member: tarfile.TarInfo, target: Path) -> None:
     member_path = Path(member.name)
@@ -220,3 +222,84 @@ def extract_archive(archive_path: Path, target: Path) -> Path:
         tf.extractall(path=target, filter="data")
 
     return target
+
+
+# ---------------------------------------------------------------------------
+# Task 6: package bundling and hash verification
+# ---------------------------------------------------------------------------
+
+
+def _parse_lockfile_packages(lockfile_path: Path) -> list[dict]:
+    from conda_lockfiles.load_yaml import load_yaml
+
+    data = load_yaml(lockfile_path)
+    return data.get("packages", []) or []
+
+
+def _url_to_filename(url: str) -> str:
+    return url.rsplit("/", 1)[-1]
+
+
+def collect_bundle_packages(
+    lockfile_path: Path,
+    cache_dirs: list[Path],
+) -> list[Path]:
+    packages_data = _parse_lockfile_packages(lockfile_path)
+    result: list[Path] = []
+    seen: set[str] = set()
+
+    for pkg in packages_data:
+        url = pkg.get("conda") or pkg.get("url", "")
+        if not url:
+            continue
+        filename = _url_to_filename(url)
+        if filename in seen:
+            continue
+        seen.add(filename)
+
+        found = False
+        for cache_dir in cache_dirs:
+            candidate = cache_dir / filename
+            if candidate.is_file():
+                result.append(candidate)
+                found = True
+                break
+
+        if not found:
+            raise ArchiveError(
+                f"Package '{filename}' not found in cache.",
+                hints=[
+                    "Run 'conda workspace install' to populate the package cache,",
+                    "then retry the archive command.",
+                ],
+            )
+
+    return sorted(result, key=lambda p: p.name)
+
+
+def _build_hash_index(lockfile_path: Path) -> dict[str, str]:
+    packages_data = _parse_lockfile_packages(lockfile_path)
+    index: dict[str, str] = {}
+    for pkg in packages_data:
+        url = pkg.get("conda") or pkg.get("url", "")
+        sha256 = pkg.get("sha256", "")
+        if url and sha256:
+            index[_url_to_filename(url)] = sha256
+    return index
+
+
+def verify_package_hashes(
+    packages: list[Path],
+    lockfile_path: Path,
+) -> None:
+    expected = _build_hash_index(lockfile_path)
+
+    for pkg_path in packages:
+        exp_hash = expected.get(pkg_path.name)
+        if not exp_hash:
+            continue
+        actual_hash = hashlib.sha256(pkg_path.read_bytes()).hexdigest()
+        if actual_hash != exp_hash:
+            raise ArchiveHashMismatchError(
+                pkg_path.name, expected=exp_hash, actual=actual_hash
+            )

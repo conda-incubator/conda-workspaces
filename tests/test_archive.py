@@ -219,3 +219,103 @@ def test_extract_archive_zst(project_dir: Path, tmp_path: Path) -> None:
 
     assert (target / "conda.toml").is_file()
     assert (target / "src" / "main.py").is_file()
+
+
+# ---------------------------------------------------------------------------
+# Task 6: package bundling and hash verification
+# ---------------------------------------------------------------------------
+
+import hashlib
+
+from conda_workspaces.archive import (
+    collect_bundle_packages,
+    verify_package_hashes,
+)
+from conda_workspaces.exceptions import ArchiveHashMismatchError
+
+
+@pytest.fixture
+def lockfile_with_packages(project_dir: Path) -> Path:
+    """Create a conda.lock with fake package entries and matching .conda files."""
+    pkg_content = b"fake conda package data"
+    sha256 = hashlib.sha256(pkg_content).hexdigest()
+
+    lockfile_content = f"""\
+version: 1
+environments:
+  default:
+    channels:
+      - url: https://conda.anaconda.org/conda-forge/
+    packages:
+      linux-64:
+        - conda: https://conda.anaconda.org/conda-forge/linux-64/zlib-1.2.13-h4dc568a_6.conda
+      osx-arm64:
+        - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zlib-1.2.13-h53f4e23_6.conda
+packages:
+  - conda: https://conda.anaconda.org/conda-forge/linux-64/zlib-1.2.13-h4dc568a_6.conda
+    sha256: {sha256}
+    md5: abc123
+    name: zlib
+    version: 1.2.13
+    build: h4dc568a_6
+    subdir: linux-64
+    depends: []
+  - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zlib-1.2.13-h53f4e23_6.conda
+    sha256: {sha256}
+    md5: def456
+    name: zlib
+    version: 1.2.13
+    build: h53f4e23_6
+    subdir: osx-arm64
+    depends: []
+"""
+    (project_dir / "conda.lock").write_text(lockfile_content, encoding="utf-8")
+
+    cache_dir = project_dir / "pkg_cache"
+    cache_dir.mkdir()
+    (cache_dir / "zlib-1.2.13-h4dc568a_6.conda").write_bytes(pkg_content)
+    (cache_dir / "zlib-1.2.13-h53f4e23_6.conda").write_bytes(pkg_content)
+
+    return project_dir
+
+
+def test_collect_bundle_packages(lockfile_with_packages: Path) -> None:
+    cache_dir = lockfile_with_packages / "pkg_cache"
+    lockfile = lockfile_with_packages / "conda.lock"
+    packages = collect_bundle_packages(lockfile, [cache_dir])
+    assert len(packages) == 2
+    filenames = {p.name for p in packages}
+    assert "zlib-1.2.13-h4dc568a_6.conda" in filenames
+    assert "zlib-1.2.13-h53f4e23_6.conda" in filenames
+
+
+def test_verify_package_hashes_pass(lockfile_with_packages: Path) -> None:
+    cache_dir = lockfile_with_packages / "pkg_cache"
+    lockfile = lockfile_with_packages / "conda.lock"
+    packages = collect_bundle_packages(lockfile, [cache_dir])
+    verify_package_hashes(packages, lockfile)
+
+
+def test_verify_package_hashes_fail(lockfile_with_packages: Path) -> None:
+    cache_dir = lockfile_with_packages / "pkg_cache"
+    lockfile = lockfile_with_packages / "conda.lock"
+    (cache_dir / "zlib-1.2.13-h4dc568a_6.conda").write_bytes(b"tampered")
+    packages = collect_bundle_packages(lockfile, [cache_dir])
+    with pytest.raises(ArchiveHashMismatchError, match="zlib-1.2.13-h4dc568a_6"):
+        verify_package_hashes(packages, lockfile)
+
+
+def test_create_archive_with_bundle(lockfile_with_packages: Path, tmp_path: Path) -> None:
+    cache_dir = lockfile_with_packages / "pkg_cache"
+    lockfile = lockfile_with_packages / "conda.lock"
+    packages = collect_bundle_packages(lockfile, [cache_dir])
+
+    output = tmp_path / "bundled.tar.gz"
+    config = ArchiveConfig()
+    create_archive(lockfile_with_packages, output, config, bundle_packages=packages)
+
+    with tarfile.open(output, "r:gz") as tf:
+        names = tf.getnames()
+    assert "packages/zlib-1.2.13-h4dc568a_6.conda" in names
+    assert "packages/zlib-1.2.13-h53f4e23_6.conda" in names
+    assert "conda.toml" in names
