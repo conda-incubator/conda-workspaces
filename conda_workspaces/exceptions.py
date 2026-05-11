@@ -307,3 +307,38 @@ class NoTaskFileError(CondaWorkspacesError):
                 " with task definitions.",
             ],
         )
+
+
+class ArchiveError(CondaWorkspacesError):
+    """General archive operation failure."""
+
+    def __init__(self, message: str, *, hints: list[str] | None = None) -> None:
+        super().__init__(message, hints=hints)
+
+
+class ArchivePathTraversalError(ArchiveError):
+    """A tar member attempts to write outside the target directory."""
+
+    def __init__(self, member_path: str) -> None:
+        self.member_path = member_path
+        super().__init__(
+            f"Archive member '{member_path}' attempts path traversal.",
+            hints=["The archive may be malicious. Do not extract it."],
+        )
+
+
+class ArchiveHashMismatchError(ArchiveError):
+    """A bundled package hash does not match the lockfile."""
+
+    def __init__(self, filename: str, *, expected: str, actual: str) -> None:
+        self.filename = filename
+        self.expected = expected
+        self.actual = actual
+        super().__init__(
+            f"Hash mismatch for '{filename}': "
+            f"expected {expected[:12]}..., got {actual[:12]}...",
+            hints=[
+                "The package file may have been tampered with.",
+                "Re-create the archive from a trusted source.",
+            ],
+        )
