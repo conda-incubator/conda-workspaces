@@ -19,6 +19,13 @@ Set up a Python project with workspaces, tasks, and multiple environments.
 Migrate from conda, pixi, anaconda-project, or conda-project.
 :::
 
+:::{grid-item-card} {octicon}`globe` Multi-platform locking
+:link: multi-platform-locking
+:link-type: doc
+
+Lock your workspace for Linux, macOS, and Windows from a single machine.
+:::
+
 :::{grid-item-card} {octicon}`server` CI pipeline
 :link: ci-pipeline
 :link-type: doc
@@ -32,6 +39,7 @@ Set up conda-workspaces in GitHub Actions.
 :hidden:
 
 first-project
+multi-platform-locking
 coming-from/index
 ci-pipeline
 ```
