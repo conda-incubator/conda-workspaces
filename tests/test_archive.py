@@ -146,3 +146,76 @@ def test_create_archive_output_dir_created(project_dir: Path, tmp_path: Path) ->
     config = ArchiveConfig()
     create_archive(project_dir, output, config)
     assert output.is_file()
+
+
+# ---------------------------------------------------------------------------
+# Task 5: safe extraction with path traversal protection
+# ---------------------------------------------------------------------------
+
+from conda_workspaces.archive import extract_archive
+from conda_workspaces.exceptions import ArchivePathTraversalError
+
+
+def test_extract_archive_basic(project_dir: Path, tmp_path: Path) -> None:
+    archive_path = tmp_path / "test.tar.gz"
+    config = ArchiveConfig()
+    create_archive(project_dir, archive_path, config)
+
+    target = tmp_path / "extracted"
+    result = extract_archive(archive_path, target)
+
+    assert result == target
+    assert (target / "conda.toml").is_file()
+    assert (target / "conda.lock").is_file()
+    assert (target / "src" / "main.py").is_file()
+
+
+def test_extract_archive_path_traversal_blocked(tmp_path: Path) -> None:
+    evil_archive = tmp_path / "evil.tar.gz"
+    with tarfile.open(evil_archive, "w:gz") as tf:
+        info = tarfile.TarInfo(name="../../../etc/passwd")
+        info.size = 4
+        tf.addfile(info, io.BytesIO(b"evil"))
+
+    target = tmp_path / "safe"
+    with pytest.raises(ArchivePathTraversalError, match="etc/passwd"):
+        extract_archive(evil_archive, target)
+
+    assert not (target / "etc" / "passwd").exists()
+
+
+def test_extract_archive_absolute_path_blocked(tmp_path: Path) -> None:
+    evil_archive = tmp_path / "abs.tar.gz"
+    with tarfile.open(evil_archive, "w:gz") as tf:
+        info = tarfile.TarInfo(name="/tmp/evil_file")
+        info.size = 4
+        tf.addfile(info, io.BytesIO(b"evil"))
+
+    target = tmp_path / "safe"
+    with pytest.raises(ArchivePathTraversalError):
+        extract_archive(evil_archive, target)
+
+
+def test_extract_archive_symlink_escape_blocked(tmp_path: Path) -> None:
+    evil_archive = tmp_path / "symlink.tar.gz"
+    with tarfile.open(evil_archive, "w:gz") as tf:
+        info = tarfile.TarInfo(name="escape")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "../../../etc"
+        tf.addfile(info)
+
+    target = tmp_path / "safe"
+    with pytest.raises(ArchivePathTraversalError):
+        extract_archive(evil_archive, target)
+
+
+def test_extract_archive_zst(project_dir: Path, tmp_path: Path) -> None:
+    archive_path = tmp_path / "test.tar.zst"
+    config = ArchiveConfig()
+    create_archive(project_dir, archive_path, config)
+
+    target = tmp_path / "extracted"
+    extract_archive(archive_path, target)
+
+    assert (target / "conda.toml").is_file()
+    assert (target / "src" / "main.py").is_file()

@@ -162,3 +162,61 @@ def _write_tar_zst(
     cctx = zstandard.ZstdCompressor(level=3)
     compressed = cctx.compress(buf.getvalue())
     output.write_bytes(compressed)
+
+
+# ---------------------------------------------------------------------------
+# Task 5: safe extraction with path traversal protection
+# ---------------------------------------------------------------------------
+
+from .exceptions import ArchivePathTraversalError
+
+
+def _validate_tar_member(member: tarfile.TarInfo, target: Path) -> None:
+    member_path = Path(member.name)
+
+    if member_path.is_absolute():
+        raise ArchivePathTraversalError(member.name)
+
+    try:
+        resolved = (target / member_path).resolve()
+        resolved.relative_to(target.resolve())
+    except ValueError:
+        raise ArchivePathTraversalError(member.name)
+
+    if ".." in member_path.parts:
+        raise ArchivePathTraversalError(member.name)
+
+    if member.issym() or member.islnk():
+        link_target = Path(member.linkname)
+        if link_target.is_absolute():
+            raise ArchivePathTraversalError(member.name)
+        resolved_link = (target / member_path.parent / link_target).resolve()
+        try:
+            resolved_link.relative_to(target.resolve())
+        except ValueError:
+            raise ArchivePathTraversalError(member.name)
+
+
+def _open_tar(archive_path: Path) -> tarfile.TarFile:
+    compression = _detect_compression(archive_path)
+    if compression == "zst":
+        import zstandard
+
+        with open(archive_path, "rb") as fh:
+            dctx = zstandard.ZstdDecompressor()
+            decompressed = dctx.decompress(fh.read())
+        return tarfile.open(fileobj=io.BytesIO(decompressed), mode="r:")
+    else:
+        return tarfile.open(archive_path, f"r:{compression}")
+
+
+def extract_archive(archive_path: Path, target: Path) -> Path:
+    target = target.resolve()
+    target.mkdir(parents=True, exist_ok=True)
+
+    with _open_tar(archive_path) as tf:
+        for member in tf.getmembers():
+            _validate_tar_member(member, target)
+        tf.extractall(path=target, filter="data")
+
+    return target
