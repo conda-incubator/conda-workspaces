@@ -18,6 +18,7 @@ Animated terminal demos recorded with [VHS](https://github.com/charmbracelet/vhs
 | `pixi-compat` | Use an existing pixi.toml with conda-workspaces |
 | `import` | Import environment.yml and anaconda-project.yml into conda.toml |
 | `shell` | Interactive shell and one-shot commands |
+| `archives` | Create and extract workspace archives |
 
 ### Tasks
 

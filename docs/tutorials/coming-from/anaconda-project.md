@@ -44,7 +44,7 @@ and interactive variable prompting have no direct equivalent.
 | Variables | `variables:` with prompting | Jinja2 templates + environment variables |
 | Downloads | `downloads:` (auto-fetched files) | not supported (use tasks instead) |
 | Services | `services:` (e.g. Redis) | not supported (use tasks or Docker instead) |
-| Archives | `anaconda-project archive` | not supported |
+| Archives | `anaconda-project archive` | `conda workspace archive` / `unarchive` |
 | Solver | conda | conda / libmamba |
 | pixi compatibility | no | reads `pixi.toml` and `pyproject.toml` |
 
@@ -263,7 +263,7 @@ your workspace.
 
 Some anaconda-project concepts have no direct equivalent:
 
-- `anaconda-project archive` — project archives are not supported
+- `anaconda-project archive` — see `conda workspace archive` ([tutorial](../archives.md))
 - Interactive variable prompting — use environment variables or
   Jinja2 defaults instead
 - `services:` — use tasks, Docker Compose, or external service

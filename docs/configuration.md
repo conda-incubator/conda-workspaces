@@ -358,3 +358,32 @@ depends-on = [
   { task = "test", environment = "py311" },
 ]
 ```
+
+## Archive configuration
+
+The `[workspace.archive]` table controls which files are excluded when
+creating archives with `conda workspace archive`.
+
+```toml
+[workspace.archive]
+exclude = ["docs/**", "*.log", "data/raw/**"]
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `exclude` | list of strings | Glob patterns for files to exclude from archives |
+
+Patterns use `fnmatch` matching against paths relative to the
+workspace root. Both directory globs (`docs/**`) and file globs
+(`*.log`) are supported.
+
+Built-in exclusions always apply regardless of this setting:
+
+- `.git`
+- `.conda/envs`
+- `.pixi`
+- `__pycache__`
+
+CLI `--exclude` flags are combined with manifest exclusions. In git
+repos, only tracked files are considered regardless of exclusion
+patterns.

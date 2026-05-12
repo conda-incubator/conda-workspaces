@@ -673,6 +673,53 @@ basename (`conda.toml` → `conda-toml`, `pixi.toml` → `pixi-toml`,
 See [Format aliases](reference/format-aliases.md) for the full
 alias table.
 
+## Archives
+
+![archive demo](../demos/archives.gif)
+
+Package a workspace into a portable `.tar.gz` or `.tar.zst` archive
+that includes the manifest, lockfile, and source files:
+
+```bash
+conda workspace archive -o my-project.tar.gz
+```
+
+In git repos, only tracked files are included. Built-in exclusions
+(`.git`, `__pycache__`, `.conda/envs`, `.pixi`) always apply.
+Configure additional exclusions in the manifest:
+
+```toml
+[workspace.archive]
+exclude = ["docs/**", "*.log"]
+```
+
+Or pass them on the command line:
+
+```bash
+conda workspace archive --exclude "benchmarks/**"
+```
+
+Extract an archive on another machine:
+
+```bash
+conda workspace unarchive my-project.tar.gz --target ./restored
+cd restored
+conda workspace install --locked
+```
+
+For offline deployment, `--bundle` includes all resolved `.conda`
+packages inside the archive. Package hashes are verified against the
+lockfile on both bundling and extraction:
+
+```bash
+conda workspace archive --bundle -o offline.tar.gz
+```
+
+See the [archive tutorial](tutorials/archives.md) for a
+full walkthrough.
+
+---
+
 ## Project-local environments
 
 All environments are installed under `.conda/envs/` in your project

@@ -1,0 +1,14 @@
+[workspace]
+name = "my-project"
+channels = ["conda-forge"]
+platforms = ["osx-arm64", "linux-64"]
+
+[dependencies]
+python = ">=3.12"
+requests = "*"
+
+[tasks]
+test = { cmd = "python -m pytest", description = "Run tests" }
+
+[workspace.archive]
+exclude = ["docs/**", "*.log"]
