@@ -14,6 +14,7 @@ from conda_workspaces.archive import (
     create_archive,
     extract_archive,
     inspect_archive,
+    open_tar,
     prime_package_cache,
     verify_package_hashes,
 )
@@ -117,6 +118,22 @@ packages:
     return project_dir
 
 
+@pytest.fixture
+def bundled_archive(
+    lockfile_with_packages: Path, tmp_path: Path
+) -> tuple[Path, Path]:
+    """Create a bundled archive from lockfile_with_packages, return (archive, root)."""
+    cache_dir = lockfile_with_packages / "pkg_cache"
+    lockfile = lockfile_with_packages / "conda.lock"
+    packages = collect_bundle_packages(lockfile, [cache_dir])
+    output = tmp_path / "bundled.tar.gz"
+    config = ArchiveConfig()
+    create_archive(
+        lockfile_with_packages, output, config, bundle_packages=packages
+    )
+    return output, lockfile_with_packages
+
+
 def test_collect_files_git_tracked(git_project: Path) -> None:
     config = ArchiveConfig()
     files = collect_archive_files(git_project, config)
@@ -165,33 +182,20 @@ def test_collect_files_custom_exclude(project_dir: Path) -> None:
     assert "conda.toml" in rel_paths
 
 
-def test_create_archive_tar_gz(project_dir: Path, tmp_path: Path) -> None:
-    output = tmp_path / "out" / "project.tar.gz"
+@pytest.mark.parametrize("suffix", [".tar.gz", ".tar.zst"])
+def test_create_archive(
+    project_dir: Path, tmp_path: Path, suffix: str
+) -> None:
+    output = tmp_path / "out" / f"project{suffix}"
     config = ArchiveConfig()
     create_archive(project_dir, output, config)
 
     assert output.is_file()
-    with tarfile.open(output, "r:gz") as tf:
+    with open_tar(output) as tf:
         names = tf.getnames()
     assert "conda.toml" in names
     assert "conda.lock" in names
     assert "src/main.py" in names
-
-
-def test_create_archive_tar_zst(project_dir: Path, tmp_path: Path) -> None:
-    output = tmp_path / "out" / "project.tar.zst"
-    config = ArchiveConfig()
-    create_archive(project_dir, output, config)
-
-    assert output.is_file()
-    import zstandard
-
-    dctx = zstandard.ZstdDecompressor()
-    with open(output, "rb") as fh:
-        decompressed = dctx.decompress(fh.read())
-    with tarfile.open(fileobj=io.BytesIO(decompressed), mode="r:") as tf:
-        names = tf.getnames()
-    assert "conda.toml" in names
 
 
 def test_create_archive_excludes_self(project_dir: Path) -> None:
@@ -225,39 +229,29 @@ def test_extract_archive_basic(project_dir: Path, tmp_path: Path) -> None:
     assert (target / "src" / "main.py").is_file()
 
 
-def test_extract_archive_path_traversal_blocked(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("name", "link_type", "linkname"),
+    [
+        pytest.param("../../../etc/passwd", None, None, id="dotdot-traversal"),
+        pytest.param("/tmp/evil_file", None, None, id="absolute-path"),
+        pytest.param("escape", tarfile.SYMTYPE, "../../../etc", id="symlink-escape"),
+    ],
+)
+def test_extract_archive_path_traversal_blocked(
+    tmp_path: Path,
+    name: str,
+    link_type: int | None,
+    linkname: str | None,
+) -> None:
     evil_archive = tmp_path / "evil.tar.gz"
     with tarfile.open(evil_archive, "w:gz") as tf:
-        info = tarfile.TarInfo(name="../../../etc/passwd")
-        info.size = 4
-        tf.addfile(info, io.BytesIO(b"evil"))
-
-    target = tmp_path / "safe"
-    with pytest.raises(ArchivePathTraversalError, match="etc/passwd"):
-        extract_archive(evil_archive, target)
-
-    assert not (target / "etc" / "passwd").exists()
-
-
-def test_extract_archive_absolute_path_blocked(tmp_path: Path) -> None:
-    evil_archive = tmp_path / "abs.tar.gz"
-    with tarfile.open(evil_archive, "w:gz") as tf:
-        info = tarfile.TarInfo(name="/tmp/evil_file")
-        info.size = 4
-        tf.addfile(info, io.BytesIO(b"evil"))
-
-    target = tmp_path / "safe"
-    with pytest.raises(ArchivePathTraversalError):
-        extract_archive(evil_archive, target)
-
-
-def test_extract_archive_symlink_escape_blocked(tmp_path: Path) -> None:
-    evil_archive = tmp_path / "symlink.tar.gz"
-    with tarfile.open(evil_archive, "w:gz") as tf:
-        info = tarfile.TarInfo(name="escape")
-        info.type = tarfile.SYMTYPE
-        info.linkname = "../../../etc"
-        tf.addfile(info)
+        info = tarfile.TarInfo(name=name)
+        if link_type is not None:
+            info.type = link_type
+            info.linkname = linkname
+        else:
+            info.size = 4
+        tf.addfile(info, io.BytesIO(b"evil") if info.size else None)
 
     target = tmp_path / "safe"
     with pytest.raises(ArchivePathTraversalError):
@@ -313,17 +307,9 @@ def test_verify_package_hashes_fail(lockfile_with_packages: Path) -> None:
 
 
 def test_create_archive_with_bundle(
-    lockfile_with_packages: Path,
-    tmp_path: Path,
+    bundled_archive: tuple[Path, Path],
 ) -> None:
-    cache_dir = lockfile_with_packages / "pkg_cache"
-    lockfile = lockfile_with_packages / "conda.lock"
-    packages = collect_bundle_packages(lockfile, [cache_dir])
-
-    output = tmp_path / "bundled.tar.gz"
-    config = ArchiveConfig()
-    create_archive(lockfile_with_packages, output, config, bundle_packages=packages)
-
+    output, _ = bundled_archive
     with tarfile.open(output, "r:gz") as tf:
         names = tf.getnames()
     assert "packages/zlib-1.2.13-h4dc568a_6.conda" in names
@@ -429,15 +415,8 @@ def test_inspect_archive_lightweight(project_dir: Path, tmp_path: Path) -> None:
     assert info["has_attestation"] is False
 
 
-def test_inspect_archive_bundled(lockfile_with_packages: Path, tmp_path: Path) -> None:
-    cache_dir = lockfile_with_packages / "pkg_cache"
-    lockfile = lockfile_with_packages / "conda.lock"
-    packages = collect_bundle_packages(lockfile, [cache_dir])
-
-    output = tmp_path / "bundled.tar.gz"
-    config = ArchiveConfig()
-    create_archive(lockfile_with_packages, output, config, bundle_packages=packages)
-
+def test_inspect_archive_bundled(bundled_archive: tuple[Path, Path]) -> None:
+    output, _ = bundled_archive
     info = inspect_archive(output)
     assert info["has_manifest"] is True
     assert info["has_lockfile"] is True
@@ -480,22 +459,11 @@ def test_archive_roundtrip(git_project: Path, tmp_path: Path) -> None:
 
 
 def test_archive_roundtrip_with_bundle(
-    lockfile_with_packages: Path,
+    bundled_archive: tuple[Path, Path],
     tmp_path: Path,
 ) -> None:
     """Round-trip with bundled packages: archive, extract, prime cache."""
-    cache_dir = lockfile_with_packages / "pkg_cache"
-    lockfile = lockfile_with_packages / "conda.lock"
-    packages = collect_bundle_packages(lockfile, [cache_dir])
-
-    archive_path = tmp_path / "bundled.tar.gz"
-    config = ArchiveConfig()
-    create_archive(
-        lockfile_with_packages,
-        archive_path,
-        config,
-        bundle_packages=packages,
-    )
+    archive_path, _ = bundled_archive
 
     target = tmp_path / "extracted"
     extract_archive(archive_path, target)
