@@ -111,7 +111,7 @@ def collect_archive_files(
 
     result: list[Path] = []
     for path in candidates:
-        rel = str(path.relative_to(root))
+        rel = path.relative_to(root).as_posix()
         if is_excluded_by_builtins(rel):
             continue
         if is_excluded_by_patterns(rel, archive_config.exclude):

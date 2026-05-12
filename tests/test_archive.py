@@ -119,18 +119,14 @@ packages:
 
 
 @pytest.fixture
-def bundled_archive(
-    lockfile_with_packages: Path, tmp_path: Path
-) -> tuple[Path, Path]:
+def bundled_archive(lockfile_with_packages: Path, tmp_path: Path) -> tuple[Path, Path]:
     """Create a bundled archive from lockfile_with_packages, return (archive, root)."""
     cache_dir = lockfile_with_packages / "pkg_cache"
     lockfile = lockfile_with_packages / "conda.lock"
     packages = collect_bundle_packages(lockfile, [cache_dir])
     output = tmp_path / "bundled.tar.gz"
     config = ArchiveConfig()
-    create_archive(
-        lockfile_with_packages, output, config, bundle_packages=packages
-    )
+    create_archive(lockfile_with_packages, output, config, bundle_packages=packages)
     return output, lockfile_with_packages
 
 
@@ -183,9 +179,7 @@ def test_collect_files_custom_exclude(project_dir: Path) -> None:
 
 
 @pytest.mark.parametrize("suffix", [".tar.gz", ".tar.zst"])
-def test_create_archive(
-    project_dir: Path, tmp_path: Path, suffix: str
-) -> None:
+def test_create_archive(project_dir: Path, tmp_path: Path, suffix: str) -> None:
     output = tmp_path / "out" / f"project{suffix}"
     config = ArchiveConfig()
     create_archive(project_dir, output, config)
