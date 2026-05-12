@@ -120,7 +120,7 @@ packages:
 def test_collect_files_git_tracked(git_project: Path) -> None:
     config = ArchiveConfig()
     files = collect_archive_files(git_project, config)
-    rel_paths = {str(f.relative_to(git_project)) for f in files}
+    rel_paths = {f.relative_to(git_project).as_posix() for f in files}
     assert "conda.toml" in rel_paths
     assert "conda.lock" in rel_paths
     assert "src/main.py" in rel_paths
@@ -131,7 +131,7 @@ def test_collect_files_git_tracked(git_project: Path) -> None:
 def test_collect_files_non_git(project_dir: Path) -> None:
     config = ArchiveConfig()
     files = collect_archive_files(project_dir, config)
-    rel_paths = {str(f.relative_to(project_dir)) for f in files}
+    rel_paths = {f.relative_to(project_dir).as_posix() for f in files}
     assert "conda.toml" in rel_paths
     assert "src/main.py" in rel_paths
     assert "data/big.bin" in rel_paths
@@ -150,7 +150,7 @@ def test_collect_files_builtin_exclusions(project_dir: Path) -> None:
 
     config = ArchiveConfig()
     files = collect_archive_files(project_dir, config)
-    rel_strs = {str(f.relative_to(project_dir)) for f in files}
+    rel_strs = {f.relative_to(project_dir).as_posix() for f in files}
 
     assert not any(p.startswith(".git/") or p == ".git" for p in rel_strs)
     assert not any(p.startswith(".conda/envs") for p in rel_strs)
@@ -160,7 +160,7 @@ def test_collect_files_builtin_exclusions(project_dir: Path) -> None:
 def test_collect_files_custom_exclude(project_dir: Path) -> None:
     config = ArchiveConfig(exclude=("data/**",))
     files = collect_archive_files(project_dir, config)
-    rel_paths = {str(f.relative_to(project_dir)) for f in files}
+    rel_paths = {f.relative_to(project_dir).as_posix() for f in files}
     assert "data/big.bin" not in rel_paths
     assert "conda.toml" in rel_paths
 
