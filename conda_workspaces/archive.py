@@ -115,6 +115,10 @@ def collect_archive_files(
         rel = path.relative_to(root).as_posix()
         if is_excluded_by_builtins(rel):
             continue
+        if archive_config.include and not is_included_by_patterns(
+            rel, archive_config.include
+        ):
+            continue
         if is_excluded_by_patterns(rel, archive_config.exclude):
             continue
         result.append(path)
@@ -131,7 +135,31 @@ def detect_compression(output: Path) -> str:
         return "gz"
     if name.endswith(".tar.bz2"):
         return "bz2"
-    return "gz"
+    return "zst"
+
+
+def is_included_by_patterns(rel_path: str, patterns: tuple[str, ...]) -> bool:
+    """Return True if *rel_path* matches any include pattern."""
+    for pattern in patterns:
+        if fnmatch.fnmatch(rel_path, pattern):
+            return True
+        parts = rel_path.split("/")
+        for i in range(len(parts)):
+            partial = "/".join(parts[: i + 1])
+            if fnmatch.fnmatch(partial, pattern):
+                return True
+    return False
+
+
+def _open_tar_for_write(
+    output: Path, mode: str, compression_level: int | None
+) -> tarfile.TarFile:
+    """Open a tar archive for writing, optionally setting compression level."""
+    if compression_level is not None:
+        return tarfile.open(  # type: ignore[call-overload]
+            output, mode, compresslevel=compression_level
+        )
+    return tarfile.open(output, mode)  # type: ignore[call-overload]
 
 
 def create_archive(
@@ -156,7 +184,7 @@ def create_archive(
     compression = detect_compression(output)
     mode = f"w:{compression}"
 
-    with tarfile.open(output, mode) as tf:
+    with _open_tar_for_write(output, mode, archive_config.compression_level) as tf:
         add_files_to_tar(tf, root, files)
         if bundle_packages:
             add_packages_to_tar(tf, bundle_packages)

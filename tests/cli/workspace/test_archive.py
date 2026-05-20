@@ -91,7 +91,7 @@ def test_execute_archive_no_output(
     result = execute_archive(args, console=console)
 
     assert result == 0
-    expected = archive_workspace / "archive-test.tar.gz"
+    expected = archive_workspace / "archive-test.tar.zst"
     assert expected.is_file()
 
 

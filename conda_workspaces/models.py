@@ -127,7 +127,10 @@ class Environment:
 class ArchiveConfig:
     """Archive settings from ``[workspace.archive]``."""
 
+    include: tuple[str, ...] = ()
     exclude: tuple[str, ...] = ()
+    compression: str = "zst"
+    compression_level: int | None = None
 
 
 @dataclass

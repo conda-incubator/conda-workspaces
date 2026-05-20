@@ -155,8 +155,12 @@ def tasks_to_toml(tasks: dict[str, Task]) -> str:
 def parse_archive_config(ws: dict[str, Any]) -> ArchiveConfig:
     """Parse ``[workspace.archive]`` into an ArchiveConfig."""
     archive_data = ws.get("archive", {})
-    exclude = tuple(archive_data.get("exclude", []))
-    return ArchiveConfig(exclude=exclude)
+    return ArchiveConfig(
+        include=tuple(archive_data.get("include", [])),
+        exclude=tuple(archive_data.get("exclude", [])),
+        compression=archive_data.get("compression", "zst"),
+        compression_level=archive_data.get("compression-level"),
+    )
 
 
 def _parse_channels(raw: list[Any]) -> list[Channel]:

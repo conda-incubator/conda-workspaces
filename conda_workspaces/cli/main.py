@@ -527,7 +527,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         type=Path,
         default=None,
         help=(
-            "Output archive path (default: <workspace-name>.tar.gz)."
+            "Output archive path (default: <workspace-name>.tar.zst)."
             " Supports .tar.gz and .tar.zst extensions."
         ),
     )

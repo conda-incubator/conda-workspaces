@@ -170,6 +170,23 @@ def test_collect_files_builtin_exclusions(project_dir: Path) -> None:
     assert not any(p.startswith(".pixi/") for p in rel_strs)
 
 
+def test_collect_files_include_filter(project_dir: Path) -> None:
+    config = ArchiveConfig(include=("src/**",))
+    files = collect_archive_files(project_dir, config)
+    rel_paths = {f.relative_to(project_dir).as_posix() for f in files}
+    assert "src/main.py" in rel_paths
+    assert "conda.toml" not in rel_paths
+
+
+def test_collect_files_include_and_exclude(project_dir: Path) -> None:
+    """Include narrows, then exclude removes from that set."""
+    config = ArchiveConfig(include=("src/**", "conda.toml"), exclude=("src/main.py",))
+    files = collect_archive_files(project_dir, config)
+    rel_paths = {f.relative_to(project_dir).as_posix() for f in files}
+    assert "conda.toml" in rel_paths
+    assert "src/main.py" not in rel_paths
+
+
 def test_collect_files_custom_exclude(project_dir: Path) -> None:
     config = ArchiveConfig(exclude=("data/**",))
     files = collect_archive_files(project_dir, config)

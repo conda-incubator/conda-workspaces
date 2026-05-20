@@ -37,13 +37,19 @@ def execute_archive(
 
     cli_excludes = tuple(args.exclude or [])
     archive_config = ArchiveConfig(
+        include=config.archive.include,
         exclude=config.archive.exclude + cli_excludes,
+        compression=config.archive.compression,
+        compression_level=config.archive.compression_level,
     )
 
     output: Path | None = args.output
     if output is None:
         name = config.name or ctx.root.name
-        output = ctx.root / f"{name}.tar.gz"
+        ext = {"zst": ".tar.zst", "gz": ".tar.gz", "bz2": ".tar.bz2"}.get(
+            config.archive.compression, ".tar.zst"
+        )
+        output = ctx.root / f"{name}{ext}"
 
     bundle_packages = None
     if args.bundle:
