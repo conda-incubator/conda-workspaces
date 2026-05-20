@@ -699,12 +699,10 @@ Or pass them on the command line:
 conda workspace archive --exclude "benchmarks/**"
 ```
 
-Extract an archive on another machine:
+Extract an archive and install environments in one step:
 
 ```bash
-conda workspace unarchive my-project.tar.zst --target ./restored
-cd restored
-conda workspace install --locked
+conda workspace unarchive my-project.tar.zst --target ./restored --install
 ```
 
 Pass `--lock` to solve and update the lockfile before archiving:

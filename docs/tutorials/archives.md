@@ -85,6 +85,20 @@ cd my-project
 conda workspace install --locked
 ```
 
+## Extract and install in one step
+
+![archive install demo](../../demos/archives-install.gif)
+
+Pass `--install` to extract the archive and install all environments
+from the lockfile in a single command:
+
+```bash
+conda workspace unarchive my-project.tar.zst --target /path/to/destination --install
+```
+
+This is equivalent to extracting, changing into the directory, and
+running `conda workspace install --locked`, but without the extra steps.
+
 ## Lock before archiving
 
 If your lockfile is out of date or does not exist yet, pass `--lock`

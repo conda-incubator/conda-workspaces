@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from rich.console import Console
 
@@ -21,9 +21,6 @@ from ...lockfile import lockfile_path as _lockfile_path
 from ...models import ArchiveConfig
 from .. import status
 from . import workspace_context_from_args
-
-if TYPE_CHECKING:
-    import argparse
 
 
 def execute_archive(
@@ -166,5 +163,19 @@ def execute_unarchive(
                     str(count),
                     detail="into conda cache",
                 )
+
+    if args.install:
+        from .install import execute_install
+
+        install_args = argparse.Namespace(
+            file=str(target),
+            environment=None,
+            force_reinstall=False,
+            locked=True,
+            frozen=False,
+            dry_run=False,
+            json=False,
+        )
+        return execute_install(install_args, console=console)
 
     return 0

@@ -20,6 +20,7 @@ Animated terminal demos recorded with [VHS](https://github.com/charmbracelet/vhs
 | `shell` | Interactive shell and one-shot commands |
 | `archives` | Create and extract workspace archives |
 | `archives-bundle` | Bundle packages for offline/air-gapped deployment |
+| `archives-install` | Extract and install in one step with --install |
 
 ### Tasks
 
