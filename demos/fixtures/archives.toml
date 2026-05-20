@@ -1,0 +1,23 @@
+[workspace]
+name = "weather-api"
+channels = ["conda-forge"]
+platforms = ["osx-arm64", "linux-64"]
+
+[dependencies]
+python = ">=3.12"
+flask = ">=3"
+pandas = ">=2"
+requests = "*"
+
+[feature.test.dependencies]
+pytest = ">=8"
+
+[environments]
+test = ["test"]
+
+[tasks]
+serve = { cmd = "flask run", description = "Start the dev server" }
+test = { cmd = "pytest tests/ -v", depends-on = ["serve"], description = "Run test suite" }
+
+[workspace.archive]
+exclude = ["docs/**", "*.log", "data/raw/**"]

@@ -44,4 +44,11 @@ Lock your workspace for Linux, macOS, and Windows from a single machine.
 Set up conda-workspaces in GitHub Actions.
 :::
 
+:::{grid-item-card} {octicon}`package` Archives
+:link: archives
+:link-type: doc
+
+Package a workspace into a portable archive and restore it elsewhere.
+:::
+
 ::::

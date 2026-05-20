@@ -11,6 +11,7 @@ from conda_workspaces.exceptions import (
     TaskNotFoundError,
 )
 from conda_workspaces.models import (
+    ArchiveConfig,
     Channel,
     Environment,
     Feature,
@@ -379,3 +380,24 @@ def test_task_not_found_error(available, expected_in, expected_not_in):
         assert expected_in in str(err)
     if expected_not_in:
         assert expected_not_in not in str(err)
+
+
+def test_archive_config_defaults():
+    cfg = ArchiveConfig()
+    assert cfg.include == ()
+    assert cfg.exclude == ()
+    assert cfg.compression == "zst"
+    assert cfg.compression_level is None
+
+
+def test_archive_config_custom():
+    cfg = ArchiveConfig(
+        include=("src/**",),
+        exclude=("data/**", "*.bin"),
+        compression="gz",
+        compression_level=6,
+    )
+    assert cfg.include == ("src/**",)
+    assert cfg.exclude == ("data/**", "*.bin")
+    assert cfg.compression == "gz"
+    assert cfg.compression_level == 6

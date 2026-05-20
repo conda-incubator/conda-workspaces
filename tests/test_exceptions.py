@@ -9,6 +9,9 @@ from conda.exceptions import CondaError
 
 from conda_workspaces.exceptions import (
     ActivationError,
+    ArchiveError,
+    ArchiveHashMismatchError,
+    ArchivePathTraversalError,
     CondaWorkspacesError,
     EnvironmentNotFoundError,
     EnvironmentNotInstalledError,
@@ -140,3 +143,22 @@ def test_error_message_and_hints_separate(exc):
     for hint in exc.hints:
         assert hint in str(exc)
     assert exc.error_message != str(exc) or not exc.hints
+
+
+def test_archive_error():
+    exc = ArchiveError("something broke")
+    assert "something broke" in str(exc)
+    assert exc.error_message == "something broke"
+
+
+def test_archive_path_traversal_error():
+    exc = ArchivePathTraversalError("../../etc/passwd")
+    assert "../../etc/passwd" in str(exc)
+    assert exc.hints
+
+
+def test_archive_hash_mismatch_error():
+    exc = ArchiveHashMismatchError("numpy-1.26.conda", expected="abc", actual="def")
+    assert "numpy-1.26.conda" in str(exc)
+    assert "abc" in str(exc)
+    assert "def" in str(exc)

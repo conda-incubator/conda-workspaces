@@ -282,3 +282,68 @@ cuda = ["gpu"]
         assert type(feat_name) is str, type(feat_name).__name__
         for platform in feature.platforms:
             assert type(platform) is str, type(platform).__name__
+
+
+def test_parse_workspace_archive_exclude(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "pixi.toml").write_text(
+        '[workspace]\nname = "test"\nchannels = ["conda-forge"]\n'
+        'platforms = ["linux-64"]\n\n'
+        '[workspace.archive]\nexclude = ["data/**", "*.bin"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    from conda_workspaces.manifests import detect_and_parse
+
+    _, config = detect_and_parse()
+    assert config.archive.exclude == ("data/**", "*.bin")
+
+
+def test_parse_workspace_archive_defaults(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "pixi.toml").write_text(
+        '[workspace]\nname = "test"\nchannels = ["conda-forge"]\n'
+        'platforms = ["linux-64"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    from conda_workspaces.manifests import detect_and_parse
+
+    _, config = detect_and_parse()
+    assert config.archive.include == ()
+    assert config.archive.exclude == ()
+    assert config.archive.compression == "zst"
+    assert config.archive.compression_level is None
+
+
+def test_parse_workspace_archive_all_fields(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "pixi.toml").write_text(
+        '[workspace]\nname = "test"\nchannels = ["conda-forge"]\n'
+        'platforms = ["linux-64"]\n\n'
+        "[workspace.archive]\n"
+        'include = ["src/**", "conda.toml"]\n'
+        'exclude = ["data/**"]\n'
+        'compression = "gz"\n'
+        "compression-level = 6\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    from conda_workspaces.manifests import detect_and_parse
+
+    _, config = detect_and_parse()
+    assert config.archive.include == ("src/**", "conda.toml")
+    assert config.archive.exclude == ("data/**",)
+    assert config.archive.compression == "gz"
+    assert config.archive.compression_level == 6
+
+
+def test_parse_conda_toml_archive_exclude(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "conda.toml").write_text(
+        '[workspace]\nname = "test"\nchannels = ["conda-forge"]\n'
+        'platforms = ["linux-64"]\n\n'
+        '[workspace.archive]\nexclude = ["data/**"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    from conda_workspaces.manifests import detect_and_parse
+
+    _, config = detect_and_parse()
+    assert config.archive.exclude == ("data/**",)

@@ -283,3 +283,17 @@ def test_task_parser_args(
     parser = generate_task_parser()
     parsed = parser.parse_args(args)
     assert getattr(parsed, expected_attr) == expected_value
+
+
+def test_archive_subparser_registered() -> None:
+    parser = generate_workspace_parser()
+    ns = parser.parse_args(["archive", "-o", "out.tar.gz"])
+    assert ns.subcmd == "archive"
+    assert str(ns.output) == "out.tar.gz"
+
+
+def test_unarchive_subparser_registered() -> None:
+    parser = generate_workspace_parser()
+    ns = parser.parse_args(["unarchive", "project.tar.gz"])
+    assert ns.subcmd == "unarchive"
+    assert str(ns.archive_path) == "project.tar.gz"

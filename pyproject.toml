@@ -34,6 +34,7 @@ dependencies = [
   "platformdirs >=3.0",
   "rich >=13.0",
   "tomlkit >=0.13",
+  "backports.zstd; python_version < '3.14'",
 ]
 # TODO: bump conda-lockfiles to the first release that ships the public
 # `rattler_lock_v6_to_conda_env` + `RattlerLockV6` pydantic model (added

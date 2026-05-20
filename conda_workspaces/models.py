@@ -123,6 +123,16 @@ class Environment:
         return self.name == self.DEFAULT_NAME
 
 
+@dataclass(frozen=True)
+class ArchiveConfig:
+    """Archive settings from ``[workspace.archive]``."""
+
+    include: tuple[str, ...] = ()
+    exclude: tuple[str, ...] = ()
+    compression: str = "zst"
+    compression_level: int | None = None
+
+
 @dataclass
 class WorkspaceConfig:
     """Complete parsed workspace configuration.
@@ -159,6 +169,7 @@ class WorkspaceConfig:
 
     # Preview / optional fields
     channel_priority: str | None = None  # "strict" | "flexible" | "disabled"
+    archive: ArchiveConfig = field(default_factory=ArchiveConfig)
 
     def __post_init__(self) -> None:
         """Ensure the default feature and environment always exist.

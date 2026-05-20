@@ -15,7 +15,7 @@ from ..exceptions import TaskNotFoundError, TaskParseError, WorkspaceParseError
 from ..models import WorkspaceConfig
 from .base import ManifestParser
 from .normalize import parse_feature_tasks, parse_tasks_and_targets
-from .toml import _parse_channels, _parse_features_and_envs
+from .toml import _parse_channels, _parse_features_and_envs, parse_archive_config
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -66,6 +66,7 @@ class PixiTomlParser(ManifestParser):
             root=root,
             manifest_path=str(path),
             channel_priority=ws.get("channel-priority"),
+            archive=parse_archive_config(ws),
         )
 
         _parse_features_and_envs(data, config, path)
