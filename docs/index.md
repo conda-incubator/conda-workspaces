@@ -166,6 +166,22 @@ Python API for models, manifests, resolver, context, environments,
 and task execution.
 :::
 
+:::{grid-item-card} {octicon}`book` `conda.toml` specification
+:link: reference/conda-toml-spec
+:link-type: doc
+
+Normative reference for the `conda.toml` manifest format and JSON
+schema.
+:::
+
+:::{grid-item-card} {octicon}`question` FAQ
+:link: faq
+:link-type: doc
+
+Answers to common questions about format compatibility, prior art,
+and unknown keys.
+:::
+
 ::::
 
 ```{toctree}
@@ -198,6 +214,7 @@ reference/format-aliases
 
 features
 motivation
+faq
 ```
 
 ```{toctree}
