@@ -47,8 +47,13 @@ ARCHIVE_SUFFIXES: tuple[str, ...] = (
 MANIFEST_FILENAMES = {"conda.toml", "pixi.toml", "pyproject.toml"}
 
 ALLOWED_TAR_TYPES: frozenset[bytes] = frozenset(
-    {tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE,
-     tarfile.SYMTYPE, tarfile.LNKTYPE}
+    {
+        tarfile.REGTYPE,
+        tarfile.AREGTYPE,
+        tarfile.DIRTYPE,
+        tarfile.SYMTYPE,
+        tarfile.LNKTYPE,
+    }
 )
 """Filenames recognised as workspace manifests inside an archive."""
 
