@@ -20,6 +20,7 @@ _ARCHIVE_DEFAULTS = {
     "file": None,
     "output": None,
     "bundle": False,
+    "lock": False,
     "exclude": None,
     "dry_run": False,
     "json": False,

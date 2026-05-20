@@ -37,6 +37,23 @@ def execute_archive(
 
     config, ctx = workspace_context_from_args(args)
 
+    if args.lock:
+        from ...lockfile import generate_lockfile
+        from ...resolver import resolve_all_environments
+
+        resolved_envs = resolve_all_environments(config, ctx.platform)
+
+        status.message(
+            console,
+            "Locking",
+            "workspace",
+            "environments",
+            style="bold blue",
+            ellipsis=True,
+        )
+        generate_lockfile(ctx, resolved_envs)
+        status.message(console, "Updated", "lockfile", "conda.lock")
+
     cli_excludes = tuple(args.exclude or [])
     archive_config = ArchiveConfig(
         include=config.archive.include,

@@ -541,6 +541,12 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         ),
     )
     archive_parser.add_argument(
+        "--lock",
+        action="store_true",
+        default=False,
+        help="Run 'conda workspace lock' before creating the archive.",
+    )
+    archive_parser.add_argument(
         "--exclude",
         action="append",
         default=None,

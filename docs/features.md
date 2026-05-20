@@ -707,12 +707,18 @@ cd restored
 conda workspace install --locked
 ```
 
+Pass `--lock` to solve and update the lockfile before archiving:
+
+```bash
+conda workspace archive --lock
+```
+
 For offline deployment, `--bundle` includes all resolved `.conda`
 packages inside the archive. Package hashes are verified against the
 lockfile on both bundling and extraction:
 
 ```bash
-conda workspace archive --bundle -o offline.tar.zst
+conda workspace archive --lock --bundle -o offline.tar.zst
 ```
 
 See the [archive tutorial](tutorials/archives.md) for a

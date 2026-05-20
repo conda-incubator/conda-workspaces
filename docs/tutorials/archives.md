@@ -1,5 +1,7 @@
 # Archives
 
+![archive demo](../../demos/archives.gif)
+
 This tutorial walks through packaging a workspace into a portable
 archive and restoring it on another machine or in CI.
 
@@ -21,7 +23,7 @@ conda workspace archive -o my-project.tar.zst
 The resulting file contains everything needed to reproduce the
 workspace elsewhere:
 
-```
+```text
 my-project.tar.zst
   conda.toml
   conda.lock
@@ -83,15 +85,28 @@ cd my-project
 conda workspace install --locked
 ```
 
+## Lock before archiving
+
+If your lockfile is out of date or does not exist yet, pass `--lock`
+to solve and write `conda.lock` before creating the archive:
+
+```bash
+conda workspace archive --lock
+```
+
+This is equivalent to running `conda workspace lock` followed by
+`conda workspace archive`, but in a single command.
+
 ## Bundle packages for offline use
 
 When the target machine has no internet access, use `--bundle` to
 include all resolved `.conda` packages inside the archive.
 
-You need a lockfile first. Run `conda workspace lock` if you don't have one.
+You need a lockfile first. Pass `--lock` to generate one automatically,
+or run `conda workspace lock` beforehand.
 
 ```bash
-conda workspace archive --bundle -o my-project-offline.tar.zst
+conda workspace archive --lock --bundle -o my-project-offline.tar.zst
 ```
 
 This adds a `packages/` directory inside the archive. Package hashes

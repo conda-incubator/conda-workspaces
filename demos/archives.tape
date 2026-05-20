@@ -27,7 +27,7 @@ Enter
 Wait /\$/
 Show
 
-Type "# Create a workspace archive from the current project"
+Type "# Package a workspace into a portable archive"
 Enter
 Sleep 500ms
 
@@ -36,35 +36,48 @@ Enter
 Wait /\$/
 Sleep 3s
 
+Type "# Lock and create the archive (defaults to .tar.zst)"
+Enter
+Sleep 500ms
+
 Type@80ms "conda workspace lock"
 Enter
 Wait /\$/
 Sleep 2s
 
-Type@80ms "conda workspace archive -o my-project.tar.gz"
+Type@80ms "conda workspace archive"
 Enter
 Wait /\$/
 Sleep 2s
 
-Type "# Archive includes the manifest, lockfile, and source files"
+Type "# Archive contains manifest, lockfile, and source files"
 Enter
 Sleep 500ms
 
-Type@80ms "tar tzf my-project.tar.gz"
+Type@80ms "tar --list -f my-project.tar.zst | head -10"
 Enter
 Wait /\$/
 Sleep 3s
 
-Type "# Extract the archive into a new directory"
+Type "# Extract the archive on another machine"
 Enter
 Sleep 500ms
 
-Type@80ms "conda workspace unarchive my-project.tar.gz --target /tmp/restored"
+Type@80ms "conda workspace unarchive my-project.tar.zst --target /tmp/restored"
 Enter
 Wait /\$/
 Sleep 2s
 
 Type@80ms "ls /tmp/restored/"
+Enter
+Wait /\$/
+Sleep 2s
+
+Type "# Install from the lockfile -- no solving needed"
+Enter
+Sleep 500ms
+
+Type@80ms "cd /tmp/restored && conda workspace install --locked"
 Enter
 Wait /\$/
 Sleep 3s
