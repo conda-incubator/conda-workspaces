@@ -19,7 +19,7 @@ Wait /\$/
 Type `cp "$FIXTURES/archives.toml" conda.toml`
 Enter
 Wait /\$/
-Type `mkdir -p src && echo 'print("hello")' > src/app.py`
+Type `mkdir -p src tests && echo 'from flask import Flask; app = Flask(__name__)' > src/app.py && echo 'def test_health(): assert True' > tests/test_app.py`
 Enter
 Wait /\$/
 Type "clear"
@@ -34,18 +34,13 @@ Sleep 500ms
 Type@80ms "bat conda.toml"
 Enter
 Wait /\$/
-Sleep 3s
+Sleep 4s
 
-Type "# Lock and create the archive (defaults to .tar.zst)"
+Type "# --lock solves and writes conda.lock before archiving"
 Enter
 Sleep 500ms
 
-Type@80ms "conda workspace lock"
-Enter
-Wait /\$/
-Sleep 2s
-
-Type@80ms "conda workspace archive"
+Type@80ms "conda workspace archive --lock"
 Enter
 Wait /\$/
 Sleep 2s
@@ -54,16 +49,16 @@ Type "# Archive contains manifest, lockfile, and source files"
 Enter
 Sleep 500ms
 
-Type@80ms "tar --list -f my-project.tar.zst | head -10"
+Type@80ms "tar --list -f weather-api.tar.zst"
 Enter
 Wait /\$/
 Sleep 3s
 
-Type "# Extract the archive on another machine"
+Type "# Extract and restore the workspace elsewhere"
 Enter
 Sleep 500ms
 
-Type@80ms "conda workspace unarchive my-project.tar.zst --target /tmp/restored"
+Type@80ms "conda workspace unarchive weather-api.tar.zst --target /tmp/restored"
 Enter
 Wait /\$/
 Sleep 2s

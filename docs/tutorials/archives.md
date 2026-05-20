@@ -99,6 +99,8 @@ This is equivalent to running `conda workspace lock` followed by
 
 ## Bundle packages for offline use
 
+![archive bundle demo](../../demos/archives-bundle.gif)
+
 When the target machine has no internet access, use `--bundle` to
 include all resolved `.conda` packages inside the archive.
 

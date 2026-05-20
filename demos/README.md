@@ -19,6 +19,7 @@ Animated terminal demos recorded with [VHS](https://github.com/charmbracelet/vhs
 | `import` | Import environment.yml and anaconda-project.yml into conda.toml |
 | `shell` | Interactive shell and one-shot commands |
 | `archives` | Create and extract workspace archives |
+| `archives-bundle` | Bundle packages for offline/air-gapped deployment |
 
 ### Tasks
 
