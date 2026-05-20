@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
-import io
 import shutil
 import subprocess
 import sys
@@ -25,6 +24,11 @@ from .exceptions import (
     ArchivePathTraversalError,
 )
 
+try:
+    import backports.zstd  # noqa: F401 -- registers zstd codec with tarfile
+except ImportError:
+    pass  # Python 3.14+ has native support
+
 if TYPE_CHECKING:
     from .models import ArchiveConfig
 
@@ -37,9 +41,6 @@ BUILTIN_EXCLUDE_DIRS: frozenset[str] = frozenset(
     }
 )
 """Directories excluded from archives regardless of user configuration."""
-
-ZSTD_COMPRESSION_LEVEL = 19
-"""Zstandard compression level for archive creation (1=fastest, 22=smallest)."""
 
 
 def is_git_repo(root: Path) -> bool:
@@ -153,15 +154,12 @@ def create_archive(
     files = [f for f in files if f.resolve() != output]
 
     compression = detect_compression(output)
+    mode = f"w:{compression}"
 
-    if compression == "zst":
-        write_tar_zst(root, output, files, bundle_packages)
-    else:
-        mode = f"w:{compression}"
-        with tarfile.open(output, mode) as tf:
-            add_files_to_tar(tf, root, files)
-            if bundle_packages:
-                add_packages_to_tar(tf, bundle_packages)
+    with tarfile.open(output, mode) as tf:
+        add_files_to_tar(tf, root, files)
+        if bundle_packages:
+            add_packages_to_tar(tf, bundle_packages)
 
     return output
 
@@ -178,26 +176,6 @@ def add_packages_to_tar(tf: tarfile.TarFile, packages: list[Path]) -> None:
     for pkg in packages:
         arcname = f"packages/{pkg.name}"
         tf.add(str(pkg), arcname=arcname)
-
-
-def write_tar_zst(
-    root: Path,
-    output: Path,
-    files: list[Path],
-    bundle_packages: list[Path] | None,
-) -> None:
-    """Write a zstandard-compressed tar archive to *output*."""
-    import zstandard
-
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:") as tf:
-        add_files_to_tar(tf, root, files)
-        if bundle_packages:
-            add_packages_to_tar(tf, bundle_packages)
-
-    cctx = zstandard.ZstdCompressor(level=ZSTD_COMPRESSION_LEVEL)
-    compressed = cctx.compress(buf.getvalue())
-    output.write_bytes(compressed)
 
 
 def validate_tar_member(member: tarfile.TarInfo, target: Path) -> None:
@@ -233,15 +211,7 @@ def validate_tar_member(member: tarfile.TarInfo, target: Path) -> None:
 def open_tar(archive_path: Path) -> tarfile.TarFile:
     """Open a tar archive, handling zstandard decompression transparently."""
     compression = detect_compression(archive_path)
-    if compression == "zst":
-        import zstandard
-
-        with open(archive_path, "rb") as fh:
-            dctx = zstandard.ZstdDecompressor()
-            decompressed = dctx.decompress(fh.read())
-        return tarfile.open(fileobj=io.BytesIO(decompressed), mode="r:")
-    else:
-        return tarfile.open(archive_path, f"r:{compression}")
+    return tarfile.open(archive_path, f"r:{compression}")
 
 
 def extract_archive(archive_path: Path, target: Path) -> Path:
