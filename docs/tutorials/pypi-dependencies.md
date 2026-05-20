@@ -42,6 +42,9 @@ mechanism implementation). The solver backend plugin hook that
 conda-rattler-solver uses was introduced by
 [CEP 3](https://github.com/conda/ceps/blob/main/cep-0003.md)
 (pluggable solver backends, originally for conda-libmamba-solver).
+conda-pypi also registers a package extractor plugin that teaches
+conda how to extract `.whl` archives, so wheels are installed through
+the same transaction pipeline as `.conda` packages.
 :::
 
 ## Adding versioned PyPI dependencies
