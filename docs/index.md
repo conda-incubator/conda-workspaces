@@ -174,6 +174,7 @@ and task execution.
 
 quickstart
 tutorials/first-project
+tutorials/pypi-dependencies
 tutorials/multi-platform-locking
 tutorials/coming-from/index
 tutorials/ci-pipeline

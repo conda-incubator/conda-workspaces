@@ -334,6 +334,8 @@ conda workspace info --json     # JSON "known_platforms" key
 reachable set, so typos like `lixux-64` are rejected before the
 solver runs.
 
+(pypi-dependencies)=
+
 ## PyPI dependencies
 
 PyPI dependencies are specified separately from conda dependencies:
@@ -365,6 +367,9 @@ Editable, git, and URL dependencies (e.g. `path = "."`, `git = "..."`)
 are handled separately via `conda-pypi`'s build system after the main
 solve completes. If `conda-pypi` is not installed, PyPI dependencies
 are skipped with a warning.
+
+See the [PyPI dependencies tutorial](tutorials/pypi-dependencies.md)
+for a full walkthrough including editable installs and troubleshooting.
 
 ## No-default-feature
 

@@ -23,6 +23,13 @@ Set up a Python project with workspaces, tasks, and multiple environments.
 Migrate from conda, pixi, anaconda-project, or conda-project.
 :::
 
+:::{grid-item-card} {octicon}`package` PyPI dependencies
+:link: pypi-dependencies
+:link-type: doc
+
+Add PyPI packages, editable local installs, and git dependencies.
+:::
+
 :::{grid-item-card} {octicon}`globe` Multi-platform locking
 :link: multi-platform-locking
 :link-type: doc
