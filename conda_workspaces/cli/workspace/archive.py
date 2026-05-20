@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from rich.console import Console
 
 from ...archive import (
+    ARCHIVE_SUFFIXES,
     collect_bundle_packages,
     create_archive,
     extract_archive,
@@ -16,6 +17,7 @@ from ...archive import (
     verify_package_hashes,
 )
 from ...exceptions import ArchiveError
+from ...lockfile import lockfile_path as _lockfile_path
 from ...models import ArchiveConfig
 from .. import status
 from . import workspace_context_from_args
@@ -55,7 +57,7 @@ def execute_archive(
     if args.bundle:
         from conda.base.context import context as conda_context
 
-        lockfile = ctx.root / "conda.lock"
+        lockfile = _lockfile_path(ctx)
         if not lockfile.is_file():
             raise ArchiveError(
                 "Cannot bundle packages: no conda.lock found.",
@@ -105,7 +107,7 @@ def execute_unarchive(
     target: Path | None = args.target
     if target is None:
         stem = archive_path.name
-        for suffix in (".tar.gz", ".tar.zst", ".tar.zstd", ".tar.bz2", ".tgz"):
+        for suffix in ARCHIVE_SUFFIXES:
             if stem.endswith(suffix):
                 stem = stem[: -len(suffix)]
                 break
@@ -115,7 +117,7 @@ def execute_unarchive(
 
     if not info["has_manifest"]:
         raise ArchiveError(
-            "Not a workspace archive: no conda.toml found.",
+            "Not a workspace archive: no manifest found.",
             hints=["This does not appear to be a conda workspace archive."],
         )
 
@@ -147,15 +149,5 @@ def execute_unarchive(
                     str(count),
                     detail="into conda cache",
                 )
-
-    if not args.no_install and not info["has_attestation"]:
-        console.print(
-            "  [bold yellow]WARNING:[/bold yellow] Archive is not signed."
-            " Cannot verify origin or integrity."
-        )
-        console.print(
-            "  Run 'conda workspace install --locked' inside the extracted"
-            " directory to install environments."
-        )
 
     return 0

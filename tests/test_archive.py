@@ -423,7 +423,6 @@ def test_inspect_archive_lightweight(project_dir: Path, tmp_path: Path) -> None:
     assert info["has_manifest"] is True
     assert info["has_lockfile"] is True
     assert info["has_packages"] is False
-    assert info["has_attestation"] is False
 
 
 def test_inspect_archive_bundled(bundled_archive: tuple[Path, Path]) -> None:

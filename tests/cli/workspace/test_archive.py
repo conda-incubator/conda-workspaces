@@ -20,7 +20,6 @@ _ARCHIVE_DEFAULTS = {
     "file": None,
     "output": None,
     "bundle": False,
-    "environment": None,
     "exclude": None,
     "dry_run": False,
     "json": False,
@@ -157,7 +156,7 @@ def test_execute_unarchive_default_target(
     assert (tmp_path / "my-project" / "conda.toml").is_file()
 
 
-def test_execute_unarchive_no_install_by_default(
+def test_execute_unarchive_no_unsigned_warning(
     archive_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -176,4 +175,5 @@ def test_execute_unarchive_no_install_by_default(
     assert result == 0
     output = console.file.getvalue()
     lower = output.lower()
-    assert "not signed" in lower or "unsigned" in lower or "WARNING" in output
+    assert "not signed" not in lower
+    assert "unsigned" not in lower

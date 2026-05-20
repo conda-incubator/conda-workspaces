@@ -536,15 +536,9 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         default=False,
         help=(
-            "Bundle .conda packages from the local cache for"
-            " offline/air-gapped deployment."
+            "Bundle resolved .conda packages from the local cache into"
+            " the archive for offline/air-gapped deployment."
         ),
-    )
-    archive_parser.add_argument(
-        "-e",
-        "--environment",
-        default=None,
-        help="Archive packages for this environment only (with --bundle).",
     )
     archive_parser.add_argument(
         "--exclude",

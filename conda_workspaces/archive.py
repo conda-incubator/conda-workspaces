@@ -32,6 +32,18 @@ except ImportError:
 if TYPE_CHECKING:
     from .models import ArchiveConfig
 
+ARCHIVE_SUFFIXES: tuple[str, ...] = (
+    ".tar.zst",
+    ".tar.zstd",
+    ".tar.gz",
+    ".tgz",
+    ".tar.bz2",
+)
+"""Recognised archive filename suffixes, longest first."""
+
+_MANIFEST_FILENAMES = {"conda.toml", "pixi.toml", "pyproject.toml"}
+"""Filenames recognised as workspace manifests inside an archive."""
+
 BUILTIN_EXCLUDE_DIRS: frozenset[str] = frozenset(
     {
         ".git",
@@ -388,9 +400,8 @@ def inspect_archive(archive_path: Path) -> dict[str, object]:
     ]
 
     return {
-        "has_manifest": "conda.toml" in names,
+        "has_manifest": bool(names & _MANIFEST_FILENAMES),
         "has_lockfile": "conda.lock" in names,
-        "has_attestation": "conda.lock.sigstore" in names,
         "has_packages": len(package_members) > 0,
         "package_count": len(package_members),
     }
