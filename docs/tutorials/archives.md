@@ -5,24 +5,24 @@ archive and restoring it on another machine or in CI.
 
 ## Prerequisites
 
-- conda (>= 24.7) with the conda-workspaces plugin installed
-- A workspace with a `conda.toml` and `conda.lock`
+- conda (>= 26.3) with the conda-workspaces plugin installed
+- A workspace with a manifest (`conda.toml`, `pixi.toml`, or `pyproject.toml`) and `conda.lock`
 
 ## Create a workspace archive
 
 An archive bundles your manifest, lockfile, and source files into a
-single `.tar.gz` (or `.tar.zst`) file. In a git repo, only tracked
+single `.tar.zst` (or `.tar.gz`) file. In a git repo, only tracked
 files are included.
 
 ```bash
-conda workspace archive -o my-project.tar.gz
+conda workspace archive -o my-project.tar.zst
 ```
 
 The resulting file contains everything needed to reproduce the
 workspace elsewhere:
 
 ```
-my-project.tar.gz
+my-project.tar.zst
   conda.toml
   conda.lock
   src/
@@ -31,15 +31,14 @@ my-project.tar.gz
 ```
 
 If no `-o` is given, the archive is named after the workspace
-(`<name>.tar.gz`) and placed in the project root.
+(`<name>.tar.zst`) and placed in the project root.
 
-## Use zstandard compression
+## Use gzip compression
 
-For smaller archives, use a `.tar.zst` extension. conda-workspaces
-detects the format from the filename and compresses at level 19:
+For broader compatibility, use a `.tar.gz` extension:
 
 ```bash
-conda workspace archive -o my-project.tar.zst
+conda workspace archive -o my-project.tar.gz
 ```
 
 ## Exclude files
@@ -66,7 +65,7 @@ Both sources are combined. Built-in exclusions (`.git`, `__pycache__`,
 On the receiving end, extract the archive with:
 
 ```bash
-conda workspace unarchive my-project.tar.gz
+conda workspace unarchive my-project.tar.zst
 ```
 
 This creates a `my-project/` directory (derived from the archive
@@ -74,7 +73,7 @@ filename) containing the full workspace. To choose a different
 location:
 
 ```bash
-conda workspace unarchive my-project.tar.gz --target /path/to/destination
+conda workspace unarchive my-project.tar.zst --target /path/to/destination
 ```
 
 After extraction, install the environments from the lockfile:
@@ -87,10 +86,12 @@ conda workspace install --locked
 ## Bundle packages for offline use
 
 When the target machine has no internet access, use `--bundle` to
-include all resolved `.conda` packages inside the archive:
+include all resolved `.conda` packages inside the archive.
+
+You need a lockfile first. Run `conda workspace lock` if you don't have one.
 
 ```bash
-conda workspace archive --bundle -o my-project-offline.tar.gz
+conda workspace archive --bundle -o my-project-offline.tar.zst
 ```
 
 This adds a `packages/` directory inside the archive. Package hashes
@@ -101,7 +102,7 @@ packages, verifies their hashes, and copies them into the local conda
 cache before installation:
 
 ```bash
-conda workspace unarchive my-project-offline.tar.gz
+conda workspace unarchive my-project-offline.tar.zst
 # packages are primed into the conda cache automatically
 cd my-project-offline
 conda workspace install --locked
@@ -110,7 +111,7 @@ conda workspace install --locked
 Pass `--no-install` to skip cache priming if you only want the files:
 
 ```bash
-conda workspace unarchive my-project-offline.tar.gz --no-install
+conda workspace unarchive my-project-offline.tar.zst --no-install
 ```
 
 ## Security

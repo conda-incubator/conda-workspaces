@@ -263,7 +263,6 @@ your workspace.
 
 Some anaconda-project concepts have no direct equivalent:
 
-- `anaconda-project archive` — see `conda workspace archive` ([tutorial](../archives.md))
 - Interactive variable prompting — use environment variables or
   Jinja2 defaults instead
 - `services:` — use tasks, Docker Compose, or external service

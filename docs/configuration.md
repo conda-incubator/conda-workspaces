@@ -361,17 +361,28 @@ depends-on = [
 
 ## Archive configuration
 
-The `[workspace.archive]` table controls which files are excluded when
-creating archives with `conda workspace archive`.
+The `[workspace.archive]` table controls which files are included and
+excluded when creating archives with `conda workspace archive`, as well
+as the compression format.
 
 ```toml
 [workspace.archive]
-exclude = ["docs/**", "*.log", "data/raw/**"]
+include = ["src/**", "conda.toml", "conda.lock"]
+exclude = ["*.log", "data/raw/**"]
+compression = "zst"
+compression-level = 19
 ```
 
 | Field | Type | Description |
 |---|---|---|
+| `include` | list of strings | Glob patterns for files to include in archives. When set, only matching files are archived. |
 | `exclude` | list of strings | Glob patterns for files to exclude from archives |
+| `compression` | string | Compression algorithm: `"zst"` (default), `"gz"`, or `"bz2"` |
+| `compression-level` | integer | Compression level (algorithm-dependent, omit for library default) |
+
+When both `include` and `exclude` are set, `include` patterns narrow
+the file set first, then `exclude` patterns remove from that set. When
+`include` is empty (the default), all files are candidates.
 
 Patterns use `fnmatch` matching against paths relative to the
 workspace root. Both directory globs (`docs/**`) and file globs

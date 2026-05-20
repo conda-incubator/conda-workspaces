@@ -677,11 +677,11 @@ alias table.
 
 ![archive demo](../demos/archives.gif)
 
-Package a workspace into a portable `.tar.gz` or `.tar.zst` archive
+Package a workspace into a portable `.tar.zst` or `.tar.gz` archive
 that includes the manifest, lockfile, and source files:
 
 ```bash
-conda workspace archive -o my-project.tar.gz
+conda workspace archive -o my-project.tar.zst
 ```
 
 In git repos, only tracked files are included. Built-in exclusions
@@ -702,7 +702,7 @@ conda workspace archive --exclude "benchmarks/**"
 Extract an archive on another machine:
 
 ```bash
-conda workspace unarchive my-project.tar.gz --target ./restored
+conda workspace unarchive my-project.tar.zst --target ./restored
 cd restored
 conda workspace install --locked
 ```
@@ -712,7 +712,7 @@ packages inside the archive. Package hashes are verified against the
 lockfile on both bundling and extraction:
 
 ```bash
-conda workspace archive --bundle -o offline.tar.gz
+conda workspace archive --bundle -o offline.tar.zst
 ```
 
 See the [archive tutorial](tutorials/archives.md) for a
