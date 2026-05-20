@@ -362,6 +362,9 @@ To use PyPI dependencies you need:
 - [conda-rattler-solver](https://github.com/conda-incubator/conda-rattler-solver)
   as the solver backend (no longer a hard dependency of conda-pypi, so
   install it explicitly)
+- The `conda-pypi` channel (`conda config --append channels conda-pypi`)
+  which serves pure Python packages from PyPI as conda packages using
+  sharded repodata (requires the rattler solver)
 
 Editable, git, and URL dependencies (e.g. `path = "."`, `git = "..."`)
 are handled separately via `conda-pypi`'s build system after the main

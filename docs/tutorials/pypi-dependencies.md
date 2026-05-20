@@ -15,11 +15,13 @@ plugin system.
 
 ## Prerequisites
 
-PyPI dependency support requires two conda packages that are not
-installed by default:
+PyPI dependency support requires two conda packages and a channel
+configuration:
 
 ```bash
 conda install conda-pypi conda-rattler-solver
+conda config --set solver rattler
+conda config --append channels conda-pypi
 ```
 
 **conda-pypi** translates PyPI package names to their conda equivalents
@@ -30,8 +32,13 @@ and PyPI packages together in a single pass. Since conda-pypi 0.9.0 it
 is no longer installed automatically, so you need to install it
 explicitly.
 
-If either package is missing, `conda workspace install` prints a
-warning and skips PyPI dependencies.
+**The `conda-pypi` channel** on `conda.anaconda.org` makes pure Python
+packages from PyPI available as conda packages. It uses sharded
+repodata, which requires the rattler solver to read. Without this
+channel, the solver has no source for PyPI-originated packages.
+
+If conda-pypi or conda-rattler-solver is missing, `conda workspace
+install` prints a warning and skips PyPI dependencies.
 
 :::{seealso}
 These tools build on the conda plugin architecture defined in
@@ -160,16 +167,19 @@ conda install conda-rattler-solver
 
 If the solver cannot find a PyPI package, check that:
 
-1. The package name is spelled correctly (PyPI names are
+1. The `conda-pypi` channel is in your channel list. Add it with
+   `conda config --append channels conda-pypi` or include it in your
+   manifest's `channels` list.
+2. The solver is set to `rattler` (`conda config --set solver rattler`).
+   The `conda-pypi` channel uses sharded repodata that only the
+   rattler solver can read.
+3. The package name is spelled correctly (PyPI names are
    case-insensitive but conda names use lowercase and hyphens).
-2. The version constraint is satisfiable.
-3. Your channels include a PyPI-aware index. For development, see the
-   [conda-pypi documentation](https://github.com/conda/conda-pypi)
-   for channel setup.
+4. The version constraint is satisfiable.
 
 ## Next steps
 
-- [Features: PyPI dependencies](../features.md#pypi-dependencies) for
+- {ref}`Features: PyPI dependencies <pypi-dependencies>` for
   the full reference on supported fields
 - [Configuration](../configuration.md) for all manifest options
 - [Your first project](first-project.md) for a complete walkthrough
