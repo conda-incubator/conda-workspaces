@@ -271,3 +271,129 @@ depends-on = ["lint"]
 
     for verb in expected_verbs:
         assert verb in stdout, f"Expected '{verb}' in output: {stdout!r}"
+
+
+PYPI_WORKSPACE_TOML = """\
+[workspace]
+name = "pypi-integ-test"
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-arm64", "win-64"]
+
+[dependencies]
+python = ">=3.10"
+
+[pypi-dependencies]
+six = ">=1.16"
+
+[environments]
+default = []
+"""
+
+
+def test_workspace_install_resolves_pypi_deps(
+    conda_toml,
+    conda_cli: CondaCLIFixture,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """PyPI dependencies are translated via conda-pypi and reach the solver."""
+    try:
+        from conda_pypi.translate import pypi_to_conda_name  # noqa: F401
+    except ImportError:
+        pytest.skip("conda-pypi not installed")
+
+    import importlib.util
+
+    if importlib.util.find_spec("conda_rattler_solver") is None:
+        pytest.skip("conda-rattler-solver not installed")
+
+    conda_toml(PYPI_WORKSPACE_TOML)
+
+    resolved_envs = []
+
+    def capture_install(ctx, resolved, *, force_reinstall=False, dry_run=False):
+        resolved_envs.append(resolved)
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.install_environment",
+        capture_install,
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.generate_lockfile",
+        lambda ctx, envs: None,
+    )
+
+    stdout, stderr, exit_code = conda_cli("workspace", "install", "--dry-run")
+
+    assert exit_code == 0
+    assert len(resolved_envs) == 1
+
+    resolved = resolved_envs[0]
+    assert "six" in resolved.pypi_dependencies
+    dep = resolved.pypi_dependencies["six"]
+    assert dep.name == "six"
+    assert dep.spec == ">=1.16"
+
+    conda_dep_names = {str(s.name) for s in resolved.conda_dependencies.values()}
+    assert "python" in conda_dep_names
+
+
+PYPI_EDITABLE_WORKSPACE_TOML = """\
+[workspace]
+name = "editable-integ-test"
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-arm64", "win-64"]
+
+[dependencies]
+python = ">=3.10"
+
+[pypi-dependencies]
+my-pkg = { path = ".", editable = true }
+
+[environments]
+default = []
+"""
+
+
+def test_workspace_install_resolves_editable_deps(
+    conda_toml,
+    conda_cli: CondaCLIFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    """Editable PyPI path deps are parsed and available in the resolved env."""
+    try:
+        from conda_pypi.translate import pypi_to_conda_name  # noqa: F401
+    except ImportError:
+        pytest.skip("conda-pypi not installed")
+
+    conda_toml(PYPI_EDITABLE_WORKSPACE_TOML)
+
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "my-pkg"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+
+    resolved_envs = []
+
+    def capture_install(ctx, resolved, *, force_reinstall=False, dry_run=False):
+        resolved_envs.append(resolved)
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.install_environment",
+        capture_install,
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.generate_lockfile",
+        lambda ctx, envs: None,
+    )
+
+    stdout, stderr, exit_code = conda_cli("workspace", "install", "--dry-run")
+
+    assert exit_code == 0
+    assert len(resolved_envs) == 1
+
+    resolved = resolved_envs[0]
+    assert "my-pkg" in resolved.pypi_dependencies
+    dep = resolved.pypi_dependencies["my-pkg"]
+    assert dep.editable is True
+    assert dep.path == "."
