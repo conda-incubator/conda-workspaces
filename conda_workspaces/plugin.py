@@ -52,14 +52,14 @@ def conda_environment_specifiers() -> Iterable[CondaEnvironmentSpecifier]:
         name=env_spec.FORMAT,
         aliases=env_spec.ALIASES,
         default_filenames=env_spec.DEFAULT_FILENAMES,
-        description="conda-workspaces manifest (conda.toml)",
+        description="conda workspaces manifest (conda.toml)",
         environment_spec=env_spec.CondaWorkspaceSpec,
     )
     yield CondaEnvironmentSpecifier(
         name=lockfile.FORMAT,
         aliases=lockfile.ALIASES,
         default_filenames=lockfile.DEFAULT_FILENAMES,
-        description="conda-workspaces lockfile (conda.lock)",
+        description="conda workspaces lockfile (conda.lock)",
         environment_spec=lockfile.CondaLockLoader,
     )
 
@@ -73,7 +73,7 @@ def conda_environment_exporters() -> Iterable[CondaEnvironmentExporter]:
         name=lockfile.FORMAT,
         aliases=lockfile.ALIASES,
         default_filenames=lockfile.DEFAULT_FILENAMES,
-        description="conda-workspaces lockfile (conda.lock)",
+        description="conda workspaces lockfile (conda.lock)",
         multiplatform_export=export.multiplatform_export,
     )
 
