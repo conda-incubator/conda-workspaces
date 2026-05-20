@@ -117,17 +117,31 @@ conda workspace unarchive my-project-offline.tar.zst --no-install
 ## Security
 
 Archives are extracted with path traversal protection. Every member is
-validated before extraction, and on Python 3.12+ the `filter="data"`
-parameter provides additional defense-in-depth.
+validated before extraction: absolute paths, `..` components, symlinks
+escaping the target directory, and special file types (device nodes,
+FIFOs) are all rejected. On Python 3.12+ the `filter="data"` parameter
+provides additional defense-in-depth.
 
-Unsigned archives produce a warning on extraction:
+When `--bundle` is used, package hashes are verified against the
+lockfile's SHA256 entries both at archive creation and at extraction.
+Packages without a SHA256 entry in the lockfile produce a warning and
+are not verified.
 
-```
-WARNING: Archive is not signed. Cannot verify origin or integrity.
-```
+### Trust model for bundled archives
 
-Review the manifest and lockfile before installing environments from
-an unsigned archive.
+A bundled archive is *self-consistent*: the package hashes match the
+lockfile that ships inside the archive. However, the lockfile itself is
+not externally signed. If the archive came from an untrusted source, the
+lockfile inside it could have been tampered with to match altered
+packages.
+
+To guard against this:
+
+- Obtain archives only from trusted sources.
+- When possible, compare the lockfile inside the archive against a
+  separately obtained copy (e.g. from version control).
+- Use `conda workspace install --locked` so the solver does not
+  silently add packages beyond what the lockfile specifies.
 
 ## Next steps
 

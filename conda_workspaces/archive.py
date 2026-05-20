@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import logging
 import shutil
 import subprocess
 import sys
@@ -32,6 +33,8 @@ except ImportError:
 if TYPE_CHECKING:
     from .models import ArchiveConfig
 
+log = logging.getLogger(__name__)
+
 ARCHIVE_SUFFIXES: tuple[str, ...] = (
     ".tar.zst",
     ".tar.zstd",
@@ -41,7 +44,12 @@ ARCHIVE_SUFFIXES: tuple[str, ...] = (
 )
 """Recognised archive filename suffixes, longest first."""
 
-_MANIFEST_FILENAMES = {"conda.toml", "pixi.toml", "pyproject.toml"}
+MANIFEST_FILENAMES = {"conda.toml", "pixi.toml", "pyproject.toml"}
+
+ALLOWED_TAR_TYPES: frozenset[bytes] = frozenset(
+    {tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE,
+     tarfile.SYMTYPE, tarfile.LNKTYPE}
+)
 """Filenames recognised as workspace manifests inside an archive."""
 
 BUILTIN_EXCLUDE_DIRS: frozenset[str] = frozenset(
@@ -163,7 +171,7 @@ def is_included_by_patterns(rel_path: str, patterns: tuple[str, ...]) -> bool:
     return False
 
 
-def _open_tar_for_write(
+def open_tar_for_write(
     output: Path, mode: str, compression_level: int | None
 ) -> tarfile.TarFile:
     """Open a tar archive for writing, optionally setting compression level."""
@@ -196,7 +204,7 @@ def create_archive(
     compression = detect_compression(output)
     mode = f"w:{compression}"
 
-    with _open_tar_for_write(output, mode, archive_config.compression_level) as tf:
+    with open_tar_for_write(output, mode, archive_config.compression_level) as tf:
         add_files_to_tar(tf, root, files)
         if bundle_packages:
             add_packages_to_tar(tf, bundle_packages)
@@ -221,8 +229,12 @@ def add_packages_to_tar(tf: tarfile.TarFile, packages: list[Path]) -> None:
 def validate_tar_member(member: tarfile.TarInfo, target: Path) -> None:
     """Raise :class:`ArchivePathTraversalError` if *member* escapes *target*.
 
-    Checks absolute paths, ``..`` components, and symlink targets.
+    Checks for disallowed file types (device nodes, FIFOs, etc.),
+    absolute paths, ``..`` components, and symlink targets.
     """
+    if member.type not in ALLOWED_TAR_TYPES:
+        raise ArchivePathTraversalError(member.name)
+
     member_path = Path(member.name)
 
     if member_path.is_absolute():
@@ -264,12 +276,13 @@ def extract_archive(archive_path: Path, target: Path) -> Path:
     target.mkdir(parents=True, exist_ok=True)
 
     with open_tar(archive_path) as tf:
-        for member in tf.getmembers():
+        members = tf.getmembers()
+        for member in members:
             validate_tar_member(member, target)
         if sys.version_info >= (3, 12):
-            tf.extractall(path=target, filter="data")
+            tf.extractall(path=target, members=members, filter="data")
         else:
-            tf.extractall(path=target)
+            tf.extractall(path=target, members=members)
 
     return target
 
@@ -351,6 +364,10 @@ def verify_package_hashes(
     for pkg_path in packages:
         exp_hash = expected.get(pkg_path.name)
         if not exp_hash:
+            log.warning(
+                "No SHA256 hash in lockfile for %s, skipping verification",
+                pkg_path.name,
+            )
             continue
         actual_hash = hashlib.sha256(pkg_path.read_bytes()).hexdigest()
         if actual_hash != exp_hash:
@@ -384,7 +401,7 @@ def prime_package_cache(
     for pkg in packages:
         dest = cache_dir / pkg.name
         if not dest.exists():
-            shutil.copy2(pkg, dest)
+            shutil.copy(pkg, dest)
             count += 1
 
     return count
@@ -400,7 +417,7 @@ def inspect_archive(archive_path: Path) -> dict[str, object]:
     ]
 
     return {
-        "has_manifest": bool(names & _MANIFEST_FILENAMES),
+        "has_manifest": bool(names & MANIFEST_FILENAMES),
         "has_lockfile": "conda.lock" in names,
         "has_packages": len(package_members) > 0,
         "package_count": len(package_members),

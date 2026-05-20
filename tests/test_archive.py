@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from conda_workspaces.archive import (
+    ALLOWED_TAR_TYPES,
     collect_archive_files,
     collect_bundle_packages,
     create_archive,
@@ -16,6 +17,7 @@ from conda_workspaces.archive import (
     inspect_archive,
     open_tar,
     prime_package_cache,
+    validate_tar_member,
     verify_package_hashes,
 )
 from conda_workspaces.exceptions import (
@@ -486,3 +488,60 @@ def test_archive_roundtrip_with_bundle(
     cached_files = {f.name for f in new_cache.iterdir()}
     assert "zlib-1.2.13-h4dc568a_6.conda" in cached_files
     assert "zlib-1.2.13-h53f4e23_6.conda" in cached_files
+
+
+@pytest.mark.parametrize(
+    "file_type",
+    [
+        tarfile.CHRTYPE,
+        tarfile.BLKTYPE,
+        tarfile.FIFOTYPE,
+    ],
+    ids=["char-device", "block-device", "fifo"],
+)
+def test_validate_tar_member_rejects_special_file_types(
+    tmp_path: Path, file_type: bytes
+) -> None:
+    member = tarfile.TarInfo(name="evil_device")
+    member.type = file_type
+    with pytest.raises(ArchivePathTraversalError):
+        validate_tar_member(member, tmp_path)
+
+
+def test_validate_tar_member_allows_regular_types(tmp_path: Path) -> None:
+    for file_type in ALLOWED_TAR_TYPES:
+        member = tarfile.TarInfo(name="normal_file")
+        member.type = file_type
+        validate_tar_member(member, tmp_path)
+
+
+def test_verify_package_hashes_warns_on_missing_hash(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    pkg = tmp_path / "nohash-1.0-h000.conda"
+    pkg.write_bytes(b"data")
+
+    lockfile_content = """\
+version: 1
+environments:
+  default:
+    channels:
+      - url: https://conda.anaconda.org/conda-forge/
+    packages:
+      linux-64:
+        - conda: https://conda.anaconda.org/conda-forge/linux-64/nohash-1.0-h000.conda
+packages:
+  - conda: https://conda.anaconda.org/conda-forge/linux-64/nohash-1.0-h000.conda
+    name: nohash
+    version: "1.0"
+    build: h000
+    subdir: linux-64
+    depends: []
+"""
+    lockfile = tmp_path / "conda.lock"
+    lockfile.write_text(lockfile_content, encoding="utf-8")
+
+    with caplog.at_level("WARNING", logger="conda_workspaces.archive"):
+        verify_package_hashes([pkg], lockfile)
+
+    assert "No SHA256 hash in lockfile for nohash-1.0-h000.conda" in caplog.text
