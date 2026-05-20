@@ -237,8 +237,7 @@ def install_environment(
 
     PyPI dependencies are translated to conda names and merged into
     the same solver call as conda dependencies, relying on
-    ``conda-pypi``'s wheel extractor and ``conda-rattler-solver`` to
-    resolve and install them in a single pass.
+    ``conda-pypi`` to resolve and install them in a single pass.
 
     Raises ``SolveError`` if dependency resolution fails.
     """

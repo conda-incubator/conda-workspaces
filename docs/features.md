@@ -349,20 +349,14 @@ pytest-benchmark = ">=4.0"
 
 PyPI package names are translated to their conda equivalents (via the
 [grayskull mapping](https://github.com/conda/grayskull)) and merged
-into the same solver call as conda dependencies. This means the solver
-(via the conda-rattler-solver backend) resolves conda and PyPI packages
-together in a single pass, and `conda-pypi`'s wheel extractor handles
-`.whl` installation.
+into the same solver call as conda dependencies. `conda-pypi` delegates
+to the configured solver backend to resolve conda and PyPI packages
+together in a single pass and handles `.whl` installation.
 
 To use PyPI dependencies you need:
 
-- [conda-pypi](https://github.com/conda/conda-pypi) for name mapping
-  and wheel extraction
-- [conda-rattler-solver](https://github.com/conda-incubator/conda-rattler-solver)
-  as the solver backend
-- A channel that indexes PyPI wheels (e.g. the
-  [conda-pypi-test](https://github.com/conda-incubator/conda-pypi-test)
-  channel for development)
+- [conda-pypi](https://github.com/conda/conda-pypi) (`>=0.9.0`) for
+  name mapping, solver delegation, and wheel extraction
 
 Editable, git, and URL dependencies (e.g. `path = "."`, `git = "..."`)
 are handled separately via `conda-pypi`'s build system after the main
