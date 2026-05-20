@@ -7,6 +7,7 @@ a standard conda prefix that can be activated with ``conda activate``.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import shutil
 import sys
@@ -152,6 +153,16 @@ def _build_pypi_specs(
         )
         return []
 
+    if importlib.util.find_spec("conda_rattler_solver") is None:
+        names = ", ".join(str(d) for d in pypi_deps)
+        log.warning(
+            "PyPI dependencies found but conda-rattler-solver is not installed.\n"
+            "  PyPI packages: %s\n"
+            "  conda-rattler-solver is required as the solver backend for PyPI\n"
+            "  dependencies. Install it with: conda install conda-rattler-solver",
+            names,
+        )
+
     specs: list[MatchSpec] = []
     for dep in pypi_deps:
         conda_name = pypi_to_conda_name(dep.name)
@@ -237,8 +248,8 @@ def install_environment(
 
     PyPI dependencies are translated to conda names and merged into
     the same solver call as conda dependencies, relying on
-    ``conda-pypi``'s wheel extractor and ``conda-rattler-solver`` to
-    resolve and install them in a single pass.
+    ``conda-pypi`` and ``conda-rattler-solver`` to resolve and install
+    them in a single pass.
 
     Raises ``SolveError`` if dependency resolution fails.
     """

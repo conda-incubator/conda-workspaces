@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+import importlib.util
 import logging
 import sys
 import types
@@ -46,6 +47,8 @@ from conda_workspaces.models import (
     WorkspaceConfig,
 )
 from conda_workspaces.resolver import ResolvedEnvironment
+
+_real_find_spec = importlib.util.find_spec
 
 
 @pytest.fixture
@@ -490,6 +493,30 @@ def test_build_pypi_specs_no_conda_pypi(
 
     assert specs == []
     assert "conda-pypi is not installed" in caplog.text
+
+
+def test_build_pypi_specs_no_rattler_solver(
+    fake_pypi_translate: None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Warns when conda-pypi is available but conda-rattler-solver is not."""
+    monkeypatch.setattr(
+        "importlib.util.find_spec",
+        lambda name: None if name == "conda_rattler_solver" else _real_find_spec(name),
+    )
+    resolved = ResolvedEnvironment(
+        name="default",
+        pypi_dependencies={
+            "requests": PyPIDependency(name="requests"),
+        },
+    )
+
+    with caplog.at_level(logging.WARNING):
+        specs = _build_pypi_specs(resolved)
+
+    assert len(specs) == 1
+    assert "conda-rattler-solver is not installed" in caplog.text
 
 
 def test_install_path_deps_no_conda_pypi(

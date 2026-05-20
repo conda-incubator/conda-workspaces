@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 from conda.base.context import context as conda_context
 from conda.models.match_spec import MatchSpec
 from conda_lockfiles.load_yaml import load_yaml
-from conda_lockfiles.rattler_lock.v6 import _record_to_dict
+from conda_lockfiles.rattler_lock.v6 import _record_to_package
 
 from conda_workspaces.context import WorkspaceContext
 from conda_workspaces.exceptions import (
@@ -117,8 +117,8 @@ def test_plugin_metadata() -> None:
     assert LOCKFILE_VERSION == 1
 
 
-def test_record_to_dict() -> None:
-    """``conda_lockfiles.rattler_lock.v6._record_to_dict`` works as expected."""
+def test_record_to_package() -> None:
+    """``conda_lockfiles.rattler_lock.v6._record_to_package`` works as expected."""
 
     class FakeRecord:
         url = "https://example.com/numpy-1.24.conda"
@@ -127,12 +127,12 @@ def test_record_to_dict() -> None:
         def get(self, key, default=None):
             return self._data.get(key, default)
 
-    result = _record_to_dict(FakeRecord())  # type: ignore[arg-type]
-    assert result["conda"] == "https://example.com/numpy-1.24.conda"
-    assert result["sha256"] == "abc123"
-    assert result["md5"] == "def456"
-    assert result["size"] == 1024
-    assert "depends" not in result
+    result = _record_to_package(FakeRecord())  # type: ignore[arg-type]
+    assert result.conda == "https://example.com/numpy-1.24.conda"
+    assert result.sha256 == "abc123"
+    assert result.md5 == "def456"
+    assert result.size == 1024
+    assert result.depends is None
 
 
 @pytest.mark.parametrize(
@@ -263,7 +263,7 @@ def test_conda_lock_loader_env_uses_context_subdir(
 @pytest.mark.parametrize(
     ("content", "env_for_kwargs", "match"),
     [
-        (None, {"platform": "win-64"}, "does not list packages for platform"),
+        (None, {"platform": "win-64"}, "does not include packages for"),
         (
             "version: 1\nenvironments:\n  test: {}\npackages: []\n",
             {"platform": "linux-64", "name": "default"},
