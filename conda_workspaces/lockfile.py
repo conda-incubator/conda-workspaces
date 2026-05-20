@@ -137,41 +137,30 @@ class CondaLockLoader(EnvironmentSpecBase):
     def env_for(self, platform: str, name: str = "default") -> Environment:
         """Return the conda ``Environment`` for *platform* and *name*.
 
-        Raises ``ValueError`` if *platform* is not in the lockfile or
-        *name* does not identify a declared environment.
+        Raises ``PlatformMismatchError`` if *platform* is not in the
+        lockfile or *name* does not identify a declared environment.
         """
-        # TODO: raise conda.exceptions.PlatformMismatchError once that
-        # lands in a released conda (tracked in conda/conda#15928).
         env_data = self._env_data(name)
         platforms = tuple(sorted(env_data.get("packages", {})))
         if platform not in platforms:
-            from conda.common.io import dashlist
+            from conda.exceptions import PlatformMismatchError
 
-            raise ValueError(
-                f"Lockfile does not list packages for platform {platform!r}. "
-                f"Available platforms: {dashlist(platforms)}."
+            raise PlatformMismatchError(
+                incompatible=[(str(self.path), platforms)],
+                subdir=platform,
             )
 
         # Share rattler-lock v6 conversion with conda-lockfiles via a
         # localised in-memory version byte swap.  Disk file is untouched.
-        # Shallow copy is sufficient: we only overwrite the top-level
-        # ``version`` key; nested structures stay shared with the cache
-        # and must not be mutated by the upstream helper.
-        #
-        # TODO: switch to the public ``rattler_lock_v6_to_conda_env`` +
-        # ``RattlerLockV6`` pydantic model once conda-lockfiles ships
-        # the APIs added in conda-incubator/conda-lockfiles#128.  The
-        # current private helper is stable across the 0.1.x line but is
-        # not part of the public contract.
-        from conda_lockfiles.rattler_lock.v6 import _rattler_lock_v6_to_env
+        from conda_lockfiles.rattler_lock.v6 import (
+            RattlerLockV6,
+            rattler_lock_v6_to_conda_env,
+        )
 
         payload = dict(self._data)
         payload["version"] = 6
-        env = _rattler_lock_v6_to_env(name=name, platform=platform, **payload)
-        # The rattler v6 helper does not populate ``Environment.name``
-        # on the returned object; re-exporters like
-        # :func:`.export.multiplatform_export` rely on it to group
-        # platforms under the right environment key, so restore it.
+        lockfile_model = RattlerLockV6.model_validate(payload)
+        env = rattler_lock_v6_to_conda_env(lockfile_model, name=name, platform=platform)
         env.name = name
         return env
 
@@ -217,7 +206,7 @@ class CondaLockLoader(EnvironmentSpecBase):
         different serialiser can reuse the same composition logic
         without re-implementing it.
         """
-        from conda_lockfiles.rattler_lock.v6 import _record_to_dict
+        from conda_lockfiles.rattler_lock.v6 import _record_to_package
         from conda_lockfiles.validate_urls import validate_urls
 
         seen_urls: set[str] = set()
@@ -248,7 +237,9 @@ class CondaLockLoader(EnvironmentSpecBase):
             for pkg in sorted(env.explicit_packages, key=lambda p: p.name):
                 platform_refs.append({"conda": pkg.url})
                 if pkg.url not in seen_urls:
-                    packages.append(_record_to_dict(pkg))
+                    packages.append(
+                        _record_to_package(pkg).model_dump(exclude_none=True)
+                    )
                     seen_urls.add(pkg.url)
 
             for manager, urls in env.external_packages.items():

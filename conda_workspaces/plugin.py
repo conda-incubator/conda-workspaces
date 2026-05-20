@@ -48,16 +48,18 @@ def conda_subcommands() -> Iterable[CondaSubcommand]:
 def conda_environment_specifiers() -> Iterable[CondaEnvironmentSpecifier]:
     from . import env_spec, lockfile
 
-    # TODO: once CondaEnvironmentSpecifier grows aliases/default_filenames
-    # fields (conda/conda#15928), pass env_spec.ALIASES /
-    # lockfile.ALIASES / *.DEFAULT_FILENAMES through as well.  Until
-    # then, only the canonical FORMAT is registered as a spec name.
     yield CondaEnvironmentSpecifier(
         name=env_spec.FORMAT,
+        aliases=env_spec.ALIASES,
+        default_filenames=env_spec.DEFAULT_FILENAMES,
+        description="conda-workspaces manifest (conda.toml)",
         environment_spec=env_spec.CondaWorkspaceSpec,
     )
     yield CondaEnvironmentSpecifier(
         name=lockfile.FORMAT,
+        aliases=lockfile.ALIASES,
+        default_filenames=lockfile.DEFAULT_FILENAMES,
+        description="conda-workspaces lockfile (conda.lock)",
         environment_spec=lockfile.CondaLockLoader,
     )
 
@@ -71,6 +73,7 @@ def conda_environment_exporters() -> Iterable[CondaEnvironmentExporter]:
         name=lockfile.FORMAT,
         aliases=lockfile.ALIASES,
         default_filenames=lockfile.DEFAULT_FILENAMES,
+        description="conda-workspaces lockfile (conda.lock)",
         multiplatform_export=export.multiplatform_export,
     )
 
