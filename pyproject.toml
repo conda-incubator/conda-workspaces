@@ -27,7 +27,8 @@ dependencies = [
   # "conda-spawn >=0.1.0",
   #
   # These are optional (gracefully skipped when absent):
-  # "conda-pypi >=0.9.0",  # PyPI dependency support (delegates to configured solver)
+  # "conda-pypi >=0.9.0",         # PyPI dependency support
+  # "conda-rattler-solver >=0.0.6",  # solver backend for PyPI deps
   "jinja2 >=3.0",
   "packaging >=21.0",
   "platformdirs >=3.0",

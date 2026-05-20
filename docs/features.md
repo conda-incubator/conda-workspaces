@@ -356,7 +356,10 @@ together in a single pass and handles `.whl` installation.
 To use PyPI dependencies you need:
 
 - [conda-pypi](https://github.com/conda/conda-pypi) (`>=0.9.0`) for
-  name mapping, solver delegation, and wheel extraction
+  name mapping and wheel extraction
+- [conda-rattler-solver](https://github.com/conda-incubator/conda-rattler-solver)
+  as the solver backend (no longer a hard dependency of conda-pypi, so
+  install it explicitly)
 
 Editable, git, and URL dependencies (e.g. `path = "."`, `git = "..."`)
 are handled separately via `conda-pypi`'s build system after the main
