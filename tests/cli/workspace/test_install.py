@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from conda_workspaces.cli.workspace.install import execute_install
-from conda_workspaces.exceptions import LockfileStaleError
+from conda_workspaces.exceptions import LockfileNotFoundError, LockfileStaleError
 
 from ..conftest import make_args
 
@@ -310,3 +310,73 @@ def test_install_no_lock_forces_solve(
     assert result == 0
     assert len(locked_calls) == 0
     assert len(sync_calls) > 0
+
+
+def test_install_ci_mode_fails_on_unsatisfiable_lockfile(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In CI, default install fails when lockfile does not satisfy manifest."""
+    monkeypatch.chdir(pixi_workspace)
+    monkeypatch.setenv("CI", "true")
+
+    lock_file = pixi_workspace / "conda.lock"
+    lock_file.write_text("version: 1\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.check_lockfile_satisfiability",
+        lambda config, data, platform: (False, "dep missing"),
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.load_yaml",
+        lambda path: {"version": 1},
+    )
+
+    args = make_args(_DEFAULTS)
+    with pytest.raises(LockfileStaleError):
+        execute_install(args)
+
+
+def test_install_ci_mode_fails_on_missing_lockfile(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In CI, default install fails when lockfile is missing."""
+    monkeypatch.chdir(pixi_workspace)
+    monkeypatch.setenv("CI", "true")
+
+    args = make_args(_DEFAULTS)
+    with pytest.raises(LockfileNotFoundError):
+        execute_install(args)
+
+
+def test_install_ci_mode_uses_lockfile_when_satisfiable(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In CI, default install uses lockfile when it satisfies manifest."""
+    monkeypatch.chdir(pixi_workspace)
+    monkeypatch.setenv("CI", "true")
+
+    lock_file = pixi_workspace / "conda.lock"
+    lock_file.write_text("version: 1\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.check_lockfile_satisfiability",
+        lambda config, data, platform: (True, ""),
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.load_yaml",
+        lambda path: {"version": 1},
+    )
+
+    locked_calls: list[str] = []
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.install_from_lockfile",
+        lambda ctx, name: locked_calls.append(name),
+    )
+
+    args = make_args(_DEFAULTS)
+    result = execute_install(args)
+    assert result == 0
+    assert len(locked_calls) > 0

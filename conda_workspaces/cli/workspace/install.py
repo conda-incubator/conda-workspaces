@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -45,7 +46,14 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
         _check_lockfile_freshness(ctx, config)
         return _install_from_lockfile(ctx, config, env_name, console=console)
 
+    ci = os.environ.get("CI", "").lower() in ("true", "1", "yes")
+
     lock = lockfile_path(ctx)
+
+    if ci and not no_lock:
+        _check_lockfile_freshness(ctx, config)
+        return _install_from_lockfile(ctx, config, env_name, console=console)
+
     if not no_lock and not force and lock.is_file():
         data = load_yaml(lock)
         ok, reason = check_lockfile_satisfiability(config, data, ctx.platform)
