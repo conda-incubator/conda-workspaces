@@ -111,8 +111,8 @@ This means:
   installs without re-solving
 - Task dependencies, caching, Jinja2 templates, and platform overrides
   all work out of the box
-- Ships as a conda plugin (`conda workspace`, `conda task`) and
-  standalone `conda workspace` / `conda task` CLIs (also available as `cw` / `ct`)
+- Ships as a conda plugin (`conda workspace` / `conda ws`, `conda task`) and
+  standalone `cw` / `ct` CLIs
 
 Read more in [](motivation.md).
 
