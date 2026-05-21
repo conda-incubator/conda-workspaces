@@ -52,6 +52,7 @@ def test_install_envs(
     output_fragment: str,
 ) -> None:
     monkeypatch.chdir(pixi_workspace)
+    monkeypatch.delenv("CI", raising=False)
 
     calls: list[str] = []
 
@@ -93,6 +94,7 @@ def test_install_flags_forwarded(
     dry_run: bool,
 ) -> None:
     monkeypatch.chdir(pixi_workspace)
+    monkeypatch.delenv("CI", raising=False)
     _stub_lockfile(monkeypatch)
 
     recorded: list[tuple[bool, bool]] = []
@@ -119,6 +121,7 @@ def test_install_dry_run_skips_lockfile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(pixi_workspace)
+    monkeypatch.delenv("CI", raising=False)
 
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.sync.install_environment",
@@ -227,6 +230,7 @@ def test_install_default_solves_when_not_satisfiable(
 ) -> None:
     """Default install falls back to solve when lockfile is not satisfiable."""
     monkeypatch.chdir(pixi_workspace)
+    monkeypatch.delenv("CI", raising=False)
 
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.install.lockfile_status",
