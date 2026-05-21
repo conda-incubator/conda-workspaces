@@ -518,11 +518,66 @@ packages:
     # ...
 ```
 
-Using `--locked` skips the solver and installs the exact package URLs
-recorded in the lockfile. It validates that the lockfile is still fresh
-relative to the manifest — if the manifest has changed since the lockfile
-was generated, the install fails. Use `--frozen` to skip freshness
-checks entirely and install the lockfile as-is.
+### Automatic lockfile management
+
+`conda workspace install` checks whether the lockfile satisfies the
+manifest before deciding how to install. When the lockfile covers all
+declared environments, channels, platforms, and dependency specs, it
+installs directly from the lockfile (no solver needed). When the
+lockfile is missing or out of date, it falls back to a full solve and
+regenerates `conda.lock`.
+
+This means day-to-day installs are fast (no solver) while the lockfile
+stays current when the manifest changes. The check compares the
+manifest's dependency specs against locked package versions, so
+whitespace or comment changes do not trigger a re-solve.
+
+| Lockfile state | Default behavior | `--locked` | `--frozen` | `--no-lock` |
+| --- | --- | --- | --- | --- |
+| Satisfiable | Install from lockfile | Install from lockfile | Install from lockfile | Full solve |
+| Not satisfiable | Full solve + update lockfile | Error | Install from lockfile | Full solve |
+| Missing | Full solve + create lockfile | Error | Error | Full solve |
+
+Use `--no-lock` to force a full solve even when the lockfile is
+satisfiable (for example, to pick up channel updates without editing
+the manifest).
+
+### Lock freshness indicator
+
+`conda workspace info` shows the lockfile status:
+
+```bash
+conda workspace info
+```
+
+The Lockfile row shows **up-to-date** (green), **out-of-date** (yellow),
+or **missing** (red). The JSON output includes a `lockfile_status` field:
+
+```bash
+conda workspace info --json | jq .lockfile_status
+```
+
+### CI-friendly defaults
+
+When the `CI` environment variable is set (`true`, `1`, or `yes`),
+`conda workspace install` behaves like `--locked`: it requires a
+satisfiable lockfile and fails if it is missing or out of date. This
+prevents accidental re-solves in CI that could produce different
+results than local development.
+
+```yaml
+# GitHub Actions example
+- run: conda workspace install  # uses lockfile, fails if out of date
+  env:
+    CI: true  # set by GitHub Actions automatically
+```
+
+To override this in CI (for example, in a nightly job that refreshes
+the lockfile), pass `--no-lock`:
+
+```bash
+conda workspace install --no-lock
+```
 
 ### CI-split locking with `--merge`
 

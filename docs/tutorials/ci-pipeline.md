@@ -39,6 +39,13 @@ jobs:
         run: conda task run -e test check
 ```
 
+:::{tip}
+When `CI=true` is set (as it is by default in GitHub Actions, GitLab
+CI, and most CI systems), `conda workspace install` automatically
+behaves like `--locked`. It installs from the lockfile and fails if
+it does not satisfy the manifest. No extra flags needed.
+:::
+
 ## Caching environments
 
 Speed up CI by caching the `.conda/envs/` directory:
@@ -47,7 +54,7 @@ Speed up CI by caching the `.conda/envs/` directory:
       - uses: actions/cache@v4
         with:
           path: .conda/envs
-          key: conda-envs-${{ runner.os }}-${{ hashFiles('conda.toml') }}
+          key: conda-envs-${{ runner.os }}-${{ hashFiles('conda.lock') }}
           restore-keys: |
             conda-envs-${{ runner.os }}-
 
