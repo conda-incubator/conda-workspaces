@@ -967,9 +967,6 @@ def satisfiability_config_factory(tmp_path: Path):
             manifest_path=str(tmp_path / "pixi.toml"),
         )
 
-        _orig_merged_conda = config.merged_conda_dependencies
-        _orig_merged_channels = config.merged_channels
-
         def _patched_deps(env, platform=None):
             return deps
 
@@ -984,87 +981,86 @@ def satisfiability_config_factory(tmp_path: Path):
     return _factory
 
 
-def test_satisfiability_all_specs_matched(
-    satisfiability_config_factory, lockfile_data_factory
+@pytest.mark.parametrize(
+    ("config_kwargs", "data_kwargs", "expected_ok", "reason_fragment"),
+    [
+        pytest.param(
+            {},
+            {},
+            True,
+            "",
+            id="all-specs-matched",
+        ),
+        pytest.param(
+            {"environments": {"default": [], "test": []}},
+            {},
+            False,
+            "test",
+            id="missing-environment",
+        ),
+        pytest.param(
+            {"platforms": ["linux-64", "osx-arm64", "win-64"]},
+            {},
+            False,
+            "win-64",
+            id="missing-platform",
+        ),
+        pytest.param(
+            {"channels": ["defaults"]},
+            {},
+            False,
+            "channel",
+            id="channel-mismatch",
+        ),
+        pytest.param(
+            {
+                "deps": {
+                    "python": MatchSpec("python>=3.10"),
+                    "numpy": MatchSpec("numpy"),
+                },
+            },
+            {},
+            False,
+            "numpy",
+            id="missing-dependency",
+        ),
+        pytest.param(
+            {"deps": {"python": MatchSpec("python>=3.14")}},
+            {},
+            False,
+            "python",
+            id="version-mismatch",
+        ),
+        pytest.param(
+            {},
+            {"version": None},
+            False,
+            "version",
+            id="lockfile-missing-version",
+        ),
+    ],
+)
+def test_satisfiability(
+    satisfiability_config_factory,
+    lockfile_data_factory,
+    config_kwargs: dict,
+    data_kwargs: dict,
+    expected_ok: bool,
+    reason_fragment: str,
 ) -> None:
-    """config has python>=3.10, lockfile has python 3.12.0 -> satisfiable."""
-    config = satisfiability_config_factory()
-    data = lockfile_data_factory()
+    config = satisfiability_config_factory(**config_kwargs)
+    data = lockfile_data_factory(**data_kwargs)
     ok, reason = check_lockfile_satisfiability(config, data, "linux-64")
-    assert ok is True
-    assert reason == ""
-
-
-def test_satisfiability_missing_environment(
-    satisfiability_config_factory, lockfile_data_factory
-) -> None:
-    """Lockfile missing an env declared in the manifest."""
-    config = satisfiability_config_factory(
-        environments={"default": [], "test": []},
-    )
-    data = lockfile_data_factory()
-    ok, reason = check_lockfile_satisfiability(config, data, "linux-64")
-    assert ok is False
-    assert "test" in reason
-
-
-def test_satisfiability_missing_platform(
-    satisfiability_config_factory, lockfile_data_factory
-) -> None:
-    """config declares win-64 but lockfile doesn't have it."""
-    config = satisfiability_config_factory(
-        platforms=["linux-64", "osx-arm64", "win-64"],
-    )
-    data = lockfile_data_factory()
-    ok, reason = check_lockfile_satisfiability(config, data, "linux-64")
-    assert ok is False
-    assert "win-64" in reason
-
-
-def test_satisfiability_channel_mismatch(
-    satisfiability_config_factory, lockfile_data_factory
-) -> None:
-    """config uses "defaults" but lockfile has "conda-forge"."""
-    config = satisfiability_config_factory(channels=["defaults"])
-    data = lockfile_data_factory()
-    ok, reason = check_lockfile_satisfiability(config, data, "linux-64")
-    assert ok is False
-    assert "channel" in reason.lower()
-
-
-def test_satisfiability_missing_dependency(
-    satisfiability_config_factory, lockfile_data_factory
-) -> None:
-    """config requires numpy but lockfile doesn't have it."""
-    config = satisfiability_config_factory(
-        deps={
-            "python": MatchSpec("python>=3.10"),
-            "numpy": MatchSpec("numpy"),
-        },
-    )
-    data = lockfile_data_factory()
-    ok, reason = check_lockfile_satisfiability(config, data, "linux-64")
-    assert ok is False
-    assert "numpy" in reason
-
-
-def test_satisfiability_version_mismatch(
-    satisfiability_config_factory, lockfile_data_factory
-) -> None:
-    """config requires python>=3.14 but lockfile has 3.12."""
-    config = satisfiability_config_factory(
-        deps={"python": MatchSpec("python>=3.14")},
-    )
-    data = lockfile_data_factory()
-    ok, reason = check_lockfile_satisfiability(config, data, "linux-64")
-    assert ok is False
-    assert "python" in reason
+    assert ok is expected_ok
+    if expected_ok:
+        assert reason == ""
+    else:
+        assert reason_fragment in reason.lower()
 
 
 def test_satisfiability_ignores_extra_lockfile_envs(
     satisfiability_config_factory, lockfile_data_factory
 ) -> None:
-    """lockfile has extra "extra" env not in manifest -> still satisfiable."""
     config = satisfiability_config_factory()
     data = lockfile_data_factory()
     data["environments"]["extra"] = {
@@ -1082,15 +1078,3 @@ def test_satisfiability_ignores_extra_lockfile_envs(
     ok, reason = check_lockfile_satisfiability(config, data, "linux-64")
     assert ok is True
     assert reason == ""
-
-
-def test_satisfiability_lockfile_missing_version(
-    satisfiability_config_factory, lockfile_data_factory
-) -> None:
-    """lockfile data has no "version" key."""
-    config = satisfiability_config_factory()
-    data = lockfile_data_factory(version=None)
-    assert "version" not in data
-    ok, reason = check_lockfile_satisfiability(config, data, "linux-64")
-    assert ok is False
-    assert "version" in reason.lower()

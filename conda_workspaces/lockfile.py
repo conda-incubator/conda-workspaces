@@ -96,46 +96,6 @@ def _normalize_channel_urls(urls: Iterable[str]) -> list[str]:
     return [url.rstrip("/") for url in urls]
 
 
-def _refs_to_records(refs: list[dict[str, str]], platform: str) -> dict[str, list[Any]]:
-    """Parse lockfile package refs into ``PackageRecord`` objects grouped by name.
-
-    Each ref is ``{"conda": "<url>"}``; the package name, version, and
-    build string are extracted from the URL filename.  Returns a dict
-    mapping package name to a list of ``PackageRecord`` instances.
-    """
-    from conda.models.records import PackageRecord
-
-    by_name: dict[str, list[Any]] = {}
-
-    for ref in refs:
-        url = ref.get("conda")
-        if not url:
-            continue
-        filename = url.rsplit("/", 1)[-1]
-        # Remove extension (.conda or .tar.bz2)
-        if filename.endswith(".tar.bz2"):
-            base = filename[: -len(".tar.bz2")]
-        else:
-            base = filename.rsplit(".", 1)[0]
-        # Split from right: name-version-build
-        parts = base.rsplit("-", 2)
-        if len(parts) != 3:
-            continue
-        name, version, build = parts
-        record = PackageRecord(
-            name=name,
-            version=version,
-            build=build,
-            build_number=0,
-            channel="<lockfile>",
-            subdir=platform,
-            fn=filename,
-        )
-        by_name.setdefault(name, []).append(record)
-
-    return by_name
-
-
 def check_lockfile_satisfiability(
     config: WorkspaceConfig,
     lockfile_data: dict[str, Any],
@@ -157,7 +117,6 @@ def check_lockfile_satisfiability(
     5. Every conda matchspec from the manifest is satisfied by at least
        one locked package on *current_platform*.
     """
-    # 1. Version check
     if lockfile_data.get("version") != LOCKFILE_VERSION:
         return (
             False,
@@ -168,7 +127,6 @@ def check_lockfile_satisfiability(
     lock_envs = lockfile_data.get("environments", {})
 
     for env_name, env_obj in config.environments.items():
-        # 2. Environment existence
         if env_name not in lock_envs:
             return (
                 False,
@@ -178,7 +136,6 @@ def check_lockfile_satisfiability(
 
         lock_env = lock_envs[env_name]
 
-        # 3. Channel match
         manifest_channels = config.merged_channels(env_obj)
         manifest_urls = _normalize_channel_urls(
             ch.base_url for ch in manifest_channels if ch.base_url
@@ -194,7 +151,6 @@ def check_lockfile_satisfiability(
                 f"manifest declares {manifest_urls} but lockfile has {lock_urls}",
             )
 
-        # 4. Platform coverage
         lock_platforms = set(lock_env.get("packages", {}))
         for platform in config.platforms:
             if platform not in lock_platforms:
@@ -204,27 +160,39 @@ def check_lockfile_satisfiability(
                     f"but missing from environment '{env_name}' in the lockfile",
                 )
 
-        # 5. Dependency satisfaction on current_platform
         lock_packages = lock_env.get("packages", {})
         platform_refs = lock_packages.get(current_platform)
         if platform_refs is None:
-            # current_platform not in lockfile for this env, skip dep check
-            # (platform coverage was already validated above against config.platforms)
             continue
 
-        records_by_name = _refs_to_records(platform_refs, current_platform)
+        from conda.models.version import VersionSpec
+
+        locked_versions: dict[str, list[str]] = {}
+        for ref in platform_refs:
+            url = ref.get("conda", "")
+            if not url:
+                continue
+            fn = url.rsplit("/", 1)[-1]
+            for ext in (".conda", ".tar.bz2"):
+                if fn.endswith(ext):
+                    fn = fn[: -len(ext)]
+                    break
+            parts = fn.rsplit("-", 2)
+            if len(parts) == 3:
+                locked_versions.setdefault(parts[0], []).append(parts[1])
+
         manifest_deps = config.merged_conda_dependencies(env_obj, current_platform)
 
         for dep_name, spec in manifest_deps.items():
-            candidates = records_by_name.get(dep_name, [])
-            if not candidates:
+            versions = locked_versions.get(dep_name)
+            if not versions:
                 return (
                     False,
                     f"Dependency '{dep_name}' is required by environment "
                     f"'{env_name}' but not found in the lockfile "
                     f"for platform '{current_platform}'",
                 )
-            if not any(spec.match(rec) for rec in candidates):
+            if not any(VersionSpec(spec.version).match(v) for v in versions):
                 return (
                     False,
                     f"Dependency '{dep_name}' in environment '{env_name}' "

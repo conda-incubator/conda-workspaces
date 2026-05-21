@@ -550,8 +550,8 @@ the manifest).
 conda workspace info
 ```
 
-The Lockfile row shows **up-to-date** (green), **out-of-date** (yellow),
-or **missing** (red). The JSON output includes a `lockfile_status` field:
+The Lockfile row shows `up-to-date` (green), `out-of-date` (yellow),
+or `missing` (red). The JSON output includes a `lockfile_status` field:
 
 ```bash
 conda workspace info --json | jq .lockfile_status

@@ -188,7 +188,6 @@ def test_install_locked_validates_freshness(
 def test_install_default_uses_lockfile_when_satisfiable(
     pixi_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Default install uses lockfile when it satisfies the manifest."""
     monkeypatch.chdir(pixi_workspace)
@@ -197,7 +196,7 @@ def test_install_default_uses_lockfile_when_satisfiable(
     lock_file.write_text("version: 1\n", encoding="utf-8")
 
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.load_yaml",
+        "conda_lockfiles.load_yaml.load_yaml",
         lambda path: {"version": 1},
     )
     monkeypatch.setattr(
@@ -239,7 +238,7 @@ def test_install_default_solves_when_not_satisfiable(
     lock_file.write_text("version: 1\n", encoding="utf-8")
 
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.load_yaml",
+        "conda_lockfiles.load_yaml.load_yaml",
         lambda path: {"version": 1},
     )
     monkeypatch.setattr(
@@ -281,7 +280,7 @@ def test_install_no_lock_forces_solve(
     lock_file.write_text("version: 1\n", encoding="utf-8")
 
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.load_yaml",
+        "conda_lockfiles.load_yaml.load_yaml",
         lambda path: {"version": 1},
     )
     monkeypatch.setattr(
@@ -312,63 +311,38 @@ def test_install_no_lock_forces_solve(
     assert len(sync_calls) > 0
 
 
-def test_install_ci_mode_fails_on_unsatisfiable_lockfile(
+@pytest.mark.parametrize(
+    ("has_lockfile", "satisfiable", "expected_error", "expected_locked"),
+    [
+        pytest.param(True, False, LockfileStaleError, False, id="unsatisfiable"),
+        pytest.param(False, None, LockfileNotFoundError, False, id="missing"),
+        pytest.param(True, True, None, True, id="satisfiable"),
+    ],
+)
+def test_install_ci_mode(
     pixi_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
+    has_lockfile: bool,
+    satisfiable: bool | None,
+    expected_error: type[Exception] | None,
+    expected_locked: bool,
 ) -> None:
-    """In CI, default install fails when lockfile does not satisfy manifest."""
     monkeypatch.chdir(pixi_workspace)
     monkeypatch.setenv("CI", "true")
 
-    lock_file = pixi_workspace / "conda.lock"
-    lock_file.write_text("version: 1\n", encoding="utf-8")
-
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.check_lockfile_satisfiability",
-        lambda config, data, platform: (False, "dep missing"),
-    )
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.load_yaml",
-        lambda path: {"version": 1},
-    )
-
-    args = make_args(_DEFAULTS)
-    with pytest.raises(LockfileStaleError):
-        execute_install(args)
-
-
-def test_install_ci_mode_fails_on_missing_lockfile(
-    pixi_workspace: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """In CI, default install fails when lockfile is missing."""
-    monkeypatch.chdir(pixi_workspace)
-    monkeypatch.setenv("CI", "true")
-
-    args = make_args(_DEFAULTS)
-    with pytest.raises(LockfileNotFoundError):
-        execute_install(args)
-
-
-def test_install_ci_mode_uses_lockfile_when_satisfiable(
-    pixi_workspace: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """In CI, default install uses lockfile when it satisfies manifest."""
-    monkeypatch.chdir(pixi_workspace)
-    monkeypatch.setenv("CI", "true")
-
-    lock_file = pixi_workspace / "conda.lock"
-    lock_file.write_text("version: 1\n", encoding="utf-8")
-
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.check_lockfile_satisfiability",
-        lambda config, data, platform: (True, ""),
-    )
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.load_yaml",
-        lambda path: {"version": 1},
-    )
+    if has_lockfile:
+        (pixi_workspace / "conda.lock").write_text("version: 1\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "conda_workspaces.cli.workspace.install.check_lockfile_satisfiability",
+            lambda config, data, platform: (
+                satisfiable,
+                "" if satisfiable else "dep missing",
+            ),
+        )
+        monkeypatch.setattr(
+            "conda_lockfiles.load_yaml.load_yaml",
+            lambda path: {"version": 1},
+        )
 
     locked_calls: list[str] = []
     monkeypatch.setattr(
@@ -377,6 +351,10 @@ def test_install_ci_mode_uses_lockfile_when_satisfiable(
     )
 
     args = make_args(_DEFAULTS)
-    result = execute_install(args)
-    assert result == 0
-    assert len(locked_calls) > 0
+    if expected_error is not None:
+        with pytest.raises(expected_error):
+            execute_install(args)
+    else:
+        result = execute_install(args)
+        assert result == 0
+        assert expected_locked == (len(locked_calls) > 0)
