@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from conda_lockfiles.load_yaml import load_yaml
 from rich.console import Console
 from rich.table import Table
 
 from ...envs import get_environment_info
+from ...lockfile import check_lockfile_satisfiability, lockfile_path
 from ...resolver import known_platforms, resolve_all_environments, resolve_environment
 from . import workspace_context_from_args
 
@@ -59,6 +61,15 @@ def _show_workspace_info(
         "features": list(config.features.keys()),
     }
 
+    lock = lockfile_path(ctx)
+    if not lock.is_file():
+        lockfile_status = "missing"
+    else:
+        lock_data = load_yaml(lock)
+        ok, _reason = check_lockfile_satisfiability(config, lock_data, ctx.platform)
+        lockfile_status = "up-to-date" if ok else "out-of-date"
+    info["lockfile_status"] = lockfile_status
+
     if json_output:
         console.print_json(json.dumps(info))
     else:
@@ -79,6 +90,15 @@ def _show_workspace_info(
             table.add_row("Known Platforms", ", ".join(known) or "(none)")
         table.add_row("Environments", ", ".join(info["environments"]))
         table.add_row("Features", ", ".join(info["features"]) or "(none)")
+        status_style = {
+            "up-to-date": "green",
+            "out-of-date": "yellow",
+            "missing": "red",
+        }.get(info["lockfile_status"], "")
+        table.add_row(
+            "Lockfile",
+            f"[{status_style}]{info['lockfile_status']}[/{status_style}]",
+        )
         console.print(table)
 
     return 0

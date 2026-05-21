@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+from io import StringIO
 from typing import TYPE_CHECKING
 
 import pytest
+from rich.console import Console
 
 from conda_workspaces.cli.workspace.info import execute_info
 
@@ -13,8 +15,6 @@ from ..conftest import make_args
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from rich.console import Console
 
     from tests.conftest import CreateWorkspaceEnv
 
@@ -210,3 +210,79 @@ requests = ">=2.28"
     out = rich_console.file.getvalue()
     assert "PyPI dependencies" in out
     assert "requests" in out
+
+
+def test_info_shows_lockfile_up_to_date(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (pixi_workspace / "conda.lock").write_text("version: 1\n", encoding="utf-8")
+    monkeypatch.chdir(pixi_workspace)
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.info.check_lockfile_satisfiability",
+        lambda config, lock_data, platform: (True, ""),
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.info.load_yaml",
+        lambda path: {"version": 1},
+    )
+    console = Console(file=StringIO(), width=200, highlight=False)
+    args = make_args(_DEFAULTS)
+    execute_info(args, console=console)
+    out = console.file.getvalue()
+    assert "up-to-date" in out
+
+
+def test_info_shows_lockfile_out_of_date(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (pixi_workspace / "conda.lock").write_text("version: 1\n", encoding="utf-8")
+    monkeypatch.chdir(pixi_workspace)
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.info.check_lockfile_satisfiability",
+        lambda config, lock_data, platform: (False, "dep missing"),
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.info.load_yaml",
+        lambda path: {"version": 1},
+    )
+    console = Console(file=StringIO(), width=200, highlight=False)
+    args = make_args(_DEFAULTS)
+    execute_info(args, console=console)
+    out = console.file.getvalue()
+    assert "out-of-date" in out
+
+
+def test_info_shows_lockfile_missing(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    console = Console(file=StringIO(), width=200, highlight=False)
+    args = make_args(_DEFAULTS)
+    execute_info(args, console=console)
+    out = console.file.getvalue()
+    assert "missing" in out
+
+
+def test_info_json_includes_lockfile_status(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (pixi_workspace / "conda.lock").write_text("version: 1\n", encoding="utf-8")
+    monkeypatch.chdir(pixi_workspace)
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.info.check_lockfile_satisfiability",
+        lambda config, lock_data, platform: (True, ""),
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.info.load_yaml",
+        lambda path: {"version": 1},
+    )
+    console = Console(file=StringIO(), width=200, highlight=False)
+    args = make_args(_DEFAULTS, json=True)
+    execute_info(args, console=console)
+    out = console.file.getvalue()
+    data = json.loads(out)
+    assert data["lockfile_status"] == "up-to-date"
