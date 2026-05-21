@@ -14,7 +14,6 @@ resolution, and spec parsing.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
-from enum import StrEnum
 from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
@@ -31,12 +30,16 @@ from .exceptions import (
 )
 
 
-class LockfileStatus(StrEnum):
+@dataclass(frozen=True)
+class LockfileStatus:
     """Status of the lockfile relative to the workspace manifest."""
 
-    UP_TO_DATE = "up-to-date"
-    OUT_OF_DATE = "out-of-date"
-    MISSING = "missing"
+    UP_TO_DATE: ClassVar[str] = "up-to-date"
+    OUT_OF_DATE: ClassVar[str] = "out-of-date"
+    MISSING: ClassVar[str] = "missing"
+
+    status: str
+    reason: str = ""
 
 
 @dataclass(frozen=True)

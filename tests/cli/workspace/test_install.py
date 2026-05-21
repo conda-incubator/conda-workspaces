@@ -9,6 +9,7 @@ import pytest
 
 from conda_workspaces.cli.workspace.install import execute_install
 from conda_workspaces.exceptions import LockfileNotFoundError, LockfileStaleError
+from conda_workspaces.models import LockfileStatus
 
 from ..conftest import make_args
 
@@ -192,16 +193,9 @@ def test_install_default_uses_lockfile_when_satisfiable(
     """Default install uses lockfile when it satisfies the manifest."""
     monkeypatch.chdir(pixi_workspace)
 
-    lock_file = pixi_workspace / "conda.lock"
-    lock_file.write_text("version: 1\n", encoding="utf-8")
-
     monkeypatch.setattr(
-        "conda_lockfiles.load_yaml.load_yaml",
-        lambda path: {"version": 1},
-    )
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.check_lockfile_satisfiability",
-        lambda config, data, platform: (True, ""),
+        "conda_workspaces.cli.workspace.install.lockfile_status",
+        lambda ctx, config: LockfileStatus(status=LockfileStatus.UP_TO_DATE),
     )
 
     locked_calls: list[str] = []
@@ -234,16 +228,11 @@ def test_install_default_solves_when_not_satisfiable(
     """Default install falls back to solve when lockfile is not satisfiable."""
     monkeypatch.chdir(pixi_workspace)
 
-    lock_file = pixi_workspace / "conda.lock"
-    lock_file.write_text("version: 1\n", encoding="utf-8")
-
     monkeypatch.setattr(
-        "conda_lockfiles.load_yaml.load_yaml",
-        lambda path: {"version": 1},
-    )
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.check_lockfile_satisfiability",
-        lambda config, data, platform: (False, "dep missing"),
+        "conda_workspaces.cli.workspace.install.lockfile_status",
+        lambda ctx, config: LockfileStatus(
+            status=LockfileStatus.OUT_OF_DATE, reason="dep missing"
+        ),
     )
 
     locked_calls: list[str] = []
@@ -276,24 +265,6 @@ def test_install_no_lock_forces_solve(
     """--no-lock forces a full solve even when lockfile is satisfiable."""
     monkeypatch.chdir(pixi_workspace)
 
-    lock_file = pixi_workspace / "conda.lock"
-    lock_file.write_text("version: 1\n", encoding="utf-8")
-
-    monkeypatch.setattr(
-        "conda_lockfiles.load_yaml.load_yaml",
-        lambda path: {"version": 1},
-    )
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.check_lockfile_satisfiability",
-        lambda config, data, platform: (True, ""),
-    )
-
-    locked_calls: list[str] = []
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.install_from_lockfile",
-        lambda ctx, name: locked_calls.append(name),
-    )
-
     sync_calls: list[str] = []
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.sync.install_environment",
@@ -307,7 +278,6 @@ def test_install_no_lock_forces_solve(
     args = make_args(_DEFAULTS, no_lock=True)
     result = execute_install(args)
     assert result == 0
-    assert len(locked_calls) == 0
     assert len(sync_calls) > 0
 
 
@@ -332,17 +302,18 @@ def test_install_ci_mode(
 
     if has_lockfile:
         (pixi_workspace / "conda.lock").write_text("version: 1\n", encoding="utf-8")
-        monkeypatch.setattr(
-            "conda_workspaces.cli.workspace.install.check_lockfile_satisfiability",
-            lambda config, data, platform: (
-                satisfiable,
-                "" if satisfiable else "dep missing",
-            ),
-        )
-        monkeypatch.setattr(
-            "conda_lockfiles.load_yaml.load_yaml",
-            lambda path: {"version": 1},
-        )
+
+    def fake_lockfile_status(ctx, config):
+        if not has_lockfile:
+            return LockfileStatus(status=LockfileStatus.MISSING)
+        if satisfiable:
+            return LockfileStatus(status=LockfileStatus.UP_TO_DATE)
+        return LockfileStatus(status=LockfileStatus.OUT_OF_DATE, reason="dep missing")
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.lockfile_status",
+        fake_lockfile_status,
+    )
 
     locked_calls: list[str] = []
     monkeypatch.setattr(

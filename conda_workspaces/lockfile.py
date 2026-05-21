@@ -62,7 +62,7 @@ if TYPE_CHECKING:
     from conda.models.environment import Environment
 
     from .context import WorkspaceContext
-    from .models import WorkspaceConfig
+    from .models import LockfileStatus, WorkspaceConfig
     from .resolver import ResolvedEnvironment
 
 #: On-disk lockfile format version.  Distinct from the rattler-lock v6
@@ -96,42 +96,58 @@ def _normalize_channel_urls(urls: Iterable[str]) -> list[str]:
     return [url.rstrip("/") for url in urls]
 
 
+def lockfile_status(
+    ctx: WorkspaceContext,
+    config: WorkspaceConfig,
+) -> LockfileStatus:
+    """Determine the lockfile status relative to the workspace manifest."""
+    from .models import LockfileStatus
+
+    lock = lockfile_path(ctx)
+    if not lock.is_file():
+        return LockfileStatus(status=LockfileStatus.MISSING)
+
+    from conda_lockfiles.load_yaml import load_yaml
+
+    data = load_yaml(lock)
+    return check_lockfile_satisfiability(config, data, ctx.platform)
+
+
 def check_lockfile_satisfiability(
     config: WorkspaceConfig,
     lockfile_data: dict[str, Any],
     current_platform: str,
-) -> tuple[bool, str]:
+) -> LockfileStatus:
     """Check whether *lockfile_data* satisfies the manifest's requirements.
 
-    Returns ``(True, "")`` when the lockfile covers every environment,
-    platform, channel, and dependency declared in *config*.  Returns
-    ``(False, reason)`` with a human-readable *reason* otherwise.
-
-    Checks performed (in order):
-
-    1. Lockfile has ``version: 1``.
-    2. Every manifest environment exists in the lockfile.
-    3. Channels match per environment (URLs normalised by stripping
-       trailing slashes).
-    4. All declared platforms are covered per environment.
-    5. Every conda matchspec from the manifest is satisfied by at least
-       one locked package on *current_platform*.
+    Returns a :class:`LockfileStatus` with ``status=UP_TO_DATE`` when
+    the lockfile covers every environment, platform, channel, and
+    dependency declared in *config*.  Returns ``status=OUT_OF_DATE``
+    with a human-readable *reason* otherwise.
     """
+    from .models import LockfileStatus
+
+    _stale = LockfileStatus.OUT_OF_DATE
+
     if lockfile_data.get("version") != LOCKFILE_VERSION:
-        return (
-            False,
-            f"Lockfile version {lockfile_data.get('version')!r} "
-            f"does not match expected version {LOCKFILE_VERSION}",
+        return LockfileStatus(
+            status=_stale,
+            reason=(
+                f"Lockfile version {lockfile_data.get('version')!r} "
+                f"does not match expected version {LOCKFILE_VERSION}"
+            ),
         )
 
     lock_envs = lockfile_data.get("environments", {})
 
     for env_name, env_obj in config.environments.items():
         if env_name not in lock_envs:
-            return (
-                False,
-                f"Environment '{env_name}' is declared in the manifest "
-                f"but missing from the lockfile",
+            return LockfileStatus(
+                status=_stale,
+                reason=(
+                    f"Environment '{env_name}' is declared in the manifest "
+                    f"but missing from the lockfile"
+                ),
             )
 
         lock_env = lock_envs[env_name]
@@ -145,19 +161,25 @@ def check_lockfile_satisfiability(
             entry.get("url", "") for entry in lock_channel_entries
         )
         if manifest_urls != lock_urls:
-            return (
-                False,
-                f"Channel mismatch for environment '{env_name}': "
-                f"manifest declares {manifest_urls} but lockfile has {lock_urls}",
+            return LockfileStatus(
+                status=_stale,
+                reason=(
+                    f"Channel mismatch for environment '{env_name}': "
+                    f"manifest declares {manifest_urls} "
+                    f"but lockfile has {lock_urls}"
+                ),
             )
 
         lock_platforms = set(lock_env.get("packages", {}))
         for platform in config.platforms:
             if platform not in lock_platforms:
-                return (
-                    False,
-                    f"Platform '{platform}' is declared in the manifest "
-                    f"but missing from environment '{env_name}' in the lockfile",
+                return LockfileStatus(
+                    status=_stale,
+                    reason=(
+                        f"Platform '{platform}' is declared in the "
+                        f"manifest but missing from environment "
+                        f"'{env_name}' in the lockfile"
+                    ),
                 )
 
         lock_packages = lock_env.get("packages", {})
@@ -186,21 +208,27 @@ def check_lockfile_satisfiability(
         for dep_name, spec in manifest_deps.items():
             versions = locked_versions.get(dep_name)
             if not versions:
-                return (
-                    False,
-                    f"Dependency '{dep_name}' is required by environment "
-                    f"'{env_name}' but not found in the lockfile "
-                    f"for platform '{current_platform}'",
+                return LockfileStatus(
+                    status=_stale,
+                    reason=(
+                        f"Dependency '{dep_name}' is required by "
+                        f"environment '{env_name}' but not found in "
+                        f"the lockfile for platform "
+                        f"'{current_platform}'"
+                    ),
                 )
             if not any(VersionSpec(spec.version).match(v) for v in versions):
-                return (
-                    False,
-                    f"Dependency '{dep_name}' in environment '{env_name}' "
-                    f"requires '{spec}' but no locked package on "
-                    f"'{current_platform}' satisfies it",
+                return LockfileStatus(
+                    status=_stale,
+                    reason=(
+                        f"Dependency '{dep_name}' in environment "
+                        f"'{env_name}' requires '{spec}' but no "
+                        f"locked package on '{current_platform}' "
+                        f"satisfies it"
+                    ),
                 )
 
-    return (True, "")
+    return LockfileStatus(status=LockfileStatus.UP_TO_DATE)
 
 
 class CondaLockLoader(EnvironmentSpecBase):

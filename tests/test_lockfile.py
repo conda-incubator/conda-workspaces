@@ -35,7 +35,13 @@ from conda_workspaces.lockfile import (
     lockfile_path,
     merge_lockfiles,
 )
-from conda_workspaces.models import Channel, Environment, Feature, WorkspaceConfig
+from conda_workspaces.models import (
+    Channel,
+    Environment,
+    Feature,
+    LockfileStatus,
+    WorkspaceConfig,
+)
 from conda_workspaces.resolver import ResolvedEnvironment
 
 
@@ -1050,12 +1056,13 @@ def test_satisfiability(
 ) -> None:
     config = satisfiability_config_factory(**config_kwargs)
     data = lockfile_data_factory(**data_kwargs)
-    ok, reason = check_lockfile_satisfiability(config, data, "linux-64")
-    assert ok is expected_ok
+    result = check_lockfile_satisfiability(config, data, "linux-64")
     if expected_ok:
-        assert reason == ""
+        assert result.status == LockfileStatus.UP_TO_DATE
+        assert result.reason == ""
     else:
-        assert reason_fragment in reason.lower()
+        assert result.status == LockfileStatus.OUT_OF_DATE
+        assert reason_fragment in result.reason.lower()
 
 
 def test_satisfiability_ignores_extra_lockfile_envs(
@@ -1075,6 +1082,6 @@ def test_satisfiability_ignores_extra_lockfile_envs(
             ],
         },
     }
-    ok, reason = check_lockfile_satisfiability(config, data, "linux-64")
-    assert ok is True
-    assert reason == ""
+    result = check_lockfile_satisfiability(config, data, "linux-64")
+    assert result.status == LockfileStatus.UP_TO_DATE
+    assert result.reason == ""

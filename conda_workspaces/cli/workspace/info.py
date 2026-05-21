@@ -9,7 +9,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ...envs import get_environment_info
-from ...lockfile import check_lockfile_satisfiability, lockfile_path
+from ...lockfile import lockfile_status
 from ...models import LockfileStatus
 from ...resolver import known_platforms, resolve_all_environments, resolve_environment
 from . import workspace_context_from_args
@@ -61,18 +61,10 @@ def _show_workspace_info(
         "features": list(config.features.keys()),
     }
 
-    lock = lockfile_path(ctx)
-    if not lock.is_file():
-        lockfile_status = LockfileStatus.MISSING
-    else:
-        from conda_lockfiles.load_yaml import load_yaml
-
-        lock_data = load_yaml(lock)
-        ok, _reason = check_lockfile_satisfiability(config, lock_data, ctx.platform)
-        lockfile_status = (
-            LockfileStatus.UP_TO_DATE if ok else LockfileStatus.OUT_OF_DATE
-        )
-    info["lockfile_status"] = lockfile_status.value
+    lock = lockfile_status(ctx, config)
+    info["lockfile_status"] = lock.status
+    if lock.reason:
+        info["lockfile_reason"] = lock.reason
 
     if json_output:
         console.print_json(json.dumps(info))
@@ -98,11 +90,11 @@ def _show_workspace_info(
             LockfileStatus.UP_TO_DATE: "green",
             LockfileStatus.OUT_OF_DATE: "yellow",
             LockfileStatus.MISSING: "red",
-        }[lockfile_status]
-        table.add_row(
-            "Lockfile",
-            f"[{status_style}]{lockfile_status.value}[/{status_style}]",
-        )
+        }[lock.status]
+        lockfile_label = f"[{status_style}]{lock.status}[/{status_style}]"
+        if lock.reason:
+            lockfile_label += f" ({lock.reason})"
+        table.add_row("Lockfile", lockfile_label)
         console.print(table)
 
     return 0
