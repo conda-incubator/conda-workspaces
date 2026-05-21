@@ -241,14 +241,23 @@ class LockfileMergeError(CondaWorkspacesError):
 
 
 class LockfileStaleError(CondaWorkspacesError):
-    """The lockfile is older than the workspace manifest."""
+    """The lockfile does not satisfy the workspace manifest."""
 
-    def __init__(self, manifest: str | Path, lockfile: str | Path) -> None:
+    def __init__(
+        self,
+        manifest: str | Path,
+        lockfile: str | Path,
+        *,
+        reason: str = "",
+    ) -> None:
         self.manifest = manifest
         self.lockfile = lockfile
+        self.reason = reason
+        msg = f"Lockfile '{lockfile}' does not satisfy manifest '{manifest}'."
+        if reason:
+            msg += f" ({reason})"
         super().__init__(
-            f"Lockfile '{lockfile}' is out of date"
-            f" (manifest '{manifest}' has been modified since the last lock).",
+            msg,
             hints=[
                 "Run 'conda workspace lock' to update it,"
                 " or use --frozen to install anyway.",

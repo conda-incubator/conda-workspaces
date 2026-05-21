@@ -78,7 +78,7 @@ def _check_lockfile_freshness(ctx: WorkspaceContext, config: WorkspaceConfig) ->
     data = load_yaml(lock)
     ok, reason = check_lockfile_satisfiability(config, data, ctx.platform)
     if not ok:
-        raise LockfileStaleError(Path(config.manifest_path), lock)
+        raise LockfileStaleError(Path(config.manifest_path), lock, reason=reason)
 
 
 def _install_from_lockfile(
