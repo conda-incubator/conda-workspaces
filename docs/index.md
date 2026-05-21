@@ -177,6 +177,7 @@ tutorials/first-project
 tutorials/pypi-dependencies
 tutorials/multi-platform-locking
 tutorials/coming-from/index
+tutorials/lockfile-management
 tutorials/ci-pipeline
 tutorials/archives
 ```

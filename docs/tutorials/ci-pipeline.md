@@ -46,6 +46,22 @@ behaves like `--locked`. It installs from the lockfile and fails if
 it does not satisfy the manifest. No extra flags needed.
 :::
 
+### What happens when the lockfile is stale in CI?
+
+If someone updates `conda.toml` without running `conda workspace lock`,
+the CI job fails with a clear error:
+
+```text
+LockfileStaleError: Lockfile 'conda.lock' does not satisfy manifest 'conda.toml'.
+(Dependency 'requests' is required by environment 'default' but not found
+in the lockfile for platform 'linux-64')
+Run 'conda workspace lock' to update it, or use --frozen to install anyway.
+```
+
+The developer fixes this locally by running `conda workspace lock` (or
+just `conda workspace install`, which updates the lockfile
+automatically) and committing the updated `conda.lock`.
+
 ## Caching environments
 
 Speed up CI by caching the `.conda/envs/` directory:
@@ -180,6 +196,47 @@ The coordinator never runs a solver, so it can stay on the
 lightest runner available. On failure, any fragment that violates
 schema or channel invariants raises `LockfileMergeError` and no
 `conda.lock` is written.
+
+## Nightly lockfile refresh
+
+Set up a scheduled workflow that re-solves the lockfile and opens a
+pull request when package versions change. Use `--no-lock` to bypass
+the CI-default strict mode and force a fresh solve:
+
+```yaml
+# .github/workflows/refresh-lock.yml
+name: Refresh conda.lock
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays, 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          activate-environment: ""
+      - run: conda install -c conda-forge conda-workspaces
+
+      - name: Re-solve and update lockfile
+        run: conda workspace lock
+
+      - name: Open PR if lockfile changed
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "Update conda.lock"
+          title: "Update conda.lock"
+          branch: auto/conda-lock-refresh
+          delete-branch: true
+```
+
+This keeps your lockfile fresh with upstream releases while
+preserving the safety of locked installs on every other CI run.
 
 ## Task caching in CI
 

@@ -37,6 +37,13 @@ Add PyPI packages, editable local installs, and git dependencies.
 Lock your workspace for Linux, macOS, and Windows from a single machine.
 :::
 
+:::{grid-item-card} {octicon}`lock` Lockfile management
+:link: lockfile-management
+:link-type: doc
+
+Automatic lockfile creation, staleness detection, and strict modes.
+:::
+
 :::{grid-item-card} {octicon}`server` CI pipeline
 :link: ci-pipeline
 :link-type: doc
