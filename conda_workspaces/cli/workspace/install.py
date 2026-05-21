@@ -8,7 +8,11 @@ from typing import TYPE_CHECKING
 from rich.console import Console
 
 from ...exceptions import LockfileNotFoundError, LockfileStaleError
-from ...lockfile import install_from_lockfile, lockfile_path
+from ...lockfile import (
+    check_lockfile_satisfiability,
+    install_from_lockfile,
+    lockfile_path,
+)
 from .. import status
 from . import workspace_context_from_args
 from .sync import sync_environments
@@ -52,15 +56,18 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
 
 
 def _check_lockfile_freshness(ctx: WorkspaceContext, config: WorkspaceConfig) -> None:
-    """Raise if the lockfile is missing or older than the manifest."""
-    manifest = Path(config.manifest_path)
+    """Raise if the lockfile is missing or does not satisfy the manifest."""
     lock = lockfile_path(ctx)
 
     if not lock.is_file():
         raise LockfileNotFoundError("(all)", lock)
 
-    if manifest.stat().st_mtime > lock.stat().st_mtime:
-        raise LockfileStaleError(manifest, lock)
+    from conda_lockfiles.load_yaml import load_yaml
+
+    data = load_yaml(lock)
+    ok, reason = check_lockfile_satisfiability(config, data, ctx.platform)
+    if not ok:
+        raise LockfileStaleError(Path(config.manifest_path), lock)
 
 
 def _install_from_lockfile(

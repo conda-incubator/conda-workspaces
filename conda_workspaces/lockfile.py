@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     from conda.models.environment import Environment
 
     from .context import WorkspaceContext
+    from .models import WorkspaceConfig
     from .resolver import ResolvedEnvironment
 
 #: On-disk lockfile format version.  Distinct from the rattler-lock v6
@@ -88,6 +89,150 @@ DEFAULT_FILENAMES: Final = (LOCKFILE_NAME,)
 def lockfile_path(ctx: WorkspaceContext) -> Path:
     """Return the path to the workspace lockfile (``<root>/conda.lock``)."""
     return ctx.root / LOCKFILE_NAME
+
+
+def _normalize_channel_urls(urls: Iterable[str]) -> list[str]:
+    """Strip trailing slashes from channel URLs for comparison."""
+    return [url.rstrip("/") for url in urls]
+
+
+def _refs_to_records(refs: list[dict[str, str]], platform: str) -> dict[str, list[Any]]:
+    """Parse lockfile package refs into ``PackageRecord`` objects grouped by name.
+
+    Each ref is ``{"conda": "<url>"}``; the package name, version, and
+    build string are extracted from the URL filename.  Returns a dict
+    mapping package name to a list of ``PackageRecord`` instances.
+    """
+    from conda.models.records import PackageRecord
+
+    by_name: dict[str, list[Any]] = {}
+
+    for ref in refs:
+        url = ref.get("conda")
+        if not url:
+            continue
+        filename = url.rsplit("/", 1)[-1]
+        # Remove extension (.conda or .tar.bz2)
+        if filename.endswith(".tar.bz2"):
+            base = filename[: -len(".tar.bz2")]
+        else:
+            base = filename.rsplit(".", 1)[0]
+        # Split from right: name-version-build
+        parts = base.rsplit("-", 2)
+        if len(parts) != 3:
+            continue
+        name, version, build = parts
+        record = PackageRecord(
+            name=name,
+            version=version,
+            build=build,
+            build_number=0,
+            channel="<lockfile>",
+            subdir=platform,
+            fn=filename,
+        )
+        by_name.setdefault(name, []).append(record)
+
+    return by_name
+
+
+def check_lockfile_satisfiability(
+    config: WorkspaceConfig,
+    lockfile_data: dict[str, Any],
+    current_platform: str,
+) -> tuple[bool, str]:
+    """Check whether *lockfile_data* satisfies the manifest's requirements.
+
+    Returns ``(True, "")`` when the lockfile covers every environment,
+    platform, channel, and dependency declared in *config*.  Returns
+    ``(False, reason)`` with a human-readable *reason* otherwise.
+
+    Checks performed (in order):
+
+    1. Lockfile has ``version: 1``.
+    2. Every manifest environment exists in the lockfile.
+    3. Channels match per environment (URLs normalised by stripping
+       trailing slashes).
+    4. All declared platforms are covered per environment.
+    5. Every conda matchspec from the manifest is satisfied by at least
+       one locked package on *current_platform*.
+    """
+    # 1. Version check
+    if lockfile_data.get("version") != LOCKFILE_VERSION:
+        return (
+            False,
+            f"Lockfile version {lockfile_data.get('version')!r} "
+            f"does not match expected version {LOCKFILE_VERSION}",
+        )
+
+    lock_envs = lockfile_data.get("environments", {})
+
+    for env_name, env_obj in config.environments.items():
+        # 2. Environment existence
+        if env_name not in lock_envs:
+            return (
+                False,
+                f"Environment '{env_name}' is declared in the manifest "
+                f"but missing from the lockfile",
+            )
+
+        lock_env = lock_envs[env_name]
+
+        # 3. Channel match
+        manifest_channels = config.merged_channels(env_obj)
+        manifest_urls = _normalize_channel_urls(
+            ch.base_url for ch in manifest_channels if ch.base_url
+        )
+        lock_channel_entries = lock_env.get("channels", [])
+        lock_urls = _normalize_channel_urls(
+            entry.get("url", "") for entry in lock_channel_entries
+        )
+        if manifest_urls != lock_urls:
+            return (
+                False,
+                f"Channel mismatch for environment '{env_name}': "
+                f"manifest declares {manifest_urls} but lockfile has {lock_urls}",
+            )
+
+        # 4. Platform coverage
+        lock_platforms = set(lock_env.get("packages", {}))
+        for platform in config.platforms:
+            if platform not in lock_platforms:
+                return (
+                    False,
+                    f"Platform '{platform}' is declared in the manifest "
+                    f"but missing from environment '{env_name}' in the lockfile",
+                )
+
+        # 5. Dependency satisfaction on current_platform
+        lock_packages = lock_env.get("packages", {})
+        platform_refs = lock_packages.get(current_platform)
+        if platform_refs is None:
+            # current_platform not in lockfile for this env, skip dep check
+            # (platform coverage was already validated above against config.platforms)
+            continue
+
+        records_by_name = _refs_to_records(platform_refs, current_platform)
+        manifest_deps = config.merged_conda_dependencies(env_obj, current_platform)
+
+        for dep_name, spec in manifest_deps.items():
+            candidates = records_by_name.get(dep_name, [])
+            if not candidates:
+                return (
+                    False,
+                    f"Dependency '{dep_name}' is required by environment "
+                    f"'{env_name}' but not found in the lockfile "
+                    f"for platform '{current_platform}'",
+                )
+            if not any(spec.match(rec) for rec in candidates):
+                return (
+                    False,
+                    f"Dependency '{dep_name}' in environment '{env_name}' "
+                    f"requires '{spec}' but no locked package on "
+                    f"'{current_platform}' satisfies it",
+                )
+
+    return (True, "")
 
 
 class CondaLockLoader(EnvironmentSpecBase):
