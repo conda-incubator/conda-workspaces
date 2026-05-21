@@ -45,6 +45,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from conda.models.dist import Dist
+from conda.models.version import VersionSpec
 from conda.plugins.types import EnvironmentSpecBase
 
 from .exceptions import (
@@ -53,6 +55,7 @@ from .exceptions import (
     LockfileNotFoundError,
     SolveError,
 )
+from .models import LockfileStatus
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
@@ -62,7 +65,7 @@ if TYPE_CHECKING:
     from conda.models.environment import Environment
 
     from .context import WorkspaceContext
-    from .models import LockfileStatus, WorkspaceConfig
+    from .models import WorkspaceConfig
     from .resolver import ResolvedEnvironment
 
 #: On-disk lockfile format version.  Distinct from the rattler-lock v6
@@ -101,8 +104,6 @@ def lockfile_status(
     config: WorkspaceConfig,
 ) -> LockfileStatus:
     """Determine the lockfile status relative to the workspace manifest."""
-    from .models import LockfileStatus
-
     lock = lockfile_path(ctx)
     if not lock.is_file():
         return LockfileStatus(status=LockfileStatus.MISSING)
@@ -125,8 +126,6 @@ def check_lockfile_satisfiability(
     dependency declared in *config*.  Returns ``status=OUT_OF_DATE``
     with a human-readable *reason* otherwise.
     """
-    from .models import LockfileStatus
-
     _stale = LockfileStatus.OUT_OF_DATE
 
     if lockfile_data.get("version") != LOCKFILE_VERSION:
@@ -187,21 +186,13 @@ def check_lockfile_satisfiability(
         if platform_refs is None:
             continue
 
-        from conda.models.version import VersionSpec
-
         locked_versions: dict[str, list[str]] = {}
         for ref in platform_refs:
             url = ref.get("conda", "")
             if not url:
                 continue
-            fn = url.rsplit("/", 1)[-1]
-            for ext in (".conda", ".tar.bz2"):
-                if fn.endswith(ext):
-                    fn = fn[: -len(ext)]
-                    break
-            parts = fn.rsplit("-", 2)
-            if len(parts) == 3:
-                locked_versions.setdefault(parts[0], []).append(parts[1])
+            dist = Dist(url)
+            locked_versions.setdefault(dist.name, []).append(dist.version)
 
         manifest_deps = config.merged_conda_dependencies(env_obj, current_platform)
 
