@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from conda_lockfiles.load_yaml import load_yaml
 from rich.console import Console
 
 from ...exceptions import LockfileNotFoundError, LockfileStaleError
@@ -35,6 +36,7 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
     dry_run = getattr(args, "dry_run", False)
     locked = getattr(args, "locked", False)
     frozen = getattr(args, "frozen", False)
+    no_lock = getattr(args, "no_lock", False)
 
     if frozen:
         return _install_from_lockfile(ctx, config, env_name, console=console)
@@ -42,6 +44,17 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
     if locked:
         _check_lockfile_freshness(ctx, config)
         return _install_from_lockfile(ctx, config, env_name, console=console)
+
+    lock = lockfile_path(ctx)
+    if not no_lock and not force and lock.is_file():
+        data = load_yaml(lock)
+        ok, reason = check_lockfile_satisfiability(config, data, ctx.platform)
+        if ok:
+            return _install_from_lockfile(ctx, config, env_name, console=console)
+        console.print(
+            f"[bold yellow]Lockfile out of date[/bold yellow]: {reason}."
+            " Re-solving environments."
+        )
 
     env_names = [env_name] if env_name else list(config.environments.keys())
     sync_environments(
@@ -61,8 +74,6 @@ def _check_lockfile_freshness(ctx: WorkspaceContext, config: WorkspaceConfig) ->
 
     if not lock.is_file():
         raise LockfileNotFoundError("(all)", lock)
-
-    from conda_lockfiles.load_yaml import load_yaml
 
     data = load_yaml(lock)
     ok, reason = check_lockfile_satisfiability(config, data, ctx.platform)

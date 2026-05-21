@@ -22,6 +22,7 @@ _DEFAULTS = {
     "dry_run": False,
     "locked": False,
     "frozen": False,
+    "no_lock": False,
 }
 
 
@@ -182,3 +183,130 @@ def test_install_locked_validates_freshness(
     args = make_args(_DEFAULTS, locked=True)
     with pytest.raises(LockfileStaleError):
         execute_install(args)
+
+
+def test_install_default_uses_lockfile_when_satisfiable(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Default install uses lockfile when it satisfies the manifest."""
+    monkeypatch.chdir(pixi_workspace)
+
+    lock_file = pixi_workspace / "conda.lock"
+    lock_file.write_text("version: 1\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.load_yaml",
+        lambda path: {"version": 1},
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.check_lockfile_satisfiability",
+        lambda config, data, platform: (True, ""),
+    )
+
+    locked_calls: list[str] = []
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.install_from_lockfile",
+        lambda ctx, name: locked_calls.append(name),
+    )
+
+    sync_calls: list[str] = []
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.install_environment",
+        lambda ctx, resolved, **kw: sync_calls.append(resolved.name),
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.generate_lockfile",
+        lambda ctx, resolved_envs: None,
+    )
+
+    args = make_args(_DEFAULTS)
+    result = execute_install(args)
+    assert result == 0
+    assert len(locked_calls) > 0
+    assert len(sync_calls) == 0
+
+
+def test_install_default_solves_when_not_satisfiable(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default install falls back to solve when lockfile is not satisfiable."""
+    monkeypatch.chdir(pixi_workspace)
+
+    lock_file = pixi_workspace / "conda.lock"
+    lock_file.write_text("version: 1\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.load_yaml",
+        lambda path: {"version": 1},
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.check_lockfile_satisfiability",
+        lambda config, data, platform: (False, "dep missing"),
+    )
+
+    locked_calls: list[str] = []
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.install_from_lockfile",
+        lambda ctx, name: locked_calls.append(name),
+    )
+
+    sync_calls: list[str] = []
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.install_environment",
+        lambda ctx, resolved, **kw: sync_calls.append(resolved.name),
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.generate_lockfile",
+        lambda ctx, resolved_envs: None,
+    )
+
+    args = make_args(_DEFAULTS)
+    result = execute_install(args)
+    assert result == 0
+    assert len(locked_calls) == 0
+    assert len(sync_calls) > 0
+
+
+def test_install_no_lock_forces_solve(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--no-lock forces a full solve even when lockfile is satisfiable."""
+    monkeypatch.chdir(pixi_workspace)
+
+    lock_file = pixi_workspace / "conda.lock"
+    lock_file.write_text("version: 1\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.load_yaml",
+        lambda path: {"version": 1},
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.check_lockfile_satisfiability",
+        lambda config, data, platform: (True, ""),
+    )
+
+    locked_calls: list[str] = []
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.install_from_lockfile",
+        lambda ctx, name: locked_calls.append(name),
+    )
+
+    sync_calls: list[str] = []
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.install_environment",
+        lambda ctx, resolved, **kw: sync_calls.append(resolved.name),
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.generate_lockfile",
+        lambda ctx, resolved_envs: None,
+    )
+
+    args = make_args(_DEFAULTS, no_lock=True)
+    result = execute_install(args)
+    assert result == 0
+    assert len(locked_calls) == 0
+    assert len(sync_calls) > 0
