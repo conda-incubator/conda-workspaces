@@ -52,6 +52,7 @@ def test_workspace_install_dry_run(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Workspace install with --dry-run parses manifest and emits status."""
+    monkeypatch.delenv("CI", raising=False)
     conda_toml(WORKSPACE_TOML)
 
     install_calls = []
@@ -238,6 +239,7 @@ def test_rich_output_contains_status(
     expected_verbs: list[str],
 ):
     """Rich output contains verb-based status messages."""
+    monkeypatch.delenv("CI", raising=False)
     if scenario == "install":
         conda_toml(WORKSPACE_TOML)
 
@@ -296,6 +298,7 @@ def test_workspace_install_resolves_pypi_deps(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """PyPI dependencies are translated via conda-pypi and reach the solver."""
+    monkeypatch.delenv("CI", raising=False)
     try:
         from conda_pypi.translate import pypi_to_conda_name  # noqa: F401
     except ImportError:
@@ -361,6 +364,7 @@ def test_workspace_install_resolves_editable_deps(
     tmp_path: Path,
 ):
     """Editable PyPI path deps are parsed and available in the resolved env."""
+    monkeypatch.delenv("CI", raising=False)
     try:
         from conda_pypi.translate import pypi_to_conda_name  # noqa: F401
     except ImportError:

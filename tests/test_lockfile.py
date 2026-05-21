@@ -29,12 +29,19 @@ from conda_workspaces.lockfile import (
     LOCKFILE_NAME,
     LOCKFILE_VERSION,
     CondaLockLoader,
+    check_lockfile_satisfiability,
     generate_lockfile,
     install_from_lockfile,
     lockfile_path,
     merge_lockfiles,
 )
-from conda_workspaces.models import Channel, Environment, Feature, WorkspaceConfig
+from conda_workspaces.models import (
+    Channel,
+    Environment,
+    Feature,
+    LockfileStatus,
+    WorkspaceConfig,
+)
 from conda_workspaces.resolver import ResolvedEnvironment
 
 
@@ -881,3 +888,200 @@ def test_merge_lockfiles_duplicate_platform(
 
     with pytest.raises(LockfileMergeError, match="present in both"):
         merge_lockfiles([frag_a, frag_b], ctx)
+
+
+@pytest.fixture
+def lockfile_data_factory():
+    """Factory that builds a lockfile data dict for satisfiability tests."""
+
+    def _factory(
+        *,
+        version: int | None = 1,
+        environments: dict | None = None,
+        packages: list | None = None,
+    ) -> dict:
+        data: dict = {}
+        if version is not None:
+            data["version"] = version
+        if environments is None:
+            environments = {
+                "default": {
+                    "channels": [
+                        {"url": "https://conda.anaconda.org/conda-forge/"},
+                    ],
+                    "packages": {
+                        "linux-64": [
+                            {
+                                "conda": "https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-hab00c5b_0.conda"
+                            },
+                        ],
+                        "osx-arm64": [
+                            {
+                                "conda": "https://conda.anaconda.org/conda-forge/osx-arm64/python-3.12.0-h47c9636_0.conda"
+                            },
+                        ],
+                    },
+                },
+            }
+        data["environments"] = environments
+        data["packages"] = packages or []
+        return data
+
+    return _factory
+
+
+@pytest.fixture
+def satisfiability_config_factory(tmp_path: Path):
+    """Factory that builds a real ``WorkspaceConfig`` for satisfiability tests.
+
+    Uses ``monkeypatch.setattr`` recording closures internally so that
+    ``merged_conda_dependencies`` and ``merged_channels`` return the
+    requested values without needing a full manifest file.
+    """
+
+    def _factory(
+        *,
+        platforms: list[str] | None = None,
+        environments: dict[str, list[str]] | None = None,
+        deps: dict[str, MatchSpec] | None = None,
+        channels: list[str] | None = None,
+    ) -> WorkspaceConfig:
+        if platforms is None:
+            platforms = ["linux-64", "osx-arm64"]
+        if environments is None:
+            environments = {"default": []}
+        if deps is None:
+            deps = {"python": MatchSpec("python>=3.10")}
+        if channels is None:
+            channels = ["conda-forge"]
+
+        features = {Feature.DEFAULT_NAME: Feature(name=Feature.DEFAULT_NAME)}
+        env_objs = {}
+        for name, feat_names in environments.items():
+            for fn in feat_names:
+                if fn not in features:
+                    features[fn] = Feature(name=fn)
+            env_objs[name] = Environment(name=name, features=feat_names)
+
+        config = WorkspaceConfig(
+            name="sat-test",
+            channels=[Channel(c) for c in channels],
+            platforms=platforms,
+            features=features,
+            environments=env_objs,
+            root=str(tmp_path),
+            manifest_path=str(tmp_path / "pixi.toml"),
+        )
+
+        def _patched_deps(env, platform=None):
+            return deps
+
+        def _patched_channels(env):
+            return [Channel(c) for c in channels]
+
+        config.merged_conda_dependencies = _patched_deps  # type: ignore[assignment]
+        config.merged_channels = _patched_channels  # type: ignore[assignment]
+
+        return config
+
+    return _factory
+
+
+@pytest.mark.parametrize(
+    ("config_kwargs", "data_kwargs", "expected_ok", "reason_fragment"),
+    [
+        pytest.param(
+            {},
+            {},
+            True,
+            "",
+            id="all-specs-matched",
+        ),
+        pytest.param(
+            {"environments": {"default": [], "test": []}},
+            {},
+            False,
+            "test",
+            id="missing-environment",
+        ),
+        pytest.param(
+            {"platforms": ["linux-64", "osx-arm64", "win-64"]},
+            {},
+            False,
+            "win-64",
+            id="missing-platform",
+        ),
+        pytest.param(
+            {"channels": ["defaults"]},
+            {},
+            False,
+            "channel",
+            id="channel-mismatch",
+        ),
+        pytest.param(
+            {
+                "deps": {
+                    "python": MatchSpec("python>=3.10"),
+                    "numpy": MatchSpec("numpy"),
+                },
+            },
+            {},
+            False,
+            "numpy",
+            id="missing-dependency",
+        ),
+        pytest.param(
+            {"deps": {"python": MatchSpec("python>=3.14")}},
+            {},
+            False,
+            "python",
+            id="version-mismatch",
+        ),
+        pytest.param(
+            {},
+            {"version": None},
+            False,
+            "version",
+            id="lockfile-missing-version",
+        ),
+    ],
+)
+def test_satisfiability(
+    satisfiability_config_factory,
+    lockfile_data_factory,
+    config_kwargs: dict,
+    data_kwargs: dict,
+    expected_ok: bool,
+    reason_fragment: str,
+) -> None:
+    config = satisfiability_config_factory(**config_kwargs)
+    data = lockfile_data_factory(**data_kwargs)
+    result = check_lockfile_satisfiability(config, data, "linux-64")
+    if expected_ok:
+        assert result.status == LockfileStatus.UP_TO_DATE
+        assert result.reason == ""
+    else:
+        assert result.status == LockfileStatus.OUT_OF_DATE
+        assert reason_fragment in result.reason.lower()
+
+
+def test_satisfiability_ignores_extra_lockfile_envs(
+    satisfiability_config_factory, lockfile_data_factory
+) -> None:
+    config = satisfiability_config_factory()
+    data = lockfile_data_factory()
+    data["environments"]["extra"] = {
+        "channels": [
+            {"url": "https://conda.anaconda.org/conda-forge/"},
+        ],
+        "packages": {
+            "linux-64": [
+                {
+                    "conda": "https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-hab00c5b_0.conda"
+                },
+            ],
+        },
+    }
+    result = check_lockfile_satisfiability(config, data, "linux-64")
+    assert result.status == LockfileStatus.UP_TO_DATE
+    assert result.reason == ""

@@ -274,6 +274,43 @@ canonical and alias strings under which `conda.lock` is registered.
 
 [rattler-lock]: https://github.com/conda/rattler/tree/main/crates/rattler_lock
 
+### Lockfile satisfiability check
+
+`conda workspace install` and `conda workspace info` evaluate the
+lockfile against the manifest to determine whether a re-solve is
+needed. The check is purely structural (no file timestamps) and
+runs in this order:
+
+1. **Schema version** -- the lockfile `version` field must match the
+   expected version (`1`).
+2. **Environments** -- every environment declared in the manifest must
+   have a corresponding entry in the lockfile.
+3. **Channels** -- the channel list for each environment in the lockfile
+   must match the manifest (order-sensitive, URLs normalized).
+4. **Platforms** -- every platform declared in the manifest must be
+   present in each lockfile environment's `packages` section.
+5. **Dependencies** -- for each dependency in the manifest (on the
+   current platform), a locked package must exist whose version
+   satisfies the manifest's version spec.
+
+The check returns the first failing condition it finds. The result
+is one of three states:
+
+| Status | Constant | Meaning |
+|---|---|---|
+| `up-to-date` | `LockfileStatus.UP_TO_DATE` | All checks pass |
+| `out-of-date` | `LockfileStatus.OUT_OF_DATE` | At least one check fails |
+| `missing` | `LockfileStatus.MISSING` | No `conda.lock` file found |
+
+### JSON output fields
+
+`conda workspace info --json` includes the following lockfile fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `lockfile_status` | `string` | One of `up-to-date`, `out-of-date`, `missing` |
+| `lockfile_reason` | `string` | Human-readable reason (only present when `out-of-date`) |
+
 ## Embedded form (`pyproject.toml`)
 
 The same tables are accepted under `[tool.conda.<name>]` inside a

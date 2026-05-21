@@ -56,7 +56,7 @@ Enter
 Wait /\$/
 Sleep 2s
 
-Type@80ms "conda workspace envs -f /tmp/deployed/conda.toml"
+Type@80ms "cd /tmp/deployed && conda workspace info"
 Enter
 Wait /\$/
 Sleep 3s

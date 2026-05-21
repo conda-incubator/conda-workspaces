@@ -1,0 +1,7 @@
+
+[tasks]
+greet = "echo 'Hello from conda-workspaces!'"
+
+[tasks.test]
+cmd = "python -m pytest --co -q"
+depends-on = ["greet"]

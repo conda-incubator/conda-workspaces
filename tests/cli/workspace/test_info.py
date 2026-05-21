@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import json
+from io import StringIO
 from typing import TYPE_CHECKING
 
 import pytest
+from rich.console import Console
 
 from conda_workspaces.cli.workspace.info import execute_info
+from conda_workspaces.models import LockfileStatus
 
 from ..conftest import make_args
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from rich.console import Console
 
     from tests.conftest import CreateWorkspaceEnv
 
@@ -210,3 +211,84 @@ requests = ">=2.28"
     out = rich_console.file.getvalue()
     assert "PyPI dependencies" in out
     assert "requests" in out
+
+
+@pytest.mark.parametrize(
+    ("lockfile_status_value", "expected_text"),
+    [
+        pytest.param(
+            LockfileStatus(status=LockfileStatus.UP_TO_DATE),
+            "up-to-date",
+            id="up-to-date",
+        ),
+        pytest.param(
+            LockfileStatus(status=LockfileStatus.OUT_OF_DATE, reason="dep missing"),
+            "out-of-date",
+            id="out-of-date",
+        ),
+        pytest.param(
+            LockfileStatus(status=LockfileStatus.MISSING),
+            "missing",
+            id="missing",
+        ),
+    ],
+)
+def test_info_shows_lockfile_status(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lockfile_status_value: LockfileStatus,
+    expected_text: str,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.info.lockfile_status",
+        lambda ctx, config: lockfile_status_value,
+    )
+    console = Console(file=StringIO(), width=200, highlight=False)
+    args = make_args(_DEFAULTS)
+    execute_info(args, console=console)
+    out = console.file.getvalue()
+    assert expected_text in out
+    if lockfile_status_value.status == LockfileStatus.OUT_OF_DATE:
+        assert "dep missing" in out
+
+
+@pytest.mark.parametrize(
+    ("lockfile_status_value", "expected_status", "expect_reason"),
+    [
+        pytest.param(
+            LockfileStatus(status=LockfileStatus.UP_TO_DATE),
+            "up-to-date",
+            False,
+            id="up-to-date",
+        ),
+        pytest.param(
+            LockfileStatus(status=LockfileStatus.OUT_OF_DATE, reason="dep missing"),
+            "out-of-date",
+            True,
+            id="out-of-date",
+        ),
+    ],
+)
+def test_info_json_includes_lockfile_status(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lockfile_status_value: LockfileStatus,
+    expected_status: str,
+    expect_reason: bool,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.info.lockfile_status",
+        lambda ctx, config: lockfile_status_value,
+    )
+    console = Console(file=StringIO(), width=200, highlight=False)
+    args = make_args(_DEFAULTS, json=True)
+    execute_info(args, console=console)
+    out = console.file.getvalue()
+    data = json.loads(out)
+    assert data["lockfile_status"] == expected_status
+    if expect_reason:
+        assert data["lockfile_reason"] == "dep missing"
+    else:
+        assert "lockfile_reason" not in data

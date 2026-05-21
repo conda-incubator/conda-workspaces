@@ -39,6 +39,29 @@ jobs:
         run: conda task run -e test check
 ```
 
+:::{tip}
+When `CI=true` is set (as it is by default in GitHub Actions, GitLab
+CI, and most CI systems), `conda workspace install` automatically
+behaves like `--locked`. It installs from the lockfile and fails if
+it does not satisfy the manifest. No extra flags needed.
+:::
+
+### What happens when the lockfile is stale in CI?
+
+If someone updates `conda.toml` without running `conda workspace lock`,
+the CI job fails with a clear error:
+
+```text
+LockfileStaleError: Lockfile 'conda.lock' does not satisfy manifest 'conda.toml'.
+(Dependency 'requests' is required by environment 'default' but not found
+in the lockfile for platform 'linux-64')
+Run 'conda workspace lock' to update it, or use --frozen to install anyway.
+```
+
+The developer fixes this locally by running `conda workspace lock` (or
+just `conda workspace install`, which updates the lockfile
+automatically) and committing the updated `conda.lock`.
+
 ## Caching environments
 
 Speed up CI by caching the `.conda/envs/` directory:
@@ -47,7 +70,7 @@ Speed up CI by caching the `.conda/envs/` directory:
       - uses: actions/cache@v4
         with:
           path: .conda/envs
-          key: conda-envs-${{ runner.os }}-${{ hashFiles('conda.toml') }}
+          key: conda-envs-${{ runner.os }}-${{ hashFiles('conda.lock') }}
           restore-keys: |
             conda-envs-${{ runner.os }}-
 
@@ -174,6 +197,47 @@ lightest runner available. On failure, any fragment that violates
 schema or channel invariants raises `LockfileMergeError` and no
 `conda.lock` is written.
 
+## Nightly lockfile refresh
+
+Set up a scheduled workflow that re-solves the lockfile and opens a
+pull request when package versions change. Use `--no-lock` to bypass
+the CI-default strict mode and force a fresh solve:
+
+```yaml
+# .github/workflows/refresh-lock.yml
+name: Refresh conda.lock
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays, 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          activate-environment: ""
+      - run: conda install -c conda-forge conda-workspaces
+
+      - name: Re-solve and update lockfile
+        run: conda workspace lock
+
+      - name: Open PR if lockfile changed
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "Update conda.lock"
+          title: "Update conda.lock"
+          branch: auto/conda-lock-refresh
+          delete-branch: true
+```
+
+This keeps your lockfile fresh with upstream releases while
+preserving the safety of locked installs on every other CI run.
+
 ## Task caching in CI
 
 If your tasks use `inputs`/`outputs` caching, the cache directory can
@@ -185,6 +249,82 @@ be preserved between runs for faster incremental builds:
           path: ~/.cache/conda-workspaces
           key: conda-workspaces-tasks-${{ hashFiles('src/**/*.py') }}
 ```
+
+## FAQ
+
+### Which CI systems set `CI=true` automatically?
+
+GitHub Actions, GitLab CI, Travis CI, CircleCI, Azure Pipelines,
+Buildkite, Bitbucket Pipelines, and most other hosted CI systems set
+`CI=true` by default. If your CI system does not, set it yourself:
+
+```yaml
+env:
+  CI: "true"
+```
+
+### How do I override the CI default and allow re-solving?
+
+Pass `--no-lock` to bypass the lockfile entirely and force a fresh
+solve, even when `CI=true`:
+
+```bash
+conda workspace install --no-lock
+```
+
+This is useful for nightly jobs that pick up new upstream releases
+(see *Nightly lockfile refresh* above).
+
+### When should I use `--locked` vs `--frozen`?
+
+| Flag | Use when |
+| --- | --- |
+| *(default in CI)* | Normal CI runs. Equivalent to `--locked`. |
+| `--locked` | You want a clear error if the lockfile is stale. This is the CI default. |
+| `--frozen` | You intentionally pinned older versions and do not want staleness checks. Installs whatever is in `conda.lock` without validating against the manifest. |
+
+### What causes a lockfile merge to fail?
+
+`conda workspace lock --merge` rejects fragments when:
+
+- Fragments use different schema versions.
+- The channel list for a shared environment differs between fragments.
+- Two fragments contain the same `(environment, platform)` pair.
+
+The error message names the conflicting fragment. Fix the input
+fragments and re-run the merge.
+
+### How do I handle platforms that fail to solve?
+
+Use `--skip-unsolvable` to let the solver continue past platforms
+where no solution exists:
+
+```bash
+conda workspace lock --skip-unsolvable
+```
+
+Skipped platforms are reported as warnings. The resulting lockfile
+covers only the platforms that solved successfully. CI jobs for
+skipped platforms will fail at install time with a clear
+`LockfileNotFoundError`.
+
+### How do I manage disk space on long-lived CI runners?
+
+conda-workspaces stores environments under `.conda/envs/` relative
+to the workspace root. On long-lived runners where old environments
+accumulate:
+
+```bash
+# Remove all workspace environments
+rm -rf .conda/envs/
+
+# Or remove conda's package cache
+conda clean --all -y
+```
+
+When using GitHub Actions cache, the `key` tied to `conda.lock`
+means stale caches are automatically evicted when the lockfile
+changes.
 
 ## Tasks without workspaces
 

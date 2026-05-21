@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 from rich.console import Console
 
 from ...exceptions import LockfileNotFoundError, LockfileStaleError
-from ...lockfile import install_from_lockfile, lockfile_path
+from ...lockfile import install_from_lockfile, lockfile_path, lockfile_status
+from ...models import LockfileStatus
 from .. import status
 from . import workspace_context_from_args
 from .sync import sync_environments
@@ -31,13 +32,33 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
     dry_run = getattr(args, "dry_run", False)
     locked = getattr(args, "locked", False)
     frozen = getattr(args, "frozen", False)
+    no_lock = getattr(args, "no_lock", False)
 
     if frozen:
-        return _install_from_lockfile(ctx, config, env_name, console=console)
+        return install_from_lockfile_all(ctx, config, env_name, console=console)
 
-    if locked:
-        _check_lockfile_freshness(ctx, config)
-        return _install_from_lockfile(ctx, config, env_name, console=console)
+    strict = locked or (ctx.is_ci and not no_lock)
+    if strict:
+        lock = lockfile_status(ctx, config)
+        if lock.status == LockfileStatus.MISSING:
+            raise LockfileNotFoundError("(all)", lockfile_path(ctx))
+        if lock.status == LockfileStatus.OUT_OF_DATE:
+            raise LockfileStaleError(
+                Path(config.manifest_path),
+                lockfile_path(ctx),
+                reason=lock.reason,
+            )
+        return install_from_lockfile_all(ctx, config, env_name, console=console)
+
+    if not no_lock and not force:
+        lock = lockfile_status(ctx, config)
+        if lock.status == LockfileStatus.UP_TO_DATE:
+            return install_from_lockfile_all(ctx, config, env_name, console=console)
+        if lock.status == LockfileStatus.OUT_OF_DATE:
+            console.print(
+                f"[bold yellow]Lockfile out of date[/bold yellow]:"
+                f" {lock.reason}. Re-solving environments."
+            )
 
     env_names = [env_name] if env_name else list(config.environments.keys())
     sync_environments(
@@ -51,19 +72,7 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
     return 0
 
 
-def _check_lockfile_freshness(ctx: WorkspaceContext, config: WorkspaceConfig) -> None:
-    """Raise if the lockfile is missing or older than the manifest."""
-    manifest = Path(config.manifest_path)
-    lock = lockfile_path(ctx)
-
-    if not lock.is_file():
-        raise LockfileNotFoundError("(all)", lock)
-
-    if manifest.stat().st_mtime > lock.stat().st_mtime:
-        raise LockfileStaleError(manifest, lock)
-
-
-def _install_from_lockfile(
+def install_from_lockfile_all(
     ctx: WorkspaceContext,
     config: WorkspaceConfig,
     env_name: str | None,

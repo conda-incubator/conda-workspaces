@@ -65,6 +65,11 @@ class WorkspaceContext:
             self._cache["root_prefix"] = Path(context.root_prefix)
         return self._cache["root_prefix"]  # type: ignore[return-value]
 
+    @property
+    def is_ci(self) -> bool:
+        """Whether the process is running in a CI environment."""
+        return os.environ.get("CI", "").lower() in ("true", "1", "yes")
+
     def env_prefix(self, env_name: str) -> Path:
         """Return the prefix path for a named environment."""
         return self.envs_dir / env_name

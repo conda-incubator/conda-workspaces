@@ -154,6 +154,16 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         default=False,
         help="Install from existing lockfiles without checking freshness.",
     )
+    install_parser.add_argument(
+        "--no-lock",
+        action="store_true",
+        default=False,
+        help=(
+            "Force a full solve even when the lockfile is up-to-date."
+            " By default, install uses the lockfile when it satisfies"
+            " the manifest."
+        ),
+    )
 
     lock_parser = sub.add_parser(
         "lock",
