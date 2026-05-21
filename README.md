@@ -130,7 +130,9 @@ everything including its own solver, see [pixi](https://pixi.sh).
 
 ## Documentation
 
-https://conda-incubator.github.io/conda-workspaces/
+- [User guide](https://conda-incubator.github.io/conda-workspaces/)
+- [`conda.toml` specification](https://conda-incubator.github.io/conda-workspaces/reference/conda-toml-spec/)
+- [JSON schema](https://github.com/conda-incubator/conda-workspaces/blob/main/schema/conda-toml-1.schema.json)
 
 ## Demos
 
