@@ -37,6 +37,12 @@ def conda_subcommands() -> Iterable[CondaSubcommand]:
         configure_parser=configure_workspace_parser,
     )
     yield CondaSubcommand(
+        name="ws",
+        summary="Shorthand for 'conda workspace'.",
+        action=execute_workspace,  # ty: ignore[invalid-argument-type]
+        configure_parser=configure_workspace_parser,
+    )
+    yield CondaSubcommand(
         name="task",
         summary="Run, list, and manage project tasks.",
         action=execute_task,  # ty: ignore[invalid-argument-type]

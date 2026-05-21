@@ -16,7 +16,10 @@ from conda_workspaces.plugin import (
 def test_conda_subcommands_yields_workspace_and_task() -> None:
     items = {sub.name: sub for sub in conda_subcommands()}
     assert "workspace" in items
+    assert "ws" in items
     assert "task" in items
+    assert items["ws"].action is items["workspace"].action
+    assert items["ws"].configure_parser is items["workspace"].configure_parser
     for sub in items.values():
         assert sub.summary
         assert callable(sub.action)

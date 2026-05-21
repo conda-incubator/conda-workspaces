@@ -2,6 +2,9 @@
 
 ## conda workspace
 
+`conda ws` is a shorthand alias for `conda workspace`. Both forms
+accept the same subcommands, flags, and arguments.
+
 Auto-generated from the `conda workspace` argument parser.
 
 ```{eval-rst}
