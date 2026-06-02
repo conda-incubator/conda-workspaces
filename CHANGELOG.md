@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 0.5.0 — 2026-06-02
+
 ### Added
 
 - User-level task definitions: tasks defined in `~/.conda/tasks.toml`
@@ -14,6 +16,74 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   `conda task list` annotates user-sourced tasks with `(user)` in text
   output and `"source": "user"` in JSON output. XDG paths are also
   supported (`$XDG_CONFIG_HOME/conda/tasks.toml`). (#53, #54)
+- `conda workspace archive` packages a workspace into a portable
+  archive. Git repositories include tracked files by default, while
+  non-git projects include workspace files filtered by built-in
+  exclusions, `[workspace.archive]` settings, and `--exclude`.
+  `.tar.zst` is the default output format; `.tar.gz` and `.tar.bz2`
+  are also supported. (#57, #63)
+- `conda workspace archive --lock` refreshes `conda.lock` before
+  writing the archive, and `--bundle` includes package archives from
+  the local conda package cache for offline or air-gapped installs.
+  Bundled package archives are checked against lockfile SHA-256 hashes
+  when hashes are available. (#57, #63, #71)
+- `conda workspace unarchive` restores an archived workspace, and
+  `conda workspace unarchive --install` extracts the workspace and
+  installs its environments from the bundled or local package cache in
+  one step. (#57, #63)
+- `conda workspace install` now checks whether `conda.lock` satisfies
+  the manifest before deciding whether to solve. In local use it
+  prefers the lockfile when it is still valid and solves when it is
+  not. In CI (`CI=true`) the default behaves like a locked install and
+  fails fast when the lockfile is missing or unsatisfiable. (#61, #67)
+- `conda workspace install --no-lock` forces a solve even when the
+  existing lockfile satisfies the manifest. (#61, #67)
+- `conda workspace info` now reports lockfile status
+  (`up-to-date`, `out-of-date`, or `missing`) in text output and as
+  `lockfile_status` in JSON output. (#61, #67)
+- `conda ws` is now a short alias for `conda workspace`, with the same
+  subcommands, flags, arguments, and help text. (#68, #69)
+- Added tutorials and reference material for workspace archives, PyPI
+  dependencies, multi-platform locking, and the `conda.toml`
+  specification. (#51, #56, #65, #66)
+
+### Changed
+
+- The minimum supported conda dependency is now `conda >=26.3`, and
+  the minimum `conda-pypi` dependency is now `conda-pypi >=0.9.0`.
+  conda-workspaces also uses the current conda environment specifier
+  and exporter plugin metadata APIs. (#65)
+- Projects that declare PyPI dependencies now receive a clearer
+  runtime warning when `conda-rattler-solver` is not installed.
+  `conda-rattler-solver` remains an explicit dependency in the pixi
+  development environments. (#65)
+
+### Fixed
+
+- `.tar.zst` archive creation and extraction now work on every
+  supported Python version. Python 3.10 through 3.13 use
+  `backports.zstd`; Python 3.14+ uses the standard library zstd
+  support. (#72)
+- Workspace archive file collection uses POSIX archive paths on
+  Windows, so archives are portable across platforms. (#57, #63)
+- Lockfile loading now raises the project-specific platform mismatch
+  error for missing-platform cases instead of a generic `ValueError`.
+  (#65)
+
+### Security
+
+- Task templates now render with Jinja2's sandboxed environment, which
+  blocks template attribute traversal attacks from malicious task
+  definitions. Task argument names can no longer shadow the reserved
+  `conda` and `pixi` template context keys. (#55)
+- Archive extraction validates every tar member before extraction,
+  rejecting absolute paths, `..` path traversal, symlink escapes, and
+  special file types such as device nodes and FIFOs. On Python 3.12+
+  extraction also uses the standard library `filter="data"` defense.
+  (#57, #63)
+- Bundled archive package cache priming verifies package SHA-256
+  hashes against `conda.lock` before copying archives into the local
+  conda package cache. (#57, #63, #71)
 
 ## 0.4.0 — 2026-04-29
 
