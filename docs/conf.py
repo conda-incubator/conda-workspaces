@@ -29,6 +29,23 @@ myst_enable_extensions = [
     "tasklist",
 ]
 
+myst_url_schemes = {
+    "http": None,
+    "https": None,
+    "mailto": None,
+    "ftp": None,
+    "gh-issue": {
+        "url": ("https://github.com/conda-incubator/conda-workspaces/issues/{{path}}"),
+        "title": "Issue #{{path}}",
+        "classes": ["github"],
+    },
+    "gh-pr": {
+        "url": ("https://github.com/conda-incubator/conda-workspaces/pull/{{path}}"),
+        "title": "PR #{{path}}",
+        "classes": ["github"],
+    },
+}
+
 
 html_theme = "conda_sphinx_theme"
 
