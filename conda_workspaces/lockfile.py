@@ -10,9 +10,11 @@ The ``conda.lock`` format is a *derivative* of rattler-lock v6
 (``pixi.lock``): same schema machinery, same top-level keys
 (``version``, ``environments``, ``packages``), but with an on-disk
 ``version: 1`` byte that identifies the file as conda-workspaces-owned.
-:class:`CondaLockLoader` shares rattler-lock v6 conversion logic with
-:mod:`conda_lockfiles.rattler_lock.v6` via an in-memory ``version: 6``
-swap, so we do not re-implement YAML -> ``Environment`` conversion.
+:class:`CondaLockLoader` shares rattler-lock v6 conversion models with
+:mod:`conda_lockfiles.rattler_lock.v6`. The read path performs an in-memory
+``version: 6`` swap before delegating YAML -> ``Environment`` conversion; the
+write path uses the same public package model while preserving conda-workspaces'
+multi-environment and external-package layout.
 
 The file layout is::
 
@@ -338,7 +340,7 @@ class CondaLockLoader(EnvironmentSpecBase):
         different serialiser can reuse the same composition logic
         without re-implementing it.
         """
-        from conda_lockfiles.rattler_lock.v6 import _record_to_package
+        from conda_lockfiles.rattler_lock.v6 import RattlerLockV6Package
         from conda_lockfiles.validate_urls import validate_urls
 
         seen_urls: set[str] = set()
@@ -369,8 +371,25 @@ class CondaLockLoader(EnvironmentSpecBase):
             for pkg in sorted(env.explicit_packages, key=lambda p: p.name):
                 platform_refs.append({"conda": pkg.url})
                 if pkg.url not in seen_urls:
+                    package_kwargs = {"conda": pkg.url}
+                    for field in (
+                        "sha256",
+                        "md5",
+                        "depends",
+                        "constrains",
+                        "features",
+                        "track_features",
+                        "license",
+                        "license_family",
+                        "size",
+                        "python_site_packages_path",
+                    ):
+                        if value := pkg.get(field, None):
+                            package_kwargs[field] = value
                     packages.append(
-                        _record_to_package(pkg).model_dump(exclude_none=True)
+                        RattlerLockV6Package(**package_kwargs).model_dump(
+                            exclude_none=True
+                        )
                     )
                     seen_urls.add(pkg.url)
 

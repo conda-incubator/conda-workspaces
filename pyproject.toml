@@ -23,7 +23,7 @@ classifiers = [
 dependencies = [
   # These are required but only available via conda, not PyPI:
   # "conda >=26.3",
-  # "conda-lockfiles >=0.1.1",  # shares rattler-lock v6 schema with conda.lock
+  # "conda-lockfiles >=0.2.0",  # shares rattler-lock v6 schema with conda.lock
   # "conda-spawn >=0.1.0",
   #
   # These are optional (gracefully skipped when absent):
@@ -36,10 +36,6 @@ dependencies = [
   "tomlkit >=0.13",
   "backports.zstd; python_version < '3.14'",
 ]
-# TODO: bump conda-lockfiles to the first release that ships the public
-# `rattler_lock_v6_to_conda_env` + `RattlerLockV6` pydantic model (added
-# in conda-incubator/conda-lockfiles#128) so we can drop the private
-# `_rattler_lock_v6_to_env` call in `conda_workspaces.lockfile`.
 dynamic = ["version"]
 
 [project.urls]
@@ -107,7 +103,7 @@ platforms = ["linux-64", "osx-64", "osx-arm64", "win-64", "linux-aarch64"]
 [tool.pixi.dependencies]
 python = ">=3.10"
 conda = ">=26.3"
-conda-lockfiles = ">=0.1.1"
+conda-lockfiles = ">=0.2.0"
 conda-pypi = ">=0.9.0"
 conda-rattler-solver = ">=0.0.6"
 conda-spawn = ">=0.1.0"
