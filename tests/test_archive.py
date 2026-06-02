@@ -17,6 +17,7 @@ from conda_workspaces.archive import (
     inspect_archive,
     open_tar,
     prime_package_cache,
+    url_to_filename,
     validate_tar_member,
     verify_package_hashes,
 )
@@ -197,7 +198,7 @@ def test_collect_files_custom_exclude(project_dir: Path) -> None:
     assert "conda.toml" in rel_paths
 
 
-@pytest.mark.parametrize("suffix", [".tar.gz", ".tar.zst"])
+@pytest.mark.parametrize("suffix", [".tar.gz", ".tar.zst", ".tar.bz2"])
 def test_create_archive(project_dir: Path, tmp_path: Path, suffix: str) -> None:
     output = tmp_path / "out" / f"project{suffix}"
     config = ArchiveConfig()
@@ -303,6 +304,27 @@ def test_collect_bundle_packages(lockfile_with_packages: Path) -> None:
     assert "zlib-1.2.13-h53f4e23_6.conda" in filenames
 
 
+def test_collect_bundle_packages_rejects_filename_collision(project_dir: Path) -> None:
+    """Flat archive bundles must not silently collapse package filenames."""
+    lockfile_content = """\
+version: 1
+packages:
+  - conda: https://example.com/channel-a/linux-64/same-1.0-h0.conda
+    sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  - conda: https://example.com/channel-b/linux-64/same-1.0-h0.conda
+    sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+"""
+    lockfile = project_dir / "conda.lock"
+    lockfile.write_text(lockfile_content, encoding="utf-8")
+
+    cache_dir = project_dir / "pkg_cache"
+    cache_dir.mkdir(exist_ok=True)
+    (cache_dir / "same-1.0-h0.conda").write_bytes(b"package")
+
+    with pytest.raises(ArchiveError, match="filename collision"):
+        collect_bundle_packages(lockfile, [cache_dir])
+
+
 def test_verify_package_hashes_pass(lockfile_with_packages: Path) -> None:
     cache_dir = lockfile_with_packages / "pkg_cache"
     lockfile = lockfile_with_packages / "conda.lock"
@@ -330,14 +352,35 @@ def test_create_archive_with_bundle(
     assert "conda.toml" in names
 
 
-def test_prime_package_cache(tmp_path: Path) -> None:
-    pkg_content = b"fake package content"
+@pytest.mark.parametrize(
+    ("package_name", "url_suffix", "package_content"),
+    [
+        (
+            "numpy-1.26-h1234.conda",
+            "",
+            b"fake package content",
+        ),
+        (
+            "legacy-1.0-h123.tar.bz2",
+            "?token=abc",
+            b"legacy package content",
+        ),
+    ],
+    ids=["conda", "tar-bz2-with-query"],
+)
+def test_prime_package_cache(
+    tmp_path: Path,
+    package_name: str,
+    url_suffix: str,
+    package_content: bytes,
+) -> None:
+    pkg_content = package_content
     sha256 = hashlib.sha256(pkg_content).hexdigest()
 
     extracted = tmp_path / "project"
     extracted.mkdir()
     (extracted / "packages").mkdir()
-    (extracted / "packages" / "numpy-1.26-h1234.conda").write_bytes(pkg_content)
+    (extracted / "packages" / package_name).write_bytes(pkg_content)
 
     lockfile_content = f"""\
 version: 1
@@ -347,9 +390,9 @@ environments:
       - url: https://conda.anaconda.org/conda-forge/
     packages:
       linux-64:
-        - conda: https://conda.anaconda.org/conda-forge/linux-64/numpy-1.26-h1234.conda
+        - conda: https://conda.anaconda.org/conda-forge/linux-64/{package_name}{url_suffix}
 packages:
-  - conda: https://conda.anaconda.org/conda-forge/linux-64/numpy-1.26-h1234.conda
+  - conda: https://conda.anaconda.org/conda-forge/linux-64/{package_name}{url_suffix}
     sha256: {sha256}
     name: numpy
     version: "1.26"
@@ -365,8 +408,7 @@ packages:
     count = prime_package_cache(extracted, cache_dir)
 
     assert count == 1
-    assert (cache_dir / "numpy-1.26-h1234.conda").is_file()
-    assert (cache_dir / "numpy-1.26-h1234.conda").read_bytes() == pkg_content
+    assert (cache_dir / package_name).read_bytes() == pkg_content
 
 
 def test_prime_package_cache_no_packages(tmp_path: Path) -> None:
@@ -416,6 +458,19 @@ packages:
         prime_package_cache(extracted, cache_dir)
 
 
+def test_prime_package_cache_requires_lockfile(tmp_path: Path) -> None:
+    extracted = tmp_path / "project"
+    extracted.mkdir()
+    (extracted / "packages").mkdir()
+    (extracted / "packages" / "numpy-1.26-h1234.conda").write_bytes(b"package")
+
+    cache_dir = tmp_path / "pkgs"
+    cache_dir.mkdir()
+
+    with pytest.raises(ArchiveError, match="require conda.lock"):
+        prime_package_cache(extracted, cache_dir)
+
+
 def test_inspect_archive_lightweight(project_dir: Path, tmp_path: Path) -> None:
     output = tmp_path / "test.tar.gz"
     config = ArchiveConfig()
@@ -434,6 +489,22 @@ def test_inspect_archive_bundled(bundled_archive: tuple[Path, Path]) -> None:
     assert info["has_lockfile"] is True
     assert info["has_packages"] is True
     assert info["package_count"] == 2
+
+
+def test_inspect_archive_counts_legacy_package_archives(tmp_path: Path) -> None:
+    archive = tmp_path / "legacy.tar.gz"
+    with tarfile.open(archive, "w:gz") as tf:
+        manifest = tarfile.TarInfo(name="conda.toml")
+        manifest.size = 0
+        tf.addfile(manifest, io.BytesIO(b""))
+        package = tarfile.TarInfo(name="packages/legacy-1.0-h123.tar.bz2")
+        package.size = 4
+        tf.addfile(package, io.BytesIO(b"data"))
+
+    result = inspect_archive(archive)
+
+    assert result["has_packages"] is True
+    assert result["package_count"] == 1
 
 
 def test_inspect_archive_not_workspace(tmp_path: Path) -> None:
@@ -515,9 +586,7 @@ def test_validate_tar_member_allows_regular_types(tmp_path: Path) -> None:
         validate_tar_member(member, tmp_path)
 
 
-def test_verify_package_hashes_warns_on_missing_hash(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_verify_package_hashes_rejects_missing_hash(tmp_path: Path) -> None:
     pkg = tmp_path / "nohash-1.0-h000.conda"
     pkg.write_bytes(b"data")
 
@@ -541,7 +610,25 @@ packages:
     lockfile = tmp_path / "conda.lock"
     lockfile.write_text(lockfile_content, encoding="utf-8")
 
-    with caplog.at_level("WARNING", logger="conda_workspaces.archive"):
+    with pytest.raises(ArchiveError, match="Cannot verify bundled package"):
         verify_package_hashes([pkg], lockfile)
 
-    assert "No SHA256 hash in lockfile for nohash-1.0-h000.conda" in caplog.text
+
+@pytest.mark.parametrize(
+    ("url", "filename"),
+    [
+        (
+            "https://example.com/linux-64/pkg-1.0-h0.conda?token=abc",
+            "pkg-1.0-h0.conda",
+        ),
+        ("https://example.com/linux-64/pkg-1.0-h0.tar.bz2", "pkg-1.0-h0.tar.bz2"),
+    ],
+    ids=["conda-with-query", "tar-bz2"],
+)
+def test_url_to_filename(url: str, filename: str) -> None:
+    assert url_to_filename(url) == filename
+
+
+def test_url_to_filename_rejects_non_package_url() -> None:
+    with pytest.raises(ArchiveError, match="Cannot determine"):
+        url_to_filename("https://example.com/linux-64/repodata.json")
