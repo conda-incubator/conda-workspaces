@@ -241,7 +241,9 @@ class ManifestParser(ABC):
         self._emit_manifest(doc, data)
         return tomlkit.dumps(doc)
 
-    def _emit_manifest(self, container: Table, data: dict[str, Any]) -> None:
+    def _emit_manifest(
+        self, container: Container | Table, data: dict[str, Any]
+    ) -> None:
         """Write the manifest tables produced by :meth:`manifest_data` into *container*.
 
         *container* is a tomlkit table (either a fresh ``TOMLDocument``

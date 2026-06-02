@@ -213,7 +213,9 @@ def _install_path_deps(
         return
 
     for dep in path_deps:
-        source_path = Path(dep.path).expanduser()  # type: ignore[arg-type]
+        if dep.path is None:
+            continue
+        source_path = Path(dep.path).expanduser()
         distribution = "editable" if dep.editable else "wheel"
         log.info("Building %s (%s) from %s", dep.name, distribution, source_path)
         try:
@@ -279,7 +281,9 @@ def install_environment(
         return
 
     # Get the solver backend (respects solver plugins)
-    solver_backend = conda_context.plugin_manager.get_cached_solver_backend()
+    solver_backend = (
+        conda_context.plugin_manager.get_cached_solver_backend()  # ty: ignore[missing-argument]
+    )
     if solver_backend is None:
         raise SolveError(resolved.name, "No solver backend found")
 

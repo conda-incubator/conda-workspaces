@@ -7,7 +7,7 @@ the result as a conda-native manifest.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import tomlkit
 
@@ -15,6 +15,8 @@ from ..manifests.toml import CondaTomlParser
 from ..models import Feature
 
 if TYPE_CHECKING:
+    from tomlkit.items import Table
+
     from ..models import Task, WorkspaceConfig
 
 
@@ -41,13 +43,13 @@ def config_to_toml(
         deps: dict[str, str] = {}
         for name, ms in default_feature.conda_dependencies.items():
             deps[name] = str(ms.version) if ms.version else "*"
-        doc.add("dependencies", deps)
+        doc.add("dependencies", tomlkit.item(deps))
 
     if default_feature and default_feature.pypi_dependencies:
         pypi: dict[str, str] = {}
         for name, dep in default_feature.pypi_dependencies.items():
             pypi[name] = dep.spec if dep.spec else "*"
-        doc.add("pypi-dependencies", pypi)
+        doc.add("pypi-dependencies", tomlkit.item(pypi))
 
     if default_feature and (
         default_feature.activation_scripts or default_feature.activation_env
@@ -60,7 +62,10 @@ def config_to_toml(
         doc.add("activation", activation)
 
     if default_feature and default_feature.system_requirements:
-        doc.add("system-requirements", dict(default_feature.system_requirements))
+        doc.add(
+            "system-requirements",
+            tomlkit.item(dict(default_feature.system_requirements)),
+        )
 
     if default_feature and default_feature.target_conda_dependencies:
         _add_target_deps(doc, default_feature)
@@ -100,7 +105,7 @@ def _add_feature(doc: tomlkit.TOMLDocument, feature: Feature) -> None:
     """Add ``[feature.<name>.*]`` tables to *doc*."""
     if "feature" not in doc:
         doc.add("feature", tomlkit.table(is_super_table=True))
-    feat_container = doc["feature"]
+    feat_container = cast("Table", doc["feature"])
 
     feat_tbl = tomlkit.table(is_super_table=True)
 
@@ -151,7 +156,7 @@ def _add_target_deps(doc: tomlkit.TOMLDocument, feature: Feature) -> None:
     """Add ``[target.<platform>.dependencies]`` for the default feature."""
     if "target" not in doc:
         doc.add("target", tomlkit.table(is_super_table=True))
-    target = doc["target"]
+    target = cast("Table", doc["target"])
 
     for platform, platform_deps in feature.target_conda_dependencies.items():
         plat_tbl = tomlkit.table()

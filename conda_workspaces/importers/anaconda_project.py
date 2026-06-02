@@ -48,9 +48,9 @@ class AnacondaProjectImporter(ManifestImporter):
                     base_pypi[k] = v
 
         if base_deps:
-            doc.add("dependencies", base_deps)
+            doc.add("dependencies", tomlkit.item(base_deps))
         if base_pypi:
-            doc.add("pypi-dependencies", base_pypi)
+            doc.add("pypi-dependencies", tomlkit.item(base_pypi))
 
         features: dict[str, dict[str, str]] = {}
         environments: dict[str, Any] = {"default": []}
@@ -84,7 +84,7 @@ class AnacondaProjectImporter(ManifestImporter):
                 }
 
         if tasks:
-            doc.add("tasks", tasks)
+            doc.add("tasks", tomlkit.item(tasks))
 
         return doc
 

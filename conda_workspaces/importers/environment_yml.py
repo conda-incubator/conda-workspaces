@@ -36,9 +36,9 @@ class EnvironmentYmlImporter(ManifestImporter):
         pypi_deps = self.parse_pip_deps(raw_deps)
 
         if conda_deps:
-            doc.add("dependencies", conda_deps)
+            doc.add("dependencies", tomlkit.item(conda_deps))
         if pypi_deps:
-            doc.add("pypi-dependencies", pypi_deps)
+            doc.add("pypi-dependencies", tomlkit.item(pypi_deps))
 
         return doc
 

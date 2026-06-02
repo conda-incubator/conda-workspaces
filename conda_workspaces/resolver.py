@@ -197,7 +197,9 @@ class ResolvedEnvironment:
         if not specs:
             return []
 
-        solver_backend = conda_context.plugin_manager.get_cached_solver_backend()
+        solver_backend = (
+            conda_context.plugin_manager.get_cached_solver_backend()  # ty: ignore[missing-argument]
+        )
         if solver_backend is None:
             raise SolveError(self.name, "No solver backend found", platform=platform)
 
