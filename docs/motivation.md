@@ -75,7 +75,7 @@ different directory (`.pixi/envs/` vs `.conda/envs/`), so they don't
 interfere with each other.
 
 See [DESIGN.md](https://github.com/conda-incubator/conda-workspaces/blob/main/DESIGN.md)
-for the full compatibility mapping.
+for the compatibility mapping.
 
 ## Comparison to other tools
 

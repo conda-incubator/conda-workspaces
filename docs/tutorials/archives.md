@@ -13,8 +13,8 @@ archive and restoring it on another machine or in CI.
 ## Create a workspace archive
 
 An archive bundles your manifest, lockfile, and source files into a
-single `.tar.zst` (or `.tar.gz`) file. In a git repo, only tracked
-files are included.
+single `.tar.zst`, `.tar.gz`, or `.tar.bz2` file. In a git repo, only
+tracked files are included.
 
 ```bash
 conda workspace archive -o my-project.tar.zst
@@ -116,7 +116,8 @@ This is equivalent to running `conda workspace lock` followed by
 ![archive bundle demo](../../demos/archives-bundle.gif)
 
 When the target machine has no internet access, use `--bundle` to
-include all resolved `.conda` packages inside the archive.
+include all resolved conda package archives (`.conda` or `.tar.bz2`)
+inside the archive.
 
 You need a lockfile first. Pass `--lock` to generate one automatically,
 or run `conda workspace lock` beforehand.
@@ -155,8 +156,8 @@ provides additional defense-in-depth.
 
 When `--bundle` is used, package hashes are verified against the
 lockfile's SHA256 entries both at archive creation and at extraction.
-Packages without a SHA256 entry in the lockfile produce a warning and
-are not verified.
+Packages without a SHA256 entry in the lockfile are rejected instead of
+being copied into the conda package cache.
 
 ### Trust model for bundled archives
 
@@ -176,8 +177,7 @@ To guard against this:
 
 ## Next steps
 
-- [Configuration](../configuration.md#archive-configuration) for all
-  archive settings
-- [Features](../features.md#archives) for a feature overview
+- {ref}`Archive configuration <archive-configuration>` for all archive settings
+- {ref}`Archives <archives>` for a feature overview
 - [CLI reference](../reference/cli.md) for the full `archive` and
   `unarchive` command-line options

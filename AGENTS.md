@@ -276,9 +276,10 @@
 
 ## CLI architecture
 
-- All task execution goes through `conda task run`. There is no
-  `conda workspace run` — it was consolidated to avoid confusion.
-  `conda workspace shell` remains for interactive sessions.
+- Task execution goes through `conda task run`. One-shot commands in
+  an installed workspace environment can use `conda workspace run -e
+  <env> -- <command>`, and `conda workspace shell` remains for
+  interactive sessions.
 
 - `conda task run` handles both named tasks (from the manifest) and
   ad-hoc shell commands (fallback when the name is not a known task).

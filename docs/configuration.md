@@ -18,7 +18,7 @@ task.
 ## Workspace search order
 
 1. `conda.toml` — conda-native workspace manifest
-2. `pixi.toml` — pixi-native format (full compatibility)
+2. `pixi.toml` — pixi-native format (compatibility)
 3. `pyproject.toml` — embedded under `[tool.conda.*]` or `[tool.pixi.*]`
 
 ## Task search order
@@ -40,6 +40,8 @@ loaded. To use pixi tasks, either remove `[tool.conda]` entirely or
 define your tasks under `[tool.conda.tasks]`.
 
 When a file defines both workspace and task sections, both are used.
+
+(user-level-tasks)=
 
 ## User-level tasks
 
@@ -358,6 +360,8 @@ depends-on = [
   { task = "test", environment = "py311" },
 ]
 ```
+
+(archive-configuration)=
 
 ## Archive configuration
 

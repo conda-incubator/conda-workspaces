@@ -222,8 +222,8 @@ $ conda task list
 ```
 
 User tasks work even outside a workspace. See
-[User-level tasks](configuration.md#user-level-tasks) for file location
-details and merge semantics.
+{ref}`User-level tasks <user-level-tasks>` for file location details and merge
+semantics.
 
 ---
 
@@ -288,6 +288,8 @@ channels = ["conda-forge", "bioconda"]
 
 Feature channels are appended after workspace channels, with duplicates
 removed.
+
+(platform-targeting)=
 
 ## Platform targeting
 
@@ -433,6 +435,8 @@ channel-priority = "strict"
 Valid values are `strict`, `flexible`, and `disabled`. When not set,
 conda's default channel priority applies.
 
+(lock)=
+
 ## Lock
 
 :::{versionchanged} 0.4.0
@@ -453,10 +457,10 @@ individual solve fails, aggregating the failures into
 `SolveError` now names the target platform for easier CI triage.
 :::
 
-conda-workspaces generates a `conda.lock` file in YAML format based on
-the rattler-lock v6 specification. The `conda workspace lock` command runs the solver
-and records the solution — it does not require environments to be
-installed first.
+conda-workspaces generates a `conda.lock` file in YAML format using a
+rattler-lock-derived schema with a conda-workspaces-owned version byte.
+The `conda workspace lock` command runs the solver and records the
+solution — it does not require environments to be installed first.
 
 ```bash
 # Generate or update the lockfile for every platform declared in the manifest
@@ -728,12 +732,15 @@ basename (`conda.toml` → `conda-toml`, `pixi.toml` → `pixi-toml`,
 See [Format aliases](reference/format-aliases.md) for the full
 alias table.
 
+(archives)=
+
 ## Archives
 
 ![archive demo](../demos/archives.gif)
 
-Package a workspace into a portable `.tar.zst` or `.tar.gz` archive
-that includes the manifest, lockfile, and source files:
+Package a workspace into a portable `.tar.zst`, `.tar.gz`, or
+`.tar.bz2` archive that includes the manifest, lockfile, and source
+files:
 
 ```bash
 conda workspace archive -o my-project.tar.zst
@@ -766,9 +773,9 @@ Pass `--lock` to solve and update the lockfile before archiving:
 conda workspace archive --lock
 ```
 
-For offline deployment, `--bundle` includes all resolved `.conda`
-packages inside the archive. Package hashes are verified against the
-lockfile on both bundling and extraction:
+For offline deployment, `--bundle` includes resolved conda package
+archives (`.conda` or `.tar.bz2`) inside the archive. Package hashes
+are verified against the lockfile on both bundling and extraction:
 
 ```bash
 conda workspace archive --lock --bundle -o offline.tar.zst

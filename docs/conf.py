@@ -56,4 +56,4 @@ html_css_files = ["css/custom.css"]
 
 html_baseurl = "https://conda-incubator.github.io/conda-workspaces/"
 
-exclude_patterns = ["_build"]
+exclude_patterns = ["_build", "superpowers"]

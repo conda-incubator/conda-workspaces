@@ -37,7 +37,7 @@ and interactive variable prompting have no direct equivalent.
 | Aspect | anaconda-project | conda-workspaces |
 |---|---|---|
 | Manifest | `anaconda-project.yml` | `conda.toml` (or `pixi.toml` / `pyproject.toml`) |
-| Lockfile | none (re-solves each time) | `conda.lock` (rattler-lock v6) |
+| Lockfile | none (re-solves each time) | `conda.lock` (rattler-lock-derived, `version: 1`) |
 | Environment location | `envs/<name>/` | `.conda/envs/<name>/` |
 | Multiple environments | `env_specs:` (separate dependency lists) | composable features in one manifest |
 | Commands | `commands:` (flat, typed: bokeh/notebook/unix) | `[tasks]` with dependency graphs, caching, templates |
