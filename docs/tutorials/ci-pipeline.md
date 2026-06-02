@@ -107,6 +107,8 @@ jobs:
       - run: conda task run -e docs build-docs
 ```
 
+(matrix-split-locking)=
+
 ## Matrix-split locking
 
 ![ci-split demo](../../demos/ci-split.gif)

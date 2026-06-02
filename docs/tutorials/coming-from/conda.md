@@ -136,7 +136,7 @@ plugins cover all common lockfile formats:
 | Plugin | Files | Format |
 |---|---|---|
 | conda-workspaces | `conda.toml` | workspace manifest |
-| conda-workspaces | `conda.lock` | rattler-lock v6 |
+| conda-workspaces | `conda.lock` | rattler-lock-derived, `version: 1` |
 | conda-lockfiles | `pixi.lock` | rattler-lock v6 |
 | conda-lockfiles | `conda-lock.yml` | conda-lock v1 |
 

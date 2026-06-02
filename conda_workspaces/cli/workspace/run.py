@@ -58,4 +58,5 @@ def execute_run(args: argparse.Namespace) -> int:
         cwd=None,
         no_capture_output=True,
     )
-    return conda_run(run_args, None)
+    parser = _argparse.ArgumentParser(prog="conda workspace run")
+    return conda_run(run_args, parser)

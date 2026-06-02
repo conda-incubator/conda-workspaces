@@ -141,9 +141,9 @@ import command:
 conda workspace import pixi.toml
 ```
 
-This reads your `pixi.toml` and writes a fully equivalent `conda.toml`.
-Use `--dry-run` to preview the output, or `-o custom.toml` to choose a
-different output path.
+This reads the supported workspace and task fields from your
+`pixi.toml` and writes a `conda.toml`. Use `--dry-run` to preview the
+output, or `-o custom.toml` to choose a different output path.
 
 To export only tasks, use the task export command instead:
 
@@ -210,4 +210,4 @@ Some pixi-only concepts don't apply to conda-workspaces:
   solver operates on a single environment at a time)
 
 See [DESIGN.md](https://github.com/conda-incubator/conda-workspaces/blob/main/DESIGN.md)
-for the full compatibility mapping.
+for the compatibility mapping.

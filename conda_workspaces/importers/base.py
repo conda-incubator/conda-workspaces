@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import tomlkit
 from conda.common.serialize.yaml import load as yaml_load
@@ -13,6 +13,8 @@ from packaging.requirements import Requirement
 if TYPE_CHECKING:
     from pathlib import Path
     from typing import Any, ClassVar
+
+    from tomlkit.items import Table
 
 
 class ManifestImporter(ABC):
@@ -69,8 +71,9 @@ class ManifestImporter(ABC):
             if "feature" not in doc:
                 doc.add("feature", tomlkit.table(is_super_table=True))
             feat_tbl = tomlkit.table(is_super_table=True)
-            feat_tbl.add("dependencies", feat_deps)
-            doc["feature"].add(feat_name, feat_tbl)
+            feat_tbl.add("dependencies", tomlkit.item(feat_deps))
+            feature_container = cast("Table", doc["feature"])
+            feature_container.add(feat_name, feat_tbl)
 
         if environments:
-            doc.add("environments", environments)
+            doc.add("environments", tomlkit.item(environments))

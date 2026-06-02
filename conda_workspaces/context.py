@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from conda.models.environment import Environment
@@ -54,7 +54,7 @@ class WorkspaceContext:
             from conda.base.context import context
 
             self._cache["platform"] = context.subdir
-        return self._cache["platform"]  # type: ignore[return-value]
+        return cast("str", self._cache["platform"])
 
     @property
     def root_prefix(self) -> Path:
@@ -63,7 +63,7 @@ class WorkspaceContext:
             from conda.base.context import context
 
             self._cache["root_prefix"] = Path(context.root_prefix)
-        return self._cache["root_prefix"]  # type: ignore[return-value]
+        return cast("Path", self._cache["root_prefix"])
 
     @property
     def is_ci(self) -> bool:

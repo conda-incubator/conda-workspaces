@@ -538,7 +538,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         default=None,
         help=(
             "Output archive path (default: <workspace-name>.tar.zst)."
-            " Supports .tar.gz and .tar.zst extensions."
+            " Supports .tar.zst, .tar.gz, and .tar.bz2 extensions."
         ),
     )
     archive_parser.add_argument(
@@ -546,7 +546,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         default=False,
         help=(
-            "Bundle resolved .conda packages from the local cache into"
+            "Bundle resolved package archives from the local cache into"
             " the archive for offline/air-gapped deployment."
         ),
     )

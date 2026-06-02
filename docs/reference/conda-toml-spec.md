@@ -263,11 +263,12 @@ to the user.
 
 `conda workspace lock` and `conda workspace install` produce and
 consume **`conda.lock`** at the workspace root.  The lockfile schema is
-[rattler-lock v6][rattler-lock] (the same schema `pixi.lock` uses) with
-one on-disk difference: `conda.lock` writes `version: 1` instead of
-`version: 6` so tools can identify the file as conda-workspaces-owned
-at a glance.  The remainder of the document — `environments`,
-`packages`, channels, platform package lists — is byte-compatible.
+derived from [rattler-lock v6][rattler-lock] (the same schema
+`pixi.lock` uses) with one on-disk difference: `conda.lock` writes
+`version: 1` instead of `version: 6` so tools can identify the file as
+conda-workspaces-owned at a glance.  The remainder of the document —
+`environments`, `packages`, channels, platform package lists — is
+byte-compatible.
 
 See [Plugin format names and aliases](format-aliases.md) for the
 canonical and alias strings under which `conda.lock` is registered.

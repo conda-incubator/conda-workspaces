@@ -7,10 +7,10 @@ from conda_workspaces.lockfile import LOCKFILE_VERSION, CondaLockLoader
 
 
 class FakeRecord:
-    def __init__(self, name: str, url: str):
+    def __init__(self, name: str, url: str, data: dict | None = None):
         self.name = name
         self.url = url
-        self._data: dict = {}
+        self._data = data or {}
 
     def get(self, key, default=None):
         return self._data.get(key, default)
@@ -55,6 +55,40 @@ def test_compose_single_env() -> None:
 
     refs = result["environments"]["default"]["packages"]["linux-64"]
     assert refs == [{"conda": "https://example.com/python-3.10.conda"}]
+
+
+def test_compose_includes_package_metadata() -> None:
+    """Package metadata is written without private conda-lockfiles helpers."""
+    pkg = FakeRecord(
+        "python",
+        "https://example.com/python-3.10.conda",
+        {
+            "sha256": "abc123",
+            "md5": "def456",
+            "depends": ["openssl >=3"],
+            "license": "Python-2.0",
+            "size": 1024,
+        },
+    )
+    env = FakeEnvironment(
+        name="default",
+        platform="linux-64",
+        channels=("conda-forge",),
+        packages=[pkg],
+    )
+
+    result = CondaLockLoader.compose([env])  # type: ignore[arg-type]
+
+    assert result["packages"] == [
+        {
+            "conda": "https://example.com/python-3.10.conda",
+            "sha256": "abc123",
+            "md5": "def456",
+            "license": "Python-2.0",
+            "size": 1024,
+            "depends": ["openssl >=3"],
+        }
+    ]
 
 
 def test_compose_deduplicates_packages() -> None:

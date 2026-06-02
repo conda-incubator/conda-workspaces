@@ -10,7 +10,7 @@ commands to their conda-workspaces equivalents.
 | Aspect | conda-project | conda-workspaces |
 |---|---|---|
 | Manifest | `conda-project.yml` + `environment.yml` | single `conda.toml` (or `pixi.toml` / `pyproject.toml`) |
-| Lockfile | `conda-lock.<env>.yml` (conda-lock) | `conda.lock` (rattler-lock v6) |
+| Lockfile | `conda-lock.<env>.yml` (conda-lock) | `conda.lock` (rattler-lock-derived, `version: 1`) |
 | Environment location | `envs/<name>/` | `.conda/envs/<name>/` |
 | Multiple environments | separate `environment.yml` files | composable features in one manifest |
 | Commands | flat `commands:` map | `[tasks]` with dependency graphs, caching, templates |
@@ -179,8 +179,9 @@ graph and runs lint before test.
 ## Lockfiles
 
 conda-project generated separate `conda-lock.<env>.yml` files using
-conda-lock. conda-workspaces generates a single `conda.lock` in
-rattler-lock v6 format that covers all environments and platforms:
+conda-lock. conda-workspaces generates a single `conda.lock` that
+uses a rattler-lock-derived schema and covers all environments and
+platforms:
 
 ```bash
 conda workspace lock                   # solve only, write conda.lock
@@ -209,7 +210,7 @@ conda env create --file conda-lock.yml -n myenv    # via conda-lockfiles plugin
 | Plugin | Files | Format |
 |---|---|---|
 | conda-workspaces | `conda.toml` | workspace manifest |
-| conda-workspaces | `conda.lock` | rattler-lock v6 |
+| conda-workspaces | `conda.lock` | rattler-lock-derived, `version: 1` |
 | conda-lockfiles | `pixi.lock` | rattler-lock v6 |
 | conda-lockfiles | `conda-lock.yml` | conda-lock v1 |
 

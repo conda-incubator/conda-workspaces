@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
-import logging
 import shutil
 import subprocess
 import sys
 import tarfile
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from conda_lockfiles.load_yaml import load_yaml
 
@@ -26,14 +26,12 @@ from .exceptions import (
 )
 
 try:
-    import backports.zstd  # noqa: F401 -- registers zstd codec with tarfile
+    import backports.zstd  # noqa: F401  # ty: ignore[unresolved-import]
 except ImportError:
     pass  # Python 3.14+ has native support
 
 if TYPE_CHECKING:
     from .models import ArchiveConfig
-
-log = logging.getLogger(__name__)
 
 ARCHIVE_SUFFIXES: tuple[str, ...] = (
     ".tar.zst",
@@ -45,6 +43,10 @@ ARCHIVE_SUFFIXES: tuple[str, ...] = (
 """Recognised archive filename suffixes, longest first."""
 
 MANIFEST_FILENAMES = {"conda.toml", "pixi.toml", "pyproject.toml"}
+"""Filenames recognised as workspace manifests inside an archive."""
+
+CONDA_PACKAGE_SUFFIXES: tuple[str, ...] = (".conda", ".tar.bz2")
+"""Recognised conda package archive suffixes."""
 
 ALLOWED_TAR_TYPES: frozenset[bytes] = frozenset(
     {
@@ -55,7 +57,7 @@ ALLOWED_TAR_TYPES: frozenset[bytes] = frozenset(
         tarfile.LNKTYPE,
     }
 )
-"""Filenames recognised as workspace manifests inside an archive."""
+"""Tar member types accepted during extraction."""
 
 BUILTIN_EXCLUDE_DIRS: frozenset[str] = frozenset(
     {
@@ -181,10 +183,10 @@ def open_tar_for_write(
 ) -> tarfile.TarFile:
     """Open a tar archive for writing, optionally setting compression level."""
     if compression_level is not None:
-        return tarfile.open(  # type: ignore[call-overload]
+        return tarfile.open(  # ty: ignore[no-matching-overload]
             output, mode, compresslevel=compression_level
         )
-    return tarfile.open(output, mode)  # type: ignore[call-overload]
+    return tarfile.open(output, mode)  # ty: ignore[no-matching-overload]
 
 
 def create_archive(
@@ -197,7 +199,7 @@ def create_archive(
     """Create a tar archive of the workspace at *root*.
 
     Writes to *output*, creating parent directories as needed.
-    If *bundle_packages* is provided, the listed ``.conda`` files
+    If *bundle_packages* is provided, the listed conda package archives
     are added under a ``packages/`` prefix inside the archive.
     """
     output = output.resolve()
@@ -225,7 +227,7 @@ def add_files_to_tar(tf: tarfile.TarFile, root: Path, files: list[Path]) -> None
 
 
 def add_packages_to_tar(tf: tarfile.TarFile, packages: list[Path]) -> None:
-    """Add ``.conda`` *packages* under the ``packages/`` archive prefix."""
+    """Add conda package archives under the ``packages/`` archive prefix."""
     for pkg in packages:
         arcname = f"packages/{pkg.name}"
         tf.add(str(pkg), arcname=arcname)
@@ -268,7 +270,9 @@ def validate_tar_member(member: tarfile.TarInfo, target: Path) -> None:
 def open_tar(archive_path: Path) -> tarfile.TarFile:
     """Open a tar archive, handling zstandard decompression transparently."""
     compression = detect_compression(archive_path)
-    return tarfile.open(archive_path, f"r:{compression}")
+    return tarfile.open(  # ty: ignore[no-matching-overload]
+        archive_path, f"r:{compression}"
+    )
 
 
 def extract_archive(archive_path: Path, target: Path) -> Path:
@@ -300,29 +304,50 @@ def parse_lockfile_packages(lockfile_path: Path) -> list[dict]:
 
 def url_to_filename(url: str) -> str:
     """Extract the filename from a conda package URL."""
-    return url.rsplit("/", 1)[-1]
+    filename = Path(urlsplit(url).path).name
+    if not filename or not filename.endswith(CONDA_PACKAGE_SUFFIXES):
+        raise ArchiveError(
+            f"Cannot determine conda package filename from URL: {url}",
+            hints=[
+                "Expected package URLs to end in .conda or .tar.bz2.",
+                "Regenerate conda.lock and retry the archive command.",
+            ],
+        )
+    return filename
 
 
 def collect_bundle_packages(
     lockfile_path: Path,
     cache_dirs: list[Path],
 ) -> list[Path]:
-    """Locate ``.conda`` packages referenced by the lockfile in local caches.
+    """Locate conda packages referenced by the lockfile in local caches.
 
     Raises :class:`ArchiveError` if any package is missing from all caches.
     """
     packages_data = parse_lockfile_packages(lockfile_path)
     result: list[Path] = []
-    seen: set[str] = set()
+    seen: dict[str, str | None] = {}
 
     for pkg in packages_data:
         url = pkg.get("conda") or pkg.get("url", "")
         if not url:
             continue
         filename = url_to_filename(url)
+        sha256 = pkg.get("sha256")
+        fingerprint = str(sha256) if sha256 is not None else None
         if filename in seen:
+            previous = seen[filename]
+            if previous is None or fingerprint is None or previous != fingerprint:
+                raise ArchiveError(
+                    f"Package filename collision in lockfile: {filename}",
+                    hints=[
+                        "The archive bundle stores package archives by filename.",
+                        "Regenerate the lockfile or remove one of the colliding"
+                        " packages before bundling.",
+                    ],
+                )
             continue
-        seen.add(filename)
+        seen[filename] = fingerprint
 
         found = False
         for cache_dir in cache_dirs:
@@ -356,6 +381,15 @@ def build_hash_index(lockfile_path: Path) -> dict[str, str]:
     return index
 
 
+def file_sha256(path: Path) -> str:
+    """Return the hex SHA-256 digest of *path* without reading it all at once."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def verify_package_hashes(
     packages: list[Path],
     lockfile_path: Path,
@@ -369,12 +403,15 @@ def verify_package_hashes(
     for pkg_path in packages:
         exp_hash = expected.get(pkg_path.name)
         if not exp_hash:
-            log.warning(
-                "No SHA256 hash in lockfile for %s, skipping verification",
-                pkg_path.name,
+            raise ArchiveError(
+                f"Cannot verify bundled package '{pkg_path.name}'.",
+                hints=[
+                    "No SHA256 entry for this package was found in conda.lock.",
+                    "Regenerate conda.lock with a current conda-workspaces version"
+                    " before bundling or priming package caches.",
+                ],
             )
-            continue
-        actual_hash = hashlib.sha256(pkg_path.read_bytes()).hexdigest()
+        actual_hash = file_sha256(pkg_path)
         if actual_hash != exp_hash:
             raise ArchiveHashMismatchError(
                 pkg_path.name, expected=exp_hash, actual=actual_hash
@@ -395,7 +432,20 @@ def prime_package_cache(
         return 0
 
     lockfile = extracted_dir / "conda.lock"
-    packages = sorted(packages_dir.glob("*.conda"))
+    if not lockfile.is_file():
+        raise ArchiveError(
+            "Cannot prime package cache: bundled packages require conda.lock.",
+            hints=[
+                "Extract the archive without cache priming using --no-install,",
+                "or rebuild the archive with its lockfile included.",
+            ],
+        )
+
+    packages = sorted(
+        path
+        for suffix in CONDA_PACKAGE_SUFFIXES
+        for path in packages_dir.glob(f"*{suffix}")
+    )
     if not packages:
         return 0
 
@@ -406,7 +456,7 @@ def prime_package_cache(
     for pkg in packages:
         dest = cache_dir / pkg.name
         if not dest.exists():
-            shutil.copy(pkg, dest)
+            shutil.copy2(pkg, dest)
             count += 1
 
     return count
@@ -418,7 +468,9 @@ def inspect_archive(archive_path: Path) -> dict[str, object]:
         names = set(tf.getnames())
 
     package_members = [
-        n for n in names if n.startswith("packages/") and n.endswith(".conda")
+        n
+        for n in names
+        if n.startswith("packages/") and n.endswith(CONDA_PACKAGE_SUFFIXES)
     ]
 
     return {

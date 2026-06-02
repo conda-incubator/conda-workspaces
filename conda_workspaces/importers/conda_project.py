@@ -54,9 +54,9 @@ class CondaProjectImporter(ManifestImporter):
         doc.add("workspace", ws)
 
         if base_deps:
-            doc.add("dependencies", base_deps)
+            doc.add("dependencies", tomlkit.item(base_deps))
         if base_pypi:
-            doc.add("pypi-dependencies", base_pypi)
+            doc.add("pypi-dependencies", tomlkit.item(base_pypi))
 
         features: dict[str, dict[str, str]] = {}
         environments: dict[str, Any] = {"default": []}
@@ -100,7 +100,7 @@ class CondaProjectImporter(ManifestImporter):
                 tasks[cmd_name] = cmd if len(task) == 1 else task
 
         if tasks:
-            doc.add("tasks", tasks)
+            doc.add("tasks", tomlkit.item(tasks))
 
         return doc
 

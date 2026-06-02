@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from conda.core.envs_manager import PrefixData
 from rich.console import Console
@@ -18,6 +18,14 @@ if TYPE_CHECKING:
 
     from ...context import WorkspaceContext
     from ...models import WorkspaceConfig
+
+
+class EnvironmentRow(TypedDict):
+    """Display row for ``conda workspace list --envs``."""
+
+    name: str
+    features: list[str]
+    installed: bool
 
 
 def execute_list(args: argparse.Namespace, *, console: Console | None = None) -> int:
@@ -93,7 +101,7 @@ def _list_environments(
     """List environments defined in the workspace."""
     installed = set(list_installed_environments(ctx))
 
-    rows: list[dict[str, str | bool | list[str]]] = []
+    rows: list[EnvironmentRow] = []
     for name, env in sorted(config.environments.items()):
         if installed_only and name not in installed:
             continue
@@ -126,9 +134,9 @@ def _list_environments(
         table.add_column("Features")
         table.add_column("Installed")
         for row in rows:
-            feats = ", ".join(row["features"]) if row["features"] else "(default)"  # type: ignore[arg-type]
+            feats = ", ".join(row["features"]) if row["features"] else "(default)"
             status = "yes" if row["installed"] else "no"
-            table.add_row(row["name"], feats, status)  # type: ignore[arg-type]
+            table.add_row(row["name"], feats, status)
         console.print(table)
 
     return 0

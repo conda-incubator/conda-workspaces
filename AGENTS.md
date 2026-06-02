@@ -276,9 +276,10 @@
 
 ## CLI architecture
 
-- All task execution goes through `conda task run`. There is no
-  `conda workspace run` — it was consolidated to avoid confusion.
-  `conda workspace shell` remains for interactive sessions.
+- Task execution goes through `conda task run`. One-shot commands in
+  an installed workspace environment can use `conda workspace run -e
+  <env> -- <command>`, and `conda workspace shell` remains for
+  interactive sessions.
 
 - `conda task run` handles both named tasks (from the manifest) and
   ad-hoc shell commands (fallback when the name is not a known task).
@@ -357,10 +358,12 @@
   build a sibling loader that shares its validation + converters
   rather than re-implementing parsing. `CondaLockLoader` in
   `lockfile.py` is the canonical example: `conda.lock` is a
-  derivative of rattler-lock v6 (`pixi.lock`), so the loader composes
-  `conda_lockfiles.rattler_lock.v6`'s conversion helper via an
-  in-memory `version: 1 -> 6` swap instead of re-implementing YAML ->
-  `Environment` conversion.
+  derivative of rattler-lock v6 (`pixi.lock`), so the read path uses
+  `conda_lockfiles.rattler_lock.v6`'s public conversion function via
+  an in-memory `version: 1 -> 6` swap instead of re-implementing YAML
+  -> `Environment` conversion. The write path uses the same module's
+  public package model and keeps conda-workspaces' own
+  multi-environment layout.
 
 - Cross-platform solving (multi-platform `conda.lock`): target each
   declared platform by (a) constructing the solver with

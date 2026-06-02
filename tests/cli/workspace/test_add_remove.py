@@ -6,9 +6,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 import tomlkit
+from conda_lockfiles.load_yaml import load_yaml
 
 from conda_workspaces.cli.workspace.add import execute_add
 from conda_workspaces.cli.workspace.remove import execute_remove
+from conda_workspaces.resolver import ResolvedEnvironment
 
 from ..conftest import make_args
 
@@ -450,6 +452,44 @@ def test_no_lockfile_update_skips_sync(
     execute_fn(args)
 
     assert stub_sync == []
+
+
+def test_add_no_install_writes_lockfile(
+    sync_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard for conda-lockfiles 0.2 lockfile composition."""
+
+    class FakeRecord:
+        def __init__(self, name: str, url: str) -> None:
+            self.name = name
+            self.url = url
+
+        def get(self, key: str, default: object = None) -> object:
+            return default
+
+    def fake_solve(self, platform, *, prefix):
+        return [
+            FakeRecord(
+                "python",
+                f"https://example.com/{self.name}-{platform}-python.conda",
+            )
+        ]
+
+    monkeypatch.setattr(ResolvedEnvironment, "solve_for_platform", fake_solve)
+    args = make_args(
+        _DEFAULTS,
+        file=sync_workspace,
+        specs=["numpy"],
+        no_install=True,
+        no_lockfile_update=False,
+    )
+
+    assert execute_add(args) == 0
+
+    data = load_yaml(sync_workspace.parent / "conda.lock")
+    assert data["version"] == 1
+    assert set(data["environments"]) == {"default", "test"}
+    assert "linux-64" in data["environments"]["default"]["packages"]
 
 
 @pytest.mark.parametrize(

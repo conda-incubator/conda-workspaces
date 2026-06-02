@@ -72,7 +72,7 @@ and task running inside the conda CLI without switching tools.
 - Reads `conda.toml`, `pixi.toml`, and `pyproject.toml` workspace manifests
 - Multi-environment support with composable features
 - Project-local environments in `.conda/envs/`
-- Lockfile generation (`conda.lock`) in rattler-lock v6 format for reproducible installs
+- Lockfile generation (`conda.lock`) using a rattler-lock-derived schema for reproducible installs
 - Per-platform dependency overrides via `[target.<platform>]`
 - PyPI dependencies translated and resolved alongside conda packages via conda-pypi
 - Activation scripts and environment variables per feature
