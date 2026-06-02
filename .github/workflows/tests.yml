@@ -39,31 +39,24 @@ jobs:
         run: pixi run -e dev format-check
 
   tests:
-    name: ${{ matrix.os }}, Python ${{ matrix.python-version }}
+    name: ${{ matrix.os }}, Python 3.${{ matrix.python-minor }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.10", "3.13"]
-        include:
-          - os: ubuntu-latest
-            python-version: "3.11"
-          - os: ubuntu-latest
-            python-version: "3.12"
-          - os: ubuntu-latest
-            python-version: "3.14"
+        python-minor: ["10", "11", "12", "13", "14"]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
       - uses: prefix-dev/setup-pixi@5185adfbffb4bd703da3010310260805d89ebb11 # v0.9.6
         with:
-          environments: test
+          environments: test-py3${{ matrix.python-minor }}
       - name: Run tests
-        run: pixi run -e test test-cov
+        run: pixi run -e test-py3${{ matrix.python-minor }} test-cov
       - name: Upload coverage to Codecov
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        if: matrix.os == 'ubuntu-latest' && matrix.python-minor == '13'
         uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6.0.1
         with:
           files: coverage.xml

@@ -122,6 +122,21 @@ pytest-cov = ">=4.0"
 tomlkit = ">=0.13"
 platformdirs = ">=3.0"
 
+[tool.pixi.feature.py310.dependencies]
+python = "3.10.*"
+
+[tool.pixi.feature.py311.dependencies]
+python = "3.11.*"
+
+[tool.pixi.feature.py312.dependencies]
+python = "3.12.*"
+
+[tool.pixi.feature.py313.dependencies]
+python = "3.13.*"
+
+[tool.pixi.feature.py314.dependencies]
+python = "3.14.*"
+
 [tool.pixi.feature.docs.dependencies]
 sphinx = ">=7.0"
 conda-sphinx-theme = ">=0.2"
@@ -135,6 +150,11 @@ sphinx-argparse = ">=0.4"
 [tool.pixi.environments]
 dev = {features = ["dev"], solve-group = "default"}
 test = {features = ["test"], solve-group = "default"}
+test-py310 = {features = ["test", "py310"], solve-group = "test-py310"}
+test-py311 = {features = ["test", "py311"], solve-group = "test-py311"}
+test-py312 = {features = ["test", "py312"], solve-group = "test-py312"}
+test-py313 = {features = ["test", "py313"], solve-group = "test-py313"}
+test-py314 = {features = ["test", "py314"], solve-group = "test-py314"}
 docs = {features = ["docs"], solve-group = "default"}
 
 [tool.pixi.tasks]
