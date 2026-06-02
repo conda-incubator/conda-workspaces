@@ -34,7 +34,7 @@ Type "# Bundle packages for offline/air-gapped deployment"
 Enter
 Sleep 500ms
 
-Type "# --lock solves first, --bundle includes .conda packages"
+Type "# --lock solves first, --bundle includes package archives"
 Enter
 Sleep 500ms
 
