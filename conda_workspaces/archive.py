@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import importlib
 import shutil
 import subprocess
 import sys
 import tarfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
@@ -25,12 +27,10 @@ from .exceptions import (
     ArchivePathTraversalError,
 )
 
-try:
-    import backports.zstd  # noqa: F401  # ty: ignore[unresolved-import]
-except ImportError:
-    pass  # Python 3.14+ has native support
-
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from typing import Any
+
     from .models import ArchiveConfig
 
 ARCHIVE_SUFFIXES: tuple[str, ...] = (
@@ -165,6 +165,27 @@ def detect_compression(output: Path) -> str:
     return "zst"
 
 
+def tarfile_supports_zstd() -> bool:
+    """Return True when this Python's tarfile module can open zstd archives."""
+    return "zst" in tarfile.TarFile.OPEN_METH
+
+
+def zstd_module() -> Any:
+    """Return the stdlib or backport zstd module."""
+    for module_name in ("compression.zstd", "backports.zstd"):
+        try:
+            return importlib.import_module(module_name)
+        except ImportError:
+            continue
+    raise ArchiveError(
+        "Zstandard archive support is not available.",
+        hints=[
+            "Install backports.zstd for Python versions before 3.14,",
+            "or choose an archive name ending in .tar.gz or .tar.bz2.",
+        ],
+    )
+
+
 def is_included_by_patterns(rel_path: str, patterns: tuple[str, ...]) -> bool:
     """Return True if *rel_path* matches any include pattern."""
     for pattern in patterns:
@@ -178,15 +199,23 @@ def is_included_by_patterns(rel_path: str, patterns: tuple[str, ...]) -> bool:
     return False
 
 
+@contextmanager
 def open_tar_for_write(
-    output: Path, mode: str, compression_level: int | None
-) -> tarfile.TarFile:
+    output: Path, compression: str, compression_level: int | None
+) -> Iterator[tarfile.TarFile]:
     """Open a tar archive for writing, optionally setting compression level."""
+    if compression == "zst" and not tarfile_supports_zstd():
+        with zstd_module().open(output, "wb", level=compression_level) as compressed:
+            with tarfile.open(fileobj=compressed, mode="w:") as tf:
+                yield tf
+        return
+
+    mode = f"w:{compression}"
+    kwargs = {}
     if compression_level is not None:
-        return tarfile.open(  # ty: ignore[no-matching-overload]
-            output, mode, compresslevel=compression_level
-        )
-    return tarfile.open(output, mode)  # ty: ignore[no-matching-overload]
+        kwargs["compresslevel"] = compression_level
+    with tarfile.open(output, mode, **kwargs) as tf:  # ty: ignore[no-matching-overload]
+        yield tf
 
 
 def create_archive(
@@ -209,9 +238,10 @@ def create_archive(
     files = [f for f in files if f.resolve() != output]
 
     compression = detect_compression(output)
-    mode = f"w:{compression}"
 
-    with open_tar_for_write(output, mode, archive_config.compression_level) as tf:
+    with open_tar_for_write(
+        output, compression, archive_config.compression_level
+    ) as tf:
         add_files_to_tar(tf, root, files)
         if bundle_packages:
             add_packages_to_tar(tf, bundle_packages)
@@ -267,12 +297,19 @@ def validate_tar_member(member: tarfile.TarInfo, target: Path) -> None:
             raise ArchivePathTraversalError(member.name)
 
 
-def open_tar(archive_path: Path) -> tarfile.TarFile:
+@contextmanager
+def open_tar(archive_path: Path) -> Iterator[tarfile.TarFile]:
     """Open a tar archive, handling zstandard decompression transparently."""
     compression = detect_compression(archive_path)
-    return tarfile.open(  # ty: ignore[no-matching-overload]
+    if compression == "zst" and not tarfile_supports_zstd():
+        with zstd_module().open(archive_path, "rb") as compressed:
+            with tarfile.open(fileobj=compressed, mode="r:") as tf:
+                yield tf
+        return
+    with tarfile.open(  # ty: ignore[no-matching-overload]
         archive_path, f"r:{compression}"
-    )
+    ) as tf:
+        yield tf
 
 
 def extract_archive(archive_path: Path, target: Path) -> Path:
