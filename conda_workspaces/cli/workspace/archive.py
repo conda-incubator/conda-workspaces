@@ -23,14 +23,6 @@ from .. import status
 from . import workspace_context_from_args
 
 
-def _prefix_under_dest(dest: Path, prefix: Path) -> Path:
-    """Return the physical install path for *prefix* staged below *dest*."""
-    parts = prefix.parts
-    if prefix.anchor and parts and parts[0] == prefix.anchor:
-        parts = parts[1:]
-    return dest.joinpath(*parts)
-
-
 def execute_archive(
     args: argparse.Namespace,
     *,
@@ -216,7 +208,7 @@ def execute_unarchive(
             install_prefix = final_prefix
             if dest is not None:
                 dest = Path(dest).expanduser().resolve()
-                install_prefix = _prefix_under_dest(dest, final_prefix)
+                install_prefix = dest / final_prefix.relative_to(final_prefix.anchor)
                 target_prefix_override = final_prefix
 
         from .install import execute_install
