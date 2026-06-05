@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 0.6.0 — 2026-06-05
+
 ### Added
 
 - `conda workspace unarchive --install` can install a selected
@@ -13,7 +15,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   `--prefix`. `--dest` stages files below a filesystem root while
   preserving the requested runtime prefix inside the installed
   environment, and warns if installed files still reference the
-  staging prefix. (<gh-issue:77>)
+  staging prefix. (<gh-issue:77>, <gh-pr:78>)
 - Added `[workspace.dependencies]` inheritance for conda, pixi, and
   pyproject manifests, matching the workspace dependency feature added
   in pixi 0.70.0. (<gh-issue:80>, <gh-pr:79>)
