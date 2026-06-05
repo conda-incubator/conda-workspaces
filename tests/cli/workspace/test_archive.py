@@ -271,6 +271,53 @@ def test_execute_unarchive_install_explicit_prefix_under_dest(
     assert install_args.target_prefix_override == prefix
 
 
+def test_execute_unarchive_install_under_dest_warns_on_staging_prefix_reference(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "test.tar.gz"
+    stream = StringIO()
+    console = Console(file=stream, width=200, highlight=False)
+
+    args_a = make_args(_ARCHIVE_DEFAULTS, output=archive)
+    execute_archive(args_a, console=console)
+
+    def fake_execute_install(args, *, console=None):
+        script = args.prefix / "bin" / "tool"
+        script.parent.mkdir(parents=True)
+        script.write_text(f"#!{args.prefix}/bin/python\n", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.execute_install",
+        fake_execute_install,
+    )
+
+    target = tmp_path / "extracted"
+    dest = tmp_path / "rootfs"
+    prefix = Path("/opt/runtime")
+    args_u = make_args(
+        _UNARCHIVE_DEFAULTS,
+        archive_path=archive,
+        target=target,
+        install=True,
+        environment="runtime",
+        prefix=prefix,
+        dest=dest,
+    )
+    result = execute_unarchive(args_u, console=console)
+
+    assert result == 0
+    output = stream.getvalue()
+    assert "Warning:" in output
+    assert "installed files still reference the staging prefix" in output
+    assert str(dest / "opt" / "runtime") in output
+    assert "/opt/runtime" in output
+    assert "bin/tool" in output
+
+
 def test_execute_unarchive_prefix_requires_install(
     archive_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,

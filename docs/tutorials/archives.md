@@ -128,6 +128,8 @@ conda workspace unarchive my-project.tar.zst \
 
 With `--dest`, files are written under `/tmp/rootfs/opt/runtime`, but
 the environment's final runtime prefix remains `/opt/runtime`.
+`unarchive` warns if any installed files still reference the physical
+staging prefix.
 
 ## Lock before archiving
 

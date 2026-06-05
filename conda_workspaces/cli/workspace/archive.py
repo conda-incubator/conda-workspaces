@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 
 from rich.console import Console
+from rich.markup import escape
 
 from ...archive import (
     ARCHIVE_SUFFIXES,
@@ -21,6 +22,75 @@ from ...lockfile import lockfile_path as _lockfile_path
 from ...models import ArchiveConfig
 from .. import status
 from . import workspace_context_from_args
+
+
+def file_contains_bytes(
+    path: Path, needle: bytes, *, chunk_size: int = 1024 * 1024
+) -> bool:
+    """Return whether *path* contains *needle* without loading it all at once."""
+    if not needle:
+        return False
+
+    overlap = b""
+    try:
+        with path.open("rb") as fh:
+            while chunk := fh.read(chunk_size):
+                data = overlap + chunk
+                if needle in data:
+                    return True
+                overlap = data[-(len(needle) - 1) :] if len(needle) > 1 else b""
+    except OSError:
+        return False
+    return False
+
+
+def scan_prefix_references(
+    root: Path,
+    prefix: Path,
+    *,
+    limit: int = 10,
+) -> tuple[list[Path], bool]:
+    """Find files below *root* that still contain *prefix* as bytes."""
+    if not root.is_dir():
+        return [], False
+
+    needle = str(prefix).encode()
+    matches: list[Path] = []
+    for path in root.rglob("*"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        if file_contains_bytes(path, needle):
+            matches.append(path)
+            if len(matches) > limit:
+                return matches[:limit], True
+    return matches, False
+
+
+def warn_staging_prefix_references(
+    console: Console,
+    *,
+    install_prefix: Path,
+    runtime_prefix: Path,
+) -> None:
+    """Warn when a staged install still contains the physical staging prefix."""
+    matches, truncated = scan_prefix_references(install_prefix, install_prefix)
+    if not matches:
+        return
+
+    console.print(
+        "[bold yellow]Warning:[/bold yellow] "
+        "installed files still reference the staging prefix"
+    )
+    console.print(f"  [dim]staging prefix:[/dim] {escape(str(install_prefix))}")
+    console.print(f"  [dim]runtime prefix:[/dim] {escape(str(runtime_prefix))}")
+    for path in matches:
+        try:
+            display_path = path.relative_to(install_prefix)
+        except ValueError:
+            display_path = path
+        console.print(f"  [dim]- {escape(str(display_path))}[/dim]")
+    if truncated:
+        console.print("  [dim]additional matches omitted[/dim]")
 
 
 def execute_archive(
@@ -224,6 +294,17 @@ def execute_unarchive(
             prefix=install_prefix,
             target_prefix_override=target_prefix_override,
         )
-        return execute_install(install_args, console=console)
+        result = execute_install(install_args, console=console)
+        if (
+            result == 0
+            and install_prefix is not None
+            and target_prefix_override is not None
+        ):
+            warn_staging_prefix_references(
+                console,
+                install_prefix=install_prefix,
+                runtime_prefix=target_prefix_override,
+            )
+        return result
 
     return 0

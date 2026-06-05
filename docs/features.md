@@ -778,6 +778,9 @@ conda workspace unarchive my-project.tar.zst \
   --prefix /opt/runtime
 ```
 
+When `--dest` is used, `unarchive` warns if installed files still
+reference the physical staging prefix.
+
 Pass `--lock` to solve and update the lockfile before archiving:
 
 ```bash
