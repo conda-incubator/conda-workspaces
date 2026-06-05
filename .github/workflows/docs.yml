@@ -6,12 +6,14 @@ on:
       - main
     paths:
       - ".github/workflows/docs.yml"
+      - "CHANGELOG.md"
       - "conda_workspaces/**"
       - "docs/**"
       - "pyproject.toml"
   pull_request:
     paths:
       - ".github/workflows/docs.yml"
+      - "CHANGELOG.md"
       - "docs/**"
   workflow_dispatch:
 
