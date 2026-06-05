@@ -206,7 +206,7 @@ def test_execute_unarchive_install_explicit_prefix(
     )
 
     target = tmp_path / "extracted"
-    prefix = Path("/opt/runtime")
+    prefix = "/opt/runtime"
     args_u = make_args(
         _UNARCHIVE_DEFAULTS,
         archive_path=archive,
@@ -223,8 +223,9 @@ def test_execute_unarchive_install_explicit_prefix(
     assert install_args.file == str(target)
     assert install_args.environment == "runtime"
     assert install_args.locked is True
-    assert install_args.prefix == prefix
-    assert install_args.target_prefix_override is None
+    assert install_args.prefix == Path(prefix)
+    expected_override = None if str(Path(prefix)) == prefix else prefix
+    assert install_args.target_prefix_override == expected_override
 
 
 def test_execute_unarchive_install_explicit_prefix_under_dest(
@@ -252,7 +253,7 @@ def test_execute_unarchive_install_explicit_prefix_under_dest(
 
     target = tmp_path / "extracted"
     dest = tmp_path / "rootfs"
-    prefix = Path("/opt/runtime")
+    prefix = "/opt/runtime"
     args_u = make_args(
         _UNARCHIVE_DEFAULTS,
         archive_path=archive,
@@ -297,7 +298,7 @@ def test_execute_unarchive_install_under_dest_warns_on_staging_prefix_reference(
 
     target = tmp_path / "extracted"
     dest = tmp_path / "rootfs"
-    prefix = Path("/opt/runtime")
+    prefix = "/opt/runtime"
     args_u = make_args(
         _UNARCHIVE_DEFAULTS,
         archive_path=archive,
@@ -315,7 +316,7 @@ def test_execute_unarchive_install_under_dest_warns_on_staging_prefix_reference(
     assert "installed files still reference the staging prefix" in output
     assert str(dest / "opt" / "runtime") in output
     assert "/opt/runtime" in output
-    assert "bin/tool" in output
+    assert "bin/tool" in output.replace("\\", "/")
 
 
 def test_execute_unarchive_prefix_requires_install(
@@ -335,7 +336,7 @@ def test_execute_unarchive_prefix_requires_install(
         archive_path=archive,
         target=tmp_path / "extracted",
         environment="runtime",
-        prefix=Path("/opt/runtime"),
+        prefix="/opt/runtime",
     )
     with pytest.raises(ArchiveError, match="--prefix requires --install"):
         execute_unarchive(args_u, console=console)
@@ -358,7 +359,7 @@ def test_execute_unarchive_prefix_requires_environment(
         archive_path=archive,
         target=tmp_path / "extracted",
         install=True,
-        prefix=Path("/opt/runtime"),
+        prefix="/opt/runtime",
     )
     with pytest.raises(ArchiveError, match="--prefix requires an explicit"):
         execute_unarchive(args_u, console=console)

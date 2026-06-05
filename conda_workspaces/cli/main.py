@@ -596,7 +596,6 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
     )
     unarchive_parser.add_argument(
         "--prefix",
-        type=Path,
         default=None,
         help=(
             "Final runtime prefix for the selected environment."

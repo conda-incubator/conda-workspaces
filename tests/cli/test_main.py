@@ -311,5 +311,5 @@ def test_unarchive_subparser_registered() -> None:
     assert str(ns.archive_path) == "project.tar.gz"
     assert ns.install is True
     assert ns.environment == "runtime"
-    assert str(ns.prefix) == "/opt/runtime"
+    assert ns.prefix == "/opt/runtime"
     assert str(ns.dest) == "/tmp/rootfs"

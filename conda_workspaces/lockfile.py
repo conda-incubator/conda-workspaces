@@ -634,7 +634,7 @@ def install_from_lockfile(
     env_name: str,
     *,
     prefix: Path | None = None,
-    target_prefix_override: Path | None = None,
+    target_prefix_override: str | Path | None = None,
 ) -> None:
     """Install an environment from ``conda.lock``.
 

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
+from os.path import expanduser
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from rich.console import Console
 from rich.markup import escape
@@ -22,6 +23,21 @@ from ...lockfile import lockfile_path as _lockfile_path
 from ...models import ArchiveConfig
 from .. import status
 from . import workspace_context_from_args
+
+
+def is_absolute_runtime_prefix(prefix: str) -> bool:
+    """Return whether *prefix* is absolute as a POSIX or Windows path."""
+    return PurePosixPath(prefix).is_absolute() or PureWindowsPath(prefix).is_absolute()
+
+
+def runtime_prefix_relative_path(prefix: str) -> Path:
+    """Return *prefix* relative to its root using host path separators."""
+    posix_prefix = PurePosixPath(prefix)
+    if posix_prefix.is_absolute():
+        return Path(*posix_prefix.relative_to(posix_prefix.anchor).parts)
+
+    windows_prefix = PureWindowsPath(prefix)
+    return Path(*windows_prefix.relative_to(windows_prefix.anchor).parts)
 
 
 def file_contains_bytes(
@@ -70,7 +86,7 @@ def warn_staging_prefix_references(
     console: Console,
     *,
     install_prefix: Path,
-    runtime_prefix: Path,
+    runtime_prefix: str,
 ) -> None:
     """Warn when a staged install still contains the physical staging prefix."""
     matches, truncated = scan_prefix_references(install_prefix, install_prefix)
@@ -206,7 +222,8 @@ def execute_unarchive(
         )
 
     env_name = getattr(args, "environment", None)
-    final_prefix = getattr(args, "prefix", None)
+    final_prefix_arg = getattr(args, "prefix", None)
+    final_prefix = str(final_prefix_arg) if final_prefix_arg is not None else None
     dest = getattr(args, "dest", None)
 
     if final_prefix is not None and not args.install:
@@ -235,8 +252,8 @@ def execute_unarchive(
                 ],
             )
         if final_prefix is not None:
-            final_prefix = Path(final_prefix).expanduser()
-            if not final_prefix.is_absolute():
+            final_prefix = expanduser(final_prefix)
+            if not is_absolute_runtime_prefix(final_prefix):
                 raise ArchiveError(
                     "--prefix must be an absolute path.",
                     hints=["Pass an absolute runtime prefix such as /opt/runtime."],
@@ -272,13 +289,14 @@ def execute_unarchive(
                 )
 
     if args.install:
-        install_prefix = final_prefix
+        install_prefix = Path(final_prefix) if final_prefix is not None else None
         target_prefix_override = None
         if final_prefix is not None:
-            install_prefix = final_prefix
             if dest is not None:
                 dest = Path(dest).expanduser().resolve()
-                install_prefix = dest / final_prefix.relative_to(final_prefix.anchor)
+                install_prefix = dest / runtime_prefix_relative_path(final_prefix)
+                target_prefix_override = final_prefix
+            elif str(install_prefix) != final_prefix:
                 target_prefix_override = final_prefix
 
         from .install import execute_install

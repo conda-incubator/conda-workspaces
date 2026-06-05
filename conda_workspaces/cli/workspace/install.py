@@ -102,7 +102,7 @@ def install_from_lockfile_all(
     *,
     console: Console,
     prefix: Path | None = None,
-    target_prefix_override: Path | None = None,
+    target_prefix_override: str | Path | None = None,
 ) -> int:
     """Install environments from existing lockfiles (no solving)."""
     if (prefix is not None or target_prefix_override is not None) and not env_name:
