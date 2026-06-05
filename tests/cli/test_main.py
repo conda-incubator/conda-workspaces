@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+from pathlib import Path
 
 import pytest
 
@@ -312,4 +313,4 @@ def test_unarchive_subparser_registered() -> None:
     assert ns.install is True
     assert ns.environment == "runtime"
     assert ns.prefix == "/opt/runtime"
-    assert str(ns.dest) == "/tmp/rootfs"
+    assert ns.dest == Path("/tmp/rootfs")
