@@ -3,9 +3,8 @@
 The ``CondaTomlParser`` handles ``conda.toml`` — the conda-native
 manifest format for both workspace configuration and task definitions.
 
-Helper functions for parsing channels, dependencies, environments,
-and target overrides are shared with ``pixi_toml.py`` and
-``pyproject_toml.py``.
+Public helpers for parsing shared TOML workspace tables are reused by
+``pixi_toml.py`` and ``pyproject_toml.py``.
 """
 
 from __future__ import annotations
@@ -29,7 +28,7 @@ from .normalize import parse_tasks_and_targets
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from typing import Any
+    from typing import Any, ClassVar, NoReturn
 
     from tomlkit.items import InlineTable
 
@@ -163,7 +162,7 @@ def parse_archive_config(ws: dict[str, Any]) -> ArchiveConfig:
     )
 
 
-def _parse_channels(raw: list[Any]) -> list[Channel]:
+def parse_channels(raw: list[Any]) -> list[Channel]:
     """Parse a channels list, handling both strings and dicts."""
     channels: list[Channel] = []
     for item in raw:
@@ -181,27 +180,186 @@ def _parse_channels(raw: list[Any]) -> list[Channel]:
     return channels
 
 
-def _parse_conda_deps(raw: dict[str, Any]) -> dict[str, MatchSpec]:
-    """Parse conda dependency specs into MatchSpec objects."""
-    deps: dict[str, MatchSpec] = {}
-    for name, spec in raw.items():
+class WorkspaceDependencyResolver:
+    """Resolve conda dependency tables with workspace inheritance.
+
+    ``[workspace.dependencies]`` is a root-level pool. Entries in regular
+    dependency tables opt in with ``{ workspace = true }``; after parsing,
+    downstream code only sees concrete ``MatchSpec`` objects.
+    """
+
+    spec_field_aliases: ClassVar[dict[str, str]] = {
+        "version": "version",
+        "build": "build",
+        "build-number": "build_number",
+        "build_number": "build_number",
+        "channel": "channel",
+        "subdir": "subdir",
+        "md5": "md5",
+        "sha256": "sha256",
+        "url": "url",
+        "fn": "fn",
+        "file-name": "fn",
+        "license": "license",
+        "license-family": "license_family",
+        "license_family": "license_family",
+        "features": "features",
+        "track-features": "track_features",
+        "track_features": "track_features",
+    }
+    source_spec_fields: ClassVar[set[str]] = {
+        "branch",
+        "extras",
+        "flags",
+        "git",
+        "path",
+        "rev",
+        "subdirectory",
+        "tag",
+    }
+
+    def __init__(
+        self,
+        *,
+        workspace_dependencies: dict[str, Any] | None = None,
+        path: Path | None = None,
+    ) -> None:
+        self.workspace_dependencies_raw = workspace_dependencies or {}
+        self.path = path
+        self.workspace_dependencies = self.parse_dependency_table(
+            self.workspace_dependencies_raw,
+            allow_inheritance=False,
+            table_name="[workspace.dependencies]",
+        )
+
+    def parse_dependency_table(
+        self,
+        raw: dict[str, Any],
+        *,
+        allow_inheritance: bool = True,
+        table_name: str = "[dependencies]",
+    ) -> dict[str, MatchSpec]:
+        """Parse a dependency table into ``MatchSpec`` objects."""
+        deps: dict[str, MatchSpec] = {}
+        for name, spec in raw.items():
+            deps[name] = self.parse_dependency(
+                name,
+                spec,
+                allow_inheritance=allow_inheritance,
+                table_name=table_name,
+            )
+        return deps
+
+    def parse_dependency(
+        self,
+        name: str,
+        spec: Any,
+        *,
+        allow_inheritance: bool,
+        table_name: str,
+    ) -> MatchSpec:
+        """Parse one dependency entry."""
         if isinstance(spec, str):
-            deps[name] = MatchSpec(f"{name} {spec}".strip())
-        elif isinstance(spec, dict):
-            version = spec.get("version", "")
-            build = spec.get("build", "")
-            parts = [name]
-            if version:
-                parts.append(version)
-            if build:
-                parts.append(build)
-            deps[name] = MatchSpec(" ".join(parts))
-        else:
-            deps[name] = MatchSpec(f"{name} {spec}")
-    return deps
+            return MatchSpec(f"{name} {spec}".strip())
+        if not isinstance(spec, dict):
+            return MatchSpec(f"{name} {spec}")
+
+        if "workspace" not in spec:
+            fields = self.spec_fields(name, spec, strict_unsupported=False)
+            return self.match_spec_from_fields(name, fields)
+
+        if not allow_inheritance:
+            self.error(f"{table_name}.{name} cannot use `workspace = true`.")
+
+        workspace = spec["workspace"]
+        if workspace is not True:
+            self.error(
+                f"{table_name}.{name} sets `workspace = {workspace!r}`; "
+                "`workspace` can only be true."
+            )
+        if "version" in spec:
+            self.error(
+                f"{table_name}.{name} cannot set both `workspace = true` and `version`."
+            )
+        if name not in self.workspace_dependencies_raw:
+            self.error(
+                f"{table_name}.{name} inherits from [workspace.dependencies], "
+                f"but no workspace dependency named '{name}' exists."
+            )
+
+        base_spec = self.workspace_dependencies_raw[name]
+        self.reject_source_fields(name, base_spec, "[workspace.dependencies]")
+        self.reject_source_fields(name, spec, table_name)
+
+        base_fields = self.spec_fields(name, base_spec, strict_unsupported=True)
+        override_fields = self.spec_fields(
+            name,
+            {k: v for k, v in spec.items() if k != "workspace"},
+            strict_unsupported=True,
+        )
+        fields = {**base_fields, **override_fields}
+        return self.match_spec_from_fields(name, fields)
+
+    def spec_fields(
+        self,
+        name: str,
+        spec: Any,
+        *,
+        strict_unsupported: bool,
+    ) -> dict[str, Any]:
+        """Return conda ``MatchSpec`` keyword fields for one TOML dependency."""
+        if isinstance(spec, str):
+            return {"version": spec}
+        if not isinstance(spec, dict):
+            return {"version": str(spec)}
+
+        unsupported = set(spec) - set(self.spec_field_aliases) - {"workspace"}
+        if strict_unsupported and unsupported:
+            fields = ", ".join(sorted(unsupported))
+            self.error(
+                f"Conda dependency '{name}' uses unsupported field(s): {fields}."
+            )
+
+        fields: dict[str, Any] = {}
+        for raw_key, value in spec.items():
+            key = self.spec_field_aliases.get(raw_key)
+            if key is None:
+                continue
+            if value is None or value == "":
+                continue
+            if isinstance(value, list):
+                value = tuple(value)
+            fields[key] = value
+        return fields
+
+    def reject_source_fields(self, name: str, spec: Any, table_name: str) -> None:
+        """Reject pixi source-package fields when inheritance would consume them."""
+        if not isinstance(spec, dict):
+            return
+        unsupported = sorted(set(spec) & self.source_spec_fields)
+        if not unsupported:
+            return
+        fields = ", ".join(unsupported)
+        self.error(
+            f"{table_name}.{name} uses source dependency field(s) unsupported by "
+            f"conda-workspaces inheritance: {fields}."
+        )
+
+    def match_spec_from_fields(self, name: str, fields: dict[str, Any]) -> MatchSpec:
+        """Construct a ``MatchSpec`` and wrap parse errors with manifest context."""
+        try:
+            return MatchSpec(name=name, **fields)
+        except Exception as exc:
+            self.error(f"Invalid conda dependency '{name}': {exc}")
+
+    def error(self, message: str) -> NoReturn:
+        """Raise a manifest parse error when a path is available."""
+        if self.path is not None:
+            raise WorkspaceParseError(self.path, message)
+        raise ValueError(message)
 
 
-def _parse_pypi_deps(raw: dict[str, Any]) -> dict[str, PyPIDependency]:
+def parse_pypi_dependencies(raw: dict[str, Any]) -> dict[str, PyPIDependency]:
     """Parse PyPI dependency specs."""
     deps: dict[str, PyPIDependency] = {}
     for name, spec in raw.items():
@@ -223,7 +381,7 @@ def _parse_pypi_deps(raw: dict[str, Any]) -> dict[str, PyPIDependency]:
     return deps
 
 
-def _parse_environment(name: str, raw: Any, path: Path) -> Environment:
+def parse_environment(name: str, raw: Any, path: Path) -> Environment:
     """Parse a single environment entry.
 
     Environments can be specified as:
@@ -245,28 +403,51 @@ def _parse_environment(name: str, raw: Any, path: Path) -> Environment:
     )
 
 
-def _parse_target_overrides(target_data: dict[str, Any], feature: Feature) -> None:
+def parse_target_overrides(
+    target_data: dict[str, Any],
+    feature: Feature,
+    resolver: WorkspaceDependencyResolver | None = None,
+) -> None:
     """Parse ``[target.<platform>]`` dep overrides into a feature."""
+    resolver = resolver or WorkspaceDependencyResolver()
     for platform, tdata in target_data.items():
-        conda = _parse_conda_deps(tdata.get("dependencies", {}))
+        conda = resolver.parse_dependency_table(
+            tdata.get("dependencies", {}),
+            table_name=f"[target.{platform}.dependencies]",
+        )
         if conda:
             feature.target_conda_dependencies[platform] = conda
 
-        pypi = _parse_pypi_deps(tdata.get("pypi-dependencies", {}))
+        pypi = parse_pypi_dependencies(tdata.get("pypi-dependencies", {}))
         if pypi:
             feature.target_pypi_dependencies[platform] = pypi
 
 
-def _parse_feature(name: str, feat_data: dict[str, Any]) -> Feature:
+def parse_feature(
+    name: str,
+    feat_data: dict[str, Any],
+    resolver: WorkspaceDependencyResolver | None = None,
+) -> Feature:
     """Parse a single ``[feature.<name>]`` table into a Feature.
 
     Shared by ``PixiTomlParser`` and ``PyprojectTomlParser`` — the
     per-feature logic is identical once the data dict is resolved.
     """
+    resolver = resolver or WorkspaceDependencyResolver()
     feature = Feature(name=name)
-    feature.conda_dependencies = _parse_conda_deps(feat_data.get("dependencies", {}))
-    feature.pypi_dependencies = _parse_pypi_deps(feat_data.get("pypi-dependencies", {}))
-    feature.channels = _parse_channels(feat_data.get("channels", []))
+    table_name = (
+        "[dependencies]"
+        if name == Feature.DEFAULT_NAME
+        else f"[feature.{name}.dependencies]"
+    )
+    feature.conda_dependencies = resolver.parse_dependency_table(
+        feat_data.get("dependencies", {}),
+        table_name=table_name,
+    )
+    feature.pypi_dependencies = parse_pypi_dependencies(
+        feat_data.get("pypi-dependencies", {})
+    )
+    feature.channels = parse_channels(feat_data.get("channels", []))
     feature.platforms = list(feat_data.get("platforms", []))
 
     sysreq = feat_data.get("system-requirements", {})
@@ -278,11 +459,11 @@ def _parse_feature(name: str, feat_data: dict[str, Any]) -> Feature:
         feature.activation_scripts = list(activation.get("scripts", []))
         feature.activation_env = dict(activation.get("env", {}))
 
-    _parse_target_overrides(feat_data.get("target", {}), feature)
+    parse_target_overrides(feat_data.get("target", {}), feature, resolver)
     return feature
 
 
-def _parse_features_and_envs(
+def parse_features_and_envs(
     source: dict[str, Any],
     config: WorkspaceConfig,
     path: Path,
@@ -293,15 +474,24 @@ def _parse_features_and_envs(
     all named features, and all environments.  Shared by
     ``PixiTomlParser`` and ``PyprojectTomlParser``.
     """
-    config.features[Feature.DEFAULT_NAME] = _parse_feature(Feature.DEFAULT_NAME, source)
+    resolver = WorkspaceDependencyResolver(
+        workspace_dependencies=source.get("workspace", {}).get("dependencies", {}),
+        path=path,
+    )
+    config.workspace_dependencies = resolver.workspace_dependencies
+    config.features[Feature.DEFAULT_NAME] = parse_feature(
+        Feature.DEFAULT_NAME,
+        source,
+        resolver,
+    )
 
     for feat_name, feat_data in source.get("feature", {}).items():
-        config.features[feat_name] = _parse_feature(feat_name, feat_data)
+        config.features[feat_name] = parse_feature(feat_name, feat_data, resolver)
 
     envs_data = source.get("environments", {})
     if envs_data:
         for env_name, env_val in envs_data.items():
-            config.environments[env_name] = _parse_environment(env_name, env_val, path)
+            config.environments[env_name] = parse_environment(env_name, env_val, path)
     else:
         config.environments[Environment.DEFAULT_NAME] = Environment(
             name=Environment.DEFAULT_NAME

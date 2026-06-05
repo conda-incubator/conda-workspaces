@@ -328,7 +328,7 @@ class ManifestParser(ABC):
         channels = list(envs[0].config.channels)
 
         # Per-platform specs as ``{name: suffix}`` dicts symmetric with
-        # ``toml._parse_conda_deps`` / ``toml._parse_pypi_deps`` — a
+        # ``WorkspaceDependencyResolver`` / ``toml.parse_pypi_dependencies`` — a
         # name-only MatchSpec round-trips as ``"*"``, versioned
         # MatchSpecs keep their ``conda_build_form`` suffix, PyPI
         # entries keep their ``Requirement.specifier`` string.  When

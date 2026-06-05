@@ -94,6 +94,7 @@ Workspace metadata.
 | `platforms` | array of *platform* | **yes** | Platforms the workspace targets.  Used to drive multi-platform solves. |
 | `channel-priority` | string | no | One of `"strict"`, `"flexible"`, `"disabled"`.  Maps to conda's solver setting. |
 | `envs-dir` | string | no | Where per-env prefixes live, relative to the workspace root.  Default: `.conda/envs`. |
+| `dependencies` | conda deps | no | Root-level dependency pool used by `{ workspace = true }` entries in dependency tables. |
 
 A *channel* is either:
 
@@ -106,11 +107,40 @@ A *platform* is a conda subdir string from the closed enum defined in
 the [JSON schema][schema] under `$defs.platform` (e.g. `linux-64`,
 `osx-arm64`, `win-64`, `noarch`).
 
+### `[workspace.dependencies]`
+
+Reusable conda package specs keyed by package name. Regular dependency
+tables can opt into a root spec with `{ workspace = true }`, which keeps
+shared versions in one place while preserving explicit package membership
+in each feature or target table. This follows the workspace dependency
+inheritance syntax that pixi added in 0.70.0.
+
+```toml
+[workspace.dependencies]
+numpy = "1.*"
+cmake = { version = ">=3.28", channel = "conda-forge" }
+
+[dependencies]
+python = ">=3.12"
+numpy = { workspace = true }
+
+[feature.build.dependencies]
+cmake = { workspace = true, build = "h*" }
+```
+
+The inherited entry uses the root spec as a base. Non-version fields such
+as `build`, `channel`, `subdir`, `md5`, `sha256`, `url`, `file-name`,
+`license`, `license-family`, `features`, and `track-features` may be
+set on the consuming dependency to layer on top. `version` is owned by
+the workspace entry; setting both `workspace = true` and `version` is an
+error. `workspace = false` is also rejected.
+
 ### `[dependencies]`
 
 Conda packages that belong to the *default feature*.  Keys are package
 names; values are either a version constraint string or a *detailed
-dependency spec*.
+dependency spec*. Detailed specs may also inherit from
+`[workspace.dependencies]` with `{ workspace = true }`.
 
 ```toml
 [dependencies]
@@ -126,6 +156,15 @@ A detailed conda dependency accepts:
 |---|---|---|
 | `version` | string | Version constraint (e.g. `">=12"`). |
 | `build` | string | Build-string glob (e.g. `"*cuda*"`). |
+| `build-number` | string | Build number constraint. |
+| `channel` | string | Channel name or URL for this package. |
+| `subdir` | platform | Platform/subdir constraint. |
+| `md5` / `sha256` | string | Exact package hash. |
+| `url` | string | Exact package URL. |
+| `file-name` | string | Exact package filename. |
+| `license` / `license-family` | string | License constraints. |
+| `features` / `track-features` | array of strings | Feature constraints. |
+| `workspace` | boolean | Must be `true`; inherit from `[workspace.dependencies]`. Mutually exclusive with `version`. |
 
 ### `[pypi-dependencies]`
 

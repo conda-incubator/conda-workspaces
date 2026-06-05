@@ -14,6 +14,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   preserving the requested runtime prefix inside the installed
   environment, and warns if installed files still reference the
   staging prefix. (<gh-issue:77>)
+- Added `[workspace.dependencies]` inheritance for conda, pixi, and
+  pyproject manifests, matching the workspace dependency feature added
+  in pixi 0.70.0. (<gh-issue:80>, <gh-pr:79>)
 
 ## 0.5.0 — 2026-06-02
 
