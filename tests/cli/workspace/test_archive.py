@@ -9,7 +9,14 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
-from conda_workspaces.cli.workspace.archive import execute_archive, execute_unarchive
+from conda_workspaces.cli.workspace.archive import (
+    execute_archive,
+    execute_unarchive,
+    file_contains_bytes,
+    is_absolute_runtime_prefix,
+    runtime_prefix_relative_path,
+    scan_prefix_references,
+)
 from conda_workspaces.exceptions import ArchiveError
 
 from ..conftest import make_args
@@ -36,6 +43,68 @@ _UNARCHIVE_DEFAULTS = {
     "dry_run": False,
     "json": False,
 }
+
+
+@pytest.mark.parametrize(
+    ("prefix", "expected"),
+    [
+        ("/opt/runtime", True),
+        ("/usr/local/vela", True),
+        ("C:/vela/runtime", True),
+        ("C:\\vela\\runtime", True),
+        ("relative/prefix", False),
+        ("runtime", False),
+    ],
+)
+def test_is_absolute_runtime_prefix(prefix: str, expected: bool) -> None:
+    assert is_absolute_runtime_prefix(prefix) is expected
+
+
+@pytest.mark.parametrize(
+    ("prefix", "expected"),
+    [
+        ("/opt/runtime", Path("opt") / "runtime"),
+        ("/usr/local/vela", Path("usr") / "local" / "vela"),
+        ("C:/vela/runtime", Path("vela") / "runtime"),
+        ("C:\\vela\\runtime", Path("vela") / "runtime"),
+    ],
+)
+def test_runtime_prefix_relative_path(prefix: str, expected: Path) -> None:
+    assert runtime_prefix_relative_path(prefix) == expected
+
+
+@pytest.mark.parametrize(
+    ("needle", "expected"),
+    [
+        (b"cde", True),
+        (b"missing", False),
+        (b"", False),
+    ],
+)
+def test_file_contains_bytes(
+    tmp_path: Path,
+    needle: bytes,
+    expected: bool,
+) -> None:
+    path = tmp_path / "payload.bin"
+    path.write_bytes(b"abcde")
+
+    assert file_contains_bytes(path, needle, chunk_size=2) is expected
+
+
+def test_scan_prefix_references_limits_matches(tmp_path: Path) -> None:
+    prefix = tmp_path / "rootfs" / "opt" / "runtime"
+    prefix.mkdir(parents=True)
+    for index in range(3):
+        (prefix / f"match-{index}.txt").write_text(str(prefix), encoding="utf-8")
+    (prefix / "clean.txt").write_text("/opt/runtime", encoding="utf-8")
+    (prefix / "nested").mkdir()
+
+    matches, truncated = scan_prefix_references(prefix, prefix, limit=2)
+
+    assert len(matches) == 2
+    assert truncated is True
+    assert all(path.name.startswith("match-") for path in matches)
 
 
 @pytest.fixture
@@ -228,10 +297,19 @@ def test_execute_unarchive_install_explicit_prefix(
     assert install_args.target_prefix_override == expected_override
 
 
+@pytest.mark.parametrize(
+    ("prefix", "expected_install_suffix"),
+    [
+        ("/opt/runtime", Path("opt") / "runtime"),
+        ("C:/vela/runtime", Path("vela") / "runtime"),
+    ],
+)
 def test_execute_unarchive_install_explicit_prefix_under_dest(
     archive_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    prefix: str,
+    expected_install_suffix: Path,
 ) -> None:
     monkeypatch.chdir(archive_workspace)
     archive = tmp_path / "test.tar.gz"
@@ -253,7 +331,6 @@ def test_execute_unarchive_install_explicit_prefix_under_dest(
 
     target = tmp_path / "extracted"
     dest = tmp_path / "rootfs"
-    prefix = "/opt/runtime"
     args_u = make_args(
         _UNARCHIVE_DEFAULTS,
         archive_path=archive,
@@ -268,7 +345,7 @@ def test_execute_unarchive_install_explicit_prefix_under_dest(
     assert result == 0
     assert len(install_calls) == 1
     install_args = install_calls[0]
-    assert install_args.prefix == dest / "opt" / "runtime"
+    assert install_args.prefix == dest / expected_install_suffix
     assert install_args.target_prefix_override == prefix
 
 
@@ -317,6 +394,48 @@ def test_execute_unarchive_install_under_dest_warns_on_staging_prefix_reference(
     assert str(dest / "opt" / "runtime") in output
     assert "/opt/runtime" in output
     assert "bin/tool" in output.replace("\\", "/")
+
+
+def test_execute_unarchive_install_under_dest_without_staging_prefix_reference(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "test.tar.gz"
+    stream = StringIO()
+    console = Console(file=stream, width=200, highlight=False)
+
+    args_a = make_args(_ARCHIVE_DEFAULTS, output=archive)
+    execute_archive(args_a, console=console)
+
+    def fake_execute_install(args, *, console=None):
+        script = args.prefix / "bin" / "tool"
+        script.parent.mkdir(parents=True)
+        script.write_text(
+            f"#!{args.target_prefix_override}/bin/python\n",
+            encoding="utf-8",
+        )
+        return 0
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.execute_install",
+        fake_execute_install,
+    )
+
+    args_u = make_args(
+        _UNARCHIVE_DEFAULTS,
+        archive_path=archive,
+        target=tmp_path / "extracted",
+        install=True,
+        environment="runtime",
+        prefix="/opt/runtime",
+        dest=tmp_path / "rootfs",
+    )
+    result = execute_unarchive(args_u, console=console)
+
+    assert result == 0
+    assert "Warning:" not in stream.getvalue()
 
 
 def test_execute_unarchive_prefix_requires_install(
