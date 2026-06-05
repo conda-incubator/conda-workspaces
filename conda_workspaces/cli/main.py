@@ -589,6 +589,30 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         help="Install environments from the lockfile after extraction.",
     )
     unarchive_parser.add_argument(
+        "-e",
+        "--environment",
+        default=None,
+        help="Install only this environment when used with --install.",
+    )
+    unarchive_parser.add_argument(
+        "--prefix",
+        type=Path,
+        default=None,
+        help=(
+            "Final runtime prefix for the selected environment."
+            " Requires --install and -e/--environment."
+        ),
+    )
+    unarchive_parser.add_argument(
+        "--dest",
+        type=Path,
+        default=None,
+        help=(
+            "Optional staging root. With --prefix, files are written below"
+            " DEST + PREFIX while preserving PREFIX as the runtime prefix."
+        ),
+    )
+    unarchive_parser.add_argument(
         "--no-install",
         action="store_true",
         default=False,

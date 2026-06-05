@@ -23,6 +23,14 @@ from .. import status
 from . import workspace_context_from_args
 
 
+def _prefix_under_dest(dest: Path, prefix: Path) -> Path:
+    """Return the physical install path for *prefix* staged below *dest*."""
+    parts = prefix.parts
+    if prefix.anchor and parts and parts[0] == prefix.anchor:
+        parts = parts[1:]
+    return dest.joinpath(*parts)
+
+
 def execute_archive(
     args: argparse.Namespace,
     *,
@@ -135,6 +143,43 @@ def execute_unarchive(
             hints=["This does not appear to be a conda workspace archive."],
         )
 
+    env_name = getattr(args, "environment", None)
+    final_prefix = getattr(args, "prefix", None)
+    dest = getattr(args, "dest", None)
+
+    if final_prefix is not None and not args.install:
+        raise ArchiveError(
+            "--prefix requires --install.",
+            hints=["Pass --install when installing to an explicit prefix."],
+        )
+    if dest is not None and not args.install:
+        raise ArchiveError(
+            "--dest requires --install.",
+            hints=["Pass --install when using a staging destination."],
+        )
+
+    if args.install:
+        if final_prefix is not None and not env_name:
+            raise ArchiveError(
+                "--prefix requires an explicit environment.",
+                hints=["Pass -e/--environment with --prefix."],
+            )
+        if dest is not None and final_prefix is None:
+            raise ArchiveError(
+                "--dest requires --prefix.",
+                hints=[
+                    "Pass --prefix to declare the final runtime prefix for"
+                    " the selected environment.",
+                ],
+            )
+        if final_prefix is not None:
+            final_prefix = Path(final_prefix).expanduser()
+            if not final_prefix.is_absolute():
+                raise ArchiveError(
+                    "--prefix must be an absolute path.",
+                    hints=["Pass an absolute runtime prefix such as /opt/runtime."],
+                )
+
     status.message(
         console,
         "Extracting",
@@ -165,16 +210,27 @@ def execute_unarchive(
                 )
 
     if args.install:
+        install_prefix = final_prefix
+        target_prefix_override = None
+        if final_prefix is not None:
+            install_prefix = final_prefix
+            if dest is not None:
+                dest = Path(dest).expanduser().resolve()
+                install_prefix = _prefix_under_dest(dest, final_prefix)
+                target_prefix_override = final_prefix
+
         from .install import execute_install
 
         install_args = argparse.Namespace(
             file=str(target),
-            environment=None,
+            environment=env_name,
             force_reinstall=False,
             locked=True,
             frozen=False,
             dry_run=False,
             json=False,
+            prefix=install_prefix,
+            target_prefix_override=target_prefix_override,
         )
         return execute_install(install_args, console=console)
 

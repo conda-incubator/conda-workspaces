@@ -294,6 +294,22 @@ def test_archive_subparser_registered() -> None:
 
 def test_unarchive_subparser_registered() -> None:
     parser = generate_workspace_parser()
-    ns = parser.parse_args(["unarchive", "project.tar.gz"])
+    ns = parser.parse_args(
+        [
+            "unarchive",
+            "project.tar.gz",
+            "--install",
+            "-e",
+            "runtime",
+            "--prefix",
+            "/opt/runtime",
+            "--dest",
+            "/tmp/rootfs",
+        ]
+    )
     assert ns.subcmd == "unarchive"
     assert str(ns.archive_path) == "project.tar.gz"
+    assert ns.install is True
+    assert ns.environment == "runtime"
+    assert str(ns.prefix) == "/opt/runtime"
+    assert str(ns.dest) == "/tmp/rootfs"

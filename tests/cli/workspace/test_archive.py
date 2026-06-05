@@ -4,17 +4,15 @@ from __future__ import annotations
 
 import tarfile
 from io import StringIO
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 from rich.console import Console
 
 from conda_workspaces.cli.workspace.archive import execute_archive, execute_unarchive
+from conda_workspaces.exceptions import ArchiveError
 
 from ..conftest import make_args
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 _ARCHIVE_DEFAULTS = {
     "file": None,
@@ -32,6 +30,9 @@ _UNARCHIVE_DEFAULTS = {
     "target": None,
     "install": False,
     "no_install": False,
+    "environment": None,
+    "prefix": None,
+    "dest": None,
     "dry_run": False,
     "json": False,
 }
@@ -179,3 +180,186 @@ def test_execute_unarchive_no_unsigned_warning(
     lower = output.lower()
     assert "not signed" not in lower
     assert "unsigned" not in lower
+
+
+def test_execute_unarchive_install_explicit_prefix(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "test.tar.gz"
+    console = Console(file=StringIO(), width=200, highlight=False)
+
+    args_a = make_args(_ARCHIVE_DEFAULTS, output=archive)
+    execute_archive(args_a, console=console)
+
+    install_calls: list[object] = []
+
+    def fake_execute_install(args, *, console=None):
+        install_calls.append(args)
+        return 0
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.execute_install",
+        fake_execute_install,
+    )
+
+    target = tmp_path / "extracted"
+    prefix = Path("/opt/runtime")
+    args_u = make_args(
+        _UNARCHIVE_DEFAULTS,
+        archive_path=archive,
+        target=target,
+        install=True,
+        environment="runtime",
+        prefix=prefix,
+    )
+    result = execute_unarchive(args_u, console=console)
+
+    assert result == 0
+    assert len(install_calls) == 1
+    install_args = install_calls[0]
+    assert install_args.file == str(target)
+    assert install_args.environment == "runtime"
+    assert install_args.locked is True
+    assert install_args.prefix == prefix
+    assert install_args.target_prefix_override is None
+
+
+def test_execute_unarchive_install_explicit_prefix_under_dest(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "test.tar.gz"
+    console = Console(file=StringIO(), width=200, highlight=False)
+
+    args_a = make_args(_ARCHIVE_DEFAULTS, output=archive)
+    execute_archive(args_a, console=console)
+
+    install_calls: list[object] = []
+
+    def fake_execute_install(args, *, console=None):
+        install_calls.append(args)
+        return 0
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.execute_install",
+        fake_execute_install,
+    )
+
+    target = tmp_path / "extracted"
+    dest = tmp_path / "rootfs"
+    prefix = Path("/opt/runtime")
+    args_u = make_args(
+        _UNARCHIVE_DEFAULTS,
+        archive_path=archive,
+        target=target,
+        install=True,
+        environment="runtime",
+        prefix=prefix,
+        dest=dest,
+    )
+    result = execute_unarchive(args_u, console=console)
+
+    assert result == 0
+    assert len(install_calls) == 1
+    install_args = install_calls[0]
+    assert install_args.prefix == dest / "opt" / "runtime"
+    assert install_args.target_prefix_override == prefix
+
+
+def test_execute_unarchive_prefix_requires_install(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "test.tar.gz"
+    console = Console(file=StringIO(), width=200, highlight=False)
+
+    args_a = make_args(_ARCHIVE_DEFAULTS, output=archive)
+    execute_archive(args_a, console=console)
+
+    args_u = make_args(
+        _UNARCHIVE_DEFAULTS,
+        archive_path=archive,
+        target=tmp_path / "extracted",
+        environment="runtime",
+        prefix=Path("/opt/runtime"),
+    )
+    with pytest.raises(ArchiveError, match="--prefix requires --install"):
+        execute_unarchive(args_u, console=console)
+
+
+def test_execute_unarchive_prefix_requires_environment(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "test.tar.gz"
+    console = Console(file=StringIO(), width=200, highlight=False)
+
+    args_a = make_args(_ARCHIVE_DEFAULTS, output=archive)
+    execute_archive(args_a, console=console)
+
+    args_u = make_args(
+        _UNARCHIVE_DEFAULTS,
+        archive_path=archive,
+        target=tmp_path / "extracted",
+        install=True,
+        prefix=Path("/opt/runtime"),
+    )
+    with pytest.raises(ArchiveError, match="--prefix requires an explicit"):
+        execute_unarchive(args_u, console=console)
+
+
+def test_execute_unarchive_dest_requires_prefix(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "test.tar.gz"
+    console = Console(file=StringIO(), width=200, highlight=False)
+
+    args_a = make_args(_ARCHIVE_DEFAULTS, output=archive)
+    execute_archive(args_a, console=console)
+
+    args_u = make_args(
+        _UNARCHIVE_DEFAULTS,
+        archive_path=archive,
+        target=tmp_path / "extracted",
+        install=True,
+        environment="runtime",
+        dest=tmp_path / "rootfs",
+    )
+    with pytest.raises(ArchiveError, match="--dest requires --prefix"):
+        execute_unarchive(args_u, console=console)
+
+
+def test_execute_unarchive_prefix_must_be_absolute(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "test.tar.gz"
+    console = Console(file=StringIO(), width=200, highlight=False)
+
+    args_a = make_args(_ARCHIVE_DEFAULTS, output=archive)
+    execute_archive(args_a, console=console)
+
+    args_u = make_args(
+        _UNARCHIVE_DEFAULTS,
+        archive_path=archive,
+        target=tmp_path / "extracted",
+        install=True,
+        environment="runtime",
+        prefix=Path("relative/prefix"),
+    )
+    with pytest.raises(ArchiveError, match="--prefix must be an absolute path"):
+        execute_unarchive(args_u, console=console)

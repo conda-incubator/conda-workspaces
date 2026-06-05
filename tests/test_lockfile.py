@@ -600,6 +600,73 @@ def test_install_from_lockfile(
     assert install_calls[0]["prefix"] == str(ctx.env_prefix("default"))
 
 
+def test_install_from_lockfile_explicit_prefix_override(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """install_from_lockfile can install elsewhere while embedding a final prefix."""
+    ctx = workspace_ctx_factory()
+
+    lockfile = tmp_path / LOCKFILE_NAME
+    lockfile.write_text(
+        "version: 1\n"
+        "environments:\n"
+        "  default:\n"
+        "    channels:\n"
+        "    - url: conda-forge\n"
+        "    packages:\n"
+        "      linux-64:\n"
+        "      - conda: https://example.com/python.conda\n"
+        "packages:\n"
+        "- conda: https://example.com/python.conda\n"
+        "  sha256: aaa\n",
+        encoding="utf-8",
+    )
+
+    records_sentinel = [object()]
+
+    def fake_get_records(lines):
+        assert lines == ["https://example.com/python.conda"]
+        return records_sentinel
+
+    monkeypatch.setattr(
+        "conda.misc.get_package_records_from_explicit",
+        fake_get_records,
+    )
+
+    install_prefix = tmp_path / "rootfs" / "opt" / "runtime"
+    final_prefix = tmp_path / "final" / "runtime"
+    install_calls: list[dict] = []
+
+    def fake_install(*, package_cache_records, prefix):
+        install_calls.append(
+            {
+                "records": package_cache_records,
+                "prefix": prefix,
+                "target_prefix_override": conda_context.target_prefix_override,
+            }
+        )
+
+    monkeypatch.setattr(
+        "conda.misc.install_explicit_packages",
+        fake_install,
+    )
+
+    install_from_lockfile(
+        ctx,
+        "default",
+        prefix=install_prefix,
+        target_prefix_override=final_prefix,
+    )
+
+    assert len(install_calls) == 1
+    assert install_calls[0]["records"] == records_sentinel
+    assert install_calls[0]["prefix"] == str(install_prefix)
+    assert install_calls[0]["target_prefix_override"] == str(final_prefix)
+    assert conda_context.target_prefix_override == ""
+
+
 @pytest.mark.parametrize(
     ("host", "target", "expected"),
     [

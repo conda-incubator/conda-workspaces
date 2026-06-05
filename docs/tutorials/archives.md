@@ -99,6 +99,36 @@ conda workspace unarchive my-project.tar.zst --target /path/to/destination --ins
 This is equivalent to extracting, changing into the directory, and
 running `conda workspace install --locked`, but without the extra steps.
 
+## Install an environment to an explicit prefix
+
+Use `-e/--environment` with `--prefix` to install one archived workspace
+environment to a final runtime prefix:
+
+```bash
+conda workspace unarchive my-project.tar.zst \
+  --target /tmp/workspace \
+  --install \
+  -e runtime \
+  --prefix /opt/runtime
+```
+
+This extracts the workspace into `/tmp/workspace` and installs the
+`runtime` environment from the lockfile directly at `/opt/runtime`.
+
+For image builders or staged filesystem roots, add `--dest`:
+
+```bash
+conda workspace unarchive my-project.tar.zst \
+  --target /tmp/workspace \
+  --install \
+  --dest /tmp/rootfs \
+  -e runtime \
+  --prefix /opt/runtime
+```
+
+With `--dest`, files are written under `/tmp/rootfs/opt/runtime`, but
+the environment's final runtime prefix remains `/opt/runtime`.
+
 ## Lock before archiving
 
 If your lockfile is out of date or does not exist yet, pass `--lock`
