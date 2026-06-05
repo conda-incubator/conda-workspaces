@@ -33,9 +33,18 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
     locked = getattr(args, "locked", False)
     frozen = getattr(args, "frozen", False)
     no_lock = getattr(args, "no_lock", False)
+    prefix = getattr(args, "prefix", None)
+    target_prefix_override = getattr(args, "target_prefix_override", None)
 
     if frozen:
-        return install_from_lockfile_all(ctx, config, env_name, console=console)
+        return install_from_lockfile_all(
+            ctx,
+            config,
+            env_name,
+            console=console,
+            prefix=prefix,
+            target_prefix_override=target_prefix_override,
+        )
 
     strict = locked or (ctx.is_ci and not no_lock)
     if strict:
@@ -48,12 +57,26 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
                 lockfile_path(ctx),
                 reason=lock.reason,
             )
-        return install_from_lockfile_all(ctx, config, env_name, console=console)
+        return install_from_lockfile_all(
+            ctx,
+            config,
+            env_name,
+            console=console,
+            prefix=prefix,
+            target_prefix_override=target_prefix_override,
+        )
 
     if not no_lock and not force:
         lock = lockfile_status(ctx, config)
         if lock.status == LockfileStatus.UP_TO_DATE:
-            return install_from_lockfile_all(ctx, config, env_name, console=console)
+            return install_from_lockfile_all(
+                ctx,
+                config,
+                env_name,
+                console=console,
+                prefix=prefix,
+                target_prefix_override=target_prefix_override,
+            )
         if lock.status == LockfileStatus.OUT_OF_DATE:
             console.print(
                 f"[bold yellow]Lockfile out of date[/bold yellow]:"
@@ -78,8 +101,18 @@ def install_from_lockfile_all(
     env_name: str | None,
     *,
     console: Console,
+    prefix: Path | None = None,
+    target_prefix_override: str | Path | None = None,
 ) -> int:
     """Install environments from existing lockfiles (no solving)."""
+    if (prefix is not None or target_prefix_override is not None) and not env_name:
+        from ...exceptions import CondaWorkspacesError
+
+        raise CondaWorkspacesError(
+            "Explicit prefix installation requires an environment name.",
+            hints=["Pass -e/--environment with --prefix."],
+        )
+
     if env_name:
         status.message(
             console,
@@ -89,7 +122,15 @@ def install_from_lockfile_all(
             style="bold blue",
             ellipsis=True,
         )
-        install_from_lockfile(ctx, env_name)
+        if prefix is None and target_prefix_override is None:
+            install_from_lockfile(ctx, env_name)
+        else:
+            install_from_lockfile(
+                ctx,
+                env_name,
+                prefix=prefix,
+                target_prefix_override=target_prefix_override,
+            )
         status.message(console, "Installed", "environment", env_name)
     else:
         env_names = list(config.environments)

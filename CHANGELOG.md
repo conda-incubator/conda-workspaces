@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added
+
+- `conda workspace unarchive --install` can install a selected
+  environment to an explicit final prefix with `-e/--environment` and
+  `--prefix`. `--dest` stages files below a filesystem root while
+  preserving the requested runtime prefix inside the installed
+  environment, and warns if installed files still reference the
+  staging prefix. (<gh-issue:77>)
+
 ## 0.5.0 — 2026-06-02
 
 ### Added

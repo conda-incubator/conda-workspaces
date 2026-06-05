@@ -767,6 +767,20 @@ Extract an archive and install environments in one step:
 conda workspace unarchive my-project.tar.zst --target ./restored --install
 ```
 
+Install one archived environment to a final runtime prefix, optionally
+under a staged filesystem root:
+
+```bash
+conda workspace unarchive my-project.tar.zst \
+  --install \
+  --dest /tmp/rootfs \
+  -e runtime \
+  --prefix /opt/runtime
+```
+
+When `--dest` is used, `unarchive` warns if installed files still
+reference the physical staging prefix.
+
 Pass `--lock` to solve and update the lockfile before archiving:
 
 ```bash

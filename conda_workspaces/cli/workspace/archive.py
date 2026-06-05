@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
+from os.path import expanduser
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from rich.console import Console
+from rich.markup import escape
 
 from ...archive import (
     ARCHIVE_SUFFIXES,
@@ -21,6 +23,90 @@ from ...lockfile import lockfile_path as _lockfile_path
 from ...models import ArchiveConfig
 from .. import status
 from . import workspace_context_from_args
+
+
+def is_absolute_runtime_prefix(prefix: str) -> bool:
+    """Return whether *prefix* is absolute as a POSIX or Windows path."""
+    return PurePosixPath(prefix).is_absolute() or PureWindowsPath(prefix).is_absolute()
+
+
+def runtime_prefix_relative_path(prefix: str) -> Path:
+    """Return *prefix* relative to its root using host path separators."""
+    posix_prefix = PurePosixPath(prefix)
+    if posix_prefix.is_absolute():
+        return Path(*posix_prefix.relative_to(posix_prefix.anchor).parts)
+
+    windows_prefix = PureWindowsPath(prefix)
+    return Path(*windows_prefix.relative_to(windows_prefix.anchor).parts)
+
+
+def file_contains_bytes(
+    path: Path, needle: bytes, *, chunk_size: int = 1024 * 1024
+) -> bool:
+    """Return whether *path* contains *needle* without loading it all at once."""
+    if not needle:
+        return False
+
+    overlap = b""
+    try:
+        with path.open("rb") as fh:
+            while chunk := fh.read(chunk_size):
+                data = overlap + chunk
+                if needle in data:
+                    return True
+                overlap = data[-(len(needle) - 1) :] if len(needle) > 1 else b""
+    except OSError:
+        return False
+    return False
+
+
+def scan_prefix_references(
+    root: Path,
+    prefix: Path,
+    *,
+    limit: int = 10,
+) -> tuple[list[Path], bool]:
+    """Find files below *root* that still contain *prefix* as bytes."""
+    if not root.is_dir():
+        return [], False
+
+    needle = str(prefix).encode()
+    matches: list[Path] = []
+    for path in root.rglob("*"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        if file_contains_bytes(path, needle):
+            matches.append(path)
+            if len(matches) > limit:
+                return matches[:limit], True
+    return matches, False
+
+
+def warn_staging_prefix_references(
+    console: Console,
+    *,
+    install_prefix: Path,
+    runtime_prefix: str,
+) -> None:
+    """Warn when a staged install still contains the physical staging prefix."""
+    matches, truncated = scan_prefix_references(install_prefix, install_prefix)
+    if not matches:
+        return
+
+    console.print(
+        "[bold yellow]Warning:[/bold yellow] "
+        "installed files still reference the staging prefix"
+    )
+    console.print(f"  [dim]staging prefix:[/dim] {escape(str(install_prefix))}")
+    console.print(f"  [dim]runtime prefix:[/dim] {escape(str(runtime_prefix))}")
+    for path in matches:
+        try:
+            display_path = path.relative_to(install_prefix)
+        except ValueError:
+            display_path = path
+        console.print(f"  [dim]- {escape(str(display_path))}[/dim]")
+    if truncated:
+        console.print("  [dim]additional matches omitted[/dim]")
 
 
 def execute_archive(
@@ -135,6 +221,44 @@ def execute_unarchive(
             hints=["This does not appear to be a conda workspace archive."],
         )
 
+    env_name = getattr(args, "environment", None)
+    final_prefix_arg = getattr(args, "prefix", None)
+    final_prefix = str(final_prefix_arg) if final_prefix_arg is not None else None
+    dest = getattr(args, "dest", None)
+
+    if final_prefix is not None and not args.install:
+        raise ArchiveError(
+            "--prefix requires --install.",
+            hints=["Pass --install when installing to an explicit prefix."],
+        )
+    if dest is not None and not args.install:
+        raise ArchiveError(
+            "--dest requires --install.",
+            hints=["Pass --install when using a staging destination."],
+        )
+
+    if args.install:
+        if final_prefix is not None and not env_name:
+            raise ArchiveError(
+                "--prefix requires an explicit environment.",
+                hints=["Pass -e/--environment with --prefix."],
+            )
+        if dest is not None and final_prefix is None:
+            raise ArchiveError(
+                "--dest requires --prefix.",
+                hints=[
+                    "Pass --prefix to declare the final runtime prefix for"
+                    " the selected environment.",
+                ],
+            )
+        if final_prefix is not None:
+            final_prefix = expanduser(final_prefix)
+            if not is_absolute_runtime_prefix(final_prefix):
+                raise ArchiveError(
+                    "--prefix must be an absolute path.",
+                    hints=["Pass an absolute runtime prefix such as /opt/runtime."],
+                )
+
     status.message(
         console,
         "Extracting",
@@ -165,17 +289,40 @@ def execute_unarchive(
                 )
 
     if args.install:
+        install_prefix = Path(final_prefix) if final_prefix is not None else None
+        target_prefix_override = None
+        if final_prefix is not None:
+            if dest is not None:
+                dest = Path(dest).expanduser().resolve()
+                install_prefix = dest / runtime_prefix_relative_path(final_prefix)
+                target_prefix_override = final_prefix
+            elif str(install_prefix) != final_prefix:
+                target_prefix_override = final_prefix
+
         from .install import execute_install
 
         install_args = argparse.Namespace(
             file=str(target),
-            environment=None,
+            environment=env_name,
             force_reinstall=False,
             locked=True,
             frozen=False,
             dry_run=False,
             json=False,
+            prefix=install_prefix,
+            target_prefix_override=target_prefix_override,
         )
-        return execute_install(install_args, console=console)
+        result = execute_install(install_args, console=console)
+        if (
+            result == 0
+            and install_prefix is not None
+            and target_prefix_override is not None
+        ):
+            warn_staging_prefix_references(
+                console,
+                install_prefix=install_prefix,
+                runtime_prefix=target_prefix_override,
+            )
+        return result
 
     return 0

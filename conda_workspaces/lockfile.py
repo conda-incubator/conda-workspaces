@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import io
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -628,7 +629,13 @@ def merge_lockfiles(paths: Sequence[Path], ctx: WorkspaceContext) -> Path:
     return out_path
 
 
-def install_from_lockfile(ctx: WorkspaceContext, env_name: str) -> None:
+def install_from_lockfile(
+    ctx: WorkspaceContext,
+    env_name: str,
+    *,
+    prefix: Path | None = None,
+    target_prefix_override: str | Path | None = None,
+) -> None:
     """Install an environment from ``conda.lock``.
 
     Reads the lockfile via :class:`CondaLockLoader`, extracts the
@@ -639,6 +646,7 @@ def install_from_lockfile(ctx: WorkspaceContext, env_name: str) -> None:
     Raises ``LockfileNotFoundError`` if the lockfile is missing or does
     not contain the requested environment/platform.
     """
+    from conda.base.context import context as conda_context
     from conda.misc import (
         get_package_records_from_explicit,
         install_explicit_packages,
@@ -660,12 +668,22 @@ def install_from_lockfile(ctx: WorkspaceContext, env_name: str) -> None:
 
     urls = [ref["conda"] for ref in platform_pkgs if "conda" in ref]
 
-    prefix = ctx.env_prefix(env_name)
-    prefix.mkdir(parents=True, exist_ok=True)
+    install_prefix = prefix or ctx.env_prefix(env_name)
+    install_prefix.mkdir(parents=True, exist_ok=True)
 
-    records = get_package_records_from_explicit(urls)
-    install_explicit_packages(
-        package_cache_records=list(records),
-        prefix=str(prefix),
+    override = (
+        conda_context._override(
+            "target_prefix_override",
+            str(target_prefix_override),
+        )
+        if target_prefix_override is not None
+        else nullcontext()
     )
+
+    with override:
+        records = get_package_records_from_explicit(urls)
+        install_explicit_packages(
+            package_cache_records=list(records),
+            prefix=str(install_prefix),
+        )
     sys.stdout.flush()
