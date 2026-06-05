@@ -64,6 +64,40 @@ def test_parse_default_dependencies(parser, sample_pixi_toml):
     assert "numpy" in default.conda_dependencies
 
 
+def test_parse_workspace_dependency_inheritance(tmp_path: Path):
+    content = """\
+[workspace]
+name = "workspace-deps"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[workspace.dependencies]
+numpy = "1.*"
+cmake = { version = ">=3.28", channel = "conda-forge" }
+
+[dependencies]
+python = ">=3.12"
+numpy = { workspace = true }
+
+[feature.build.dependencies]
+cmake = { workspace = true, build = "h*" }
+"""
+    path = tmp_path / "pixi.toml"
+    path.write_text(content, encoding="utf-8")
+
+    config = PixiTomlParser().parse(path)
+    assert str(config.workspace_dependencies["numpy"].version) == "1.*"
+
+    default = config.features["default"]
+    assert str(default.conda_dependencies["numpy"].version) == "1.*"
+
+    build = config.features["build"]
+    cmake = build.conda_dependencies["cmake"]
+    assert str(cmake.version) == ">=3.28"
+    assert cmake.get_raw_value("channel") == "https://conda.anaconda.org/conda-forge"
+    assert cmake.get_raw_value("build") == "h*"
+
+
 def test_parse_features(parser, sample_pixi_toml):
     config = parser.parse(sample_pixi_toml)
     assert "test" in config.features

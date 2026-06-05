@@ -270,6 +270,31 @@ myst-parser = ">=3.0"
 When an environment includes multiple features, dependencies are merged
 in order. Later features override earlier ones for the same package name.
 
+### Workspace dependency inheritance
+
+Use `[workspace.dependencies]` to centralize conda specs that multiple
+dependency tables should share. A table entry opts in explicitly with
+`{ workspace = true }`. Pixi added the same workspace dependency
+inheritance syntax in 0.70.0, and conda-workspaces reads it from
+`conda.toml`, `pixi.toml`, and supported `pyproject.toml` tables.
+
+```toml
+[workspace.dependencies]
+numpy = "1.*"
+cmake = { version = ">=3.28", channel = "conda-forge" }
+
+[dependencies]
+numpy = { workspace = true }
+
+[feature.build.dependencies]
+cmake = { workspace = true, build = "h*" }
+```
+
+The root spec supplies the version and any other base match fields. The
+consuming entry may add non-version fields such as `build`, `channel`,
+or `subdir`; restating `version` alongside `workspace = true` is an
+error.
+
 ## Channels
 
 Channels are specified at the workspace level and can be overridden per

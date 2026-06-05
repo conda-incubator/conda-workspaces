@@ -22,7 +22,7 @@ from ..exceptions import (
 from ..models import WorkspaceConfig
 from .base import ManifestParser
 from .normalize import parse_feature_tasks, parse_tasks_and_targets
-from .toml import _parse_channels, _parse_features_and_envs, parse_archive_config
+from .toml import parse_archive_config, parse_channels, parse_features_and_envs
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -180,7 +180,7 @@ class PyprojectTomlParser(ManifestParser):
             name=ws.get("name") or data.get("project", {}).get("name"),
             version=ws.get("version") or data.get("project", {}).get("version"),
             description=data.get("project", {}).get("description"),
-            channels=_parse_channels(ws.get("channels", [])),
+            channels=parse_channels(ws.get("channels", [])),
             platforms=list(ws.get("platforms", [])),
             root=root,
             manifest_path=str(path),
@@ -188,7 +188,7 @@ class PyprojectTomlParser(ManifestParser):
             archive=parse_archive_config(ws),
         )
 
-        _parse_features_and_envs(source, config, path)
+        parse_features_and_envs(source, config, path)
         return config
 
     def has_tasks(self, path: Path) -> bool:

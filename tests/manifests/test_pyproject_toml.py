@@ -61,6 +61,29 @@ def test_parse_dependencies(parser, sample_pyproject_toml):
     assert str(default.conda_dependencies["python"].version) == ">=3.11"
 
 
+def test_parse_workspace_dependency_inheritance(parser, tmp_path: Path):
+    content = """\
+[project]
+name = "workspace-deps"
+
+[tool.conda.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[tool.conda.workspace.dependencies]
+numpy = "1.*"
+
+[tool.conda.dependencies]
+numpy = { workspace = true }
+"""
+    path = tmp_path / "pyproject.toml"
+    path.write_text(content, encoding="utf-8")
+
+    config = parser.parse(path)
+    assert str(config.workspace_dependencies["numpy"].version) == "1.*"
+    assert str(config.features["default"].conda_dependencies["numpy"].version) == "1.*"
+
+
 def test_parse_features(parser, sample_pyproject_toml):
     config = parser.parse(sample_pyproject_toml)
     assert "test" in config.features

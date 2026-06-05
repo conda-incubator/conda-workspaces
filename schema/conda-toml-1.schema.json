@@ -114,6 +114,10 @@
         "envs-dir": {
           "type": "string",
           "description": "Where per-environment prefixes are written, relative to the workspace root.  Default: '.conda/envs'."
+        },
+        "dependencies": {
+          "$ref": "#/$defs/workspaceCondaDependencies",
+          "description": "Root-level conda dependency pool. Dependency tables may opt into these specs with { workspace = true }."
         }
       },
       "required": ["channels", "platforms"],
@@ -147,27 +151,129 @@
           "description": "Version constraint string (e.g. '>=3.10', '>=1.24,<2', '*')."
         },
         {
-          "type": "object",
-          "description": "Detailed dependency specification with version and optional build string.",
-          "properties": {
-            "version": {
-              "type": "string",
-              "description": "Version constraint (e.g. '>=12')."
-            },
-            "build": {
-              "type": "string",
-              "description": "Build string glob pattern (e.g. '*cuda*')."
-            }
-          },
-          "additionalProperties": false
+          "$ref": "#/$defs/condaDetailedDependencySpec"
+        },
+        {
+          "$ref": "#/$defs/condaInheritedDependencySpec"
         }
       ]
+    },
+    "workspaceCondaDependencySpec": {
+      "description": "A concrete conda dependency specification for [workspace.dependencies].",
+      "oneOf": [
+        {
+          "type": "string",
+          "description": "Version constraint string (e.g. '>=3.10', '>=1.24,<2', '*')."
+        },
+        {
+          "$ref": "#/$defs/condaDetailedDependencySpec"
+        }
+      ]
+    },
+    "condaDetailedDependencySpec": {
+      "type": "object",
+      "description": "Detailed dependency specification with conda MatchSpec fields.",
+      "properties": {
+        "version": {
+          "type": "string",
+          "description": "Version constraint (e.g. '>=12')."
+        },
+        "build": {
+          "type": "string",
+          "description": "Build string glob pattern (e.g. '*cuda*')."
+        },
+        "build-number": {
+          "type": "string",
+          "description": "Build number constraint."
+        },
+        "channel": {
+          "type": "string",
+          "description": "Channel name or URL for this package."
+        },
+        "subdir": {
+          "$ref": "#/$defs/platform",
+          "description": "Platform/subdir constraint for this package."
+        },
+        "md5": {
+          "type": "string",
+          "description": "Exact package MD5 hash."
+        },
+        "sha256": {
+          "type": "string",
+          "description": "Exact package SHA256 hash."
+        },
+        "url": {
+          "type": "string",
+          "description": "Exact package URL."
+        },
+        "file-name": {
+          "type": "string",
+          "description": "Exact package filename."
+        },
+        "license": {
+          "type": "string",
+          "description": "Package license constraint."
+        },
+        "license-family": {
+          "type": "string",
+          "description": "Package license family constraint."
+        },
+        "features": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Required package features."
+        },
+        "track-features": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Required package track features."
+        }
+      },
+      "additionalProperties": false
+    },
+    "condaInheritedDependencySpec": {
+      "type": "object",
+      "description": "Dependency specification inherited from [workspace.dependencies].",
+      "properties": {
+        "workspace": {
+          "type": "boolean",
+          "const": true,
+          "description": "Inherit the spec from [workspace.dependencies]."
+        },
+        "build": { "type": "string" },
+        "build-number": { "type": "string" },
+        "channel": { "type": "string" },
+        "subdir": { "$ref": "#/$defs/platform" },
+        "md5": { "type": "string" },
+        "sha256": { "type": "string" },
+        "url": { "type": "string" },
+        "file-name": { "type": "string" },
+        "license": { "type": "string" },
+        "license-family": { "type": "string" },
+        "features": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "track-features": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["workspace"],
+      "additionalProperties": false
     },
     "condaDependencies": {
       "type": "object",
       "description": "Conda package dependencies keyed by package name.",
       "additionalProperties": {
         "$ref": "#/$defs/condaDependencySpec"
+      }
+    },
+    "workspaceCondaDependencies": {
+      "type": "object",
+      "description": "Conda package dependency pool keyed by package name.",
+      "additionalProperties": {
+        "$ref": "#/$defs/workspaceCondaDependencySpec"
       }
     },
     "pypiDependencySpec": {

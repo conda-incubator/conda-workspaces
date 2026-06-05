@@ -164,6 +164,10 @@ class WorkspaceConfig:
     channels: list[Channel] = field(default_factory=list)
     platforms: list[str] = field(default_factory=list)
 
+    # Root-level dependency pool from [workspace.dependencies].
+    # Concrete feature dependencies may opt in with { workspace = true }.
+    workspace_dependencies: dict[str, MatchSpec] = field(default_factory=dict)
+
     # Features keyed by name; always includes "default"
     features: dict[str, Feature] = field(default_factory=dict)
 

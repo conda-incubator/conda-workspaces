@@ -270,6 +270,25 @@ scipy = "*"          # any version
 cuda-toolkit = { version = ">=12", build = "*cuda*" }
 ```
 
+Shared conda specs can live under `[workspace.dependencies]`. Any conda
+dependency table can opt into a shared spec with `{ workspace = true }`;
+the consuming entry may add non-version fields such as `build` or
+`channel`. This matches the workspace dependency inheritance syntax
+that pixi added in 0.70.0.
+
+```toml
+[workspace.dependencies]
+numpy = "1.*"
+cmake = { version = ">=3.28", channel = "conda-forge" }
+
+[dependencies]
+python = ">=3.12"
+numpy = { workspace = true }
+
+[feature.build.dependencies]
+cmake = { workspace = true, build = "h*" }
+```
+
 ## Feature table
 
 Each `[feature.<name>]` table can contain:
