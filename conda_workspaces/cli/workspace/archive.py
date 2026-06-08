@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import shutil
+import tempfile
 from os.path import expanduser
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import TYPE_CHECKING
 
 from rich.console import Console
 from rich.markup import escape
@@ -14,6 +17,7 @@ from ...archive import (
     collect_bundle_packages,
     create_archive,
     extract_archive,
+    has_absolute_path_syntax,
     inspect_archive,
     prime_package_cache,
     verify_package_hashes,
@@ -21,13 +25,17 @@ from ...archive import (
 from ...exceptions import ArchiveError
 from ...lockfile import lockfile_path as _lockfile_path
 from ...models import ArchiveConfig
+from ...receipts import ArchiveReceipt
 from .. import status
 from . import workspace_context_from_args
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def is_absolute_runtime_prefix(prefix: str) -> bool:
     """Return whether *prefix* is absolute as a POSIX or Windows path."""
-    return PurePosixPath(prefix).is_absolute() or PureWindowsPath(prefix).is_absolute()
+    return has_absolute_path_syntax(prefix)
 
 
 def runtime_prefix_relative_path(prefix: str) -> Path:
@@ -109,6 +117,82 @@ def warn_staging_prefix_references(
         console.print("  [dim]additional matches omitted[/dim]")
 
 
+def resolve_receipt_path(archive_path: Path, receipt: object) -> Path | None:
+    """Resolve the optional ``--receipt [PATH]`` argparse value."""
+    if receipt in (None, False):
+        return None
+    if receipt is True:
+        return ArchiveReceipt.default_path(archive_path)
+    if isinstance(receipt, Path):
+        return receipt
+    if isinstance(receipt, str):
+        return Path(receipt)
+    raise ArchiveError("Invalid --receipt value.")
+
+
+def receipt_environment_prefixes(
+    *,
+    config_environments: list[str],
+    ctx_root: Path,
+    env_prefix: Callable[[str], Path],
+) -> dict[str, str]:
+    """Return environment prefixes to record in a receipt predicate."""
+    prefixes: dict[str, str] = {}
+    for name in config_environments:
+        prefix = env_prefix(name)
+        try:
+            prefixes[name] = prefix.relative_to(ctx_root).as_posix()
+        except ValueError:
+            prefixes[name] = str(prefix)
+    return prefixes
+
+
+def ensure_verified_target_empty(target: Path) -> None:
+    """Reject verified extraction into non-empty or unsafe targets."""
+    if not target.exists():
+        return
+    if target.is_symlink():
+        raise ArchiveError("Cannot verify receipt into an existing symlink target.")
+    if not target.is_dir():
+        raise ArchiveError(
+            "Cannot verify receipt into an existing non-directory target."
+        )
+    try:
+        target_has_files = any(target.iterdir())
+    except OSError as exc:
+        raise ArchiveError(
+            f"Cannot inspect target before verified extraction: {target}"
+        ) from exc
+    if target_has_files:
+        raise ArchiveError(
+            "Cannot verify receipt into a non-empty target.",
+            hints=["Choose an empty target directory or remove existing files first."],
+        )
+
+
+def extract_verified_archive(
+    archive_path: Path,
+    target: Path,
+    receipt: ArchiveReceipt,
+    *,
+    require_sha256: bool = False,
+) -> None:
+    """Extract to a staging directory, verify, then move into *target*."""
+    target = target.resolve()
+    ensure_verified_target_empty(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staged = Path(tempfile.mkdtemp(prefix=f".{target.name}.verify-", dir=target.parent))
+    try:
+        extract_archive(archive_path, staged)
+        receipt.verify_extracted(staged, require_sha256=require_sha256)
+        if target.exists():
+            target.rmdir()
+        staged.rename(target)
+    except BaseException:
+        shutil.rmtree(staged, ignore_errors=True)
+        raise
+
+
 def execute_archive(
     args: argparse.Namespace,
     *,
@@ -185,9 +269,43 @@ def execute_archive(
         ellipsis=True,
     )
 
-    create_archive(ctx.root, output, archive_config, bundle_packages=bundle_packages)
+    output = create_archive(
+        ctx.root,
+        output,
+        archive_config,
+        bundle_packages=bundle_packages,
+    )
 
     status.message(console, "Created", "archive", str(output))
+
+    receipt_path = resolve_receipt_path(output, getattr(args, "receipt", None))
+    if receipt_path is not None:
+        if receipt_path.resolve() == output.resolve():
+            raise ArchiveError(
+                "Receipt path cannot be the archive path.",
+                hints=["Choose a separate JSON path for --receipt."],
+            )
+        receipt = ArchiveReceipt.build(
+            root=ctx.root,
+            archive_path=output,
+            archive_config=archive_config,
+            manifest_path=Path(config.manifest_path),
+            lockfile_path=_lockfile_path(ctx),
+            environment_prefixes=receipt_environment_prefixes(
+                config_environments=list(config.environments),
+                ctx_root=ctx.root,
+                env_prefix=ctx.env_prefix,
+            ),
+            options={
+                "bundle": bool(args.bundle),
+                "lock": bool(args.lock),
+                "include": list(archive_config.include),
+                "exclude": list(archive_config.exclude),
+                "compressionLevel": archive_config.compression_level,
+            },
+        )
+        receipt.write(receipt_path)
+        status.message(console, "Created", "receipt", str(receipt_path))
     return 0
 
 
@@ -204,6 +322,16 @@ def execute_unarchive(
     if not archive_path.is_file():
         raise ArchiveError(f"Archive not found: {archive_path}")
 
+    receipt_path = resolve_receipt_path(archive_path, getattr(args, "receipt", None))
+    if getattr(args, "require_sha256", False) and receipt_path is None:
+        raise ArchiveError("--require-sha256 requires --receipt.")
+
+    receipt = None
+    if receipt_path is not None:
+        receipt = ArchiveReceipt.load(receipt_path)
+        receipt.verify_archive(archive_path)
+        status.message(console, "Verified", "archive", str(archive_path.name))
+
     target: Path | None = args.target
     if target is None:
         stem = archive_path.name
@@ -212,6 +340,7 @@ def execute_unarchive(
                 stem = stem[: -len(suffix)]
                 break
         target = Path.cwd() / stem
+    target = target.resolve()
 
     info = inspect_archive(archive_path)
 
@@ -268,9 +397,19 @@ def execute_unarchive(
         ellipsis=True,
     )
 
-    extract_archive(archive_path, target)
+    if receipt is None:
+        extract_archive(archive_path, target)
+    else:
+        extract_verified_archive(
+            archive_path,
+            target,
+            receipt,
+            require_sha256=getattr(args, "require_sha256", False),
+        )
 
     status.message(console, "Extracted", "archive", str(target))
+    if receipt is not None:
+        status.message(console, "Verified", "receipt", str(receipt_path))
 
     if info["has_packages"]:
         console.print(f"  Archive includes {info['package_count']} bundled packages")

@@ -12,10 +12,9 @@ import hashlib
 import importlib
 import shutil
 import subprocess
-import sys
 import tarfile
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -68,6 +67,44 @@ BUILTIN_EXCLUDE_DIRS: frozenset[str] = frozenset(
     }
 )
 """Directories excluded from archives regardless of user configuration."""
+
+
+def has_absolute_path_syntax(path: str) -> bool:
+    """Return whether *path* is absolute using POSIX or Windows syntax.
+
+    Workspace archives can be created and verified on a different OS than
+    the one that consumes them, so callers cannot rely on host-only path
+    parsing for archive metadata.
+    """
+    return PurePosixPath(path).is_absolute() or PureWindowsPath(path).is_absolute()
+
+
+def parse_relative_archive_path(
+    path: str,
+    *,
+    allow_parent: bool = False,
+) -> PurePosixPath:
+    """Return *path* as a validated POSIX archive path.
+
+    Tar members and receipt paths use POSIX separators regardless of the
+    host OS.  Keeping this policy in one helper lets extraction and receipt
+    verification reject the same ambiguous path syntax while raising their
+    own domain-specific errors.
+    """
+    posix_path = PurePosixPath(path)
+    windows_path = PureWindowsPath(path)
+    if (
+        not path
+        or "\0" in path
+        or "\\" in path
+        or posix_path.is_absolute()
+        or windows_path.drive
+        or not posix_path.parts
+        or posix_path.as_posix() != path
+        or (not allow_parent and any(part == ".." for part in posix_path.parts))
+    ):
+        raise ValueError(f"Invalid relative archive path: {path!r}")
+    return posix_path
 
 
 def is_git_repo(root: Path) -> bool:
@@ -252,7 +289,7 @@ def create_archive(
 def add_files_to_tar(tf: tarfile.TarFile, root: Path, files: list[Path]) -> None:
     """Add workspace *files* to the tar, using paths relative to *root*."""
     for path in files:
-        arcname = str(path.relative_to(root))
+        arcname = path.relative_to(root).as_posix()
         tf.add(str(path), arcname=arcname)
 
 
@@ -272,25 +309,29 @@ def validate_tar_member(member: tarfile.TarInfo, target: Path) -> None:
     if member.type not in ALLOWED_TAR_TYPES:
         raise ArchivePathTraversalError(member.name)
 
-    member_path = Path(member.name)
-
-    if member_path.is_absolute():
-        raise ArchivePathTraversalError(member.name)
+    try:
+        member_path = parse_relative_archive_path(member.name)
+    except ValueError:
+        raise ArchivePathTraversalError(member.name) from None
 
     try:
-        resolved = (target / member_path).resolve()
+        resolved = target.joinpath(*member_path.parts).resolve()
         resolved.relative_to(target.resolve())
     except ValueError:
         raise ArchivePathTraversalError(member.name)
 
-    if ".." in member_path.parts:
-        raise ArchivePathTraversalError(member.name)
-
     if member.issym() or member.islnk():
-        link_target = Path(member.linkname)
-        if link_target.is_absolute():
-            raise ArchivePathTraversalError(member.name)
-        resolved_link = (target / member_path.parent / link_target).resolve()
+        try:
+            link_target = parse_relative_archive_path(
+                member.linkname,
+                allow_parent=True,
+            )
+        except ValueError:
+            raise ArchivePathTraversalError(member.name) from None
+        resolved_link = target.joinpath(
+            *member_path.parent.parts,
+            *link_target.parts,
+        ).resolve()
         try:
             resolved_link.relative_to(target.resolve())
         except ValueError:
@@ -325,7 +366,7 @@ def extract_archive(archive_path: Path, target: Path) -> Path:
         members = tf.getmembers()
         for member in members:
             validate_tar_member(member, target)
-        if sys.version_info >= (3, 12):
+        if hasattr(tarfile, "data_filter"):
             tf.extractall(path=target, members=members, filter="data")
         else:
             tf.extractall(path=target, members=members)

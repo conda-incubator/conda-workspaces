@@ -293,6 +293,20 @@ def test_archive_subparser_registered() -> None:
     assert str(ns.output) == "out.tar.gz"
 
 
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["archive", "-o", "out.tar.gz", "--receipt"], True),
+        (["archive", "-o", "out.tar.gz", "--receipt", "r.json"], Path("r.json")),
+    ],
+    ids=["default", "path"],
+)
+def test_archive_subparser_receipt(args: list[str], expected: object) -> None:
+    parser = generate_workspace_parser()
+    ns = parser.parse_args(args)
+    assert ns.receipt == expected
+
+
 def test_unarchive_subparser_registered() -> None:
     parser = generate_workspace_parser()
     ns = parser.parse_args(
@@ -314,3 +328,19 @@ def test_unarchive_subparser_registered() -> None:
     assert ns.environment == "runtime"
     assert ns.prefix == "/opt/runtime"
     assert ns.dest == Path("/tmp/rootfs")
+
+
+def test_unarchive_subparser_receipt() -> None:
+    parser = generate_workspace_parser()
+    ns = parser.parse_args(
+        [
+            "unarchive",
+            "project.tar.gz",
+            "--receipt",
+            "project.receipt.json",
+            "--require-sha256",
+        ]
+    )
+
+    assert ns.receipt == Path("project.receipt.json")
+    assert ns.require_sha256 is True
