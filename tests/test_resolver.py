@@ -243,6 +243,40 @@ def test_resolve_system_requirements_merged():
 
 
 @pytest.mark.parametrize(
+    ("platform", "expected"),
+    [
+        pytest.param("linux-64", {"cuda": "12.0", "glibc": "2.28"}, id="linux"),
+        pytest.param("osx-arm64", {"cuda": "12.0", "osx": "13.0"}, id="osx"),
+        pytest.param("win-64", {"cuda": "12.0"}, id="win"),
+    ],
+)
+def test_resolve_system_requirements_with_rich_platform(
+    platform: str,
+    expected: dict[str, str],
+) -> None:
+    """Rich-platform requirements are merged only for their platform."""
+    default_feat = Feature(
+        name="default",
+        system_requirements={"cuda": "12.0"},
+    )
+    config = WorkspaceConfig(
+        channels=[Channel("conda-forge")],
+        platforms=["linux-64", "osx-arm64", "win-64"],
+        platform_system_requirements={
+            "linux-64": {"glibc": "2.28"},
+            "osx-arm64": {"osx": "13.0"},
+        },
+        features={"default": default_feat},
+        environments={
+            "default": Environment(name="default"),
+        },
+    )
+
+    resolved = resolve_environment(config, "default", platform=platform)
+    assert resolved.system_requirements == expected
+
+
+@pytest.mark.parametrize(
     "priority, expected",
     [
         ("strict", "strict"),

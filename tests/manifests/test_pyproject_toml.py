@@ -266,3 +266,30 @@ cuda = "11.8"
     path.write_text(content, encoding="utf-8")
     config = parser.parse(path)
     assert config.features["gpu"].system_requirements == {"cuda": "11.8"}
+
+
+@pytest.mark.parametrize(
+    "tool_table",
+    [
+        pytest.param("tool.conda", id="tool-conda"),
+        pytest.param("tool.pixi", id="tool-pixi"),
+    ],
+)
+def test_parse_rich_platform_system_requirements(parser, tmp_path, tool_table):
+    """Pixi-style rich platform system requirements in pyproject.toml."""
+    content = f"""\
+[project]
+name = "rich-platform-sysreq"
+
+[{tool_table}.workspace]
+channels = ["conda-forge"]
+platforms = [
+  "osx-arm64",
+  {{ platform = "linux-64", libc = "2.28" }},
+]
+"""
+    path = tmp_path / "pyproject.toml"
+    path.write_text(content, encoding="utf-8")
+    config = parser.parse(path)
+    assert config.platforms == ["osx-arm64", "linux-64"]
+    assert config.platform_system_requirements == {"linux-64": {"glibc": "2.28"}}

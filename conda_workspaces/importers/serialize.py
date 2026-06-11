@@ -33,7 +33,7 @@ def config_to_toml(
     if config.channels:
         ws.add("channels", [ch.canonical_name for ch in config.channels])
     if config.platforms:
-        ws.add("platforms", list(config.platforms))
+        ws.add("platforms", config.platforms_for_toml())
     if config.channel_priority:
         ws.add("channel-priority", config.channel_priority)
     doc.add("workspace", ws)
@@ -68,7 +68,7 @@ def config_to_toml(
         )
 
     if default_feature and default_feature.target_conda_dependencies:
-        _add_target_deps(doc, default_feature)
+        _add_target_overrides(doc, default_feature)
 
     for feat_name, feature in config.features.items():
         if feature.is_default:
@@ -140,28 +140,30 @@ def _add_feature(doc: tomlkit.TOMLDocument, feature: Feature) -> None:
 
     if feature.target_conda_dependencies:
         target_tbl = tomlkit.table(is_super_table=True)
-        for platform, platform_deps in feature.target_conda_dependencies.items():
+        for platform in sorted(feature.target_conda_dependencies):
             plat_tbl = tomlkit.table()
-            plat_deps: dict[str, str] = {}
-            for name, ms in platform_deps.items():
-                plat_deps[name] = str(ms.version) if ms.version else "*"
-            plat_tbl.add("dependencies", plat_deps)
+            if platform_deps := feature.target_conda_dependencies.get(platform):
+                plat_deps: dict[str, str] = {}
+                for name, ms in platform_deps.items():
+                    plat_deps[name] = str(ms.version) if ms.version else "*"
+                plat_tbl.add("dependencies", plat_deps)
             target_tbl.add(platform, plat_tbl)
         feat_tbl.add("target", target_tbl)
 
     feat_container.add(feature.name, feat_tbl)
 
 
-def _add_target_deps(doc: tomlkit.TOMLDocument, feature: Feature) -> None:
-    """Add ``[target.<platform>.dependencies]`` for the default feature."""
+def _add_target_overrides(doc: tomlkit.TOMLDocument, feature: Feature) -> None:
+    """Add ``[target.<platform>.*]`` overrides for the default feature."""
     if "target" not in doc:
         doc.add("target", tomlkit.table(is_super_table=True))
     target = cast("Table", doc["target"])
 
-    for platform, platform_deps in feature.target_conda_dependencies.items():
+    for platform in sorted(feature.target_conda_dependencies):
         plat_tbl = tomlkit.table()
-        plat_deps: dict[str, str] = {}
-        for name, ms in platform_deps.items():
-            plat_deps[name] = str(ms.version) if ms.version else "*"
-        plat_tbl.add("dependencies", plat_deps)
+        if platform_deps := feature.target_conda_dependencies.get(platform):
+            plat_deps: dict[str, str] = {}
+            for name, ms in platform_deps.items():
+                plat_deps[name] = str(ms.version) if ms.version else "*"
+            plat_tbl.add("dependencies", plat_deps)
         target.add(platform, plat_tbl)

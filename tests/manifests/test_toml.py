@@ -375,12 +375,22 @@ def test_parse_environment_no_default_feature(tmp_path):
 )
 def test_parse_target_overrides(platform, dep_key, attr, pkg):
     feature = Feature(name="default")
-    version = ">=12" if dep_key == "dependencies" else ">=2.0"
+    if dep_key == "dependencies":
+        version = ">=12"
+    else:
+        version = ">=2.0"
     target_data = {platform: {dep_key: {pkg: version}}}
     parse_target_overrides(target_data, feature)
     result = getattr(feature, attr)
     assert platform in result
     assert pkg in result[platform]
+
+
+def test_parse_target_system_requirements_rejected():
+    feature = Feature(name="default")
+    target_data = {"linux-64": {"system-requirements": {"libc": "2.28"}}}
+    with pytest.raises(ValueError, match="not supported"):
+        parse_target_overrides(target_data, feature)
 
 
 def test_parse_target_overrides_empty():

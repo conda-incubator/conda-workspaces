@@ -240,6 +240,31 @@ def test_config_merged_pypi_deps_with_target():
     assert "uvloop" in merged
 
 
+@pytest.mark.parametrize(
+    ("platform", "expected"),
+    [
+        pytest.param("linux-64", {"cuda": "12.0", "glibc": "2.28"}, id="override"),
+        pytest.param("osx-arm64", {"cuda": "12.0", "glibc": "2.17"}, id="fallback"),
+    ],
+)
+def test_config_merged_system_requirements_with_platform(
+    platform: str,
+    expected: dict[str, str],
+) -> None:
+    default_feat = Feature(
+        name="default",
+        system_requirements={"cuda": "12.0", "glibc": "2.17"},
+    )
+    config = WorkspaceConfig(
+        platform_system_requirements={"linux-64": {"glibc": "2.28"}},
+        features={"default": default_feat},
+        environments={"default": Environment(name="default")},
+    )
+    env = config.environments["default"]
+
+    assert config.merged_system_requirements(env, platform=platform) == expected
+
+
 def test_config_merged_channels_feature_adds_new():
     default_feat = Feature(name="default")
     extra_feat = Feature(name="bio", channels=[Channel("bioconda")])
