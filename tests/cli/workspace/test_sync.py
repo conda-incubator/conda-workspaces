@@ -193,7 +193,7 @@ def test_sync_activate_d_hint_respects_conda_spawn(
     )
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.sync.generate_lockfile",
-        lambda ctx, resolved_envs: None,
+        lambda ctx, resolved_envs, **kwargs: None,
     )
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.sync.install_environment", fake_install

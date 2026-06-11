@@ -68,7 +68,7 @@ def test_workspace_install_dry_run(
     )
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.sync.generate_lockfile",
-        lambda ctx, envs: None,
+        lambda ctx, envs, **kwargs: None,
     )
 
     stdout, stderr, exit_code = conda_cli("workspace", "install", "--dry-run")
@@ -249,7 +249,7 @@ def test_rich_output_contains_status(
         )
         monkeypatch.setattr(
             "conda_workspaces.cli.workspace.sync.generate_lockfile",
-            lambda ctx, envs: None,
+            lambda ctx, envs, **kwargs: None,
         )
 
         stdout, _, _ = conda_cli("workspace", "install", "--dry-run")
@@ -322,7 +322,7 @@ def test_workspace_install_resolves_pypi_deps(
     )
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.sync.generate_lockfile",
-        lambda ctx, envs: None,
+        lambda ctx, envs, **kwargs: None,
     )
 
     stdout, stderr, exit_code = conda_cli("workspace", "install", "--dry-run")
@@ -388,7 +388,7 @@ def test_workspace_install_resolves_editable_deps(
     )
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.sync.generate_lockfile",
-        lambda ctx, envs: None,
+        lambda ctx, envs, **kwargs: None,
     )
 
     stdout, stderr, exit_code = conda_cli("workspace", "install", "--dry-run")

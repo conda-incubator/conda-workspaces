@@ -31,7 +31,7 @@ def _stub_lockfile(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stub generate_lockfile to a no-op for tests that don't care about it."""
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.sync.generate_lockfile",
-        lambda ctx, resolved_envs: None,
+        lambda ctx, resolved_envs, **kwargs: None,
     )
 
 
@@ -66,7 +66,7 @@ def test_install_envs(
     lock_calls: list[dict] = []
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.sync.generate_lockfile",
-        lambda ctx, resolved_envs: lock_calls.append(resolved_envs),
+        lambda ctx, resolved_envs, **kwargs: lock_calls.append(resolved_envs),
     )
 
     args = make_args(_DEFAULTS, environment=env_arg)
@@ -131,7 +131,7 @@ def test_install_dry_run_skips_lockfile(
     lock_calls: list[dict] = []
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.sync.generate_lockfile",
-        lambda ctx, resolved_envs: lock_calls.append(resolved_envs),
+        lambda ctx, resolved_envs, **kwargs: lock_calls.append(resolved_envs),
     )
 
     args = make_args(_DEFAULTS, environment="default", dry_run=True)
@@ -214,7 +214,7 @@ def test_install_default_uses_lockfile_when_satisfiable(
     )
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.sync.generate_lockfile",
-        lambda ctx, resolved_envs: None,
+        lambda ctx, resolved_envs, **kwargs: None,
     )
 
     args = make_args(_DEFAULTS)
@@ -252,7 +252,7 @@ def test_install_default_solves_when_not_satisfiable(
     )
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.sync.generate_lockfile",
-        lambda ctx, resolved_envs: None,
+        lambda ctx, resolved_envs, **kwargs: None,
     )
 
     args = make_args(_DEFAULTS)
@@ -276,7 +276,7 @@ def test_install_no_lock_forces_solve(
     )
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.sync.generate_lockfile",
-        lambda ctx, resolved_envs: None,
+        lambda ctx, resolved_envs, **kwargs: None,
     )
 
     args = make_args(_DEFAULTS, no_lock=True)
