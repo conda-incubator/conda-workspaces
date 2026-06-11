@@ -37,6 +37,7 @@ def capture_generate_lockfile(monkeypatch: pytest.MonkeyPatch, pixi_workspace: P
         ctx,
         resolved_envs,
         *,
+        config=None,
         platforms=None,
         progress=None,
         skip_unsolvable=False,
@@ -46,6 +47,7 @@ def capture_generate_lockfile(monkeypatch: pytest.MonkeyPatch, pixi_workspace: P
         calls.append(
             {
                 "resolved_envs": resolved_envs,
+                "config": config,
                 "platforms": platforms,
                 "progress": progress,
                 "skip_unsolvable": skip_unsolvable,
@@ -84,6 +86,7 @@ def test_lock_envs(
     assert result == 0
     assert len(capture_generate_lockfile) == 1
     assert set(capture_generate_lockfile[0]["resolved_envs"].keys()) == expected_keys
+    assert capture_generate_lockfile[0]["config"] is not None
     assert capture_generate_lockfile[0]["platforms"] is None
     assert output_fragment in capsys.readouterr().out
 

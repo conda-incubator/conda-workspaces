@@ -411,6 +411,7 @@ def generate_lockfile(
     ctx: WorkspaceContext,
     resolved_envs: dict[str, ResolvedEnvironment],
     *,
+    config: WorkspaceConfig | None = None,
     platforms: tuple[str, ...] | None = None,
     progress: Callable[[str, str], None] | None = None,
     skip_unsolvable: bool = False,
@@ -421,13 +422,16 @@ def generate_lockfile(
 
     Solves each environment in *resolved_envs* for every platform it
     declares (intersected with *platforms* when given) and writes the
-    results to ``<workspace>/conda.lock``.  Serialisation is delegated
-    to :func:`.export.multiplatform_export` so this function and
-    ``conda export --format=conda-workspaces-lock-v1`` produce
-    byte-identical output.  Solver chatter is silenced inside
-    :meth:`ResolvedEnvironment.solve_for_platform` itself, so the
-    caller is free to render status through the optional *progress*
-    callback without stdout bookkeeping.
+    results to ``<workspace>/conda.lock``.  When *config* is supplied,
+    each ``(environment, platform)`` pair is resolved from the manifest
+    just before solving so target-specific dependency tables only apply
+    to the platform they declare.  Serialisation is delegated to
+    :func:`.export.multiplatform_export` so this function and ``conda
+    export --format=conda-workspaces-lock-v1`` produce byte-identical
+    output.  Solver chatter is silenced inside
+    :meth:`ResolvedEnvironment.solve_for_platform` itself, so the caller
+    is free to render status through the optional *progress* callback
+    without stdout bookkeeping.
 
     Fails fast by default: the first unsolvable ``(environment,
     platform)`` pair raises :class:`SolveError` with the platform
@@ -449,6 +453,7 @@ def generate_lockfile(
     from conda.models.environment import Environment, EnvironmentConfig
 
     from .export import multiplatform_export
+    from .resolver import resolve_environment
 
     host_platform = ctx.platform
     envs: list[Environment] = []
@@ -462,13 +467,18 @@ def generate_lockfile(
         targets = sorted(declared if platforms is None else declared & set(platforms))
         if not targets:
             continue
-        channels = tuple(str(ch) for ch in resolved.channels)
         for target in targets:
             if progress is not None:
                 progress(name, target)
+            target_resolved = (
+                resolve_environment(config, name, target)
+                if config is not None
+                else resolved
+            )
+            channels = tuple(str(ch) for ch in target_resolved.channels)
             try:
-                records = resolved.solve_for_platform(
-                    target, prefix=ctx.env_prefix(resolved.name)
+                records = target_resolved.solve_for_platform(
+                    target, prefix=ctx.env_prefix(target_resolved.name)
                 )
             except SolveError as exc:
                 if not skip_unsolvable:

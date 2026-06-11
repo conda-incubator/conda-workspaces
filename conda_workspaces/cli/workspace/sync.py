@@ -114,5 +114,5 @@ def sync_environments(
         console.print(
             "[bold blue]Updating[/bold blue] [bold]conda.lock[/bold][dim]...[/dim]"
         )
-        generate_lockfile(ctx, resolved_all)
+        generate_lockfile(ctx, resolved_all, config=config)
         console.print("[bold cyan]Updated[/bold cyan] [bold]conda.lock[/bold]")

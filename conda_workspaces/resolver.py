@@ -274,24 +274,11 @@ def resolve_environment(
     and platform support is validated.
     """
     env = config.get_environment(env_name)
-
-    # Validate platform if provided
-    if platform and config.platforms and platform not in config.platforms:
-        raise PlatformError(platform, config.platforms)
-
-    resolved = ResolvedEnvironment(
-        name=env_name,
-        channel_priority=config.channel_priority,
-    )
-
-    # Merge dependencies
-    resolved.conda_dependencies = config.merged_conda_dependencies(env, platform)
-    resolved.pypi_dependencies = config.merged_pypi_dependencies(env, platform)
-    resolved.channels = config.merged_channels(env)
-
-    # Merge platforms: intersect feature platforms with workspace platforms
-    feature_platforms: set[str] = set()
     features = config.resolve_features(env)
+
+    # Merge platforms: intersect feature-declared platform sets, falling back
+    # to workspace-level platforms when no feature narrows or broadens support.
+    feature_platforms: set[str] = set()
     for feat in features:
         if feat.platforms:
             if not feature_platforms:
@@ -299,8 +286,9 @@ def resolve_environment(
             else:
                 feature_platforms &= set(feat.platforms)
 
+    resolved_platforms: list[str]
     if feature_platforms:
-        resolved.platforms = sorted(feature_platforms)
+        resolved_platforms = sorted(feature_platforms)
     else:
         if any(f.platforms for f in features):
             log.warning(
@@ -308,7 +296,21 @@ def resolve_environment(
                 "falling back to workspace platforms",
                 env_name,
             )
-        resolved.platforms = list(config.platforms)
+        resolved_platforms = list(config.platforms)
+
+    if platform and resolved_platforms and platform not in resolved_platforms:
+        raise PlatformError(platform, resolved_platforms)
+
+    resolved = ResolvedEnvironment(
+        name=env_name,
+        channel_priority=config.channel_priority,
+        platforms=resolved_platforms,
+    )
+
+    # Merge dependencies
+    resolved.conda_dependencies = config.merged_conda_dependencies(env, platform)
+    resolved.pypi_dependencies = config.merged_pypi_dependencies(env, platform)
+    resolved.channels = config.merged_channels(env)
 
     # Merge activation and system requirements
     for feat in features:

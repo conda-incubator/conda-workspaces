@@ -117,6 +117,7 @@ def execute_lock(args: argparse.Namespace, *, console: Console | None = None) ->
     generate_lockfile(
         ctx,
         resolved_envs,
+        config=config,
         platforms=platforms,
         progress=_progress,
         skip_unsolvable=skip_unsolvable,

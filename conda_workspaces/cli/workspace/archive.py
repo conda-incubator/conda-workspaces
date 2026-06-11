@@ -134,7 +134,7 @@ def execute_archive(
             style="bold blue",
             ellipsis=True,
         )
-        generate_lockfile(ctx, resolved_envs)
+        generate_lockfile(ctx, resolved_envs, config=config)
         status.message(console, "Updated", "lockfile", "conda.lock")
 
     cli_excludes = tuple(args.exclude or [])

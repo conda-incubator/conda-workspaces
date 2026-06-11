@@ -41,7 +41,7 @@ from conda_workspaces.models import (
     LockfileStatus,
     WorkspaceConfig,
 )
-from conda_workspaces.resolver import ResolvedEnvironment
+from conda_workspaces.resolver import ResolvedEnvironment, resolve_environment
 
 
 @pytest.fixture
@@ -404,6 +404,116 @@ def test_generate_lockfile_solves_expected_pairs(
     assert f"version: {LOCKFILE_VERSION}" in content
     for env_name, platform in expected_pairs:
         assert f"python-{env_name}-{platform}.conda" in content
+
+
+@pytest.mark.parametrize(
+    ("platform", "expected_extra", "forbidden"),
+    [
+        pytest.param(
+            "linux-64",
+            frozenset(),
+            frozenset(
+                {
+                    "python.app",
+                    "anaconda_prompt",
+                    "anaconda_powershell_prompt",
+                }
+            ),
+            id="linux-64",
+        ),
+        pytest.param(
+            "linux-aarch64",
+            frozenset(),
+            frozenset(
+                {
+                    "python.app",
+                    "anaconda_prompt",
+                    "anaconda_powershell_prompt",
+                }
+            ),
+            id="linux-aarch64",
+        ),
+        pytest.param(
+            "osx-arm64",
+            frozenset({"python.app"}),
+            frozenset({"anaconda_prompt", "anaconda_powershell_prompt"}),
+            id="osx-arm64",
+        ),
+        pytest.param(
+            "win-64",
+            frozenset({"anaconda_prompt", "anaconda_powershell_prompt"}),
+            frozenset({"python.app"}),
+            id="win-64",
+        ),
+    ],
+)
+def test_generate_lockfile_resolves_target_dependencies_per_platform(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    expected_extra: frozenset[str],
+    forbidden: frozenset[str],
+) -> None:
+    """Target dependency tables are scoped to their matching platform."""
+    config = WorkspaceConfig(
+        name="target-dep-repro",
+        channels=[
+            Channel("https://repo.anaconda.com/pkgs/main"),
+            Channel("https://repo.anaconda.com/pkgs/msys2"),
+        ],
+        platforms=["linux-64", "linux-aarch64", "osx-arm64", "win-64"],
+        features={
+            "default": Feature(
+                name="default",
+                conda_dependencies={
+                    "python": MatchSpec("python=3.13"),
+                    "conda": MatchSpec("conda==26.5.2"),
+                    "menuinst": MatchSpec("menuinst"),
+                },
+                target_conda_dependencies={
+                    "osx-arm64": {"python.app": MatchSpec("python.app")},
+                    "win-64": {
+                        "anaconda_prompt": MatchSpec("anaconda_prompt"),
+                        "anaconda_powershell_prompt": MatchSpec(
+                            "anaconda_powershell_prompt"
+                        ),
+                    },
+                },
+            )
+        },
+        environments={"default": Environment(name="default")},
+        root=str(tmp_path),
+        manifest_path=str(tmp_path / "conda.toml"),
+    )
+    ctx = WorkspaceContext(config)
+    ctx._cache["platform"] = "osx-arm64"
+    resolved_envs = {
+        "default": resolve_environment(config, "default", platform=ctx.platform)
+    }
+    observed_deps: dict[str, set[str]] = {}
+
+    def fake_solve(self, platform, *, prefix):
+        observed_deps[platform] = set(self.conda_dependencies)
+        return [
+            _FakePkg(name, f"https://example.com/{name}-{platform}.conda")
+            for name in sorted(self.conda_dependencies)
+        ]
+
+    monkeypatch.setattr(ResolvedEnvironment, "solve_for_platform", fake_solve)
+
+    result = generate_lockfile(ctx, resolved_envs, config=config)
+
+    common = {"conda", "menuinst", "python"}
+    assert observed_deps[platform] == common | expected_extra
+
+    data = load_yaml(result)
+    package_refs = data["environments"]["default"]["packages"][platform]
+    locked_names = {
+        ref["conda"].rpartition("/")[2].removesuffix(f"-{platform}.conda")
+        for ref in package_refs
+    }
+    assert expected_extra <= locked_names
+    assert not forbidden & locked_names
 
 
 def test_generate_lockfile_progress_callback(
