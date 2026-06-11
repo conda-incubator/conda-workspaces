@@ -163,6 +163,9 @@ class WorkspaceConfig:
 
     channels: list[Channel] = field(default_factory=list)
     platforms: list[str] = field(default_factory=list)
+    platform_system_requirements: dict[str, dict[str, str]] = field(
+        default_factory=dict
+    )
 
     # Root-level dependency pool from [workspace.dependencies].
     # Concrete feature dependencies may opt in with { workspace = true }.
@@ -261,6 +264,42 @@ class WorkspaceConfig:
             if platform and platform in feature.target_pypi_dependencies:
                 merged.update(feature.target_pypi_dependencies[platform])
         return merged
+
+    def merged_system_requirements(
+        self,
+        environment: Environment,
+        platform: str | None = None,
+    ) -> dict[str, str]:
+        """Merge system requirements across features for *environment*."""
+        merged: dict[str, str] = {}
+        for feature in self.resolve_features(environment):
+            merged.update(feature.system_requirements)
+        if platform and platform in self.platform_system_requirements:
+            merged.update(self.platform_system_requirements[platform])
+        return merged
+
+    def platforms_for_toml(self) -> list[str | dict[str, str]]:
+        """Return platforms in a TOML shape compatible with Pixi."""
+        aliases = {
+            "glibc": "libc",
+            "__glibc": "__glibc",
+            "osx": "macos",
+            "__osx": "__osx",
+            "win": "windows",
+            "__win": "__win",
+        }
+        result: list[str | dict[str, str]] = []
+        for platform in self.platforms:
+            requirements = self.platform_system_requirements.get(platform)
+            if not requirements:
+                result.append(platform)
+                continue
+            entry = {"platform": platform}
+            entry.update(
+                {aliases.get(name, name): value for name, value in requirements.items()}
+            )
+            result.append(entry)
+        return result
 
     def merged_channels(self, environment: Environment) -> list[Channel]:
         """Merge channels across features for *environment*.

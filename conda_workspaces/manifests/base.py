@@ -11,12 +11,12 @@ from typing import TYPE_CHECKING
 import tomlkit
 from packaging.requirements import InvalidRequirement, Requirement
 
-from ..exceptions import ManifestExistsError
+from ..exceptions import ManifestExistsError, WorkspaceParseError
 
 _PYPI_NAME_TAIL_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(.*)$")
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping
     from pathlib import Path
     from typing import Any, ClassVar
 
@@ -51,6 +51,22 @@ class ManifestParser(ABC):
     #: Optional user-friendly aliases for the exporter plugin (e.g.
     #: ``("conda",)`` for ``conda-toml``).  Empty tuple is fine.
     exporter_aliases: ClassVar[tuple[str, ...]] = ()
+    rich_platform_system_requirement_keys: ClassVar[set[str]] = {
+        "archspec",
+        "cuda",
+        "glibc",
+        "libc",
+        "linux",
+        "macos",
+        "osx",
+        "win",
+        "windows",
+    }
+    system_requirement_aliases: ClassVar[dict[str, str]] = {
+        "libc": "glibc",
+        "macos": "osx",
+        "windows": "win",
+    }
 
     @staticmethod
     @lru_cache(maxsize=16)
@@ -191,6 +207,93 @@ class ManifestParser(ABC):
         export still writes the exporter output verbatim.
         """
         return exported
+
+    def parse_system_requirements(
+        self,
+        requirements: Mapping[str, Any],
+    ) -> dict[str, str]:
+        """Parse Pixi-facing system requirements into conda virtual names.
+
+        Pixi exposes TOML names like ``libc`` / ``macos`` / ``windows``;
+        conda virtual packages use ``__glibc`` / ``__osx`` / ``__win``.
+        The workspace model stores bare conda names while preserving raw
+        ``__name`` escape hatches for callers that already use virtual
+        package names.
+        """
+        parsed: dict[str, str] = {}
+        for raw_name, raw_value in requirements.items():
+            name = str(raw_name)
+            prefixed = name.startswith("__")
+            bare_name = name[2:] if prefixed else name
+
+            if bare_name == "libc" and isinstance(raw_value, dict):
+                family = str(raw_value.get("family", "glibc"))
+                version = raw_value.get("version")
+                bare_name = self.system_requirement_aliases.get(family, family)
+                raw_value = "" if version is None else version
+            else:
+                bare_name = self.system_requirement_aliases.get(bare_name, bare_name)
+
+            parsed[f"__{bare_name}" if prefixed else bare_name] = str(raw_value)
+        return parsed
+
+    def parse_workspace_platforms(
+        self,
+        raw: Iterable[Any],
+        path: Path,
+    ) -> tuple[list[str], dict[str, dict[str, str]]]:
+        """Parse Pixi-compatible workspace platform entries.
+
+        Bare strings remain plain conda subdirs.  Inline tables can add
+        virtual package requirements to that subdir, e.g.
+        ``{ platform = "linux-64", libc = "2.28" }``.  Pixi also
+        supports custom rich-platform names; conda-workspaces still
+        stores lockfile entries by conda subdir, so custom names are
+        rejected instead of being silently discarded.
+        """
+        platforms: list[str] = []
+        platform_system_requirements: dict[str, dict[str, str]] = {}
+
+        for item in raw:
+            if isinstance(item, str):
+                platforms.append(item)
+                continue
+            if not isinstance(item, dict):
+                raise WorkspaceParseError(
+                    path,
+                    "[workspace].platforms entries must be strings or inline tables",
+                )
+
+            subdir = item.get("platform") or item.get("name")
+            if not subdir:
+                raise WorkspaceParseError(
+                    path,
+                    "Rich platform entries must set `platform` or `name`.",
+                )
+            platform = str(subdir)
+
+            name = item.get("name")
+            if name is not None and "platform" in item and str(name) != platform:
+                raise WorkspaceParseError(
+                    path,
+                    "Custom rich platform names are not supported yet; "
+                    "omit `name` or set it equal to `platform`.",
+                )
+
+            platforms.append(platform)
+
+            requirements = {
+                key: value
+                for key, value in item.items()
+                if key in self.rich_platform_system_requirement_keys
+                or str(key).startswith("__")
+            }
+            if requirements:
+                platform_system_requirements[platform] = self.parse_system_requirements(
+                    requirements
+                )
+
+        return platforms, platform_system_requirements
 
     @classmethod
     def for_exporter_format(cls, name: str) -> ManifestParser | None:

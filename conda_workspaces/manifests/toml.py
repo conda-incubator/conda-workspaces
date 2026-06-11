@@ -411,6 +411,13 @@ def parse_target_overrides(
     """Parse ``[target.<platform>]`` dep overrides into a feature."""
     resolver = resolver or WorkspaceDependencyResolver()
     for platform, tdata in target_data.items():
+        if "system-requirements" in tdata:
+            resolver.error(
+                f"[target.{platform}.system-requirements] is not supported; "
+                "use rich [workspace].platforms entries or "
+                "[feature.<name>.system-requirements]."
+            )
+
         conda = resolver.parse_dependency_table(
             tdata.get("dependencies", {}),
             table_name=f"[target.{platform}.dependencies]",
@@ -426,6 +433,7 @@ def parse_target_overrides(
 def parse_feature(
     name: str,
     feat_data: dict[str, Any],
+    parser: ManifestParser,
     resolver: WorkspaceDependencyResolver | None = None,
 ) -> Feature:
     """Parse a single ``[feature.<name>]`` table into a Feature.
@@ -452,7 +460,7 @@ def parse_feature(
 
     sysreq = feat_data.get("system-requirements", {})
     if sysreq:
-        feature.system_requirements = {k: str(v) for k, v in sysreq.items()}
+        feature.system_requirements = parser.parse_system_requirements(sysreq)
 
     activation = feat_data.get("activation", {})
     if activation:
@@ -467,6 +475,7 @@ def parse_features_and_envs(
     source: dict[str, Any],
     config: WorkspaceConfig,
     path: Path,
+    parser: ManifestParser,
 ) -> None:
     """Parse features and environments from *source* into *config*.
 
@@ -482,11 +491,17 @@ def parse_features_and_envs(
     config.features[Feature.DEFAULT_NAME] = parse_feature(
         Feature.DEFAULT_NAME,
         source,
+        parser,
         resolver,
     )
 
     for feat_name, feat_data in source.get("feature", {}).items():
-        config.features[feat_name] = parse_feature(feat_name, feat_data, resolver)
+        config.features[feat_name] = parse_feature(
+            feat_name,
+            feat_data,
+            parser,
+            resolver,
+        )
 
     envs_data = source.get("environments", {})
     if envs_data:

@@ -153,6 +153,57 @@ def test_import_manifest_produces_workspace(
     assert "channels" in doc["workspace"]
 
 
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [
+        pytest.param(
+            "pixi.toml",
+            """\
+[workspace]
+name = "rich-platform"
+channels = ["conda-forge"]
+platforms = [
+  "osx-arm64",
+  { platform = "linux-64", libc = "2.28" },
+]
+""",
+            id="pixi",
+        ),
+        pytest.param(
+            "pyproject.toml",
+            """\
+[project]
+name = "rich-platform"
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = [
+  "osx-arm64",
+  { platform = "linux-64", libc = "2.28" },
+]
+""",
+            id="pyproject",
+        ),
+    ],
+)
+def test_import_rich_platform_system_requirements(
+    tmp_path: Path,
+    filename: str,
+    content: str,
+) -> None:
+    p = tmp_path / filename
+    p.write_text(
+        content,
+        encoding="utf-8",
+    )
+
+    doc = find_importer(p).convert(p)
+
+    platforms = doc["workspace"]["platforms"]
+    assert platforms[0] == "osx-arm64"
+    assert dict(platforms[1]) == {"platform": "linux-64", "libc": "2.28"}
+
+
 def test_import_conda_project(tmp_path: Path) -> None:
     (tmp_path / "conda-project.yml").write_text(_CONDA_PROJECT_YML, encoding="utf-8")
     (tmp_path / "environment.yml").write_text(_CONDA_PROJECT_ENV_YML, encoding="utf-8")

@@ -138,6 +138,47 @@ gcc = ">=12"
     assert "gcc" in default.target_conda_dependencies["linux-64"]
 
 
+def test_parse_rich_platform_system_requirements(tmp_path):
+    content = """\
+[workspace]
+name = "rich-platform-sysreq-test"
+channels = ["conda-forge"]
+platforms = [
+  "osx-arm64",
+  { platform = "linux-64", libc = "2.28" },
+  { platform = "linux-aarch64", libc = "2.28" },
+]
+"""
+    path = tmp_path / "pixi.toml"
+    path.write_text(content, encoding="utf-8")
+
+    parser = PixiTomlParser()
+    config = parser.parse(path)
+    assert config.platforms == ["osx-arm64", "linux-64", "linux-aarch64"]
+    assert config.platform_system_requirements == {
+        "linux-64": {"glibc": "2.28"},
+        "linux-aarch64": {"glibc": "2.28"},
+    }
+
+
+def test_parse_target_system_requirements_rejected(tmp_path):
+    content = """\
+[workspace]
+name = "target-sysreq-test"
+channels = ["conda-forge"]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64", "win-64"]
+
+[target.linux-64.system-requirements]
+libc = "2.28"
+"""
+    path = tmp_path / "pixi.toml"
+    path.write_text(content, encoding="utf-8")
+
+    parser = PixiTomlParser()
+    with pytest.raises(WorkspaceParseError, match="not supported"):
+        parser.parse(path)
+
+
 def test_parse_with_pypi_deps(tmp_path):
     content = """\
 [workspace]
@@ -228,12 +269,21 @@ platforms = ["linux-64"]
 [system-requirements]
 linux = "5.10"
 cuda = "12.0"
+libc = { family = "glibc", version = "2.28" }
+macos = "13.0"
+windows = "0"
 """
     path = tmp_path / "pixi.toml"
     path.write_text(content, encoding="utf-8")
     config = PixiTomlParser().parse(path)
     default = config.features["default"]
-    assert default.system_requirements == {"linux": "5.10", "cuda": "12.0"}
+    assert default.system_requirements == {
+        "linux": "5.10",
+        "cuda": "12.0",
+        "glibc": "2.28",
+        "osx": "13.0",
+        "win": "0",
+    }
 
 
 def test_parse_feature_system_requirements(tmp_path):

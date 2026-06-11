@@ -46,6 +46,21 @@ class ResolvedEnvironment:
     system_requirements: dict[str, str] = field(default_factory=dict)
     channel_priority: str | None = None
 
+    def system_requirement_version(self, name: str) -> str | None:
+        """Look up a system requirement by conda or Pixi-facing virtual name."""
+        aliases = {
+            "glibc": ("glibc", "libc"),
+            "osx": ("osx", "macos"),
+            "win": ("win", "windows"),
+        }
+        for candidate in aliases.get(name, (name,)):
+            version = self.system_requirements.get(
+                candidate
+            ) or self.system_requirements.get(f"__{candidate}")
+            if version:
+                return version
+        return None
+
     def virtual_package_overrides(self, platform: str) -> dict[str, str]:
         """Return ``CONDA_OVERRIDE_*`` env vars that enable a cross-platform solve.
 
@@ -87,20 +102,20 @@ class ResolvedEnvironment:
         if not target_family or family(conda_context.subdir) == target_family:
             return {}
 
-        def req_version(name: str) -> str | None:
-            """Look up a ``[system-requirements]`` entry by bare or ``__`` name."""
-            return self.system_requirements.get(name) or self.system_requirements.get(
-                f"__{name}"
-            )
-
         baseline: dict[str, str] = {}
         if target_family == "linux":
-            baseline["CONDA_OVERRIDE_GLIBC"] = req_version("glibc") or "2.17"
+            baseline["CONDA_OVERRIDE_GLIBC"] = (
+                self.system_requirement_version("glibc") or "2.17"
+            )
         elif target_family == "osx":
             default = "11.0" if platform == "osx-arm64" else "10.15"
-            baseline["CONDA_OVERRIDE_OSX"] = req_version("osx") or default
+            baseline["CONDA_OVERRIDE_OSX"] = (
+                self.system_requirement_version("osx") or default
+            )
         elif target_family == "win":
-            baseline["CONDA_OVERRIDE_WIN"] = req_version("win") or "0"
+            baseline["CONDA_OVERRIDE_WIN"] = (
+                self.system_requirement_version("win") or "0"
+            )
 
         return {k: v for k, v in baseline.items() if k not in os.environ}
 
@@ -311,12 +326,12 @@ def resolve_environment(
     resolved.conda_dependencies = config.merged_conda_dependencies(env, platform)
     resolved.pypi_dependencies = config.merged_pypi_dependencies(env, platform)
     resolved.channels = config.merged_channels(env)
+    resolved.system_requirements = config.merged_system_requirements(env, platform)
 
-    # Merge activation and system requirements
+    # Merge activation settings
     for feat in features:
         resolved.activation_scripts.extend(feat.activation_scripts)
         resolved.activation_env.update(feat.activation_env)
-        resolved.system_requirements.update(feat.system_requirements)
 
     return resolved
 

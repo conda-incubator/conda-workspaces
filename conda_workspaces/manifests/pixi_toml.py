@@ -15,7 +15,11 @@ from ..exceptions import TaskNotFoundError, TaskParseError, WorkspaceParseError
 from ..models import WorkspaceConfig
 from .base import ManifestParser
 from .normalize import parse_feature_tasks, parse_tasks_and_targets
-from .toml import parse_archive_config, parse_channels, parse_features_and_envs
+from .toml import (
+    parse_archive_config,
+    parse_channels,
+    parse_features_and_envs,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -57,19 +61,25 @@ class PixiTomlParser(ManifestParser):
         if not ws:
             raise WorkspaceParseError(path, "No [workspace] or [project] table found")
 
+        platforms, platform_system_requirements = self.parse_workspace_platforms(
+            ws.get("platforms", []),
+            path,
+        )
+
         config = WorkspaceConfig(
             name=ws.get("name"),
             version=ws.get("version"),
             description=ws.get("description"),
             channels=parse_channels(ws.get("channels", [])),
-            platforms=list(ws.get("platforms", [])),
+            platforms=platforms,
+            platform_system_requirements=platform_system_requirements,
             root=root,
             manifest_path=str(path),
             channel_priority=ws.get("channel-priority"),
             archive=parse_archive_config(ws),
         )
 
-        parse_features_and_envs(data, config, path)
+        parse_features_and_envs(data, config, path, self)
         return config
 
     def has_tasks(self, path: Path) -> bool:

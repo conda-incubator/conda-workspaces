@@ -516,6 +516,60 @@ def test_generate_lockfile_resolves_target_dependencies_per_platform(
     assert not forbidden & locked_names
 
 
+@pytest.mark.parametrize(
+    ("platform", "expected_requirements"),
+    [
+        pytest.param("linux-64", {"glibc": "2.28"}, id="linux-64"),
+        pytest.param("linux-aarch64", {"glibc": "2.28"}, id="linux-aarch64"),
+        pytest.param("osx-arm64", {}, id="osx-arm64"),
+        pytest.param("win-64", {}, id="win-64"),
+    ],
+)
+def test_generate_lockfile_resolves_rich_platform_system_requirements(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    expected_requirements: dict[str, str],
+) -> None:
+    """Rich-platform requirements are scoped to their matching platform."""
+    config = WorkspaceConfig(
+        name="rich-platform-sysreq-repro",
+        channels=[Channel("conda-forge")],
+        platforms=["linux-64", "linux-aarch64", "osx-arm64", "win-64"],
+        platform_system_requirements={
+            "linux-64": {"glibc": "2.28"},
+            "linux-aarch64": {"glibc": "2.28"},
+        },
+        features={"default": Feature(name="default")},
+        environments={"default": Environment(name="default")},
+        root=str(tmp_path),
+        manifest_path=str(tmp_path / "conda.toml"),
+    )
+    ctx = WorkspaceContext(config)
+    ctx._cache["platform"] = "osx-arm64"
+    resolved_envs = {
+        "default": resolve_environment(config, "default", platform=ctx.platform)
+    }
+    observed_requirements: dict[str, dict[str, str]] = {}
+    observed_overrides: dict[str, dict[str, str]] = {}
+
+    def fake_solve(self, platform, *, prefix):
+        observed_requirements[platform] = dict(self.system_requirements)
+        observed_overrides[platform] = self.virtual_package_overrides(platform)
+        return [_FakePkg("python", f"https://example.com/python-{platform}.conda")]
+
+    monkeypatch.setattr(ResolvedEnvironment, "solve_for_platform", fake_solve)
+
+    with conda_context._override("_subdir", "osx-arm64"):
+        generate_lockfile(ctx, resolved_envs, config=config)
+
+    assert observed_requirements[platform] == expected_requirements
+    if platform.startswith("linux-"):
+        assert observed_overrides[platform]["CONDA_OVERRIDE_GLIBC"] == "2.28"
+    else:
+        assert "CONDA_OVERRIDE_GLIBC" not in observed_overrides[platform]
+
+
 def test_generate_lockfile_progress_callback(
     workspace_ctx_factory: Callable[..., WorkspaceContext],
     fake_solver_factory,
@@ -836,12 +890,14 @@ def test_virtual_package_overrides_respect_existing_env(
     [
         ({}, {"CONDA_OVERRIDE_GLIBC": "2.17"}),
         ({"glibc": "2.28"}, {"CONDA_OVERRIDE_GLIBC": "2.28"}),
+        ({"libc": "2.28"}, {"CONDA_OVERRIDE_GLIBC": "2.28"}),
         ({"__glibc": "2.34"}, {"CONDA_OVERRIDE_GLIBC": "2.34"}),
         ({"osx": "12.0"}, {"CONDA_OVERRIDE_GLIBC": "2.17"}),
     ],
     ids=[
         "default-baseline",
         "bare-name-wins",
+        "pixi-name-wins",
         "dunder-name-wins",
         "unrelated-requirement-ignored",
     ],
