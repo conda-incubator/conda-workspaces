@@ -421,3 +421,27 @@ Built-in exclusions always apply regardless of this setting:
 CLI `--exclude` flags are combined with manifest exclusions. In git
 repos, only tracked files are considered regardless of exclusion
 patterns.
+
+### Receipt-compatible archive filters
+
+`conda workspace archive --receipt` requires the workspace manifest and
+`conda.lock` to be included in the archive because the receipt binds and
+later verifies both files. If you set `include`, make sure those files
+are part of the allowlist:
+
+```toml
+[workspace.archive]
+include = ["conda.toml", "conda.lock", "src/**"]
+```
+
+Do not exclude the manifest or lockfile when writing receipts:
+
+```toml
+[workspace.archive]
+exclude = ["docs/**", "*.log", "data/raw/**"]
+```
+
+If manifest settings or CLI `--exclude` patterns would remove either
+file, receipt creation fails before writing the archive or receipt. Run
+without `--receipt` only when you intentionally want an archive that is
+not receipt-verifiable.

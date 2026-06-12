@@ -143,6 +143,69 @@ conda workspace archive --lock
 This is equivalent to running `conda workspace lock` followed by
 `conda workspace archive`, but in a single command.
 
+## Write a receipt for verification
+
+![archive receipt demo](../../demos/archives-receipt.gif)
+
+Pass `--receipt` to write an external JSON receipt next to the archive:
+
+```bash
+conda workspace archive --lock --receipt -o my-project.tar.zst
+```
+
+This creates:
+
+```text
+my-project.tar.zst
+my-project.tar.zst.receipt.json
+```
+
+The receipt is an in-toto Statement that records SHA-256 digests for
+the archive, the manifest, and `conda.lock`, plus a per-environment
+package inventory from the lockfile. Use an explicit receipt path when
+your release process stores attestations separately:
+
+```bash
+conda workspace archive \
+  --receipt attestations/my-project.receipt.json \
+  -o dist/my-project.tar.zst
+```
+
+On the receiving side, pass `--receipt` to verify before the workspace
+is moved into place:
+
+```bash
+conda workspace unarchive my-project.tar.zst --receipt --target /tmp/verified
+```
+
+Or point to the explicit receipt path:
+
+```bash
+conda workspace unarchive dist/my-project.tar.zst \
+  --receipt attestations/my-project.receipt.json \
+  --target /tmp/verified
+```
+
+Verified extraction checks the archive digest before extraction, then
+extracts to a temporary staging directory, verifies the extracted
+manifest, lockfile, and package inventory, and only then moves the
+workspace to the target. The target must be empty or absent.
+
+Receipts require both the manifest and `conda.lock` to be present in the
+archive. If `include`, `exclude`, or `--exclude` filters would remove
+either file, `conda workspace archive --receipt` fails before writing
+the archive or receipt.
+
+For stricter package inventory checks, require every compared package
+record to include SHA-256:
+
+```bash
+conda workspace unarchive my-project.tar.zst \
+  --receipt \
+  --require-sha256 \
+  --target /tmp/verified
+```
+
 ## Bundle packages for offline use
 
 ![archive bundle demo](../../demos/archives-bundle.gif)
@@ -207,9 +270,24 @@ To guard against this:
 - Use `conda workspace install --locked` so the solver does not
   silently add packages beyond what the lockfile specifies.
 
+### Trust model for receipts
+
+A receipt is an integrity record, not a signature. It can detect that an
+archive, extracted manifest, extracted lockfile, or lockfile package
+inventory differs from the receipt. It does not prove who created the
+receipt.
+
+For provenance-sensitive workflows, distribute the receipt through a
+separate trusted channel or sign it with your release signing system.
+Pair `--receipt` with `--bundle` when you want one archive to carry the
+package artifacts and one sidecar receipt to bind the archive to the
+lockfile inventory.
+
 ## Next steps
 
 - {ref}`Archive configuration <archive-configuration>` for all archive settings
 - {ref}`Archives <archives>` for a feature overview
+- [Archive receipt reference](../reference/archive-receipts.md) for the
+  receipt JSON format and verification contract
 - [CLI reference](../reference/cli.md) for the full `archive` and
   `unarchive` command-line options

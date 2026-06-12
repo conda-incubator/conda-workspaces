@@ -820,8 +820,20 @@ are verified against the lockfile on both bundling and extraction:
 conda workspace archive --lock --bundle -o offline.tar.zst
 ```
 
+For handoff workflows that need a separate integrity record, `--receipt`
+writes an external in-toto Statement JSON file. `unarchive --receipt`
+verifies the archive, extracted manifest, extracted lockfile, and
+lockfile package inventory before moving the verified workspace into
+place:
+
+```bash
+conda workspace archive --lock --receipt -o my-project.tar.zst
+conda workspace unarchive my-project.tar.zst --receipt --target ./verified
+```
+
 See the [archive tutorial](tutorials/archives.md) for a
-full walkthrough.
+full walkthrough and the [archive receipt reference](reference/archive-receipts.md)
+for the receipt JSON format.
 
 ---
 

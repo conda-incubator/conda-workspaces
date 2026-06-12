@@ -103,6 +103,56 @@ def test_archive_receipt_roundtrip(receipt_workspace: Path, tmp_path: Path) -> N
     assert "/t/token/" not in json.dumps(loaded.statement)
 
 
+def test_archive_receipt_deduplicates_noarch_packages_across_platforms(
+    receipt_workspace: Path,
+    tmp_path: Path,
+) -> None:
+    receipt_workspace.joinpath("conda.lock").write_text(
+        """\
+version: 1
+environments:
+  default:
+    channels:
+      - url: https://conda.anaconda.org/conda-forge/
+    packages:
+      linux-64:
+        - conda: https://conda.anaconda.org/conda-forge/noarch/pan-1.3.1-pyhd8ed1ab_0.conda
+      osx-arm64:
+        - conda: https://conda.anaconda.org/conda-forge/noarch/pan-1.3.1-pyhd8ed1ab_0.conda
+packages:
+  - conda: https://conda.anaconda.org/conda-forge/noarch/pan-1.3.1-pyhd8ed1ab_0.conda
+    sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    md5: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    name: pan
+    version: 1.3.1
+    build: pyhd8ed1ab_0
+    depends: []
+""",
+        encoding="utf-8",
+    )
+    archive_path = tmp_path / "workspace.tar.gz"
+    create_archive(receipt_workspace, archive_path, ArchiveConfig())
+
+    receipt = build_receipt(receipt_workspace, archive_path)
+
+    packages = receipt.statement["predicate"]["environments"][0]["packages"]
+    assert packages == [
+        {
+            "build": "pyhd8ed1ab_0",
+            "channel": "https://conda.anaconda.org/conda-forge",
+            "fn": "pan-1.3.1-pyhd8ed1ab_0.conda",
+            "md5": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "name": "pan",
+            "sha256": (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ),
+            "subdir": "noarch",
+            "url": "https://conda.anaconda.org/conda-forge/noarch/pan-1.3.1-pyhd8ed1ab_0.conda",
+            "version": "1.3.1",
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     ("content", "match"),
     [
