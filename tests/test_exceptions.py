@@ -13,6 +13,7 @@ from conda_workspaces.exceptions import (
     ArchiveHashMismatchError,
     ArchivePathTraversalError,
     CondaWorkspacesError,
+    EnvironmentNameInvalidError,
     EnvironmentNotFoundError,
     EnvironmentNotInstalledError,
     FeatureNotFoundError,
@@ -44,6 +45,10 @@ from conda_workspaces.exceptions import (
         (
             EnvironmentNotFoundError("dev", []),
             ["dev"],
+        ),
+        (
+            EnvironmentNameInvalidError("../outside"),
+            ["../outside", "not valid"],
         ),
         (
             FeatureNotFoundError("gpu", "train"),
@@ -83,6 +88,7 @@ from conda_workspaces.exceptions import (
         "parse-error",
         "env-not-found-with-available",
         "env-not-found-empty",
+        "invalid-env-name",
         "feature-not-found",
         "platform-error",
         "solve-error",
@@ -126,6 +132,7 @@ def test_exception_attributes(exc, attr, expected):
         WorkspaceNotFoundError("/some/dir"),
         WorkspaceParseError("/path/pixi.toml", "bad syntax"),
         EnvironmentNotFoundError("dev", ["default", "test"]),
+        EnvironmentNameInvalidError("../outside"),
         EnvironmentNotInstalledError("dev"),
         ManifestExistsError("pixi.toml"),
         FeatureNotFoundError("gpu", "train"),
@@ -139,6 +146,7 @@ def test_exception_attributes(exc, attr, expected):
         "workspace-not-found",
         "parse-error",
         "env-not-found",
+        "invalid-env-name",
         "env-not-installed",
         "manifest-exists",
         "feature-not-found",

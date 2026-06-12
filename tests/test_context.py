@@ -15,6 +15,7 @@ from conda_workspaces.context import (
     WorkspaceContext,
     build_template_context,
 )
+from conda_workspaces.exceptions import EnvironmentNameInvalidError
 from conda_workspaces.models import (
     Channel,
     Environment,
@@ -104,6 +105,44 @@ def test_env_prefix(config: WorkspaceConfig, env_name: str) -> None:
     ctx = WorkspaceContext(config)
     prefix = ctx.env_prefix(env_name)
     assert prefix == ctx.envs_dir / env_name
+
+
+@pytest.mark.parametrize(
+    "env_name",
+    [
+        "",
+        ".",
+        "..",
+        "../outside-prefix",
+        "../../outside-prefix",
+        "/tmp/outside-prefix",
+        "nested/env",
+        r"..\outside-prefix",
+        r"nested\env",
+        r"C:\outside-prefix",
+        "C:outside-prefix",
+    ],
+    ids=[
+        "empty",
+        "dot",
+        "dot-dot",
+        "parent",
+        "parents",
+        "absolute",
+        "nested-posix",
+        "windows-parent",
+        "nested-windows",
+        "windows-absolute",
+        "windows-drive-relative",
+    ],
+)
+def test_env_prefix_rejects_path_like_names(
+    config: WorkspaceConfig,
+    env_name: str,
+) -> None:
+    ctx = WorkspaceContext(config)
+    with pytest.raises(EnvironmentNameInvalidError, match="not valid"):
+        ctx.env_prefix(env_name)
 
 
 @pytest.mark.parametrize(
