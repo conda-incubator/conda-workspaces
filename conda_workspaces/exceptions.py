@@ -77,6 +77,20 @@ class EnvironmentNotFoundError(CondaWorkspacesError):
         )
 
 
+class InvalidEnvironmentNameError(CondaWorkspacesError):
+    """The requested environment name cannot map to a workspace-local prefix."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        super().__init__(
+            f"Environment name '{name}' is not valid for a project-local prefix.",
+            hints=[
+                "Use a simple environment name without path separators,"
+                " drive prefixes, or '.'/'..'.",
+            ],
+        )
+
+
 class EnvironmentNotInstalledError(CondaWorkspacesError):
     """The requested environment exists but is not installed."""
 

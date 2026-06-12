@@ -8,8 +8,10 @@ import-time overhead negligible.
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, cast
+
+from .exceptions import InvalidEnvironmentNameError
 
 if TYPE_CHECKING:
     from conda.models.environment import Environment
@@ -72,7 +74,23 @@ class WorkspaceContext:
 
     def env_prefix(self, env_name: str) -> Path:
         """Return the prefix path for a named environment."""
-        return self.envs_dir / env_name
+        if (
+            not env_name
+            or env_name in {".", ".."}
+            or "/" in env_name
+            or "\\" in env_name
+            or Path(env_name).is_absolute()
+            or PureWindowsPath(env_name).drive
+        ):
+            raise InvalidEnvironmentNameError(env_name)
+
+        prefix = self.envs_dir / env_name
+        envs_dir = self.envs_dir.resolve(strict=False)
+        try:
+            prefix.resolve(strict=False).relative_to(envs_dir)
+        except ValueError as exc:
+            raise InvalidEnvironmentNameError(env_name) from exc
+        return prefix
 
     def env_exists(self, env_name: str) -> bool:
         """Check whether the prefix is a valid conda environment."""
