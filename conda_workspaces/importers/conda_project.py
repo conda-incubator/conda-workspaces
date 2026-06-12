@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING
 
 import tomlkit
 from conda.base.context import context as conda_context
 
 from ..exceptions import ManifestImportError
+from ..paths import parse_relative_posix_path, resolve_relative_path
 from .base import ManifestImporter
 
 if TYPE_CHECKING:
@@ -115,15 +115,9 @@ class CondaProjectImporter(ManifestImporter):
                 "conda-project environment file references must be strings.",
             )
 
-        posix_path = PurePosixPath(env_file)
-        windows_path = PureWindowsPath(env_file)
-        if (
-            posix_path.is_absolute()
-            or windows_path.drive
-            or windows_path.root
-            or ".." in posix_path.parts
-            or ".." in windows_path.parts
-        ):
+        try:
+            relative_path = parse_relative_posix_path(env_file)
+        except ValueError:
             raise ManifestImportError(
                 manifest_path,
                 f"environment file '{env_file}' escapes the project directory.",
@@ -131,13 +125,11 @@ class CondaProjectImporter(ManifestImporter):
                     "Keep conda-project environment files inside the project"
                     " directory and reference them with relative paths.",
                 ],
-            )
+            ) from None
 
         project_dir = manifest_path.parent
-        project_root = project_dir.resolve(strict=False)
-        env_path = (project_dir / env_file).resolve(strict=False)
         try:
-            env_path.relative_to(project_root)
+            return resolve_relative_path(project_dir, relative_path)
         except ValueError as exc:
             raise ManifestImportError(
                 manifest_path,
@@ -147,7 +139,6 @@ class CondaProjectImporter(ManifestImporter):
                     " directory and avoid symlinks that point outside it.",
                 ],
             ) from exc
-        return env_path
 
 
 convert = CondaProjectImporter().convert

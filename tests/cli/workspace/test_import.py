@@ -207,8 +207,8 @@ def test_import_rich_platform_system_requirements(
 
 @pytest.mark.parametrize(
     "env_file",
-    ["environment.yml", "envs/default.yml"],
-    ids=["root-env-file", "nested-env-file"],
+    ["environment.yml", "envs/default.yml", "./envs/default.yml"],
+    ids=["root-env-file", "nested-env-file", "current-dir-prefix"],
 )
 def test_import_conda_project(tmp_path: Path, env_file: str) -> None:
     (tmp_path / "conda-project.yml").write_text(

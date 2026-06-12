@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath
+from typing import TYPE_CHECKING
+
 import pytest
 
 from conda_workspaces.paths import (
     has_absolute_path_syntax,
     is_path_segment,
     parse_relative_posix_path,
+    resolve_relative_path,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.mark.parametrize(
@@ -37,12 +44,21 @@ def test_has_absolute_path_syntax(value: str, expected: bool) -> None:
 @pytest.mark.parametrize(
     ("value", "allow_parent", "require_canonical", "expected"),
     [
-        ("conda.toml", False, False, "conda.toml"),
-        ("envs/default/history", False, False, "envs/default/history"),
+        ("environment.yml", False, False, "environment.yml"),
+        ("envs/default.yml", False, False, "envs/default.yml"),
+        ("./envs/default.yml", False, False, "envs/default.yml"),
+        ("envs//default.yml", False, False, "envs/default.yml"),
+        ("envs/./default.yml", False, False, "envs/default.yml"),
         ("../target", True, False, "../target"),
-        ("dir/./file", False, False, "dir/file"),
     ],
-    ids=["file", "nested", "parent-allowed", "non-canonical-allowed"],
+    ids=[
+        "file",
+        "nested",
+        "current-dir-prefix",
+        "double-separator",
+        "current-dir-segment",
+        "allowed-parent",
+    ],
 )
 def test_parse_relative_posix_path_accepts_valid_paths(
     value: str,
@@ -68,9 +84,11 @@ def test_parse_relative_posix_path_accepts_valid_paths(
         (r"C:\project", False, False),
         (r"dir\file", False, False),
         ("C:project", True, False),
+        ("../file", False, False),
         ("dir/../file", False, False),
-        ("dir/./file", False, True),
-        ("dir//file", False, True),
+        ("./envs/default.yml", False, True),
+        ("envs//default.yml", False, True),
+        ("envs/./default.yml", False, True),
         ("bad\0path", False, False),
     ],
     ids=[
@@ -81,8 +99,10 @@ def test_parse_relative_posix_path_accepts_valid_paths(
         "backslash",
         "windows-drive-relative",
         "parent",
+        "nested-parent",
         "current-dir-canonical",
         "double-slash-canonical",
+        "current-dir-segment-canonical",
         "nul",
     ],
 )
@@ -136,3 +156,37 @@ def test_parse_relative_posix_path_rejects_invalid_paths(
 )
 def test_is_path_segment(value: str, expected: bool) -> None:
     assert is_path_segment(value) is expected
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        PurePosixPath("environment.yml"),
+        PurePosixPath("envs/default.yml"),
+    ],
+    ids=["file", "nested"],
+)
+def test_resolve_relative_path_returns_paths_inside_root(
+    tmp_path: Path,
+    relative_path: PurePosixPath,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+
+    assert resolve_relative_path(root, relative_path) == root.joinpath(
+        *relative_path.parts
+    ).resolve(strict=False)
+
+
+def test_resolve_relative_path_rejects_symlink_escape(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    outside.mkdir()
+    try:
+        (project / "linked").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
+
+    with pytest.raises(ValueError):
+        resolve_relative_path(project, PurePosixPath("linked/environment.yml"))
