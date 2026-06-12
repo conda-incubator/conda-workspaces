@@ -236,6 +236,84 @@ def test_execute_archive_no_output(
     assert expected.is_file()
 
 
+@pytest.mark.parametrize(
+    "workspace_name",
+    [
+        "../escaped-output",
+        "nested/archive-test",
+        r"nested\archive-test",
+        "/tmp/escaped-output",
+        "C:escaped-output",
+        "C:/escaped-output",
+    ],
+    ids=[
+        "parent",
+        "nested-posix",
+        "nested-windows",
+        "absolute",
+        "windows-drive-relative",
+        "windows-absolute",
+    ],
+)
+def test_execute_archive_rejects_path_like_default_output_name(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_name: str,
+) -> None:
+    manifest = archive_workspace / "conda.toml"
+    manifest.write_text(
+        f"""\
+[workspace]
+name = '{workspace_name}'
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-arm64"]
+
+[dependencies]
+python = ">=3.10"
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(archive_workspace)
+    console = Console(file=StringIO(), width=200, highlight=False)
+
+    with pytest.raises(ArchiveError, match="default archive filename"):
+        execute_archive(make_args(_ARCHIVE_DEFAULTS), console=console)
+
+    assert not (archive_workspace.parent / "escaped-output.tar.zst").exists()
+    assert not (archive_workspace / "nested").exists()
+
+
+def test_execute_archive_explicit_output_allows_path_like_workspace_name(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manifest = archive_workspace / "conda.toml"
+    manifest.write_text(
+        """\
+[workspace]
+name = '../escaped-output'
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-arm64"]
+
+[dependencies]
+python = ">=3.10"
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(archive_workspace)
+    output = tmp_path / "chosen.tar.gz"
+    console = Console(file=StringIO(), width=200, highlight=False)
+
+    result = execute_archive(
+        make_args(_ARCHIVE_DEFAULTS, output=output),
+        console=console,
+    )
+
+    assert result == 0
+    assert output.is_file()
+
+
 def test_execute_archive_exclude(
     archive_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,

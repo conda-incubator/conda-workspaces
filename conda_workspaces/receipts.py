@@ -11,11 +11,11 @@ from conda_lockfiles.load_yaml import load_yaml
 
 from .archive import (
     file_sha256,
-    has_absolute_path_syntax,
     parse_relative_archive_path,
     url_to_filename,
 )
 from .exceptions import ArchiveError, ArchiveHashMismatchError
+from .paths import has_absolute_path_syntax
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
