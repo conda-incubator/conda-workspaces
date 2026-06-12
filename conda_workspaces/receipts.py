@@ -418,7 +418,7 @@ class ReceiptInventory:
                 raise ArchiveError(
                     "Invalid lockfile: environment packages must be a mapping."
                 )
-            packages: list[dict[str, object]] = []
+            packages_by_identity: dict[str, dict[str, object]] = {}
             for platform in sorted(platform_packages):
                 refs = platform_packages[platform] or []
                 if not isinstance(refs, list):
@@ -428,18 +428,25 @@ class ReceiptInventory:
                         raise ArchiveError("Invalid lockfile package reference.")
                     url = ReceiptPackageRecord.package_url(ref)
                     source = packages_by_url.get(url, ref)
-                    packages.append(
-                        ReceiptPackageRecord.from_record(
-                            source,
-                            fallback_url=url,
-                            platform=platform,
-                        ).data
+                    package = ReceiptPackageRecord.from_record(
+                        source,
+                        fallback_url=url,
+                        platform=platform,
                     )
+                    existing = packages_by_identity.setdefault(
+                        package.identity,
+                        package.data,
+                    )
+                    if existing != package.data:
+                        raise ArchiveError(
+                            "Duplicate package record for environment"
+                            f" '{env_name}': {package.identity}"
+                        )
 
             env: dict[str, object] = {
                 "name": str(env_name),
                 "packages": sorted(
-                    packages,
+                    packages_by_identity.values(),
                     key=lambda record: ReceiptPackageRecord(record).identity,
                 ),
             }
@@ -616,6 +623,10 @@ class ReceiptPackageRecord:
         if url:
             result["url"] = cls.redact_url(url)
             result.setdefault("fn", url_to_filename(url))
+        if "subdir" not in result and url and isinstance(result.get("fn"), str):
+            subdir = cls.url_subdir(str(result["url"]), str(result["fn"]))
+            if subdir:
+                result["subdir"] = subdir
         if platform:
             result.setdefault("subdir", platform)
 
@@ -657,6 +668,16 @@ class ReceiptPackageRecord:
         elif filename and path.endswith(f"/{filename}"):
             path = path[: -(len(filename) + 1)]
         return parts._replace(path=path).geturl()
+
+    @staticmethod
+    def url_subdir(url: str, filename: str) -> str:
+        """Derive a package subdir from an artifact URL."""
+        path = urlsplit(url).path
+        suffix = f"/{filename}"
+        if not filename or not path.endswith(suffix):
+            return ""
+        parent = path[: -len(suffix)].rstrip("/")
+        return parent.rsplit("/", 1)[-1] if parent else ""
 
     @staticmethod
     def hex_digest(value: str, length: int, field: str) -> None:

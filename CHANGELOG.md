@@ -31,6 +31,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   archive when archive filters would omit the workspace manifest or
   `conda.lock`, avoiding archive/receipt pairs that cannot verify.
   (<gh-pr:84>)
+- Archive receipts now deduplicate identical `noarch` package records
+  that appear under multiple target platforms in `conda.lock`.
 
 ## 0.6.0 — 2026-06-05
 
