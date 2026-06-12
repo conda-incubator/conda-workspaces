@@ -796,6 +796,9 @@ Extract an archive and install environments in one step:
 conda workspace unarchive my-project.tar.zst --target ./restored --install
 ```
 
+The extraction target must be empty or absent. Existing files are not
+overwritten.
+
 Install one archived environment to a final runtime prefix, optionally
 under a staged filesystem root:
 

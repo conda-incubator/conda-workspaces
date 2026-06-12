@@ -33,6 +33,12 @@ class CreateWorkspaceEnv(Protocol):
     def __call__(self, workspace: Path, name: str, *, pkg_count: int = 0) -> Path: ...
 
 
+class ExistingExtractTarget(Protocol):
+    """Callable signature for creating pre-existing extraction targets."""
+
+    def __call__(self, kind: str, *, name: str = "extracted") -> Path: ...
+
+
 @pytest.fixture
 def sample_pixi_toml(tmp_path: Path) -> Path:
     """Create a minimal pixi.toml in tmp_path and return its path."""
@@ -160,6 +166,31 @@ def tmp_workspace_env(tmp_env: TmpEnvFixture) -> Iterator[CreateWorkspaceEnv]:
 def tmp_project(tmp_path: Path) -> Path:
     """A temporary directory acting as a project root."""
     return tmp_path
+
+
+@pytest.fixture
+def existing_extract_target(tmp_path: Path) -> ExistingExtractTarget:
+    """Factory fixture for unsafe archive extraction targets."""
+
+    def _create(kind: str, *, name: str = "extracted") -> Path:
+        target = tmp_path / name
+        if kind == "non-empty":
+            target.mkdir()
+            (target / "conda.toml").write_text("trusted = true\n", encoding="utf-8")
+        elif kind == "file-target":
+            target.write_text("trusted file\n", encoding="utf-8")
+        elif kind == "symlink-target":
+            destination = tmp_path / f"{name}-destination"
+            destination.mkdir()
+            try:
+                target.symlink_to(destination, target_is_directory=True)
+            except (NotImplementedError, OSError) as exc:
+                pytest.skip(f"symlink target setup unavailable: {exc}")
+        else:
+            raise AssertionError(f"unknown extraction target setup: {kind}")
+        return target
+
+    return _create
 
 
 @pytest.fixture

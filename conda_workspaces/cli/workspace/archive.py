@@ -17,6 +17,7 @@ from ...archive import (
     collect_archive_files,
     collect_bundle_packages,
     create_archive,
+    ensure_extract_target_empty,
     extract_archive,
     inspect_archive,
     prime_package_cache,
@@ -148,29 +149,6 @@ def receipt_environment_prefixes(
     return prefixes
 
 
-def ensure_verified_target_empty(target: Path) -> None:
-    """Reject verified extraction into non-empty or unsafe targets."""
-    if not target.exists():
-        return
-    if target.is_symlink():
-        raise ArchiveError("Cannot verify receipt into an existing symlink target.")
-    if not target.is_dir():
-        raise ArchiveError(
-            "Cannot verify receipt into an existing non-directory target."
-        )
-    try:
-        target_has_files = any(target.iterdir())
-    except OSError as exc:
-        raise ArchiveError(
-            f"Cannot inspect target before verified extraction: {target}"
-        ) from exc
-    if target_has_files:
-        raise ArchiveError(
-            "Cannot verify receipt into a non-empty target.",
-            hints=["Choose an empty target directory or remove existing files first."],
-        )
-
-
 def extract_verified_archive(
     archive_path: Path,
     target: Path,
@@ -179,8 +157,8 @@ def extract_verified_archive(
     require_sha256: bool = False,
 ) -> None:
     """Extract to a staging directory, verify, then move into *target*."""
+    ensure_extract_target_empty(target)
     target = target.resolve()
-    ensure_verified_target_empty(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     staged = Path(tempfile.mkdtemp(prefix=f".{target.name}.verify-", dir=target.parent))
     try:
@@ -391,7 +369,6 @@ def execute_unarchive(
                 stem = stem[: -len(suffix)]
                 break
         target = Path.cwd() / stem
-    target = target.resolve()
 
     info = inspect_archive(archive_path)
 
@@ -449,7 +426,7 @@ def execute_unarchive(
     )
 
     if receipt is None:
-        extract_archive(archive_path, target)
+        target = extract_archive(archive_path, target)
     else:
         extract_verified_archive(
             archive_path,
@@ -457,6 +434,7 @@ def execute_unarchive(
             receipt,
             require_sha256=getattr(args, "require_sha256", False),
         )
+        target = target.resolve()
 
     status.message(console, "Extracted", "archive", str(target))
     if receipt is not None:
