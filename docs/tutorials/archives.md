@@ -33,7 +33,9 @@ my-project.tar.zst
 ```
 
 If no `-o` is given, the archive is named after the workspace
-(`<name>.tar.zst`) and placed in the project root.
+(`<name>.tar.zst`) and placed in the project root. The workspace name
+must be a single filename segment for this default; pass `-o/--output`
+when you want to write the archive somewhere else.
 
 ## Use gzip compression
 

@@ -771,6 +771,10 @@ files:
 conda workspace archive -o my-project.tar.zst
 ```
 
+When `-o/--output` is omitted, the archive is written in the workspace
+root using the workspace name as the filename stem. That default name
+must be a single filename segment; use `-o/--output` for other paths.
+
 In git repos, only tracked files are included. Built-in exclusions
 (`.git`, `__pycache__`, `.conda/envs`, `.pixi`) always apply.
 Configure additional exclusions in the manifest:

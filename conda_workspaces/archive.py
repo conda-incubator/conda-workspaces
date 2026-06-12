@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import tarfile
 from contextlib import contextmanager
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -25,9 +25,11 @@ from .exceptions import (
     ArchiveHashMismatchError,
     ArchivePathTraversalError,
 )
+from .paths import parse_relative_posix_path
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from pathlib import PurePosixPath
     from typing import Any
 
     from .models import ArchiveConfig
@@ -69,16 +71,6 @@ BUILTIN_EXCLUDE_DIRS: frozenset[str] = frozenset(
 """Directories excluded from archives regardless of user configuration."""
 
 
-def has_absolute_path_syntax(path: str) -> bool:
-    """Return whether *path* is absolute using POSIX or Windows syntax.
-
-    Workspace archives can be created and verified on a different OS than
-    the one that consumes them, so callers cannot rely on host-only path
-    parsing for archive metadata.
-    """
-    return PurePosixPath(path).is_absolute() or PureWindowsPath(path).is_absolute()
-
-
 def parse_relative_archive_path(
     path: str,
     *,
@@ -91,20 +83,14 @@ def parse_relative_archive_path(
     verification reject the same ambiguous path syntax while raising their
     own domain-specific errors.
     """
-    posix_path = PurePosixPath(path)
-    windows_path = PureWindowsPath(path)
-    if (
-        not path
-        or "\0" in path
-        or "\\" in path
-        or posix_path.is_absolute()
-        or windows_path.drive
-        or not posix_path.parts
-        or posix_path.as_posix() != path
-        or (not allow_parent and any(part == ".." for part in posix_path.parts))
-    ):
-        raise ValueError(f"Invalid relative archive path: {path!r}")
-    return posix_path
+    try:
+        return parse_relative_posix_path(
+            path,
+            allow_parent=allow_parent,
+            require_canonical=True,
+        )
+    except ValueError as exc:
+        raise ValueError(f"Invalid relative archive path: {path!r}") from exc
 
 
 def is_git_repo(root: Path) -> bool:

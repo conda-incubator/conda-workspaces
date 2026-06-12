@@ -18,7 +18,6 @@ from ...archive import (
     collect_bundle_packages,
     create_archive,
     extract_archive,
-    has_absolute_path_syntax,
     inspect_archive,
     prime_package_cache,
     verify_package_hashes,
@@ -26,6 +25,7 @@ from ...archive import (
 from ...exceptions import ArchiveError
 from ...lockfile import lockfile_path as _lockfile_path
 from ...models import ArchiveConfig
+from ...paths import has_absolute_path_syntax, is_path_segment
 from ...receipts import ArchiveReceipt
 from .. import status
 from . import workspace_context_from_args
@@ -233,6 +233,14 @@ def execute_archive(
     output: Path | None = args.output
     if output is None:
         name = config.name or ctx.root.name
+        if not is_path_segment(name):
+            raise ArchiveError(
+                "Workspace name cannot be used as a default archive filename.",
+                hints=[
+                    "Use a simple workspace name without path separators,",
+                    "or pass -o/--output to choose the archive path explicitly.",
+                ],
+            )
         ext = {"zst": ".tar.zst", "gz": ".tar.gz", "bz2": ".tar.bz2"}.get(
             config.archive.compression, ".tar.zst"
         )
