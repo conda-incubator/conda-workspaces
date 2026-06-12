@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import pytest
+from conda.utils import quote_for_shell
 
 import conda_workspaces.cli.task.run as run_mod
 from conda_workspaces.cli.task.run import _resolve_task_args, execute_run
@@ -187,15 +189,98 @@ def test_execute_run_alias_quiet(tmp_path, capsys, fake_shell):
     assert capsys.readouterr().out == ""
 
 
-def test_execute_run_list_command(tmp_path, capsys):
-    """List-form commands are joined for dry-run display."""
+@pytest.mark.parametrize(
+    ("task_body", "expected"),
+    [
+        ('[tasks]\nbuild = "cmake --build ."\n', "cmake --build ."),
+        ('[tasks.build]\ncmd = ["cmake", "--build", "."]\n', "cmake --build ."),
+    ],
+    ids=["shell-string", "argv-list"],
+)
+def test_execute_run_dry_run_command_display(tmp_path, capsys, task_body, expected):
+    """Dry-run shows shell strings and list-form argv commands readably."""
     task_file = tmp_path / "conda.toml"
-    task_file.write_text('[tasks]\nbuild = "cmake --build ."\n')
+    task_file.write_text(task_body)
 
     result = execute_run(_run_args(task_file, task_name="build", dry_run=True))
     assert result == 0
     output = capsys.readouterr().out
-    assert "cmake --build ." in output
+    assert expected in output
+
+
+@pytest.mark.parametrize(
+    ("task_body", "task_name", "task_args", "expected_cmd"),
+    [
+        (
+            (
+                '[tasks.test]\ncmd = "python -m pytest {{ target }}"\n'
+                'args = [{ arg = "target" }]\n'
+            ),
+            "test",
+            ["tests/unit; echo ARG_PWN"],
+            f"python -m pytest {quote_for_shell('tests/unit; echo ARG_PWN')}",
+        ),
+        (
+            '[tasks.build]\ncmd = ["python", "-c", "print(1); echo ARRAY_PWN"]\n',
+            "build",
+            [],
+            ["python", "-c", "print(1); echo ARRAY_PWN"],
+        ),
+    ],
+    ids=["shell-template-arg-quoted", "argv-list-preserved"],
+)
+def test_execute_run_command_contract(
+    tmp_path,
+    fake_shell,
+    task_body,
+    task_name,
+    task_args,
+    expected_cmd,
+):
+    """Task run quotes shell-template args and preserves argv-list commands."""
+    task_file = tmp_path / "conda.toml"
+    task_file.write_text(task_body)
+
+    result = execute_run(_run_args(task_file, task_name=task_name, task_args=task_args))
+
+    assert result == 0
+    assert fake_shell.calls[0][0] == expected_cmd
+
+
+@pytest.mark.parametrize(
+    "command_form",
+    ["shell-template-arg", "argv-list"],
+    ids=["shell-template-arg", "argv-list"],
+)
+def test_execute_run_treats_task_values_as_data(tmp_path, command_form):
+    """Task values with shell metacharacters are passed as data."""
+    recorder = (
+        "from pathlib import Path; import sys; Path('seen.txt').write_text(sys.argv[1])"
+    )
+    pwned = "from pathlib import Path; Path('pwned.txt').write_text('bad')"
+    payload = f'safe & python -c "{pwned}"'
+    task_file = tmp_path / "conda.toml"
+    if command_form == "shell-template-arg":
+        command = f'python -c "{recorder}" {{{{ value }}}}'
+        task_file.write_text(
+            "[tasks.probe]\n"
+            f"cmd = {json.dumps(command)}\n"
+            'args = [{ arg = "value" }]\n'
+        )
+        task_args = [payload]
+    else:
+        task_file.write_text(
+            f"[tasks.probe]\ncmd = {json.dumps(['python', '-c', recorder, payload])}\n"
+        )
+        task_args = []
+
+    result = execute_run(
+        _run_args(task_file, task_name="probe", task_args=task_args, cwd=tmp_path)
+    )
+
+    assert result == 0
+    assert (tmp_path / "seen.txt").read_text() == payload
+    assert not (tmp_path / "pwned.txt").exists()
 
 
 def test_execute_run_single_zero_chrome(tmp_path, capsys, fake_shell):

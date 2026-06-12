@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from conda.base.constants import on_win
 
@@ -89,6 +91,77 @@ def test_list_command(tmp_path):
     assert exit_code == 0
 
 
+@pytest.mark.parametrize(
+    ("cmd", "expected_command"),
+    [
+        ("echo hi", SubprocessShell._shell_command("echo hi")),
+        (
+            ["python", "-c", "print(1); echo ARRAY_PWN"],
+            ["python", "-c", "print(1); echo ARRAY_PWN"],
+        ),
+    ],
+    ids=["shell-string", "argv-list"],
+)
+def test_run_direct_command_contract(tmp_path, monkeypatch, cmd, expected_command):
+    import types
+
+    import conda_workspaces.runner as runner_mod
+
+    calls: list[tuple] = []
+    script_bodies: list[str] = []
+
+    def fake_subprocess_call(command, **kwargs):
+        calls.append((command, kwargs))
+        if isinstance(cmd, str) and on_win:
+            script_bodies.append(Path(command[3]).read_text())
+        return types.SimpleNamespace(rc=0)
+
+    monkeypatch.setattr(runner_mod, "subprocess_call", fake_subprocess_call)
+
+    shell = SubprocessShell()
+    exit_code = shell.run(cmd, {}, tmp_path)
+
+    assert exit_code == 0
+    if isinstance(cmd, str) and on_win:
+        assert calls[0][0][:3] == ["cmd", "/d", "/c"]
+        assert script_bodies[0].startswith("@ECHO OFF\n")
+        assert "echo hi\n" in script_bodies[0]
+        assert not Path(calls[0][0][3]).exists()
+    else:
+        assert calls[0][0] == expected_command
+    assert calls[0][1]["capture_output"] is False
+
+
+def test_run_direct_windows_string_uses_batch_script(tmp_path, monkeypatch):
+    import types
+
+    import conda_workspaces.runner as runner_mod
+
+    calls: list[tuple] = []
+    script_bodies: list[str] = []
+
+    def fake_subprocess_call(command, **kwargs):
+        calls.append((command, kwargs))
+        script_bodies.append(Path(command[3]).read_text())
+        return types.SimpleNamespace(rc=0)
+
+    monkeypatch.setattr(runner_mod, "on_win", True)
+    monkeypatch.setattr(runner_mod, "subprocess_call", fake_subprocess_call)
+
+    shell = SubprocessShell()
+    code = shell.run('python -c "print(1)"', {}, tmp_path)
+
+    assert code == 0
+    assert calls[0][0][:3] == ["cmd", "/d", "/c"]
+    assert script_bodies[0] == (
+        "@ECHO OFF\n"
+        'python -c "print(1)"\n'
+        'SET "_CONDA_WORKSPACES_RC=%ERRORLEVEL%"\n'
+        "EXIT /B %_CONDA_WORKSPACES_RC%\n"
+    )
+    assert not Path(calls[0][0][3]).exists()
+
+
 @pytest.mark.skipif(on_win, reason="Unix-only test")
 def test_shell_command_unix():
     result = SubprocessShell._shell_command("echo hi")
@@ -103,9 +176,24 @@ def test_shell_command_windows():
     assert "/c" in result
 
 
-def test_run_in_env(tmp_path, monkeypatch):
-    """_run_in_env delegates to wrap_subprocess_call."""
-    import subprocess as subprocess_mod
+@pytest.mark.parametrize(
+    ("cmd", "expected_arguments"),
+    [
+        ("echo hi", SubprocessShell._shell_command("echo hi")),
+        (
+            ["python", "-c", "print(1); echo ARRAY_PWN"],
+            ["python", "-c", "print(1); echo ARRAY_PWN"],
+        ),
+    ],
+    ids=["shell-string", "argv-list"],
+)
+def test_run_in_env_delegates_to_conda_wrapper(
+    tmp_path,
+    monkeypatch,
+    cmd,
+    expected_arguments,
+):
+    """_run_in_env delegates activation wrapping to conda."""
     import types
 
     import conda_workspaces.runner as runner_mod
@@ -124,24 +212,66 @@ def test_run_in_env(tmp_path, monkeypatch):
         wrap_calls.append(args)
         return (str(script_file), ["echo", "hi"])
 
+    def fake_subprocess_call(*args, **kwargs):
+        return types.SimpleNamespace(rc=0)
+
     monkeypatch.setattr(runner_mod, "context", fake_context)
     monkeypatch.setattr(runner_mod, "wrap_subprocess_call", fake_wrap)
-    monkeypatch.setattr(
-        subprocess_mod,
-        "run",
-        lambda *a, **kw: types.SimpleNamespace(returncode=0),
-    )
+    monkeypatch.setattr(runner_mod, "subprocess_call", fake_subprocess_call)
 
     shell = SubprocessShell()
-    code = shell._run_in_env("echo hi", {}, tmp_path, tmp_path / "envs/test")
+    code = shell._run_in_env(cmd, {}, tmp_path, tmp_path / "envs/test")
 
     assert code == 0
     assert len(wrap_calls) == 1
+    if isinstance(cmd, str) and on_win:
+        assert wrap_calls[0][4] == [SubprocessShell._batch_body(cmd)]
+    else:
+        assert wrap_calls[0][4] == expected_arguments
+
+
+def test_run_in_env_windows_string_uses_activation_script_body(tmp_path, monkeypatch):
+    import types
+
+    import conda_workspaces.runner as runner_mod
+
+    script_file = tmp_path / "activate.bat"
+    script_file.write_text("@ECHO OFF\n")
+
+    fake_context = types.SimpleNamespace(
+        root_prefix=str(tmp_path / "root"),
+        dev=False,
+    )
+    wrap_calls: list[tuple] = []
+
+    def fake_wrap(*args):
+        wrap_calls.append(args)
+        return (str(script_file), ["cmd", "/d", "/c", str(script_file)])
+
+    monkeypatch.setattr(runner_mod, "on_win", True)
+    monkeypatch.setattr(runner_mod, "context", fake_context)
+    monkeypatch.setattr(runner_mod, "wrap_subprocess_call", fake_wrap)
+    monkeypatch.setattr(
+        runner_mod,
+        "subprocess_call",
+        lambda *a, **kw: types.SimpleNamespace(rc=0),
+    )
+
+    shell = SubprocessShell()
+    code = shell._run_in_env(
+        'python -c "print(1)"',
+        {},
+        tmp_path,
+        tmp_path / "envs/test",
+    )
+
+    assert code == 0
+    assert wrap_calls[0][4] == ['python -c "print(1)"\n']
+    assert not script_file.exists()
 
 
 def test_run_in_env_cleans_up_script(tmp_path, monkeypatch):
     """_run_in_env removes the wrapper script after execution."""
-    import subprocess as subprocess_mod
     import types
 
     import conda_workspaces.runner as runner_mod
@@ -161,9 +291,9 @@ def test_run_in_env_cleans_up_script(tmp_path, monkeypatch):
         lambda *a: (str(script_file), ["echo", "hi"]),
     )
     monkeypatch.setattr(
-        subprocess_mod,
-        "run",
-        lambda *a, **kw: types.SimpleNamespace(returncode=0),
+        runner_mod,
+        "subprocess_call",
+        lambda *a, **kw: types.SimpleNamespace(rc=0),
     )
 
     shell = SubprocessShell()

@@ -85,13 +85,18 @@ def _fingerprint_files(paths: list[str]) -> dict[str, dict[str, Any]]:
 
 
 def _compute_entry(
-    cmd: str,
+    cmd: str | list[str],
     env: dict[str, str],
     input_files: list[str],
     output_files: list[str],
 ) -> dict[str, Any]:
     """Compute a cache entry from current state."""
-    cmd_hash = hashlib.sha256(cmd.encode()).hexdigest()
+    cmd_data = (
+        cmd
+        if isinstance(cmd, str)
+        else json.dumps(cmd, ensure_ascii=True, separators=(",", ":"))
+    )
+    cmd_hash = hashlib.sha256(cmd_data.encode()).hexdigest()
     env_hash = hashlib.sha256(json.dumps(env, sort_keys=True).encode()).hexdigest()
     return {
         "cmd_hash": cmd_hash,
@@ -104,7 +109,7 @@ def _compute_entry(
 def is_cached(
     project_root: Path,
     task_name: str,
-    cmd: str,
+    cmd: str | list[str],
     env: dict[str, str],
     input_patterns: list[str],
     output_patterns: list[str],
@@ -165,7 +170,7 @@ def _files_match(cached: dict[str, Any], current: dict[str, Any]) -> bool:
 def save_cache(
     project_root: Path,
     task_name: str,
-    cmd: str,
+    cmd: str | list[str],
     env: dict[str, str],
     input_patterns: list[str],
     output_patterns: list[str],

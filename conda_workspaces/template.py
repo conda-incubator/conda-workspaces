@@ -5,6 +5,8 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
+from conda.utils import quote_for_shell
+
 from .context import build_template_context
 
 if TYPE_CHECKING:
@@ -42,6 +44,25 @@ def render(
         ctx.update(extra_context)
     tpl = env.from_string(template_str)
     return tpl.render(ctx)
+
+
+def render_command(
+    template_str: str,
+    manifest_path: Path | None = None,
+    task_args: dict[str, str] | None = None,
+) -> str:
+    """Render a shell command template with task arguments shell-quoted.
+
+    Command strings are executed through the native shell, so named task
+    arguments are data values that must occupy one shell word when they
+    are interpolated.
+    """
+    quoted_args = (
+        {key: quote_for_shell(str(value)) for key, value in task_args.items()}
+        if task_args
+        else None
+    )
+    return render(template_str, manifest_path=manifest_path, task_args=quoted_args)
 
 
 def render_list(

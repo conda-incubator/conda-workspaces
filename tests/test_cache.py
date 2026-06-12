@@ -99,7 +99,15 @@ def test_not_cached_initially(tmp_path):
     )
 
 
-def test_save_and_check(tmp_path):
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "make",
+        ["python", "-c", "print(1); echo ARRAY_PWN"],
+    ],
+    ids=["shell-string", "argv-list"],
+)
+def test_save_and_check(tmp_path, cmd):
     src = tmp_path / "main.py"
     src.write_text("print('hello')")
     dist = tmp_path / "dist"
@@ -109,7 +117,7 @@ def test_save_and_check(tmp_path):
     save_cache(
         tmp_path,
         "build",
-        "make",
+        cmd,
         {},
         ["main.py"],
         ["dist/*.whl"],
@@ -118,7 +126,7 @@ def test_save_and_check(tmp_path):
     assert is_cached(
         tmp_path,
         "build",
-        "make",
+        cmd,
         {},
         ["main.py"],
         ["dist/*.whl"],
@@ -131,12 +139,20 @@ def test_save_and_check(tmp_path):
     [
         ("make", {}, "make", {}, "input"),
         ("make", {}, "make all", {}, None),
+        (
+            ["python", "-m", "pytest"],
+            {},
+            ["python", "-m", "pytest", "tests/unit"],
+            {},
+            None,
+        ),
         ("make", {"CC": "gcc"}, "make", {"CC": "clang"}, None),
         ("make", {}, "make", {}, "delete_output"),
     ],
     ids=[
         "input-change",
         "cmd-change",
+        "argv-cmd-change",
         "env-change",
         "missing-output",
     ],
