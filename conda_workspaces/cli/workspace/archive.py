@@ -143,7 +143,7 @@ def receipt_environment_prefixes(
         try:
             prefixes[name] = prefix.relative_to(ctx_root).as_posix()
         except ValueError:
-            prefixes[name] = str(prefix)
+            prefixes[name] = prefix.as_posix()
     return prefixes
 
 

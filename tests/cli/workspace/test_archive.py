@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import tarfile
 from io import StringIO
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 from rich.console import Console
@@ -165,6 +165,16 @@ def test_receipt_environment_prefixes_records_external_prefix(tmp_path: Path) ->
         "default": ".conda/envs/default",
         "runtime": "/opt/runtime",
     }
+
+
+def test_receipt_environment_prefixes_normalizes_windows_external_prefix() -> None:
+    prefixes = receipt_environment_prefixes(
+        config_environments=["runtime"],
+        ctx_root=PureWindowsPath("C:/workspace"),
+        env_prefix=lambda name: PureWindowsPath("D:/runtime"),
+    )
+
+    assert prefixes == {"runtime": "D:/runtime"}
 
 
 @pytest.fixture
