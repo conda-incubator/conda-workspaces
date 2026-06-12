@@ -443,18 +443,23 @@ def execute_unarchive(
     if info["has_packages"]:
         console.print(f"  Archive includes {info['package_count']} bundled packages")
         if not args.no_install:
-            from conda.base.context import context as conda_context
-
-            cache_dir = Path(conda_context.pkgs_dirs[0])
-            count = prime_package_cache(target, cache_dir)
-            if count > 0:
-                status.message(
-                    console,
-                    "Primed",
-                    "packages",
-                    str(count),
-                    detail="into conda cache",
+            if receipt is None:
+                console.print(
+                    "  Skipping package cache priming without verified receipt"
                 )
+            else:
+                from conda.base.context import context as conda_context
+
+                cache_dir = Path(conda_context.pkgs_dirs[0])
+                count = prime_package_cache(target, cache_dir, verified=True)
+                if count > 0:
+                    status.message(
+                        console,
+                        "Primed",
+                        "packages",
+                        str(count),
+                        detail="into conda cache",
+                    )
 
     if args.install:
         install_prefix = Path(final_prefix) if final_prefix is not None else None

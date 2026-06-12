@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import tarfile
 from io import StringIO
@@ -11,6 +12,7 @@ from typing import TYPE_CHECKING
 import pytest
 from rich.console import Console
 
+from conda_workspaces.archive import create_archive
 from conda_workspaces.cli.workspace.archive import (
     execute_archive,
     execute_unarchive,
@@ -23,6 +25,7 @@ from conda_workspaces.cli.workspace.archive import (
     scan_prefix_references,
 )
 from conda_workspaces.exceptions import ArchiveError
+from conda_workspaces.models import ArchiveConfig
 from conda_workspaces.receipts import ArchiveReceipt
 
 from ..conftest import make_args
@@ -202,6 +205,64 @@ python = ">=3.10"
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("print('hello')\n", encoding="utf-8")
     return tmp_path
+
+
+@pytest.fixture
+def bundled_cli_archive(tmp_path: Path) -> Path:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "conda.toml").write_text(
+        """\
+[workspace]
+name = "archive-test"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+""",
+        encoding="utf-8",
+    )
+    package_name = "example-1.0-h123.conda"
+    package_content = b"example package"
+    sha256 = hashlib.sha256(package_content).hexdigest()
+    (root / "conda.lock").write_text(
+        f"""\
+version: 1
+environments:
+  default:
+    channels:
+      - url: https://conda.anaconda.org/conda-forge/
+    packages:
+      linux-64:
+        - conda: https://conda.anaconda.org/conda-forge/linux-64/{package_name}
+packages:
+  - conda: https://conda.anaconda.org/conda-forge/linux-64/{package_name}
+    sha256: {sha256}
+    name: example
+    version: "1.0"
+    build: h123
+    subdir: linux-64
+    depends: []
+""",
+        encoding="utf-8",
+    )
+    package_cache = tmp_path / "package-cache"
+    package_cache.mkdir()
+    package_path = package_cache / package_name
+    package_path.write_bytes(package_content)
+
+    archive = tmp_path / "bundled.tar.gz"
+    archive_config = ArchiveConfig()
+    create_archive(root, archive, archive_config, bundle_packages=[package_path])
+    receipt = ArchiveReceipt.build(
+        root=root,
+        archive_path=archive,
+        archive_config=archive_config,
+        manifest_path=root / "conda.toml",
+        lockfile_path=root / "conda.lock",
+        environment_prefixes={"default": ".conda/envs/default"},
+        options={"bundle": True, "lock": False},
+    )
+    receipt.write(ArchiveReceipt.default_path(archive))
+    return archive
 
 
 def test_execute_archive_default(
@@ -493,6 +554,63 @@ def test_execute_unarchive_receipt_detects_tampered_archive(
                 receipt=True,
             ),
             console=console,
+        )
+
+
+@pytest.mark.parametrize(
+    ("receipt", "expected_primed"),
+    [
+        (None, False),
+        (True, True),
+    ],
+    ids=["without-receipt", "with-receipt"],
+)
+def test_execute_unarchive_package_cache_priming_requires_receipt(
+    bundled_cli_archive: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    receipt: object,
+    expected_primed: bool,
+) -> None:
+    calls: list[tuple[Path, Path, bool]] = []
+
+    def fake_prime_package_cache(
+        extracted_dir: Path,
+        cache_dir: Path,
+        *,
+        verified: bool = False,
+    ) -> int:
+        calls.append((extracted_dir, cache_dir, verified))
+        return 1
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.archive.prime_package_cache",
+        fake_prime_package_cache,
+    )
+
+    target = tmp_path / f"extracted-{receipt or 'none'}"
+    stream = StringIO()
+    result = execute_unarchive(
+        make_args(
+            _UNARCHIVE_DEFAULTS,
+            archive_path=bundled_cli_archive,
+            target=target,
+            receipt=receipt,
+        ),
+        console=Console(file=stream, width=200, highlight=False),
+    )
+
+    assert result == 0
+    if expected_primed:
+        assert len(calls) == 1
+        extracted_dir, _, verified = calls[0]
+        assert extracted_dir == target.resolve()
+        assert verified is True
+        assert "Primed" in stream.getvalue()
+    else:
+        assert calls == []
+        assert "Skipping package cache priming without verified receipt" in (
+            stream.getvalue()
         )
 
 

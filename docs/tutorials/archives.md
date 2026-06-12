@@ -230,18 +230,20 @@ conda workspace archive --lock --bundle -o my-project-offline.tar.zst
 This adds a `packages/` directory inside the archive. Package hashes
 are verified against the lockfile before bundling.
 
-On the receiving end, `conda workspace unarchive` detects the bundled
-packages, verifies their hashes, and copies them into the local conda
-cache before installation:
+On the receiving end, pair bundled archives with a receipt when you want
+`conda workspace unarchive` to verify the external integrity record and
+copy bundled packages into the local conda cache before installation:
 
 ```bash
-conda workspace unarchive my-project-offline.tar.zst
-# packages are primed into the conda cache automatically
+conda workspace archive --lock --bundle --receipt -o my-project-offline.tar.zst
+conda workspace unarchive my-project-offline.tar.zst --receipt
+# packages are primed into the conda cache after receipt verification
 cd my-project-offline
 conda workspace install --locked
 ```
 
-Pass `--no-install` to skip cache priming if you only want the files:
+Without a verified receipt, `unarchive` extracts the files but skips
+package cache priming. Pass `--no-install` when you only want the files:
 
 ```bash
 conda workspace unarchive my-project-offline.tar.zst --no-install
@@ -256,9 +258,9 @@ FIFOs) are all rejected. On Python 3.12+ the `filter="data"` parameter
 provides additional defense-in-depth.
 
 When `--bundle` is used, package hashes are verified against the
-lockfile's SHA256 entries both at archive creation and at extraction.
-Packages without a SHA256 entry in the lockfile are rejected instead of
-being copied into the conda package cache.
+lockfile's SHA256 entries at archive creation and before receipt-verified
+cache priming. Packages without a SHA256 entry in the lockfile are
+rejected instead of being copied into the conda package cache.
 
 ### Trust model for bundled archives
 
@@ -271,8 +273,8 @@ packages.
 To guard against this:
 
 - Obtain archives only from trusted sources.
-- When possible, compare the lockfile inside the archive against a
-  separately obtained copy (e.g. from version control).
+- Use `--receipt` and distribute the receipt through a separate trusted
+  channel when bundled packages should prime a conda package cache.
 - Use `conda workspace install --locked` so the solver does not
   silently add packages beyond what the lockfile specifies.
 
