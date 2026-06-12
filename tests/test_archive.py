@@ -162,22 +162,74 @@ def test_collect_files_non_git(project_dir: Path) -> None:
     "relative_path",
     [
         ".env",
+        ".env.production",
         ".env.local",
         ".env.production.local",
+        ".aws/credentials",
+        ".azure/msal_token_cache.json",
+        ".config/gcloud/application_default_credentials.json",
+        ".condarc",
+        ".docker/config.json",
+        ".git-credentials",
+        ".gnupg/private-keys-v1.d/key",
+        ".kube/config",
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+        ".ssh/id_rsa",
+        ".terraform/terraform.tfstate",
+        "app.key",
+        "credentials.p12",
+        "credentials.pfx",
+        "credentials.pem",
+        "identity.jks",
+        "identity.keystore",
+        "kubeconfig",
+        "secret.secret",
+        "secrets",
+        "secrets.yaml",
+        "terraform.tfstate",
+        "terraform.tfstate.backup",
         "nested/.env",
-        "nested/.env.local",
-        "nested/.env.production.local",
+        "nested/.ssh/id_ed25519",
+        "nested/secrets/token.txt",
     ],
     ids=[
         "dotenv",
+        "dotenv-environment",
         "dotenv-local",
         "dotenv-env-local",
+        "aws-credentials",
+        "azure-config",
+        "gcloud-config",
+        "condarc",
+        "docker-config",
+        "git-credentials",
+        "gnupg",
+        "kube-config",
+        "netrc",
+        "npmrc",
+        "pypirc",
+        "ssh-key",
+        "terraform-dir",
+        "key-file",
+        "p12-file",
+        "pfx-file",
+        "pem-file",
+        "jks-file",
+        "keystore-file",
+        "kubeconfig",
+        "secret-extension",
+        "secrets-file",
+        "secrets-yaml",
+        "terraform-state",
+        "terraform-state-backup",
         "nested-dotenv",
-        "nested-dotenv-local",
-        "nested-dotenv-env-local",
+        "nested-ssh-key",
+        "nested-secrets-dir",
     ],
 )
-def test_collect_files_excludes_default_sensitive_dotenv_files(
+def test_collect_files_excludes_default_sensitive_files(
     project_dir: Path,
     relative_path: str,
 ) -> None:
@@ -196,12 +248,25 @@ def test_collect_files_excludes_default_sensitive_dotenv_files(
 @pytest.mark.parametrize(
     "relative_path",
     [
+        ".env.dist",
         ".env.example",
+        ".env.sample",
+        ".env.template",
+        "docs/secrets-guide.md",
         "nested/.env.example",
+        "nested/id_rsa.pub",
     ],
-    ids=["example", "nested-example"],
+    ids=[
+        "dotenv-dist",
+        "dotenv-example",
+        "dotenv-sample",
+        "dotenv-template",
+        "secrets-doc",
+        "nested-dotenv-example",
+        "nested-public-key",
+    ],
 )
-def test_collect_files_keeps_dotenv_examples(
+def test_collect_files_keeps_safe_examples(
     project_dir: Path,
     relative_path: str,
 ) -> None:
@@ -262,6 +327,10 @@ def test_collect_files_custom_exclude(project_dir: Path) -> None:
 
 @pytest.mark.parametrize("suffix", [".tar.gz", ".tar.zst", ".tar.bz2"])
 def test_create_archive(project_dir: Path, tmp_path: Path, suffix: str) -> None:
+    (project_dir / ".npmrc").write_text("//registry.example/:_authToken=secret\n")
+    (project_dir / ".ssh").mkdir()
+    (project_dir / ".ssh" / "id_rsa").write_text("secret\n")
+
     output = tmp_path / "out" / f"project{suffix}"
     config = ArchiveConfig()
     create_archive(project_dir, output, config)
@@ -272,6 +341,9 @@ def test_create_archive(project_dir: Path, tmp_path: Path, suffix: str) -> None:
     assert "conda.toml" in names
     assert "conda.lock" in names
     assert "src/main.py" in names
+    assert ".env" not in names
+    assert ".npmrc" not in names
+    assert ".ssh/id_rsa" not in names
 
 
 def test_create_archive_excludes_self(project_dir: Path) -> None:

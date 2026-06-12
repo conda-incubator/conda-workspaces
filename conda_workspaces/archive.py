@@ -73,12 +73,73 @@ BUILTIN_EXCLUDE_DIRS: frozenset[str] = frozenset(
 BUILTIN_SENSITIVE_EXCLUDE_PATTERNS: tuple[str, ...] = (
     ".env",
     "*/.env",
-    ".env.local",
-    "*/.env.local",
-    ".env.*.local",
-    "*/.env.*.local",
+    ".env.*",
+    "*/.env.*",
+    ".aws",
+    "*/.aws",
+    ".azure",
+    "*/.azure",
+    ".config/gcloud",
+    "*/.config/gcloud",
+    ".docker",
+    "*/.docker",
+    ".gnupg",
+    "*/.gnupg",
+    ".kube",
+    "*/.kube",
+    ".ssh",
+    "*/.ssh",
+    ".terraform",
+    "*/.terraform",
+    ".condarc",
+    "*/.condarc",
+    ".git-credentials",
+    "*/.git-credentials",
+    ".netrc",
+    "*/.netrc",
+    ".npmrc",
+    "*/.npmrc",
+    ".pypirc",
+    "*/.pypirc",
+    "id_dsa",
+    "*/id_dsa",
+    "id_ecdsa",
+    "*/id_ecdsa",
+    "id_ed25519",
+    "*/id_ed25519",
+    "id_rsa",
+    "*/id_rsa",
+    "kubeconfig",
+    "*/kubeconfig",
+    "*.kubeconfig",
+    "*.key",
+    "*.keystore",
+    "*.jks",
+    "*.p12",
+    "*.pem",
+    "*.pfx",
+    "*.secret",
+    "*.secrets",
+    "*.tfstate",
+    "*.tfstate.*",
+    "secrets",
+    "*/secrets",
+    "secrets.*",
+    "*/secrets.*",
 )
-"""Credential-bearing dotenv files excluded from archives by default."""
+"""Common credential material excluded from archives by default."""
+
+BUILTIN_SENSITIVE_EXCLUDE_EXCEPTIONS: tuple[str, ...] = (
+    ".env.dist",
+    "*/.env.dist",
+    ".env.example",
+    "*/.env.example",
+    ".env.sample",
+    "*/.env.sample",
+    ".env.template",
+    "*/.env.template",
+)
+"""Documented dotenv examples that are safe to keep in archives."""
 
 
 def parse_relative_archive_path(
@@ -140,6 +201,8 @@ def is_excluded_by_builtins(rel_path: str) -> bool:
     for excl in BUILTIN_EXCLUDE_DIRS:
         if rel_path == excl or rel_path.startswith(excl + "/"):
             return True
+    if is_excluded_by_patterns(rel_path, BUILTIN_SENSITIVE_EXCLUDE_EXCEPTIONS):
+        return False
     return is_excluded_by_patterns(rel_path, BUILTIN_SENSITIVE_EXCLUDE_PATTERNS)
 
 

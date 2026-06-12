@@ -62,8 +62,8 @@ conda workspace archive --exclude "benchmarks/**" --exclude "*.csv"
 ```
 
 Both sources are combined. Built-in exclusions (`.git`, `__pycache__`,
-`.conda/envs`, `.pixi`, and common dotenv secret files such as `.env`)
-always apply regardless of configuration.
+`.conda/envs`, `.pixi`, and common credential material such as `.env`,
+`.ssh`, `.aws`, and `.npmrc`) always apply regardless of configuration.
 
 ## Extract an archive
 

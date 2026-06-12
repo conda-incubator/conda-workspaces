@@ -417,8 +417,13 @@ Built-in exclusions always apply regardless of this setting:
 - `.conda/envs`
 - `.pixi`
 - `__pycache__`
-- common dotenv secret files such as `.env`, `.env.local`, and
-  `.env.*.local`
+- common credential material such as `.env`, `.ssh`, `.aws`, `.azure`,
+  `.config/gcloud`, `.docker`, `.gnupg`, `.kube`, `.terraform`,
+  `.npmrc`, `.pypirc`, `.netrc`, private keys, certificate/key bundles,
+  and Terraform state files
+
+Dotenv templates such as `.env.example`, `.env.sample`, `.env.template`,
+and `.env.dist` remain eligible for archives unless excluded explicitly.
 
 CLI `--exclude` flags are combined with manifest exclusions. In git
 repos, only tracked files are considered regardless of exclusion
