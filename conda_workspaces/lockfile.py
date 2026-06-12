@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     from conda.models.environment import Environment
 
     from .context import WorkspaceContext
+    from .models import Environment as WorkspaceEnvironment
     from .models import WorkspaceConfig
     from .resolver import ResolvedEnvironment
 
@@ -100,6 +101,29 @@ def lockfile_path(ctx: WorkspaceContext) -> Path:
 def _normalize_channel_urls(urls: Iterable[str]) -> list[str]:
     """Strip trailing slashes from channel URLs for comparison."""
     return [url.rstrip("/") for url in urls]
+
+
+def _manifest_channel_entries(
+    config: WorkspaceConfig,
+    environment: WorkspaceEnvironment,
+) -> list[dict[str, str]]:
+    """Return manifest channel entries without conda canonical-name deduplication."""
+    seen: set[str] = set()
+    entries: list[dict[str, str]] = []
+    for ch in config.channels:
+        url = str(ch)
+        normalized = url.rstrip("/")
+        if normalized not in seen:
+            seen.add(normalized)
+            entries.append({"url": url})
+    for feature in config.resolve_features(environment):
+        for ch in feature.channels:
+            url = str(ch)
+            normalized = url.rstrip("/")
+            if normalized not in seen:
+                seen.add(normalized)
+                entries.append({"url": url})
+    return entries
 
 
 def lockfile_status(
@@ -154,9 +178,9 @@ def check_lockfile_satisfiability(
 
         lock_env = lock_envs[env_name]
 
-        manifest_channels = config.merged_channels(env_obj)
+        manifest_channels = _manifest_channel_entries(config, env_obj)
         manifest_urls = _normalize_channel_urls(
-            ch.base_url for ch in manifest_channels if ch.base_url
+            entry["url"] for entry in manifest_channels
         )
         lock_channel_entries = lock_env.get("channels", [])
         lock_urls = _normalize_channel_urls(
@@ -514,10 +538,14 @@ def merge_lockfiles(paths: Sequence[Path], ctx: WorkspaceContext) -> Path:
     conda.lock.<subdir>``), and a coordinator job stitches them back
     into a single ``<workspace>/conda.lock`` with this function.
 
-    Every fragment must be a ``version: 1`` lockfile.  Fragments that
-    declare the same environment must agree on its ``channels`` list
-    entry-for-entry and in the same order.  Two fragments may not both
-    carry entries for the same ``(environment, platform)`` pair —
+    Every fragment must be a ``version: 1`` lockfile.  When the current
+    workspace manifest declares the fragment environment, its channel
+    list is canonical: fragments may omit unused manifest channels, but
+    any channels they do declare must be an ordered subset of the
+    manifest's list.  Fragment environments not declared in the manifest
+    keep the stricter legacy rule and must agree on their ``channels``
+    list entry-for-entry and in the same order.  Two fragments may not
+    both carry entries for the same ``(environment, platform)`` pair —
     overlapping platforms indicate a misconfigured pipeline rather than
     a legitimate merge.  Any violation raises
     :class:`LockfileMergeError` and nothing is written.
@@ -550,6 +578,15 @@ def merge_lockfiles(paths: Sequence[Path], ctx: WorkspaceContext) -> Path:
     env_platforms: dict[str, dict[str, list[dict[str, str]]]] = {}
     seen_pairs: dict[tuple[str, str], Path] = {}
     packages_by_url: dict[str, dict[str, Any]] = {}
+    manifest_env_channels: dict[str, list[dict[str, str]]] = {}
+    manifest_env_channel_urls: dict[str, list[str]] = {}
+
+    for env_name, env_obj in ctx.config.environments.items():
+        entries = _manifest_channel_entries(ctx.config, env_obj)
+        manifest_env_channels[env_name] = entries
+        manifest_env_channel_urls[env_name] = _normalize_channel_urls(
+            entry["url"] for entry in entries
+        )
 
     for path in paths:
         if not path.is_file():
@@ -569,6 +606,27 @@ def merge_lockfiles(paths: Sequence[Path], ctx: WorkspaceContext) -> Path:
 
         for env_name, env_data in (data.get("environments") or {}).items():
             channels = list(env_data.get("channels") or [])
+            manifest_channels = manifest_env_channels.get(env_name)
+            if manifest_channels is not None:
+                manifest_urls = manifest_env_channel_urls[env_name]
+                fragment_urls = _normalize_channel_urls(
+                    str(entry.get("url", "")) for entry in channels
+                )
+                next_index = 0
+                for url in fragment_urls:
+                    try:
+                        next_index = manifest_urls.index(url, next_index) + 1
+                    except ValueError as exc:
+                        raise LockfileMergeError(
+                            f"environment '{env_name}' channels differ between "
+                            f"fragment '{path}' and the manifest",
+                            hints=[
+                                "Every fragment channel list must be an ordered"
+                                " subset of the manifest channel list for a"
+                                " shared environment.",
+                            ],
+                        ) from exc
+                channels = list(manifest_channels)
             existing = env_channels.get(env_name)
             if existing is None:
                 env_order.append(env_name)

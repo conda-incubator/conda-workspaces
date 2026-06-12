@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import os
 from typing import TYPE_CHECKING
 
@@ -12,6 +13,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 from conda.base.context import context as conda_context
+from conda.common.serialize.yaml import dump as yaml_dump
 from conda.models.match_spec import MatchSpec
 from conda_lockfiles.load_yaml import load_yaml
 
@@ -1056,29 +1058,237 @@ def test_merge_lockfiles_rejects_wrong_version(
         merge_lockfiles([bad], ctx)
 
 
-def test_merge_lockfiles_channel_mismatch(
-    workspace_ctx_factory: Callable[..., WorkspaceContext],
-    fake_solver_factory,
-    resolved_envs_factory,
-    write_fragment: Callable[[WorkspaceContext, dict, str], Path],
+def test_merge_lockfiles_fills_manifest_channels_for_fragment_subset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ctx = workspace_ctx_factory(env_names=["default"])
-    fake_solver_factory()
-    resolved_envs = resolved_envs_factory(default=["linux-64"])
-    frag_a = write_fragment(ctx, resolved_envs, "linux-64")
-
-    # Produce a second fragment with a different channel list by
-    # tweaking the saved content directly.
-    frag_b = ctx.root / "conda.lock.osx-arm64"
-    content = (
-        frag_a.read_text(encoding="utf-8")
-        .replace("linux-64", "osx-arm64")
-        .replace(
-            "conda-forge",
-            "different-channel",
-        )
+    """Merge accepts fragments that omit an unused manifest-declared channel."""
+    main = "https://repo.anaconda.com/pkgs/main"
+    msys2 = "https://repo.anaconda.com/pkgs/msys2"
+    config = WorkspaceConfig(
+        name="fragment-channel-subset",
+        channels=[Channel(main), Channel(msys2)],
+        platforms=["linux-64", "win-64"],
+        features={"default": Feature(name="default")},
+        environments={"default": Environment(name="default")},
+        root=str(tmp_path),
+        manifest_path=str(tmp_path / "conda.toml"),
     )
-    frag_b.write_text(content, encoding="utf-8")
+    ctx = WorkspaceContext(config)
+    ctx._cache["platform"] = "linux-64"
+    resolved_envs = {
+        "default": ResolvedEnvironment(
+            name="default",
+            platforms=["linux-64", "win-64"],
+        )
+    }
+
+    def fake_solve(
+        self: ResolvedEnvironment,
+        platform: str,
+        *,
+        prefix: str | Path,
+    ) -> list[_FakePkg]:
+        return [_FakePkg("python", f"{main}/{platform}/python-{platform}.conda")]
+
+    monkeypatch.setattr(ResolvedEnvironment, "solve_for_platform", fake_solve)
+
+    frag_linux = generate_lockfile(
+        ctx,
+        resolved_envs,
+        config=config,
+        platforms=("linux-64",),
+        output_path=tmp_path / "conda.lock.linux-64",
+    )
+    frag_win = generate_lockfile(
+        ctx,
+        resolved_envs,
+        config=config,
+        platforms=("win-64",),
+        output_path=tmp_path / "conda.lock.win-64",
+    )
+
+    win_data = load_yaml(frag_win)
+    win_data["environments"]["default"]["channels"] = [{"url": main}]
+    buf = io.StringIO()
+    yaml_dump(win_data, buf)
+    frag_win.write_text(buf.getvalue(), encoding="utf-8")
+    load_yaml.cache_clear()
+
+    merged_path = merge_lockfiles([frag_linux, frag_win], ctx)
+    merged = load_yaml(merged_path)
+
+    assert merged["environments"]["default"]["channels"] == [
+        {"url": main},
+        {"url": msys2},
+    ]
+    assert set(merged["environments"]["default"]["packages"]) == {
+        "linux-64",
+        "win-64",
+    }
+
+
+def test_merge_lockfiles_preserves_manifest_channels_with_canonical_collision(
+    tmp_path: Path,
+) -> None:
+    """Merge preserves distinct manifest URLs even if conda canonicalizes them alike."""
+    main = "https://repo.anaconda.com/pkgs/main"
+    msys2 = "https://repo.anaconda.com/pkgs/msys2"
+
+    class CanonicalCollisionChannel:
+        canonical_name = "defaults"
+
+        def __init__(self, url: str) -> None:
+            self.url = url
+
+        def __str__(self) -> str:
+            return self.url
+
+    config = WorkspaceConfig(
+        name="fragment-channel-collision",
+        channels=[
+            CanonicalCollisionChannel(main),  # type: ignore[list-item]
+            CanonicalCollisionChannel(msys2),  # type: ignore[list-item]
+        ],
+        platforms=["linux-64"],
+        features={"default": Feature(name="default")},
+        environments={"default": Environment(name="default")},
+        root=str(tmp_path),
+        manifest_path=str(tmp_path / "conda.toml"),
+    )
+    env = config.environments["default"]
+    assert [str(ch) for ch in config.merged_channels(env)] == [main]
+    ctx = WorkspaceContext(config)
+
+    fragment = tmp_path / "conda.lock.linux-64"
+    fragment.write_text(
+        f"""\
+version: 1
+environments:
+  default:
+    channels:
+    - url: {main}
+    packages:
+      linux-64:
+      - conda: {main}/linux-64/python-linux-64.conda
+packages:
+- conda: {main}/linux-64/python-linux-64.conda
+""",
+        encoding="utf-8",
+    )
+    load_yaml.cache_clear()
+
+    merged_path = merge_lockfiles([fragment], ctx)
+    merged = load_yaml(merged_path)
+
+    assert merged["environments"]["default"]["channels"] == [
+        {"url": main},
+        {"url": msys2},
+    ]
+    result = check_lockfile_satisfiability(config, merged, "linux-64")
+    assert result.status == LockfileStatus.UP_TO_DATE
+
+
+@pytest.mark.parametrize(
+    ("fragment_channels", "case"),
+    [
+        pytest.param(
+            [
+                "https://repo.anaconda.com/pkgs/main",
+                "https://repo.anaconda.com/pkgs/extra",
+            ],
+            "unknown",
+            id="unknown-channel",
+        ),
+        pytest.param(
+            [
+                "https://repo.anaconda.com/pkgs/msys2",
+                "https://repo.anaconda.com/pkgs/main",
+            ],
+            "reordered",
+            id="reordered-subset",
+        ),
+    ],
+)
+def test_merge_lockfiles_rejects_manifest_channel_mismatch(
+    tmp_path: Path,
+    fragment_channels: list[str],
+    case: str,
+) -> None:
+    """Fragments can omit manifest channels but cannot add or reorder them."""
+    main = "https://repo.anaconda.com/pkgs/main"
+    msys2 = "https://repo.anaconda.com/pkgs/msys2"
+    config = WorkspaceConfig(
+        name=f"fragment-channel-{case}",
+        channels=[Channel(main), Channel(msys2)],
+        platforms=["linux-64"],
+        features={"default": Feature(name="default")},
+        environments={"default": Environment(name="default")},
+        root=str(tmp_path),
+        manifest_path=str(tmp_path / "conda.toml"),
+    )
+    ctx = WorkspaceContext(config)
+    channel_lines = "\n".join(f"    - url: {url}" for url in fragment_channels)
+    fragment = tmp_path / "conda.lock.linux-64"
+    fragment.write_text(
+        f"""\
+version: 1
+environments:
+  default:
+    channels:
+{channel_lines}
+    packages:
+      linux-64:
+      - conda: {main}/linux-64/python-linux-64.conda
+packages:
+- conda: {main}/linux-64/python-linux-64.conda
+""",
+        encoding="utf-8",
+    )
+    load_yaml.cache_clear()
+
+    with pytest.raises(LockfileMergeError, match="channels differ"):
+        merge_lockfiles([fragment], ctx)
+
+
+def test_merge_lockfiles_channel_mismatch_for_manifest_unknown_env(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+) -> None:
+    """Manifest-unknown environments keep strict fragment-to-fragment checks."""
+    ctx = workspace_ctx_factory(env_names=["default"])
+    frag_a = tmp_path / "conda.lock.external-linux-64"
+    frag_a.write_text(
+        """\
+version: 1
+environments:
+  external:
+    channels:
+    - url: https://conda.anaconda.org/conda-forge
+    packages:
+      linux-64:
+      - conda: https://example.com/python-linux-64.conda
+packages:
+- conda: https://example.com/python-linux-64.conda
+""",
+        encoding="utf-8",
+    )
+    frag_b = ctx.root / "conda.lock.osx-arm64"
+    frag_b.write_text(
+        """\
+version: 1
+environments:
+  external:
+    channels:
+    - url: https://conda.anaconda.org/different-channel
+    packages:
+      osx-arm64:
+      - conda: https://example.com/python-osx-arm64.conda
+packages:
+- conda: https://example.com/python-osx-arm64.conda
+""",
+        encoding="utf-8",
+    )
     load_yaml.cache_clear()
 
     with pytest.raises(LockfileMergeError, match="channels differ"):
