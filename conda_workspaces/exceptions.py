@@ -217,6 +217,21 @@ class LockfileNotFoundError(CondaWorkspacesError):
         )
 
 
+class LockfileIntegrityError(CondaWorkspacesError):
+    """A lockfile package reference is not bound to trusted metadata."""
+
+    def __init__(self, path: str | Path, reason: str) -> None:
+        self.path = path
+        self.reason = reason
+        super().__init__(
+            f"Lockfile '{path}' failed integrity validation: {reason}",
+            hints=[
+                "Regenerate the lockfile with 'conda workspace lock'"
+                " before installing from it.",
+            ],
+        )
+
+
 class LockfileMergeError(CondaWorkspacesError):
     """A set of ``conda.lock`` fragments cannot be merged into one file.
 
