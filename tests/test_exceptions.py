@@ -20,6 +20,7 @@ from conda_workspaces.exceptions import (
     LockfileIntegrityError,
     LockfileNotFoundError,
     ManifestExistsError,
+    ManifestImportError,
     PlatformError,
     SolveError,
     WorkspaceNotFoundError,
@@ -37,6 +38,10 @@ from conda_workspaces.exceptions import (
         (
             WorkspaceParseError("/path/pixi.toml", "bad syntax"),
             ["pixi.toml", "bad syntax"],
+        ),
+        (
+            ManifestImportError("/path/conda-project.yml", "bad reference"),
+            ["conda-project.yml", "bad reference"],
         ),
         (
             EnvironmentNotFoundError("dev", ["default", "test"]),
@@ -86,6 +91,7 @@ from conda_workspaces.exceptions import (
     ids=[
         "workspace-not-found",
         "parse-error",
+        "manifest-import",
         "env-not-found-with-available",
         "env-not-found-empty",
         "invalid-env-name",
@@ -131,6 +137,7 @@ def test_exception_attributes(exc, attr, expected):
     [
         WorkspaceNotFoundError("/some/dir"),
         WorkspaceParseError("/path/pixi.toml", "bad syntax"),
+        ManifestImportError("/path/conda-project.yml", "bad reference"),
         EnvironmentNotFoundError("dev", ["default", "test"]),
         EnvironmentNameInvalidError("../outside"),
         EnvironmentNotInstalledError("dev"),
@@ -145,6 +152,7 @@ def test_exception_attributes(exc, attr, expected):
     ids=[
         "workspace-not-found",
         "parse-error",
+        "manifest-import",
         "env-not-found",
         "invalid-env-name",
         "env-not-installed",

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING
 
 import tomlkit
 from conda.base.context import context as conda_context
 
+from ..exceptions import ManifestImportError
 from .base import ManifestImporter
 
 if TYPE_CHECKING:
@@ -38,7 +40,7 @@ class CondaProjectImporter(ManifestImporter):
         platforms: list[str] = [conda_context.subdir]
 
         for env_file in env_specs.get("default", []):
-            env_path = project_dir / env_file
+            env_path = self.environment_file_path(path, env_file)
             if env_path.exists():
                 env_data = self.load_yaml(env_path)
                 raw_deps = env_data.get("dependencies", [])
@@ -66,7 +68,7 @@ class CondaProjectImporter(ManifestImporter):
                 continue
             env_deps: dict[str, str] = {}
             for env_file in env_files:
-                env_path = project_dir / env_file
+                env_path = self.environment_file_path(path, env_file)
                 if env_path.exists():
                     env_data = self.load_yaml(env_path)
                     env_deps.update(
@@ -103,6 +105,49 @@ class CondaProjectImporter(ManifestImporter):
             doc.add("tasks", tomlkit.item(tasks))
 
         return doc
+
+    @staticmethod
+    def environment_file_path(manifest_path: Path, env_file: object) -> Path:
+        """Return a project-local environment file path from conda-project data."""
+        if not isinstance(env_file, str) or not env_file:
+            raise ManifestImportError(
+                manifest_path,
+                "conda-project environment file references must be strings.",
+            )
+
+        posix_path = PurePosixPath(env_file)
+        windows_path = PureWindowsPath(env_file)
+        if (
+            posix_path.is_absolute()
+            or windows_path.drive
+            or windows_path.root
+            or ".." in posix_path.parts
+            or ".." in windows_path.parts
+        ):
+            raise ManifestImportError(
+                manifest_path,
+                f"environment file '{env_file}' escapes the project directory.",
+                hints=[
+                    "Keep conda-project environment files inside the project"
+                    " directory and reference them with relative paths.",
+                ],
+            )
+
+        project_dir = manifest_path.parent
+        project_root = project_dir.resolve(strict=False)
+        env_path = (project_dir / env_file).resolve(strict=False)
+        try:
+            env_path.relative_to(project_root)
+        except ValueError as exc:
+            raise ManifestImportError(
+                manifest_path,
+                f"environment file '{env_file}' escapes the project directory.",
+                hints=[
+                    "Keep conda-project environment files inside the project"
+                    " directory and avoid symlinks that point outside it.",
+                ],
+            ) from exc
+        return env_path
 
 
 convert = CondaProjectImporter().convert
