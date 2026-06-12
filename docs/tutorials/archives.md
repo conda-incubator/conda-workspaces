@@ -80,6 +80,9 @@ location:
 conda workspace unarchive my-project.tar.zst --target /path/to/destination
 ```
 
+The target directory must be empty or absent. `unarchive` refuses to
+extract over existing files.
+
 After extraction, install the environments from the lockfile:
 
 ```bash

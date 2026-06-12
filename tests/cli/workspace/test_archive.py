@@ -6,6 +6,7 @@ import json
 import tarfile
 from io import StringIO
 from pathlib import Path, PureWindowsPath
+from typing import TYPE_CHECKING
 
 import pytest
 from rich.console import Console
@@ -25,6 +26,9 @@ from conda_workspaces.exceptions import ArchiveError
 from conda_workspaces.receipts import ArchiveReceipt
 
 from ..conftest import make_args
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _ARCHIVE_DEFAULTS = {
     "file": None,
@@ -492,15 +496,18 @@ def test_execute_unarchive_receipt_detects_tampered_archive(
         )
 
 
+@pytest.mark.parametrize("receipt", [False, True], ids=["unsigned", "receipt"])
 @pytest.mark.parametrize(
     "target_setup",
     ["non-empty", "file-target", "symlink-target"],
     ids=["non-empty", "file-target", "symlink-target"],
 )
-def test_execute_unarchive_receipt_rejects_existing_target(
+def test_execute_unarchive_rejects_existing_target(
     archive_workspace: Path,
+    existing_extract_target: Callable[[str], Path],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    receipt: bool,
     target_setup: str,
 ) -> None:
     monkeypatch.chdir(archive_workspace)
@@ -508,28 +515,26 @@ def test_execute_unarchive_receipt_rejects_existing_target(
     console = Console(file=StringIO(), width=200, highlight=False)
 
     execute_archive(
-        make_args(_ARCHIVE_DEFAULTS, output=archive, receipt=True),
+        make_args(_ARCHIVE_DEFAULTS, output=archive, receipt=receipt),
         console=console,
     )
-    target = tmp_path / "extracted"
-    if target_setup == "non-empty":
-        target.mkdir()
-        (target / "existing.txt").write_text("x", encoding="utf-8")
-    elif target_setup == "file-target":
-        target.write_text("x", encoding="utf-8")
-    else:
-        target.symlink_to(tmp_path)
+    target = existing_extract_target(target_setup)
 
-    with pytest.raises(ArchiveError, match="Cannot verify receipt"):
+    with pytest.raises(ArchiveError, match="Cannot extract archive"):
         execute_unarchive(
             make_args(
                 _UNARCHIVE_DEFAULTS,
                 archive_path=archive,
                 target=target,
-                receipt=True,
+                receipt=receipt,
             ),
             console=console,
         )
+
+    if target_setup == "non-empty":
+        assert (target / "conda.toml").read_text(encoding="utf-8") == "trusted = true\n"
+    elif target_setup == "file-target":
+        assert target.read_text(encoding="utf-8") == "trusted file\n"
 
 
 def test_execute_unarchive_require_sha256_requires_receipt(

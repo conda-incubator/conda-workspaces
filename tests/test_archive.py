@@ -32,6 +32,7 @@ from conda_workspaces.exceptions import (
 from conda_workspaces.models import ArchiveConfig
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
@@ -263,6 +264,47 @@ def test_extract_archive_basic(project_dir: Path, tmp_path: Path) -> None:
     assert (target / "conda.toml").is_file()
     assert (target / "conda.lock").is_file()
     assert (target / "src" / "main.py").is_file()
+
+
+def test_extract_archive_allows_existing_empty_target(
+    project_dir: Path,
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "test.tar.gz"
+    config = ArchiveConfig()
+    create_archive(project_dir, archive_path, config)
+    target = tmp_path / "extracted"
+    target.mkdir()
+
+    result = extract_archive(archive_path, target)
+
+    assert result == target
+    assert (target / "conda.toml").is_file()
+
+
+@pytest.mark.parametrize(
+    "target_setup",
+    ["non-empty", "file-target", "symlink-target"],
+    ids=["non-empty", "file-target", "symlink-target"],
+)
+def test_extract_archive_rejects_existing_target(
+    project_dir: Path,
+    tmp_path: Path,
+    existing_extract_target: Callable[[str], Path],
+    target_setup: str,
+) -> None:
+    archive_path = tmp_path / "test.tar.gz"
+    config = ArchiveConfig()
+    create_archive(project_dir, archive_path, config)
+    target = existing_extract_target(target_setup)
+
+    with pytest.raises(ArchiveError, match="Cannot extract archive"):
+        extract_archive(archive_path, target)
+
+    if target_setup == "non-empty":
+        assert (target / "conda.toml").read_text(encoding="utf-8") == "trusted = true\n"
+    elif target_setup == "file-target":
+        assert target.read_text(encoding="utf-8") == "trusted file\n"
 
 
 @pytest.mark.parametrize(

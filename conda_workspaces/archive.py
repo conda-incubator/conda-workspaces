@@ -339,12 +339,36 @@ def open_tar(archive_path: Path) -> Iterator[tarfile.TarFile]:
         yield tf
 
 
+def ensure_extract_target_empty(target: Path) -> None:
+    """Reject archive extraction into non-empty or unsafe targets."""
+    if target.is_symlink():
+        raise ArchiveError("Cannot extract archive into an existing symlink target.")
+    if not target.exists():
+        return
+    if not target.is_dir():
+        raise ArchiveError(
+            "Cannot extract archive into an existing non-directory target."
+        )
+    try:
+        target_has_files = any(target.iterdir())
+    except OSError as exc:
+        raise ArchiveError(
+            f"Cannot inspect target before archive extraction: {target}"
+        ) from exc
+    if target_has_files:
+        raise ArchiveError(
+            "Cannot extract archive into a non-empty target.",
+            hints=["Choose an empty target directory or remove existing files first."],
+        )
+
+
 def extract_archive(archive_path: Path, target: Path) -> Path:
     """Extract *archive_path* into *target* with path traversal protection.
 
     Every member is validated before extraction. On Python 3.12+ the
     ``filter="data"`` parameter provides additional defense-in-depth.
     """
+    ensure_extract_target_empty(target)
     target = target.resolve()
     target.mkdir(parents=True, exist_ok=True)
 
