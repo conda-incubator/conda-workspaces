@@ -70,6 +70,16 @@ BUILTIN_EXCLUDE_DIRS: frozenset[str] = frozenset(
 )
 """Directories excluded from archives regardless of user configuration."""
 
+BUILTIN_SENSITIVE_EXCLUDE_PATTERNS: tuple[str, ...] = (
+    ".env",
+    "*/.env",
+    ".env.local",
+    "*/.env.local",
+    ".env.*.local",
+    "*/.env.*.local",
+)
+"""Credential-bearing dotenv files excluded from archives by default."""
+
 
 def parse_relative_archive_path(
     path: str,
@@ -130,7 +140,7 @@ def is_excluded_by_builtins(rel_path: str) -> bool:
     for excl in BUILTIN_EXCLUDE_DIRS:
         if rel_path == excl or rel_path.startswith(excl + "/"):
             return True
-    return False
+    return is_excluded_by_patterns(rel_path, BUILTIN_SENSITIVE_EXCLUDE_PATTERNS)
 
 
 def is_excluded_by_patterns(rel_path: str, patterns: tuple[str, ...]) -> bool:

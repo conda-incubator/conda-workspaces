@@ -155,7 +155,65 @@ def test_collect_files_non_git(project_dir: Path) -> None:
     assert "conda.toml" in rel_paths
     assert "src/main.py" in rel_paths
     assert "data/big.bin" in rel_paths
-    assert ".env" in rel_paths
+    assert ".env" not in rel_paths
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        ".env",
+        ".env.local",
+        ".env.production.local",
+        "nested/.env",
+        "nested/.env.local",
+        "nested/.env.production.local",
+    ],
+    ids=[
+        "dotenv",
+        "dotenv-local",
+        "dotenv-env-local",
+        "nested-dotenv",
+        "nested-dotenv-local",
+        "nested-dotenv-env-local",
+    ],
+)
+def test_collect_files_excludes_default_sensitive_dotenv_files(
+    project_dir: Path,
+    relative_path: str,
+) -> None:
+    path = project_dir / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("SECRET=abc\n", encoding="utf-8")
+
+    config = ArchiveConfig()
+    files = collect_archive_files(project_dir, config)
+    rel_paths = {f.relative_to(project_dir).as_posix() for f in files}
+
+    assert relative_path not in rel_paths
+    assert "conda.toml" in rel_paths
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        ".env.example",
+        "nested/.env.example",
+    ],
+    ids=["example", "nested-example"],
+)
+def test_collect_files_keeps_dotenv_examples(
+    project_dir: Path,
+    relative_path: str,
+) -> None:
+    path = project_dir / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("TOKEN=\n", encoding="utf-8")
+
+    config = ArchiveConfig()
+    files = collect_archive_files(project_dir, config)
+    rel_paths = {f.relative_to(project_dir).as_posix() for f in files}
+
+    assert relative_path in rel_paths
 
 
 def test_collect_files_builtin_exclusions(project_dir: Path) -> None:

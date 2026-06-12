@@ -417,6 +417,8 @@ Built-in exclusions always apply regardless of this setting:
 - `.conda/envs`
 - `.pixi`
 - `__pycache__`
+- common dotenv secret files such as `.env`, `.env.local`, and
+  `.env.*.local`
 
 CLI `--exclude` flags are combined with manifest exclusions. In git
 repos, only tracked files are considered regardless of exclusion
