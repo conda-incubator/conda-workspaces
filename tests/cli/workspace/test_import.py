@@ -2,17 +2,23 @@
 
 from __future__ import annotations
 
+import json
+import os
+import sys
 from io import StringIO
 from typing import TYPE_CHECKING
 
 import pytest
 import tomlkit
+from conda.base.constants import on_win
 from conda.exceptions import DryRunExit
+from conda.utils import quote_for_shell
 from rich.console import Console
 
 from conda_workspaces.cli.workspace.import_manifest import execute_import
 from conda_workspaces.exceptions import ManifestImportError
 from conda_workspaces.importers import find_importer
+from conda_workspaces.runner import SubprocessShell
 
 from ..conftest import make_args
 
@@ -320,6 +326,149 @@ def test_ap_commands_become_tasks(tmp_path: Path) -> None:
     p.write_text(_ANACONDA_PROJECT_YML, encoding="utf-8")
     doc = find_importer(p).convert(p)
     assert "serve" in doc["tasks"]
+
+
+@pytest.mark.parametrize(
+    ("content", "task_name", "expected_cmd"),
+    [
+        pytest.param(
+            """\
+name: ap-demo
+commands:
+  view:
+    notebook: "notebook.ipynb; echo NOTEBOOK_PWN"
+""",
+            "view",
+            quote_for_shell("jupyter", "notebook", "notebook.ipynb; echo NOTEBOOK_PWN"),
+            id="notebook",
+        ),
+        pytest.param(
+            """\
+name: ap-demo
+commands:
+  serve:
+    bokeh_app: "apps/main.py; echo BOKEH_PWN"
+""",
+            "serve",
+            quote_for_shell("bokeh", "serve", "apps/main.py; echo BOKEH_PWN"),
+            id="bokeh",
+        ),
+        pytest.param(
+            """\
+name: ap-demo
+downloads:
+  "data; echo NAME_PWN":
+    url: "https://example.invalid/file.csv; echo URL_PWN"
+""",
+            "download-data; echo name-pwn",
+            quote_for_shell(
+                "curl",
+                "-fsSL",
+                "-o",
+                "data; echo name-pwn",
+                "https://example.invalid/file.csv; echo URL_PWN",
+            ),
+            id="download",
+        ),
+    ],
+)
+def test_anaconda_project_import_quotes_data_task_fields(
+    tmp_path: Path,
+    content: str,
+    task_name: str,
+    expected_cmd: str,
+) -> None:
+    p = tmp_path / "anaconda-project.yml"
+    p.write_text(content, encoding="utf-8")
+
+    doc = find_importer(p).convert(p)
+    task = doc["tasks"][task_name]
+    cmd = task if isinstance(task, str) else task["cmd"]
+
+    assert cmd == expected_cmd
+
+
+def test_anaconda_project_imported_data_task_reaches_shell_as_data(
+    tmp_path: Path,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    recorder = bin_dir / "jupyter.py"
+    recorder.write_text(
+        """\
+import json
+import sys
+from pathlib import Path
+
+Path("argv.json").write_text(json.dumps(sys.argv[1:]), encoding="utf-8")
+""",
+        encoding="utf-8",
+    )
+    if on_win:
+        tool = bin_dir / "jupyter.bat"
+        tool.write_text(f'@echo off\n"{sys.executable}" "{recorder}" %*\n')
+        separator = "&"
+    else:
+        tool = bin_dir / "jupyter"
+        tool.write_text(f"#!{sys.executable}\n{recorder.read_text(encoding='utf-8')}")
+        tool.chmod(0o755)
+        separator = ";"
+
+    payload = f"notebook.ipynb {separator} echo PWNED > pwned.txt"
+    p = tmp_path / "anaconda-project.yml"
+    p.write_text(
+        f"""\
+name: ap-demo
+commands:
+  view:
+    notebook: "{payload}"
+""",
+        encoding="utf-8",
+    )
+    doc = find_importer(p).convert(p)
+    cmd = doc["tasks"]["view"]
+
+    exit_code = SubprocessShell().run(
+        cmd,
+        {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
+        tmp_path,
+    )
+
+    assert exit_code == 0
+    assert json.loads((tmp_path / "argv.json").read_text(encoding="utf-8")) == [
+        "notebook",
+        payload,
+    ]
+    assert not (tmp_path / "pwned.txt").exists()
+
+
+@pytest.mark.parametrize(
+    ("command_field", "command"),
+    [
+        ("unix", "python serve.py; echo EXPLICIT_UNIX"),
+        ("windows", "python serve.py & echo EXPLICIT_WINDOWS"),
+    ],
+    ids=["unix", "windows"],
+)
+def test_anaconda_project_import_preserves_explicit_commands(
+    tmp_path: Path,
+    command_field: str,
+    command: str,
+) -> None:
+    p = tmp_path / "anaconda-project.yml"
+    p.write_text(
+        f"""\
+name: ap-demo
+commands:
+  serve:
+    {command_field}: "{command}"
+""",
+        encoding="utf-8",
+    )
+
+    doc = find_importer(p).convert(p)
+
+    assert doc["tasks"]["serve"] == command
 
 
 def test_pixi_tasks_preserved(tmp_path: Path) -> None:
