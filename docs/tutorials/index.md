@@ -55,7 +55,7 @@ Set up conda-workspaces in GitHub Actions.
 :link: archives
 :link-type: doc
 
-Package a workspace into a portable archive and restore it elsewhere.
+Package a workspace into a portable archive, add a receipt, and restore it elsewhere.
 :::
 
 ::::

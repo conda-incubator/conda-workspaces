@@ -6,6 +6,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added
+
+- `conda workspace archive --receipt [PATH]` writes an external
+  in-toto Statement JSON receipt for a workspace archive, binding the
+  archive, workspace manifest, `conda.lock`, and per-environment
+  package inventory from the lockfile. `conda workspace unarchive
+  --receipt [PATH]` verifies that receipt during extraction. The
+  receipt schema is published as
+  `workspace-archive-receipt-1.schema.json`. (<gh-pr:84>)
+
+### Security
+
+- Receipt-verified archive extraction now checks the archive digest
+  before extraction, stages extraction into an empty temporary target,
+  verifies the extracted manifest, lockfile, and package inventory, and
+  only then moves the verified workspace into place. `--require-sha256`
+  can require every receipt package record to carry a SHA-256 digest.
+  (<gh-pr:84>)
+
+### Fixed
+
+- `conda workspace archive --receipt` now fails before writing an
+  archive when archive filters would omit the workspace manifest or
+  `conda.lock`, avoiding archive/receipt pairs that cannot verify.
+  (<gh-pr:84>)
+
 ## 0.6.0 — 2026-06-05
 
 ### Added

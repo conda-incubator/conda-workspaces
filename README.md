@@ -73,6 +73,7 @@ and task running inside the conda CLI without switching tools.
 - Multi-environment support with composable features
 - Project-local environments in `.conda/envs/`
 - Lockfile generation (`conda.lock`) using a rattler-lock-derived schema for reproducible installs
+- Workspace archives with optional receipt verification for portable handoff
 - Per-platform dependency overrides via `[target.<platform>]`
 - PyPI dependencies translated and resolved alongside conda packages via conda-pypi
 - Activation scripts and environment variables per feature
@@ -110,6 +111,8 @@ and also provides `cw` and `ct` as shorter aliases.
 | `conda workspace shell [ENV]` | Spawn a shell with an environment activated |
 | `conda workspace activate [ENV]` | Print activation instructions |
 | `conda workspace clean` | Remove installed environments |
+| `conda workspace archive` | Create a portable workspace archive |
+| `conda workspace unarchive` | Extract and optionally verify a workspace archive |
 
 ### Task commands
 
@@ -133,6 +136,7 @@ everything including its own solver, see [pixi](https://pixi.sh).
 - [User guide](https://conda-incubator.github.io/conda-workspaces/)
 - [`conda.toml` specification](https://conda-incubator.github.io/conda-workspaces/reference/conda-toml-spec/)
 - [JSON schema](https://github.com/conda-incubator/conda-workspaces/blob/main/schema/conda-toml-1.schema.json)
+- [Archive receipt schema](https://github.com/conda-incubator/conda-workspaces/blob/main/schema/workspace-archive-receipt-1.schema.json)
 
 ## Demos
 
