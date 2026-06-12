@@ -300,6 +300,8 @@ class _FakePkg:
         self.url = url
 
     def get(self, key: str, default: object = None) -> object:
+        if key == "sha256":
+            return "a" * 64
         return default
 
 
@@ -324,7 +326,8 @@ def fake_solver_factory(monkeypatch: pytest.MonkeyPatch):
             return [
                 _FakePkg(
                     "python",
-                    f"https://example.com/python-{self.name}-{platform}.conda",
+                    "https://conda.anaconda.org/conda-forge/"
+                    f"{platform}/python-{self.name}-{platform}.conda",
                 ),
             ]
 
@@ -1393,9 +1396,10 @@ environments:
     - url: https://conda.anaconda.org/conda-forge
     packages:
       linux-64:
-      - conda: https://example.com/python-linux-64.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/python-linux-64.conda
 packages:
-- conda: https://example.com/python-linux-64.conda
+- conda: https://conda.anaconda.org/conda-forge/linux-64/python-linux-64.conda
+  sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 """,
         encoding="utf-8",
     )
@@ -1409,9 +1413,10 @@ environments:
     - url: https://conda.anaconda.org/different-channel
     packages:
       osx-arm64:
-      - conda: https://example.com/python-osx-arm64.conda
+      - conda: https://conda.anaconda.org/different-channel/osx-arm64/python-osx-arm64.conda
 packages:
-- conda: https://example.com/python-osx-arm64.conda
+- conda: https://conda.anaconda.org/different-channel/osx-arm64/python-osx-arm64.conda
+  sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 """,
         encoding="utf-8",
     )
@@ -1438,6 +1443,166 @@ def test_merge_lockfiles_duplicate_platform(
 
     with pytest.raises(LockfileMergeError, match="present in both"):
         merge_lockfiles([frag_a, frag_b], ctx)
+
+
+def test_merge_lockfiles_allows_identical_package_records(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+) -> None:
+    """Same-URL package records can appear in multiple fragments if identical."""
+    ctx = workspace_ctx_factory(env_names=["default"])
+    channel = str(Channel("conda-forge"))
+    package_url = f"{channel}/noarch/demo-1.0-0.tar.bz2"
+    package_record = (
+        f"- conda: {package_url}\n  sha256: {'a' * 64}\n  depends:\n  - python >=3.11\n"
+    )
+    frag_a = tmp_path / "conda.lock.linux-64"
+    frag_a.write_text(
+        f"""\
+version: 1
+environments:
+  default:
+    channels:
+    - url: {channel}
+    packages:
+      linux-64:
+      - conda: {package_url}
+packages:
+{package_record}""",
+        encoding="utf-8",
+    )
+    frag_b = tmp_path / "conda.lock.osx-64"
+    frag_b.write_text(
+        f"""\
+version: 1
+environments:
+  default:
+    channels:
+    - url: {channel}
+    packages:
+      osx-64:
+      - conda: {package_url}
+packages:
+{package_record}""",
+        encoding="utf-8",
+    )
+    load_yaml.cache_clear()
+
+    merged_path = merge_lockfiles([frag_a, frag_b], ctx)
+    merged = load_yaml(merged_path)
+
+    assert merged["packages"] == [
+        {
+            "conda": package_url,
+            "sha256": "a" * 64,
+            "depends": ["python >=3.11"],
+        }
+    ]
+
+
+def test_merge_lockfiles_rejects_conflicting_package_records(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+) -> None:
+    """Same-URL package records from fragments must agree exactly."""
+    ctx = workspace_ctx_factory(env_names=["default"])
+    channel = str(Channel("conda-forge"))
+    package_url = f"{channel}/noarch/demo-1.0-0.tar.bz2"
+    frag_a = tmp_path / "conda.lock.linux-64"
+    frag_a.write_text(
+        f"""\
+version: 1
+environments:
+  default:
+    channels:
+    - url: {channel}
+    packages:
+      linux-64:
+      - conda: {package_url}
+packages:
+- conda: {package_url}
+  sha256: {"a" * 64}
+""",
+        encoding="utf-8",
+    )
+    frag_b = tmp_path / "conda.lock.osx-64"
+    frag_b.write_text(
+        f"""\
+version: 1
+environments:
+  default:
+    channels:
+    - url: {channel}
+    packages:
+      osx-64:
+      - conda: {package_url}
+packages:
+- conda: {package_url}
+  sha256: {"b" * 64}
+""",
+        encoding="utf-8",
+    )
+    load_yaml.cache_clear()
+
+    with pytest.raises(LockfileMergeError, match="conflicting package record"):
+        merge_lockfiles([frag_a, frag_b], ctx)
+
+
+@pytest.mark.parametrize(
+    ("packages_block", "package_url", "match"),
+    [
+        pytest.param(
+            "packages: []\n",
+            "https://conda.anaconda.org/conda-forge/linux-64/demo-1.0-0.tar.bz2",
+            "no top-level package record",
+            id="missing-record",
+        ),
+        pytest.param(
+            "packages:\n"
+            "- conda: https://conda.anaconda.org/conda-forge/linux-64/"
+            "demo-1.0-0.tar.bz2\n",
+            "https://conda.anaconda.org/conda-forge/linux-64/demo-1.0-0.tar.bz2",
+            "missing a sha256 or md5 digest",
+            id="missing-digest",
+        ),
+        pytest.param(
+            "packages:\n"
+            "- conda: https://attacker.example/pkgs/linux-64/demo-1.0-0.tar.bz2\n"
+            f"  sha256: {'0' * 64}\n",
+            "https://attacker.example/pkgs/linux-64/demo-1.0-0.tar.bz2",
+            "not under any declared channel",
+            id="off-channel",
+        ),
+    ],
+)
+def test_merge_lockfiles_rejects_unbound_package_refs(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    packages_block: str,
+    package_url: str,
+    match: str,
+) -> None:
+    """Merged env refs must be bound to channel-valid hashed package records."""
+    ctx = workspace_ctx_factory(env_names=["default"])
+    channel = str(Channel("conda-forge"))
+    fragment = tmp_path / "conda.lock.linux-64"
+    fragment.write_text(
+        f"""\
+version: 1
+environments:
+  default:
+    channels:
+    - url: {channel}
+    packages:
+      linux-64:
+      - conda: {package_url}
+{packages_block}""",
+        encoding="utf-8",
+    )
+    load_yaml.cache_clear()
+
+    with pytest.raises(LockfileMergeError, match=match):
+        merge_lockfiles([fragment], ctx)
 
 
 @pytest.fixture

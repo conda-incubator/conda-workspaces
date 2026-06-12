@@ -756,8 +756,9 @@ def merge_lockfiles(paths: Sequence[Path], ctx: WorkspaceContext) -> Path:
     are walked in first-seen order across fragments, platforms in
     alphabetical order within each environment, and top-level
     ``packages`` are emitted in the same order
-    :meth:`CondaLockLoader.compose` would produce (first encounter of
-    each URL wins, iterating env-by-env then platform-by-platform).
+    :meth:`CondaLockLoader.compose` would produce. Duplicate top-level
+    records for the same package URL are accepted only when their
+    metadata matches exactly.
 
     Returns the path to the merged lockfile.
     """
@@ -769,9 +770,10 @@ def merge_lockfiles(paths: Sequence[Path], ctx: WorkspaceContext) -> Path:
 
     env_order: list[str] = []
     env_channels: dict[str, list[dict[str, Any]]] = {}
-    env_platforms: dict[str, dict[str, list[dict[str, str]]]] = {}
+    env_platforms: dict[str, dict[str, list[dict[str, Any]]]] = {}
     seen_pairs: dict[tuple[str, str], Path] = {}
     packages_by_url: dict[str, dict[str, Any]] = {}
+    package_sources_by_url: dict[str, Path] = {}
     manifest_env_channels: dict[str, list[dict[str, str]]] = {}
     manifest_env_channel_urls: dict[str, list[str]] = {}
 
@@ -796,7 +798,20 @@ def merge_lockfiles(paths: Sequence[Path], ctx: WorkspaceContext) -> Path:
             url = record.get("url") or record.get("conda") or record.get("pypi")
             if not url:
                 continue
-            packages_by_url.setdefault(url, record)
+            existing = packages_by_url.get(url)
+            if existing is None:
+                packages_by_url[url] = record
+                package_sources_by_url[url] = path
+            elif existing != record:
+                raise LockfileMergeError(
+                    f"fragment '{path}' has a conflicting package record for "
+                    f"URL '{url}'",
+                    hints=[
+                        "The same package URL must have identical top-level"
+                        " metadata in every fragment.",
+                        f"The first record came from '{package_sources_by_url[url]}'.",
+                    ],
+                )
 
         for env_name, env_data in (data.get("environments") or {}).items():
             channels = list(env_data.get("channels") or [])
@@ -848,13 +863,53 @@ def merge_lockfiles(paths: Sequence[Path], ctx: WorkspaceContext) -> Path:
                         ],
                     )
                 seen_pairs[pair] = path
-                env_platforms[env_name][platform] = list(refs or [])
+                try:
+                    channel_urls = CondaLockLoader.channel_urls_for_env_data(
+                        {"channels": channels},
+                        platform,
+                    )
+                except ValueError as exc:
+                    raise LockfileMergeError(
+                        f"environment '{env_name}' channels in fragment "
+                        f"'{path}' cannot be resolved"
+                    ) from exc
+
+                validated_refs: list[dict[str, Any]] = []
+                for ref in refs or []:
+                    if not isinstance(ref, dict):
+                        continue
+                    url = ref.get("conda")
+                    if not url:
+                        validated_refs.append(ref)
+                        continue
+                    if not isinstance(url, str):
+                        raise LockfileMergeError(
+                            f"environment '{env_name}' contains an invalid "
+                            f"package ref on '{platform}' in fragment '{path}'"
+                        )
+                    if not CondaLockLoader.url_matches_channel(url, channel_urls):
+                        raise LockfileMergeError(
+                            f"package URL '{url}' in environment '{env_name}' "
+                            f"on '{platform}' is not under any declared channel"
+                        )
+                    record = packages_by_url.get(url)
+                    if record is None:
+                        raise LockfileMergeError(
+                            f"package URL '{url}' in environment '{env_name}' "
+                            f"on '{platform}' has no top-level package record"
+                        )
+                    try:
+                        CondaLockLoader.digest_fragment_for_record(record, url)
+                    except ValueError as exc:
+                        raise LockfileMergeError(str(exc)) from exc
+                    validated_refs.append(ref)
+                env_platforms[env_name][platform] = validated_refs
 
     # Rebuild top-level ``packages`` in the same order
     # :meth:`CondaLockLoader.compose` would produce for a single-run
     # solve: iterate envs in first-seen order, platforms alphabetically,
     # then each platform's refs (already sorted by package name by the
-    # producing fragment).  First occurrence of a URL wins.
+    # producing fragment).
     merged_packages: list[dict[str, Any]] = []
     emitted_urls: set[str] = set()
     for env_name in env_order:
