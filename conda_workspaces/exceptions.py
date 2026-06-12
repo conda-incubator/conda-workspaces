@@ -77,7 +77,7 @@ class EnvironmentNotFoundError(CondaWorkspacesError):
         )
 
 
-class InvalidEnvironmentNameError(CondaWorkspacesError):
+class EnvironmentNameInvalidError(CondaWorkspacesError):
     """The requested environment name cannot map to a workspace-local prefix."""
 
     def __init__(self, name: str) -> None:

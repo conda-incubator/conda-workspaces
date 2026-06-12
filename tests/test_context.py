@@ -15,7 +15,7 @@ from conda_workspaces.context import (
     WorkspaceContext,
     build_template_context,
 )
-from conda_workspaces.exceptions import InvalidEnvironmentNameError
+from conda_workspaces.exceptions import EnvironmentNameInvalidError
 from conda_workspaces.models import (
     Channel,
     Environment,
@@ -141,7 +141,7 @@ def test_env_prefix_rejects_path_like_names(
     env_name: str,
 ) -> None:
     ctx = WorkspaceContext(config)
-    with pytest.raises(InvalidEnvironmentNameError, match="not valid"):
+    with pytest.raises(EnvironmentNameInvalidError, match="not valid"):
         ctx.env_prefix(env_name)
 
 
