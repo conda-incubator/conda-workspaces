@@ -14,6 +14,7 @@ from rich.markup import escape
 
 from ...archive import (
     ARCHIVE_SUFFIXES,
+    collect_archive_files,
     collect_bundle_packages,
     create_archive,
     extract_archive,
@@ -237,19 +238,67 @@ def execute_archive(
         )
         output = ctx.root / f"{name}{ext}"
 
+    receipt_path = resolve_receipt_path(
+        output.resolve(), getattr(args, "receipt", None)
+    )
+    manifest_path = Path(config.manifest_path)
+    lockfile_path = _lockfile_path(ctx)
+    if receipt_path is not None:
+        if receipt_path.resolve() == output.resolve():
+            raise ArchiveError(
+                "Receipt path cannot be the archive path.",
+                hints=["Choose a separate JSON path for --receipt."],
+            )
+        if not manifest_path.is_file():
+            raise ArchiveError(
+                "Cannot write receipt: workspace manifest was not found."
+            )
+        if not lockfile_path.is_file():
+            raise ArchiveError(
+                "Cannot write receipt: no conda.lock found.",
+                hints=["Run 'conda workspace lock' first."],
+            )
+
+        archive_members = {
+            path.relative_to(ctx.root).as_posix()
+            for path in collect_archive_files(ctx.root, archive_config)
+            if path.resolve() != output.resolve()
+        }
+        required_members: dict[str, Path] = {
+            "workspace manifest": manifest_path,
+            "workspace lockfile": lockfile_path,
+        }
+        missing = []
+        for label, path in required_members.items():
+            try:
+                archive_name = path.relative_to(ctx.root).as_posix()
+            except ValueError:
+                missing.append(label)
+                continue
+            if archive_name not in archive_members:
+                missing.append(f"{label} ({archive_name})")
+        if missing:
+            raise ArchiveError(
+                f"Cannot write receipt: archive would not include {missing[0]}.",
+                hints=[
+                    "Receipt verification requires the workspace manifest and"
+                    " conda.lock to be included in the archive.",
+                    "Remove matching include/exclude filters or run without --receipt.",
+                ],
+            )
+
     bundle_packages = None
     if args.bundle:
         from conda.base.context import context as conda_context
 
-        lockfile = _lockfile_path(ctx)
-        if not lockfile.is_file():
+        if not lockfile_path.is_file():
             raise ArchiveError(
                 "Cannot bundle packages: no conda.lock found.",
                 hints=["Run 'conda workspace lock' first."],
             )
         cache_dirs = [Path(d) for d in conda_context.pkgs_dirs]
-        bundle_packages = collect_bundle_packages(lockfile, cache_dirs)
-        verify_package_hashes(bundle_packages, lockfile)
+        bundle_packages = collect_bundle_packages(lockfile_path, cache_dirs)
+        verify_package_hashes(bundle_packages, lockfile_path)
 
         status.message(
             console,
@@ -278,19 +327,13 @@ def execute_archive(
 
     status.message(console, "Created", "archive", str(output))
 
-    receipt_path = resolve_receipt_path(output, getattr(args, "receipt", None))
     if receipt_path is not None:
-        if receipt_path.resolve() == output.resolve():
-            raise ArchiveError(
-                "Receipt path cannot be the archive path.",
-                hints=["Choose a separate JSON path for --receipt."],
-            )
         receipt = ArchiveReceipt.build(
             root=ctx.root,
             archive_path=output,
             archive_config=archive_config,
-            manifest_path=Path(config.manifest_path),
-            lockfile_path=_lockfile_path(ctx),
+            manifest_path=manifest_path,
+            lockfile_path=lockfile_path,
             environment_prefixes=receipt_environment_prefixes(
                 config_environments=list(config.environments),
                 ctx_root=ctx.root,

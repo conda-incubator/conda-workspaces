@@ -303,6 +303,38 @@ def test_execute_archive_receipt_path_cannot_be_archive_path(
         execute_archive(args, console=console)
 
 
+@pytest.mark.parametrize(
+    ("exclude", "match"),
+    [
+        ("conda.toml", "workspace manifest"),
+        ("conda.lock", "workspace lockfile"),
+    ],
+    ids=["manifest", "lockfile"],
+)
+def test_execute_archive_receipt_requires_bound_files_in_archive(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    exclude: str,
+    match: str,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "test.tar.gz"
+    console = Console(file=StringIO(), width=200, highlight=False)
+
+    args = make_args(
+        _ARCHIVE_DEFAULTS,
+        output=archive,
+        exclude=[exclude],
+        receipt=True,
+    )
+    with pytest.raises(ArchiveError, match=match):
+        execute_archive(args, console=console)
+
+    assert not archive.exists()
+    assert not ArchiveReceipt.default_path(archive).exists()
+
+
 def test_execute_unarchive_basic(
     archive_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
