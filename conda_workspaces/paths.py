@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from pathlib import PurePosixPath, PureWindowsPath
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def has_absolute_path_syntax(path: str) -> bool:
@@ -53,3 +57,14 @@ def is_path_segment(value: str) -> bool:
         return len(parse_relative_posix_path(value, require_canonical=True).parts) == 1
     except ValueError:
         return False
+
+
+def resolve_relative_path(root: Path, path: PurePosixPath) -> Path:
+    """Resolve *path* under *root*, rejecting symlink escapes."""
+    root = root.resolve(strict=False)
+    resolved = root.joinpath(*path.parts).resolve(strict=False)
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"Path escapes root: {path!s}") from exc
+    return resolved

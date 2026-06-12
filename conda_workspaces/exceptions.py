@@ -62,6 +62,24 @@ class WorkspaceParseError(CondaWorkspacesError):
         )
 
 
+class ManifestImportError(CondaWorkspacesError):
+    """A foreign manifest could not be imported safely."""
+
+    def __init__(
+        self,
+        path: str | Path,
+        reason: str,
+        *,
+        hints: list[str] | None = None,
+    ) -> None:
+        self.path = path
+        self.reason = reason
+        super().__init__(
+            f"Cannot import manifest '{path}': {reason}",
+            hints=hints,
+        )
+
+
 class EnvironmentNotFoundError(CondaWorkspacesError):
     """The requested environment is not defined in the workspace."""
 

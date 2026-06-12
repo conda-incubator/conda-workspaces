@@ -11,6 +11,7 @@ from conda.exceptions import DryRunExit
 from rich.console import Console
 
 from conda_workspaces.cli.workspace.import_manifest import execute_import
+from conda_workspaces.exceptions import ManifestImportError
 from conda_workspaces.importers import find_importer
 
 from ..conftest import make_args
@@ -204,14 +205,105 @@ def test_import_rich_platform_system_requirements(
     assert dict(platforms[1]) == {"platform": "linux-64", "libc": "2.28"}
 
 
-def test_import_conda_project(tmp_path: Path) -> None:
-    (tmp_path / "conda-project.yml").write_text(_CONDA_PROJECT_YML, encoding="utf-8")
-    (tmp_path / "environment.yml").write_text(_CONDA_PROJECT_ENV_YML, encoding="utf-8")
+@pytest.mark.parametrize(
+    "env_file",
+    ["environment.yml", "envs/default.yml", "./envs/default.yml"],
+    ids=["root-env-file", "nested-env-file", "current-dir-prefix"],
+)
+def test_import_conda_project(tmp_path: Path, env_file: str) -> None:
+    (tmp_path / "conda-project.yml").write_text(
+        f"""\
+name: cp-demo
+environments:
+  default:
+    - {env_file}
+commands:
+  test:
+    cmd: pytest
+""",
+        encoding="utf-8",
+    )
+    env_path = tmp_path / env_file
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text(_CONDA_PROJECT_ENV_YML, encoding="utf-8")
     doc = find_importer(tmp_path / "conda-project.yml").convert(
         tmp_path / "conda-project.yml"
     )
     assert doc["workspace"]["name"] == "cp-demo"
     assert "python" in doc["dependencies"]
+
+
+@pytest.mark.parametrize(
+    "env_file_template",
+    [
+        "../outside-env.yml",
+        "../../outside-env.yml",
+        "{outside}",
+        r"..\outside-env.yml",
+        "C:outside-env.yml",
+        r"C:\outside-env.yml",
+    ],
+    ids=[
+        "parent",
+        "parents",
+        "absolute",
+        "windows-parent",
+        "windows-drive-relative",
+        "windows-absolute",
+    ],
+)
+def test_import_conda_project_rejects_external_environment_files(
+    tmp_path: Path,
+    env_file_template: str,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "outside-env.yml"
+    outside.write_text(_CONDA_PROJECT_ENV_YML, encoding="utf-8")
+    env_file = env_file_template.format(outside=outside)
+    manifest = project / "conda-project.yml"
+    manifest.write_text(
+        f"""\
+name: cp-demo
+environments:
+  default:
+    - {env_file}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ManifestImportError, match="escapes the project directory"):
+        find_importer(manifest).convert(manifest)
+
+
+def test_import_conda_project_rejects_environment_file_symlink_escape(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    outside.mkdir()
+    (outside / "environment.yml").write_text(
+        _CONDA_PROJECT_ENV_YML,
+        encoding="utf-8",
+    )
+    try:
+        (project / "linked").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
+    manifest = project / "conda-project.yml"
+    manifest.write_text(
+        """\
+name: cp-demo
+environments:
+  default:
+    - linked/environment.yml
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ManifestImportError, match="escapes the project directory"):
+        find_importer(manifest).convert(manifest)
 
 
 def test_env_yml_dependencies(tmp_path: Path) -> None:

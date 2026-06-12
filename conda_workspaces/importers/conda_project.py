@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 import tomlkit
 from conda.base.context import context as conda_context
 
+from ..exceptions import ManifestImportError
+from ..paths import parse_relative_posix_path, resolve_relative_path
 from .base import ManifestImporter
 
 if TYPE_CHECKING:
@@ -38,7 +40,7 @@ class CondaProjectImporter(ManifestImporter):
         platforms: list[str] = [conda_context.subdir]
 
         for env_file in env_specs.get("default", []):
-            env_path = project_dir / env_file
+            env_path = self.environment_file_path(path, env_file)
             if env_path.exists():
                 env_data = self.load_yaml(env_path)
                 raw_deps = env_data.get("dependencies", [])
@@ -66,7 +68,7 @@ class CondaProjectImporter(ManifestImporter):
                 continue
             env_deps: dict[str, str] = {}
             for env_file in env_files:
-                env_path = project_dir / env_file
+                env_path = self.environment_file_path(path, env_file)
                 if env_path.exists():
                     env_data = self.load_yaml(env_path)
                     env_deps.update(
@@ -103,6 +105,40 @@ class CondaProjectImporter(ManifestImporter):
             doc.add("tasks", tomlkit.item(tasks))
 
         return doc
+
+    @staticmethod
+    def environment_file_path(manifest_path: Path, env_file: object) -> Path:
+        """Return a project-local environment file path from conda-project data."""
+        if not isinstance(env_file, str) or not env_file:
+            raise ManifestImportError(
+                manifest_path,
+                "conda-project environment file references must be strings.",
+            )
+
+        try:
+            relative_path = parse_relative_posix_path(env_file)
+        except ValueError:
+            raise ManifestImportError(
+                manifest_path,
+                f"environment file '{env_file}' escapes the project directory.",
+                hints=[
+                    "Keep conda-project environment files inside the project"
+                    " directory and reference them with relative paths.",
+                ],
+            ) from None
+
+        project_dir = manifest_path.parent
+        try:
+            return resolve_relative_path(project_dir, relative_path)
+        except ValueError as exc:
+            raise ManifestImportError(
+                manifest_path,
+                f"environment file '{env_file}' escapes the project directory.",
+                hints=[
+                    "Keep conda-project environment files inside the project"
+                    " directory and avoid symlinks that point outside it.",
+                ],
+            ) from exc
 
 
 convert = CondaProjectImporter().convert

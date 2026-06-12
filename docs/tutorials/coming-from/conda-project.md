@@ -109,6 +109,9 @@ environments:
     - dev-extras.yml
 ```
 
+Imported environment files must be referenced with project-local relative
+paths. References that resolve outside the project directory are rejected.
+
 conda-workspaces uses composable features instead:
 
 ```toml
