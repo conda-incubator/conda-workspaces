@@ -19,6 +19,7 @@ from conda_lockfiles.load_yaml import load_yaml
 
 from conda_workspaces.context import WorkspaceContext
 from conda_workspaces.exceptions import (
+    LockfileIntegrityError,
     LockfileMergeError,
     LockfileNotFoundError,
     SolveError,
@@ -712,6 +713,10 @@ def test_install_from_lockfile(
 ) -> None:
     """install_from_lockfile reads conda.lock, extracts URLs, and installs."""
     ctx = workspace_ctx_factory()
+    python_url = "https://example.com/channel/linux-64/python.conda"
+    numpy_url = "https://example.com/channel/noarch/numpy.conda"
+    python_sha256 = "a" * 64
+    numpy_md5 = "b" * 32
 
     lockfile = tmp_path / LOCKFILE_NAME
     lockfile.write_text(
@@ -719,16 +724,16 @@ def test_install_from_lockfile(
         "environments:\n"
         "  default:\n"
         "    channels:\n"
-        "    - url: conda-forge\n"
+        "    - url: https://example.com/channel\n"
         "    packages:\n"
         "      linux-64:\n"
-        "      - conda: https://example.com/python.conda\n"
-        "      - conda: https://example.com/numpy.conda\n"
+        f"      - conda: {python_url}\n"
+        f"      - conda: {numpy_url}\n"
         "packages:\n"
-        "- conda: https://example.com/python.conda\n"
-        "  sha256: aaa\n"
-        "- conda: https://example.com/numpy.conda\n"
-        "  sha256: bbb\n",
+        f"- conda: {python_url}\n"
+        f"  sha256: {python_sha256}\n"
+        f"- conda: {numpy_url}\n"
+        f"  md5: {numpy_md5}\n",
         encoding="utf-8",
     )
 
@@ -758,12 +763,130 @@ def test_install_from_lockfile(
 
     assert len(get_records_calls) == 1
     assert get_records_calls[0] == [
-        "https://example.com/python.conda",
-        "https://example.com/numpy.conda",
+        f"{python_url}#sha256:{python_sha256}",
+        f"{numpy_url}#{numpy_md5}",
     ]
     assert len(install_calls) == 1
     assert install_calls[0]["records"] == records_sentinel
     assert install_calls[0]["prefix"] == str(ctx.env_prefix("default"))
+
+
+@pytest.mark.parametrize(
+    ("package_url", "package_record", "match"),
+    [
+        pytest.param(
+            "https://attacker.example/pkgs/linux-64/python-3.11.9-hbad_0.tar.bz2",
+            {
+                "conda": (
+                    "https://attacker.example/pkgs/linux-64/"
+                    "python-3.11.9-hbad_0.tar.bz2"
+                ),
+                "sha256": "0" * 64,
+            },
+            "not under any channel",
+            id="off-channel",
+        ),
+        pytest.param(
+            "https://example.com/channel/linux-64/python-3.11.9-hgood_0.tar.bz2",
+            None,
+            "no top-level package record",
+            id="missing-top-level-record",
+        ),
+        pytest.param(
+            "https://example.com/channel/linux-64/python-3.11.9-hgood_0.tar.bz2",
+            {
+                "conda": (
+                    "https://example.com/channel/linux-64/python-3.11.9-hgood_0.tar.bz2"
+                )
+            },
+            "missing a sha256 or md5 digest",
+            id="missing-digest",
+        ),
+        pytest.param(
+            "https://example.com/channel/linux-64/python-3.11.9-hgood_0.tar.bz2",
+            {
+                "conda": (
+                    "https://example.com/channel/linux-64/python-3.11.9-hgood_0.tar.bz2"
+                ),
+                "sha256": "not-a-valid-sha256",
+            },
+            "invalid sha256 digest",
+            id="invalid-sha256",
+        ),
+    ],
+)
+def test_install_from_lockfile_rejects_unbound_package_refs(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    monkeypatch: pytest.MonkeyPatch,
+    package_url: str,
+    package_record: dict[str, str] | None,
+    match: str,
+) -> None:
+    """Locked installs reject refs that are not bound to channel + hash metadata."""
+    ctx = workspace_ctx_factory()
+    packages = [] if package_record is None else [package_record]
+    lockfile = {
+        "version": LOCKFILE_VERSION,
+        "environments": {
+            "default": {
+                "channels": [{"url": "https://example.com/channel"}],
+                "packages": {"linux-64": [{"conda": package_url}]},
+            }
+        },
+        "packages": packages,
+    }
+    buf = io.StringIO()
+    yaml_dump(lockfile, buf)
+    (tmp_path / LOCKFILE_NAME).write_text(buf.getvalue(), encoding="utf-8")
+
+    get_records_calls: list[list] = []
+
+    def fake_get_records(lines):
+        get_records_calls.append(lines)
+        return []
+
+    monkeypatch.setattr(
+        "conda.misc.get_package_records_from_explicit",
+        fake_get_records,
+    )
+
+    with pytest.raises(LockfileIntegrityError, match=match):
+        install_from_lockfile(ctx, "default")
+
+    assert get_records_calls == []
+
+
+def test_lockfile_status_rejects_off_channel_package_refs() -> None:
+    """Freshness checks reject the off-channel URL used by the scan PoC."""
+    config = WorkspaceConfig(
+        name="lock-test",
+        channels=[Channel("conda-forge")],
+        platforms=["linux-64"],
+        features={
+            "default": Feature(
+                name="default",
+                conda_dependencies={"python": MatchSpec("python >=3.11")},
+            )
+        },
+        environments={"default": Environment(name="default")},
+    )
+    package_url = "https://attacker.example/pkgs/linux-64/python-3.11.9-hbad_0.tar.bz2"
+    lockfile_data = {
+        "version": LOCKFILE_VERSION,
+        "environments": {
+            "default": {
+                "channels": [{"url": str(Channel("conda-forge"))}],
+                "packages": {"linux-64": [{"conda": package_url}]},
+            }
+        },
+        "packages": [{"conda": package_url, "sha256": "0" * 64}],
+    }
+
+    status = check_lockfile_satisfiability(config, lockfile_data, "linux-64")
+
+    assert status.status == LockfileStatus.OUT_OF_DATE
+    assert "not under a declared channel" in status.reason
 
 
 def test_install_from_lockfile_explicit_prefix_override(
@@ -773,6 +896,8 @@ def test_install_from_lockfile_explicit_prefix_override(
 ) -> None:
     """install_from_lockfile can install elsewhere while embedding a final prefix."""
     ctx = workspace_ctx_factory()
+    package_url = "https://example.com/channel/linux-64/python.conda"
+    package_sha256 = "a" * 64
 
     lockfile = tmp_path / LOCKFILE_NAME
     lockfile.write_text(
@@ -780,20 +905,20 @@ def test_install_from_lockfile_explicit_prefix_override(
         "environments:\n"
         "  default:\n"
         "    channels:\n"
-        "    - url: conda-forge\n"
+        "    - url: https://example.com/channel\n"
         "    packages:\n"
         "      linux-64:\n"
-        "      - conda: https://example.com/python.conda\n"
+        f"      - conda: {package_url}\n"
         "packages:\n"
-        "- conda: https://example.com/python.conda\n"
-        "  sha256: aaa\n",
+        f"- conda: {package_url}\n"
+        f"  sha256: {package_sha256}\n",
         encoding="utf-8",
     )
 
     records_sentinel = [object()]
 
     def fake_get_records(lines):
-        assert lines == ["https://example.com/python.conda"]
+        assert lines == [f"{package_url}#sha256:{package_sha256}"]
         return records_sentinel
 
     monkeypatch.setattr(
@@ -1173,6 +1298,7 @@ environments:
       - conda: {main}/linux-64/python-linux-64.conda
 packages:
 - conda: {main}/linux-64/python-linux-64.conda
+  sha256: {"a" * 64}
 """,
         encoding="utf-8",
     )
@@ -1328,6 +1454,14 @@ def lockfile_data_factory():
         if version is not None:
             data["version"] = version
         if environments is None:
+            linux_url = (
+                "https://conda.anaconda.org/conda-forge/linux-64/"
+                "python-3.12.0-hab00c5b_0.conda"
+            )
+            osx_url = (
+                "https://conda.anaconda.org/conda-forge/osx-arm64/"
+                "python-3.12.0-h47c9636_0.conda"
+            )
             environments = {
                 "default": {
                     "channels": [
@@ -1336,17 +1470,22 @@ def lockfile_data_factory():
                     "packages": {
                         "linux-64": [
                             {
-                                "conda": "https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-hab00c5b_0.conda"
+                                "conda": linux_url,
                             },
                         ],
                         "osx-arm64": [
                             {
-                                "conda": "https://conda.anaconda.org/conda-forge/osx-arm64/python-3.12.0-h47c9636_0.conda"
+                                "conda": osx_url,
                             },
                         ],
                     },
                 },
             }
+            if packages is None:
+                packages = [
+                    {"conda": linux_url, "sha256": "a" * 64},
+                    {"conda": osx_url, "sha256": "b" * 64},
+                ]
         data["environments"] = environments
         data["packages"] = packages or []
         return data

@@ -54,6 +54,7 @@ from conda.plugins.types import EnvironmentSpecBase
 
 from .exceptions import (
     AllTargetsUnsolvableError,
+    LockfileIntegrityError,
     LockfileMergeError,
     LockfileNotFoundError,
     SolveError,
@@ -213,11 +214,52 @@ def check_lockfile_satisfiability(
         if platform_refs is None:
             continue
 
+        records_by_url = CondaLockLoader.package_records_by_url_from_data(lockfile_data)
+        try:
+            channel_urls = CondaLockLoader.channel_urls_for_env_data(
+                lock_env,
+                current_platform,
+            )
+        except ValueError as exc:
+            return LockfileStatus(status=_stale, reason=str(exc))
+
         locked_versions: dict[str, list[str]] = {}
         for ref in platform_refs:
+            if not isinstance(ref, dict):
+                continue
             url = ref.get("conda", "")
             if not url:
                 continue
+            if not isinstance(url, str):
+                return LockfileStatus(
+                    status=_stale,
+                    reason=(
+                        f"Environment '{env_name}' contains an invalid "
+                        f"package ref on '{current_platform}'"
+                    ),
+                )
+            if not CondaLockLoader.url_matches_channel(url, channel_urls):
+                return LockfileStatus(
+                    status=_stale,
+                    reason=(
+                        f"Package URL '{url}' in environment '{env_name}' "
+                        f"on '{current_platform}' is not under a declared "
+                        "channel"
+                    ),
+                )
+            record = records_by_url.get(url)
+            if record is None:
+                return LockfileStatus(
+                    status=_stale,
+                    reason=(
+                        f"Package URL '{url}' in environment '{env_name}' "
+                        "has no top-level package record"
+                    ),
+                )
+            try:
+                CondaLockLoader.digest_fragment_for_record(record, url)
+            except ValueError as exc:
+                return LockfileStatus(status=_stale, reason=str(exc))
             dist = Dist(url)
             locked_versions.setdefault(dist.name, []).append(dist.version)
 
@@ -350,6 +392,158 @@ class CondaLockLoader(EnvironmentSpecBase):
                 f"Available environments: {dashlist(sorted(environments))}"
             )
         return environments[name]
+
+    def explicit_package_specs_for(
+        self,
+        platform: str,
+        name: str = "default",
+    ) -> list[str]:
+        """Return hash-bearing explicit conda specs for *name* on *platform*."""
+        env_data = self._env_data(name)
+        platform_refs = env_data.get("packages", {}).get(platform)
+        if platform_refs is None:
+            raise ValueError(
+                f"Environment {name!r} does not include packages for {platform!r}"
+            )
+
+        records_by_url = self.package_records_by_url()
+        channel_urls = self.channel_urls_for(env_data, platform)
+        explicit_specs: list[str] = []
+        for ref in platform_refs:
+            if not isinstance(ref, dict) or "conda" not in ref:
+                continue
+            url = ref["conda"]
+            if not isinstance(url, str) or not url:
+                raise LockfileIntegrityError(
+                    self.path,
+                    f"environment {name!r} has an invalid conda package ref",
+                )
+            if not self.url_matches_channel(url, channel_urls):
+                raise LockfileIntegrityError(
+                    self.path,
+                    f"package URL {url!r} is not under any channel declared "
+                    f"for environment {name!r}",
+                )
+            record = records_by_url.get(url)
+            if record is None:
+                raise LockfileIntegrityError(
+                    self.path,
+                    f"package URL {url!r} has no top-level package record",
+                )
+            digest = self.digest_fragment_for(record, url)
+            explicit_specs.append(f"{url}#{digest}")
+        return explicit_specs
+
+    def package_records_by_url(self) -> dict[str, dict[str, Any]]:
+        """Return top-level conda package records keyed by their exact URL."""
+        return self.package_records_by_url_from_data(self._data)
+
+    @staticmethod
+    def package_records_by_url_from_data(
+        data: dict[str, Any],
+    ) -> dict[str, dict[str, Any]]:
+        """Return top-level conda package records from *data* keyed by URL."""
+        records_by_url: dict[str, dict[str, Any]] = {}
+        for record in data.get("packages", []) or []:
+            if not isinstance(record, dict):
+                continue
+            url = record.get("conda") or record.get("url")
+            if isinstance(url, str) and url:
+                records_by_url.setdefault(url, record)
+        return records_by_url
+
+    def channel_urls_for(
+        self,
+        env_data: dict[str, Any],
+        platform: str,
+    ) -> tuple[str, ...]:
+        """Return concrete package-containing channel URLs for *platform*."""
+        return self.channel_urls_for_env_data(env_data, platform, path=self.path)
+
+    @staticmethod
+    def channel_urls_for_env_data(
+        env_data: dict[str, Any],
+        platform: str,
+        *,
+        path: Path | None = None,
+    ) -> tuple[str, ...]:
+        """Return concrete package-containing channel URLs for *platform*."""
+        from conda.models.channel import Channel
+
+        urls: set[str] = set()
+        for entry in env_data.get("channels", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            raw_url = entry.get("url")
+            if not isinstance(raw_url, str) or not raw_url:
+                continue
+            try:
+                channel = Channel(raw_url)
+                for with_credentials in (False, True):
+                    urls.update(
+                        channel.urls(
+                            with_credentials=with_credentials,
+                            subdirs=(platform, "noarch"),
+                        )
+                    )
+            except Exception as exc:
+                reason = f"environment channel {raw_url!r} cannot be resolved"
+                if path is None:
+                    raise ValueError(reason) from exc
+                raise LockfileIntegrityError(path, reason) from exc
+        return tuple(sorted(url.rstrip("/") for url in urls))
+
+    @staticmethod
+    def url_matches_channel(url: str, channel_urls: tuple[str, ...]) -> bool:
+        """Return whether *url* is contained by one declared channel URL."""
+        return any(url.startswith(f"{channel_url}/") for channel_url in channel_urls)
+
+    def digest_fragment_for(self, record: dict[str, Any], url: str) -> str:
+        """Return the conda explicit-file digest fragment for *record*."""
+        return self.digest_fragment_for_record(record, url, path=self.path)
+
+    @classmethod
+    def digest_fragment_for_record(
+        cls,
+        record: dict[str, Any],
+        url: str,
+        *,
+        path: Path | None = None,
+    ) -> str:
+        """Return the conda explicit-file digest fragment for *record*."""
+        sha256 = record.get("sha256")
+        if sha256 is not None:
+            if cls.is_hex_digest(sha256, 64):
+                return f"sha256:{sha256.lower()}"
+            reason = f"package URL {url!r} has an invalid sha256 digest"
+            if path is None:
+                raise ValueError(reason)
+            raise LockfileIntegrityError(path, reason)
+
+        md5 = record.get("md5")
+        if md5 is not None:
+            if cls.is_hex_digest(md5, 32):
+                return md5.lower()
+            reason = f"package URL {url!r} has an invalid md5 digest"
+            if path is None:
+                raise ValueError(reason)
+            raise LockfileIntegrityError(path, reason)
+
+        reason = f"package URL {url!r} is missing a sha256 or md5 digest"
+        if path is None:
+            raise ValueError(reason)
+        raise LockfileIntegrityError(path, reason)
+
+    @staticmethod
+    def is_hex_digest(value: object, length: int) -> bool:
+        """Return whether *value* is a hex digest with *length* characters."""
+        if not isinstance(value, str) or len(value) != length:
+            return False
+        try:
+            int(value, 16)
+        except ValueError:
+            return False
+        return True
 
     @classmethod
     def compose(cls, envs: Iterable[Environment]) -> dict[str, Any]:
@@ -726,15 +920,9 @@ def install_from_lockfile(
 
     loader = CondaLockLoader(path)
     try:
-        env_data = loader._env_data(env_name)
+        urls = loader.explicit_package_specs_for(ctx.platform, env_name)
     except (ValueError, OSError) as exc:
         raise LockfileNotFoundError(env_name, path) from exc
-
-    platform_pkgs = env_data.get("packages", {}).get(ctx.platform)
-    if platform_pkgs is None:
-        raise LockfileNotFoundError(env_name, path)
-
-    urls = [ref["conda"] for ref in platform_pkgs if "conda" in ref]
 
     install_prefix = prefix or ctx.env_prefix(env_name)
     install_prefix.mkdir(parents=True, exist_ok=True)

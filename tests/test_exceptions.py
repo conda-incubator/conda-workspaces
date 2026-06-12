@@ -16,6 +16,7 @@ from conda_workspaces.exceptions import (
     EnvironmentNotFoundError,
     EnvironmentNotInstalledError,
     FeatureNotFoundError,
+    LockfileIntegrityError,
     LockfileNotFoundError,
     ManifestExistsError,
     PlatformError,
@@ -65,6 +66,10 @@ from conda_workspaces.exceptions import (
             ["test", "conda.lock"],
         ),
         (
+            LockfileIntegrityError(Path("conda.lock"), "bad digest"),
+            ["conda.lock", "bad digest"],
+        ),
+        (
             EnvironmentNotInstalledError("dev"),
             ["dev", "not installed"],
         ),
@@ -83,6 +88,7 @@ from conda_workspaces.exceptions import (
         "solve-error",
         "activation-error",
         "lockfile-not-found",
+        "lockfile-integrity",
         "env-not-installed",
         "manifest-exists",
     ],
@@ -102,8 +108,13 @@ def test_inheritance():
     [
         (ActivationError("dev", "shell not found"), "environment", "dev"),
         (LockfileNotFoundError("test", Path("conda.lock")), "environment", "test"),
+        (
+            LockfileIntegrityError(Path("conda.lock"), "bad digest"),
+            "reason",
+            "bad digest",
+        ),
     ],
-    ids=["activation-env", "lockfile-env"],
+    ids=["activation-env", "lockfile-env", "lockfile-integrity-reason"],
 )
 def test_exception_attributes(exc, attr, expected):
     assert getattr(exc, attr) == expected
@@ -122,6 +133,7 @@ def test_exception_attributes(exc, attr, expected):
         SolveError("test", "conflict"),
         ActivationError("dev", "shell not found"),
         LockfileNotFoundError("test", Path("conda.lock")),
+        LockfileIntegrityError(Path("conda.lock"), "bad digest"),
     ],
     ids=[
         "workspace-not-found",
@@ -134,6 +146,7 @@ def test_exception_attributes(exc, attr, expected):
         "solve-error",
         "activation-error",
         "lockfile-not-found",
+        "lockfile-integrity",
     ],
 )
 def test_error_message_and_hints_separate(exc):
