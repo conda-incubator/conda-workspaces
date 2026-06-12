@@ -1128,6 +1128,67 @@ def test_merge_lockfiles_fills_manifest_channels_for_fragment_subset(
     }
 
 
+def test_merge_lockfiles_preserves_manifest_channels_with_canonical_collision(
+    tmp_path: Path,
+) -> None:
+    """Merge preserves distinct manifest URLs even if conda canonicalizes them alike."""
+    main = "https://repo.anaconda.com/pkgs/main"
+    msys2 = "https://repo.anaconda.com/pkgs/msys2"
+
+    class CanonicalCollisionChannel:
+        canonical_name = "defaults"
+
+        def __init__(self, url: str) -> None:
+            self.url = url
+
+        def __str__(self) -> str:
+            return self.url
+
+    config = WorkspaceConfig(
+        name="fragment-channel-collision",
+        channels=[
+            CanonicalCollisionChannel(main),  # type: ignore[list-item]
+            CanonicalCollisionChannel(msys2),  # type: ignore[list-item]
+        ],
+        platforms=["linux-64"],
+        features={"default": Feature(name="default")},
+        environments={"default": Environment(name="default")},
+        root=str(tmp_path),
+        manifest_path=str(tmp_path / "conda.toml"),
+    )
+    env = config.environments["default"]
+    assert [str(ch) for ch in config.merged_channels(env)] == [main]
+    ctx = WorkspaceContext(config)
+
+    fragment = tmp_path / "conda.lock.linux-64"
+    fragment.write_text(
+        f"""\
+version: 1
+environments:
+  default:
+    channels:
+    - url: {main}
+    packages:
+      linux-64:
+      - conda: {main}/linux-64/python-linux-64.conda
+packages:
+- conda: {main}/linux-64/python-linux-64.conda
+""",
+        encoding="utf-8",
+    )
+    load_yaml.cache_clear()
+
+    merged_path = merge_lockfiles([fragment], ctx)
+    merged = load_yaml(merged_path)
+
+    assert merged["environments"]["default"]["channels"] == [
+        {"url": main},
+        {"url": msys2},
+    ]
+    result = check_lockfile_satisfiability(config, merged, "linux-64")
+    assert result.status == LockfileStatus.UP_TO_DATE
+
+
 @pytest.mark.parametrize(
     ("fragment_channels", "case"),
     [

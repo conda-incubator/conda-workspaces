@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     from conda.models.environment import Environment
 
     from .context import WorkspaceContext
+    from .models import Environment as WorkspaceEnvironment
     from .models import WorkspaceConfig
     from .resolver import ResolvedEnvironment
 
@@ -100,6 +101,29 @@ def lockfile_path(ctx: WorkspaceContext) -> Path:
 def _normalize_channel_urls(urls: Iterable[str]) -> list[str]:
     """Strip trailing slashes from channel URLs for comparison."""
     return [url.rstrip("/") for url in urls]
+
+
+def _manifest_channel_entries(
+    config: WorkspaceConfig,
+    environment: WorkspaceEnvironment,
+) -> list[dict[str, str]]:
+    """Return manifest channel entries without conda canonical-name deduplication."""
+    seen: set[str] = set()
+    entries: list[dict[str, str]] = []
+    for ch in config.channels:
+        url = str(ch)
+        normalized = url.rstrip("/")
+        if normalized not in seen:
+            seen.add(normalized)
+            entries.append({"url": url})
+    for feature in config.resolve_features(environment):
+        for ch in feature.channels:
+            url = str(ch)
+            normalized = url.rstrip("/")
+            if normalized not in seen:
+                seen.add(normalized)
+                entries.append({"url": url})
+    return entries
 
 
 def lockfile_status(
@@ -154,9 +178,9 @@ def check_lockfile_satisfiability(
 
         lock_env = lock_envs[env_name]
 
-        manifest_channels = config.merged_channels(env_obj)
+        manifest_channels = _manifest_channel_entries(config, env_obj)
         manifest_urls = _normalize_channel_urls(
-            ch.base_url for ch in manifest_channels if ch.base_url
+            entry["url"] for entry in manifest_channels
         )
         lock_channel_entries = lock_env.get("channels", [])
         lock_urls = _normalize_channel_urls(
@@ -558,7 +582,7 @@ def merge_lockfiles(paths: Sequence[Path], ctx: WorkspaceContext) -> Path:
     manifest_env_channel_urls: dict[str, list[str]] = {}
 
     for env_name, env_obj in ctx.config.environments.items():
-        entries = [{"url": str(ch)} for ch in ctx.config.merged_channels(env_obj)]
+        entries = _manifest_channel_entries(ctx.config, env_obj)
         manifest_env_channels[env_name] = entries
         manifest_env_channel_urls[env_name] = _normalize_channel_urls(
             entry["url"] for entry in entries
