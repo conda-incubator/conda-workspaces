@@ -48,6 +48,9 @@ source = "vcs"
 [tool.hatch.build.hooks.vcs]
 version-file = "conda_workspaces/_version.py"
 
+[tool.hatch.build.targets.wheel.force-include]
+"schema" = "schema"
+
 [project.scripts]
 cw = "conda_workspaces.__main__:main"
 ct = "conda_workspaces.__main__:main_task"

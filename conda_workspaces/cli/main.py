@@ -563,6 +563,18 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         help="Additional exclude patterns (repeatable)."
         " Added to [workspace.archive] exclude.",
     )
+    archive_parser.add_argument(
+        "--receipt",
+        nargs="?",
+        const=True,
+        default=None,
+        type=Path,
+        metavar="PATH",
+        help=(
+            "Write an external in-toto receipt JSON file."
+            " Defaults to <archive>.receipt.json when PATH is omitted."
+        ),
+    )
 
     unarchive_parser = sub.add_parser(
         "unarchive",
@@ -616,6 +628,24 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         default=False,
         help="Skip cache priming for bundled packages.",
+    )
+    unarchive_parser.add_argument(
+        "--receipt",
+        nargs="?",
+        const=True,
+        default=None,
+        type=Path,
+        metavar="PATH",
+        help=(
+            "Verify an external in-toto receipt JSON file."
+            " Defaults to <archive>.receipt.json when PATH is omitted."
+        ),
+    )
+    unarchive_parser.add_argument(
+        "--require-sha256",
+        action="store_true",
+        default=False,
+        help="Require package records verified by --receipt to include SHA-256.",
     )
 
     quickstart_parser = sub.add_parser(

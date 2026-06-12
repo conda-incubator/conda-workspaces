@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import tarfile
 from io import StringIO
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 from rich.console import Console
@@ -12,12 +13,16 @@ from rich.console import Console
 from conda_workspaces.cli.workspace.archive import (
     execute_archive,
     execute_unarchive,
+    extract_verified_archive,
     file_contains_bytes,
     is_absolute_runtime_prefix,
+    receipt_environment_prefixes,
+    resolve_receipt_path,
     runtime_prefix_relative_path,
     scan_prefix_references,
 )
 from conda_workspaces.exceptions import ArchiveError
+from conda_workspaces.receipts import ArchiveReceipt
 
 from ..conftest import make_args
 
@@ -27,6 +32,7 @@ _ARCHIVE_DEFAULTS = {
     "bundle": False,
     "lock": False,
     "exclude": None,
+    "receipt": None,
     "dry_run": False,
     "json": False,
 }
@@ -40,6 +46,8 @@ _UNARCHIVE_DEFAULTS = {
     "environment": None,
     "prefix": None,
     "dest": None,
+    "receipt": None,
+    "require_sha256": False,
     "dry_run": False,
     "json": False,
 }
@@ -105,6 +113,68 @@ def test_scan_prefix_references_limits_matches(tmp_path: Path) -> None:
     assert len(matches) == 2
     assert truncated is True
     assert all(path.name.startswith("match-") for path in matches)
+
+
+@pytest.mark.parametrize(
+    ("receipt", "expected"),
+    [
+        (None, None),
+        (False, None),
+        (True, "workspace.tar.gz.receipt.json"),
+        (Path("custom.json"), "custom.json"),
+        ("string.json", "string.json"),
+    ],
+    ids=["none", "false", "default", "path", "string"],
+)
+def test_resolve_receipt_path(
+    tmp_path: Path,
+    receipt: object,
+    expected: str | None,
+) -> None:
+    archive_path = tmp_path / "workspace.tar.gz"
+    result = resolve_receipt_path(archive_path, receipt)
+
+    if expected is None:
+        assert result is None
+    elif receipt is True:
+        assert result == tmp_path / expected
+    else:
+        assert result == Path(expected)
+
+
+def test_resolve_receipt_path_rejects_invalid_value(tmp_path: Path) -> None:
+    with pytest.raises(ArchiveError, match="Invalid --receipt value"):
+        resolve_receipt_path(tmp_path / "workspace.tar.gz", object())
+
+
+def test_receipt_environment_prefixes_records_external_prefix(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+
+    prefixes = receipt_environment_prefixes(
+        config_environments=["default", "runtime"],
+        ctx_root=root,
+        env_prefix=lambda name: (
+            root / ".conda" / "envs" / name
+            if name == "default"
+            else Path("/opt/runtime")
+        ),
+    )
+
+    assert prefixes == {
+        "default": ".conda/envs/default",
+        "runtime": "/opt/runtime",
+    }
+
+
+def test_receipt_environment_prefixes_normalizes_windows_external_prefix() -> None:
+    prefixes = receipt_environment_prefixes(
+        config_environments=["runtime"],
+        ctx_root=PureWindowsPath("C:/workspace"),
+        env_prefix=lambda name: PureWindowsPath("D:/runtime"),
+    )
+
+    assert prefixes == {"runtime": "D:/runtime"}
 
 
 @pytest.fixture
@@ -185,6 +255,86 @@ def test_execute_archive_exclude(
     assert "src/app.py" not in names
 
 
+@pytest.mark.parametrize(
+    ("receipt", "expected_name"),
+    [
+        (True, "test.tar.gz.receipt.json"),
+        ("custom-receipt.json", "custom-receipt.json"),
+    ],
+    ids=["default-path", "explicit-path"],
+)
+def test_execute_archive_receipt_path(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    receipt: object,
+    expected_name: str,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "test.tar.gz"
+    console = Console(file=StringIO(), width=200, highlight=False)
+    receipt_arg = tmp_path / receipt if isinstance(receipt, str) else receipt
+
+    args = make_args(_ARCHIVE_DEFAULTS, output=archive, receipt=receipt_arg)
+    result = execute_archive(args, console=console)
+
+    assert result == 0
+    receipt_path = tmp_path / expected_name
+    data = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert data["_type"] == "https://in-toto.io/Statement/v1"
+    assert data["subject"][0]["name"] == "test.tar.gz"
+    assert data["predicate"]["workspace"] == {
+        "manifest": "conda.toml",
+        "lockfile": "conda.lock",
+    }
+
+
+def test_execute_archive_receipt_path_cannot_be_archive_path(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "test.tar.gz"
+    console = Console(file=StringIO(), width=200, highlight=False)
+
+    args = make_args(_ARCHIVE_DEFAULTS, output=archive, receipt=archive)
+    with pytest.raises(ArchiveError, match="Receipt path cannot be the archive path"):
+        execute_archive(args, console=console)
+
+
+@pytest.mark.parametrize(
+    ("exclude", "match"),
+    [
+        ("conda.toml", "workspace manifest"),
+        ("conda.lock", "workspace lockfile"),
+    ],
+    ids=["manifest", "lockfile"],
+)
+def test_execute_archive_receipt_requires_bound_files_in_archive(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    exclude: str,
+    match: str,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "test.tar.gz"
+    console = Console(file=StringIO(), width=200, highlight=False)
+
+    args = make_args(
+        _ARCHIVE_DEFAULTS,
+        output=archive,
+        exclude=[exclude],
+        receipt=True,
+    )
+    with pytest.raises(ArchiveError, match=match):
+        execute_archive(args, console=console)
+
+    assert not archive.exists()
+    assert not ArchiveReceipt.default_path(archive).exists()
+
+
 def test_execute_unarchive_basic(
     archive_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -205,6 +355,150 @@ def test_execute_unarchive_basic(
     assert (target / "conda.toml").is_file()
     assert (target / "conda.lock").is_file()
     assert (target / "src" / "app.py").is_file()
+
+
+def test_execute_unarchive_receipt_default_path(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "test.tar.gz"
+    console = Console(file=StringIO(), width=200, highlight=False)
+
+    execute_archive(
+        make_args(_ARCHIVE_DEFAULTS, output=archive, receipt=True),
+        console=console,
+    )
+
+    target = tmp_path / "extracted"
+    result = execute_unarchive(
+        make_args(
+            _UNARCHIVE_DEFAULTS,
+            archive_path=archive,
+            target=target,
+            receipt=True,
+        ),
+        console=console,
+    )
+
+    assert result == 0
+    assert (target / "conda.toml").is_file()
+    assert "Verified" in console.file.getvalue()
+
+
+def test_execute_unarchive_receipt_detects_tampered_archive(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "test.tar.gz"
+    console = Console(file=StringIO(), width=200, highlight=False)
+
+    execute_archive(
+        make_args(_ARCHIVE_DEFAULTS, output=archive, receipt=True),
+        console=console,
+    )
+    archive.write_bytes(archive.read_bytes() + b"tamper")
+
+    with pytest.raises(ArchiveError, match="Hash mismatch"):
+        execute_unarchive(
+            make_args(
+                _UNARCHIVE_DEFAULTS,
+                archive_path=archive,
+                target=tmp_path / "extracted",
+                receipt=True,
+            ),
+            console=console,
+        )
+
+
+@pytest.mark.parametrize(
+    "target_setup",
+    ["non-empty", "file-target", "symlink-target"],
+    ids=["non-empty", "file-target", "symlink-target"],
+)
+def test_execute_unarchive_receipt_rejects_existing_target(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    target_setup: str,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "test.tar.gz"
+    console = Console(file=StringIO(), width=200, highlight=False)
+
+    execute_archive(
+        make_args(_ARCHIVE_DEFAULTS, output=archive, receipt=True),
+        console=console,
+    )
+    target = tmp_path / "extracted"
+    if target_setup == "non-empty":
+        target.mkdir()
+        (target / "existing.txt").write_text("x", encoding="utf-8")
+    elif target_setup == "file-target":
+        target.write_text("x", encoding="utf-8")
+    else:
+        target.symlink_to(tmp_path)
+
+    with pytest.raises(ArchiveError, match="Cannot verify receipt"):
+        execute_unarchive(
+            make_args(
+                _UNARCHIVE_DEFAULTS,
+                archive_path=archive,
+                target=target,
+                receipt=True,
+            ),
+            console=console,
+        )
+
+
+def test_execute_unarchive_require_sha256_requires_receipt(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "test.tar.gz"
+    console = Console(file=StringIO(), width=200, highlight=False)
+
+    execute_archive(make_args(_ARCHIVE_DEFAULTS, output=archive), console=console)
+
+    with pytest.raises(ArchiveError, match="--require-sha256 requires --receipt"):
+        execute_unarchive(
+            make_args(
+                _UNARCHIVE_DEFAULTS,
+                archive_path=archive,
+                target=tmp_path / "extracted",
+                require_sha256=True,
+            ),
+            console=console,
+        )
+
+
+def test_extract_verified_archive_cleans_failed_staging(
+    archive_workspace: Path,
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "test.tar.gz"
+    receipt_path = tmp_path / "test.tar.gz.receipt.json"
+    create_console = Console(file=StringIO(), width=200, highlight=False)
+
+    args = make_args(_ARCHIVE_DEFAULTS, output=archive, receipt=receipt_path)
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.chdir(archive_workspace)
+        execute_archive(args, console=create_console)
+
+    receipt = ArchiveReceipt.load(receipt_path)
+    receipt.statement["predicate"]["workspace"]["lockfile"] = "../conda.lock"
+    target = tmp_path / "target"
+
+    with pytest.raises(ArchiveError, match="relative archive path"):
+        extract_verified_archive(archive, target, receipt)
+
+    assert not target.exists()
+    assert not list(tmp_path.glob(".target.verify-*"))
 
 
 def test_execute_unarchive_default_target(

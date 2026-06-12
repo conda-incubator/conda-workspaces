@@ -4,18 +4,21 @@ import hashlib
 import io
 import subprocess
 import tarfile
+from pathlib import PureWindowsPath
 from typing import TYPE_CHECKING
 
 import pytest
 
 from conda_workspaces.archive import (
     ALLOWED_TAR_TYPES,
+    add_files_to_tar,
     collect_archive_files,
     collect_bundle_packages,
     create_archive,
     extract_archive,
     inspect_archive,
     open_tar,
+    parse_relative_archive_path,
     prime_package_cache,
     url_to_filename,
     validate_tar_member,
@@ -229,6 +232,25 @@ def test_create_archive_output_dir_created(project_dir: Path, tmp_path: Path) ->
     assert output.is_file()
 
 
+def test_add_files_to_tar_writes_posix_member_names() -> None:
+    class RecordingTar:
+        def __init__(self) -> None:
+            self.arcnames: list[str] = []
+
+        def add(self, name: str, arcname: str) -> None:
+            self.arcnames.append(arcname)
+
+    tf = RecordingTar()
+
+    add_files_to_tar(
+        tf,
+        PureWindowsPath("C:/workspace"),
+        [PureWindowsPath("C:/workspace/src/main.py")],
+    )
+
+    assert tf.arcnames == ["src/main.py"]
+
+
 def test_extract_archive_basic(project_dir: Path, tmp_path: Path) -> None:
     archive_path = tmp_path / "test.tar.gz"
     config = ArchiveConfig()
@@ -248,6 +270,8 @@ def test_extract_archive_basic(project_dir: Path, tmp_path: Path) -> None:
     [
         pytest.param("../../../etc/passwd", None, None, id="dotdot-traversal"),
         pytest.param("/tmp/evil_file", None, None, id="absolute-path"),
+        pytest.param("C:/tmp/evil_file", None, None, id="windows-drive"),
+        pytest.param("dir\\evil_file", None, None, id="windows-backslash"),
         pytest.param("escape", tarfile.SYMTYPE, "../../../etc", id="symlink-escape"),
     ],
 )
@@ -270,6 +294,55 @@ def test_extract_archive_path_traversal_blocked(
     target = tmp_path / "safe"
     with pytest.raises(ArchivePathTraversalError):
         extract_archive(evil_archive, target)
+
+
+@pytest.mark.parametrize(
+    ("path", "allow_parent"),
+    [
+        ("conda.toml", False),
+        ("envs/default/conda-meta/history", False),
+        ("../target", True),
+    ],
+    ids=["file", "nested", "link-parent"],
+)
+def test_parse_relative_archive_path_allows_valid_paths(
+    path: str,
+    allow_parent: bool,
+) -> None:
+    assert parse_relative_archive_path(path, allow_parent=allow_parent).as_posix()
+
+
+@pytest.mark.parametrize(
+    ("path", "allow_parent"),
+    [
+        ("", False),
+        ("/tmp/evil", False),
+        ("C:/tmp/evil", False),
+        ("dir\\evil", False),
+        ("dir/../evil", False),
+        ("dir/./evil", False),
+        ("dir//evil", False),
+        ("bad\0path", False),
+        ("C:evil", True),
+    ],
+    ids=[
+        "empty",
+        "absolute",
+        "windows-drive",
+        "backslash",
+        "parent",
+        "current-dir",
+        "double-slash",
+        "nul",
+        "drive-relative-link",
+    ],
+)
+def test_parse_relative_archive_path_rejects_unsafe_paths(
+    path: str,
+    allow_parent: bool,
+) -> None:
+    with pytest.raises(ValueError):
+        parse_relative_archive_path(path, allow_parent=allow_parent)
 
 
 def test_extract_archive_zst(project_dir: Path, tmp_path: Path) -> None:
@@ -583,6 +656,8 @@ def test_validate_tar_member_allows_regular_types(tmp_path: Path) -> None:
     for file_type in ALLOWED_TAR_TYPES:
         member = tarfile.TarInfo(name="normal_file")
         member.type = file_type
+        if file_type in {tarfile.LNKTYPE, tarfile.SYMTYPE}:
+            member.linkname = "normal_target"
         validate_tar_member(member, tmp_path)
 
 
