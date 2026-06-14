@@ -613,11 +613,13 @@ def test_create_archive_with_bundle(
     ],
     ids=["conda", "tar-bz2-with-query"],
 )
-def test_prime_package_cache(
+@pytest.mark.parametrize("verified", [False, True], ids=["unverified", "verified"])
+def test_prime_package_cache_requires_verified_archive(
     tmp_path: Path,
     package_name: str,
     url_suffix: str,
     package_content: bytes,
+    verified: bool,
 ) -> None:
     pkg_content = package_content
     sha256 = hashlib.sha256(pkg_content).hexdigest()
@@ -650,7 +652,13 @@ packages:
     cache_dir = tmp_path / "pkgs"
     cache_dir.mkdir()
 
-    count = prime_package_cache(extracted, cache_dir)
+    if not verified:
+        with pytest.raises(ArchiveError, match="unverified archive packages"):
+            prime_package_cache(extracted, cache_dir)
+        assert not (cache_dir / package_name).exists()
+        return
+
+    count = prime_package_cache(extracted, cache_dir, verified=True)
 
     assert count == 1
     assert (cache_dir / package_name).read_bytes() == pkg_content
@@ -700,7 +708,7 @@ packages:
     cache_dir.mkdir()
 
     with pytest.raises(ArchiveHashMismatchError, match="bad-1.0-h000"):
-        prime_package_cache(extracted, cache_dir)
+        prime_package_cache(extracted, cache_dir, verified=True)
 
 
 def test_prime_package_cache_requires_lockfile(tmp_path: Path) -> None:
@@ -713,7 +721,7 @@ def test_prime_package_cache_requires_lockfile(tmp_path: Path) -> None:
     cache_dir.mkdir()
 
     with pytest.raises(ArchiveError, match="require conda.lock"):
-        prime_package_cache(extracted, cache_dir)
+        prime_package_cache(extracted, cache_dir, verified=True)
 
 
 def test_inspect_archive_lightweight(project_dir: Path, tmp_path: Path) -> None:
@@ -798,7 +806,7 @@ def test_archive_roundtrip_with_bundle(
 
     new_cache = tmp_path / "fresh_cache"
     new_cache.mkdir()
-    count = prime_package_cache(target, new_cache)
+    count = prime_package_cache(target, new_cache, verified=True)
     assert count == 2
 
     cached_files = {f.name for f in new_cache.iterdir()}

@@ -582,15 +582,36 @@ def verify_package_hashes(
 def prime_package_cache(
     extracted_dir: Path,
     cache_dir: Path,
+    *,
+    verified: bool = False,
 ) -> int:
     """Copy bundled packages from an extracted archive into the conda cache.
 
-    Verifies SHA256 hashes against the lockfile before copying.
+    Only copies packages after the archive has been verified by an
+    external integrity record. Package SHA256 hashes are still verified
+    against the extracted lockfile before copying.
     Returns the number of packages added to the cache.
     """
     packages_dir = extracted_dir / "packages"
     if not packages_dir.is_dir():
         return 0
+
+    packages = sorted(
+        path
+        for suffix in CONDA_PACKAGE_SUFFIXES
+        for path in packages_dir.glob(f"*{suffix}")
+    )
+    if not packages:
+        return 0
+    if not verified:
+        raise ArchiveError(
+            "Cannot prime package cache from unverified archive packages.",
+            hints=[
+                "Verify the archive with an external receipt before cache priming.",
+                "Use 'conda workspace unarchive --receipt ...' or extract without"
+                " cache priming.",
+            ],
+        )
 
     lockfile = extracted_dir / "conda.lock"
     if not lockfile.is_file():
@@ -601,14 +622,6 @@ def prime_package_cache(
                 "or rebuild the archive with its lockfile included.",
             ],
         )
-
-    packages = sorted(
-        path
-        for suffix in CONDA_PACKAGE_SUFFIXES
-        for path in packages_dir.glob(f"*{suffix}")
-    )
-    if not packages:
-        return 0
 
     verify_package_hashes(packages, lockfile)
 
