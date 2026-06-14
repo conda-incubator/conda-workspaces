@@ -1,7 +1,10 @@
 """Sphinx configuration for conda-workspaces documentation."""
 
 import os
+import re
 import sys
+
+from docutils import nodes
 
 sys.path.insert(0, os.path.abspath(".."))
 
@@ -34,17 +37,61 @@ myst_url_schemes = {
     "https": None,
     "mailto": None,
     "ftp": None,
-    "gh-issue": {
-        "url": ("https://github.com/conda-incubator/conda-workspaces/issues/{{path}}"),
-        "title": "Issue #{{path}}",
-        "classes": ["github"],
-    },
-    "gh-pr": {
-        "url": ("https://github.com/conda-incubator/conda-workspaces/pull/{{path}}"),
-        "title": "PR #{{path}}",
-        "classes": ["github"],
-    },
 }
+
+GITHUB_REF_RE = re.compile(r"(?<![\w/])#([0-9]+)\b")
+GITHUB_ISSUE_URL = "https://github.com/conda-incubator/conda-workspaces/issues/"
+
+
+def link_changelog_github_refs(
+    app,
+    doctree: nodes.document,
+    docname: str,
+) -> None:
+    if docname != "changelog":
+        return
+
+    for text_node in list(doctree.findall(nodes.Text)):
+        skip_node = False
+        parent = text_node.parent
+        while parent is not None:
+            if isinstance(
+                parent,
+                (nodes.reference, nodes.literal, nodes.literal_block, nodes.raw),
+            ):
+                skip_node = True
+                break
+            parent = parent.parent
+
+        if skip_node:
+            continue
+
+        text = text_node.astext()
+        matches = list(GITHUB_REF_RE.finditer(text))
+        if not matches:
+            continue
+
+        replacements: list[nodes.Node] = []
+        cursor = 0
+        for match in matches:
+            if match.start() > cursor:
+                replacements.append(nodes.Text(text[cursor : match.start()]))
+
+            ref_text = match.group(0)
+            replacements.append(
+                nodes.reference(
+                    "",
+                    ref_text,
+                    refuri=f"{GITHUB_ISSUE_URL}{match.group(1)}",
+                    classes=["github"],
+                )
+            )
+            cursor = match.end()
+
+        if cursor < len(text):
+            replacements.append(nodes.Text(text[cursor:]))
+
+        text_node.parent.replace(text_node, replacements)
 
 
 html_theme = "conda_sphinx_theme"
@@ -74,3 +121,7 @@ html_css_files = ["css/custom.css"]
 html_baseurl = "https://conda-incubator.github.io/conda-workspaces/"
 
 exclude_patterns = ["_build", "superpowers"]
+
+
+def setup(app):
+    app.connect("doctree-resolved", link_changelog_github_refs)
