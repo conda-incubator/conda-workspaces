@@ -776,7 +776,8 @@ root using the workspace name as the filename stem. That default name
 must be a single filename segment; use `-o/--output` for other paths.
 
 In git repos, only tracked files are included. Built-in exclusions
-(`.git`, `__pycache__`, `.conda/envs`, `.pixi`) always apply.
+(`.git`, `__pycache__`, `.conda/envs`, `.pixi`, and common credential
+material such as `.env`, `.ssh`, `.aws`, and `.npmrc`) always apply.
 Configure additional exclusions in the manifest:
 
 ```toml
