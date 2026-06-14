@@ -292,7 +292,7 @@ cmake = { workspace = true, build = "h*" }
 
 The root spec supplies the version and any other base match fields. The
 consuming entry may add non-version fields such as `build`, `channel`,
-or `subdir`; restating `version` alongside `workspace = true` is an
+or `subdir`. Restating `version` alongside `workspace = true` is an
 error.
 
 ## Channels
@@ -393,10 +393,12 @@ To use PyPI dependencies you need:
   which serves pure Python packages from PyPI as conda packages using
   sharded repodata (requires the rattler solver)
 
-Editable, git, and URL dependencies (e.g. `path = "."`, `git = "..."`)
-are handled separately via `conda-pypi`'s build system after the main
-solve completes. If `conda-pypi` is not installed, PyPI dependencies
-are skipped with a warning.
+Local path dependencies (e.g. `path = "."`) are handled separately via
+`conda-pypi`'s build system after the main solve completes. Git and URL
+dependencies are parsed for pixi manifest compatibility but are not
+installed yet. `conda workspace install` skips them with a warning. If
+`conda-pypi` is not installed, version-only and path PyPI dependencies
+are skipped with warnings.
 
 See the [PyPI dependencies tutorial](tutorials/pypi-dependencies.md)
 for a full walkthrough including editable installs and troubleshooting.
@@ -474,7 +476,7 @@ overridden so conda's virtual package plugins (`__linux`, `__osx`,
 
 :::{versionadded} 0.4.0
 `--platform <subdir>` (repeatable) restricts the lock run to a
-subset of declared platforms; unknown platforms raise
+subset of declared platforms. Unknown platforms raise
 `PlatformError` before any solve runs. `--skip-unsolvable` keeps
 locking the remaining `(environment, platform)` pairs when an
 individual solve fails, aggregating the failures into
@@ -650,7 +652,7 @@ is mutually exclusive with `--environment`, `--platform`,
 You can also point to a specific manifest with `--file` / `-f`:
 
 ```bash
-conda workspace install -f path/to/conda.toml
+conda workspace --file path/to/conda.toml install
 ```
 
 ## Export
@@ -663,7 +665,7 @@ conda workspace install -f path/to/conda.toml
 reachable through `conda export` — and anything registered by a
 third-party plugin such as `conda-lockfiles` — is also reachable
 through `conda workspace export`. `--from-lockfile` and
-`--from-prefix` select alternative sources; `--platform`
+`--from-prefix` select alternative sources. `--platform`
 (repeatable) drives multi-platform exports for exporters that opt
 into `multiplatform_export`.
 :::
@@ -683,7 +685,7 @@ vice versa.
 # Default: environment-yaml from the declared manifest (no install needed)
 conda workspace export -e default --file environment.yml
 
-# environment.json; format auto-detected from the filename
+# environment.json, format auto-detected from the filename
 conda workspace export -e default --file environment.json
 
 # Re-emit the workspace as a conda.toml manifest (cross-format export)
@@ -719,9 +721,9 @@ Three sources feed the exporter:
 `--platform` (repeatable) intersects declared / available platforms
 with the chosen subset. Passing multiple platforms requires an
 exporter that opts into `multiplatform_export` — the
-`conda-workspaces-lock-v1`, rattler-lock, and the three manifest
-exporters (`conda-toml`, `pixi-toml`, `pyproject-toml`) do; the
-single-platform yaml / json ones raise a clear error.
+`conda-workspaces-lock-v1`, rattler-lock-v6, and the three manifest
+exporters (`conda-toml`, `pixi-toml`, `pyproject-toml`) do. The
+single-platform yaml / json exporters raise a clear error.
 
 ### Manifest-format exporters
 
@@ -739,7 +741,7 @@ already reads, so `conda workspace import` and `conda workspace
 export` together form a bidirectional translator across every
 supported format. Declared specs that appear on every requested
 platform land under the top-level `[dependencies]` /
-`[pypi-dependencies]` tables; platform-specific deltas move under
+`[pypi-dependencies]` tables. Platform-specific deltas move under
 `[target.<platform>.*]`. The `pyproject-toml` exporter wraps the
 same content under `[tool.conda]`, and when the target
 `pyproject.toml` already exists it splices the `[tool.conda]`
@@ -773,7 +775,7 @@ conda workspace archive -o my-project.tar.zst
 
 When `-o/--output` is omitted, the archive is written in the workspace
 root using the workspace name as the filename stem. That default name
-must be a single filename segment; use `-o/--output` for other paths.
+must be a single filename segment. Use `-o/--output` for other paths.
 
 In git repos, only tracked files are included. Built-in exclusions
 (`.git`, `__pycache__`, `.conda/envs`, `.pixi`, and common credential

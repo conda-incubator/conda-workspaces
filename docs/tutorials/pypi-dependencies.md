@@ -37,8 +37,11 @@ packages from PyPI available as conda packages. It uses sharded
 repodata, which requires the rattler solver to read. Without this
 channel, the solver has no source for PyPI-originated packages.
 
-If conda-pypi or conda-rattler-solver is missing, `conda workspace
-install` prints a warning and skips PyPI dependencies.
+If conda-pypi is missing, `conda workspace install` prints warnings and
+skips version-only and local path PyPI dependencies. If
+conda-rattler-solver is missing, install still translates version-only
+PyPI dependencies into specs but warns that the configured solver may
+not be able to read the `conda-pypi` channel.
 
 :::{seealso}
 These tools build on the conda plugin architecture defined in
@@ -72,7 +75,8 @@ pydantic = ">=2.0,<3"
 PyPI package names are translated to their conda equivalents via the
 [grayskull mapping](https://github.com/conda/grayskull) and merged
 into the same solver call as conda dependencies. The solver resolves
-everything together, so conda and PyPI packages cannot conflict.
+everything together, so incompatible conda and PyPI requirements fail
+as a single solve instead of being discovered after installation.
 
 Install as usual:
 
@@ -134,7 +138,8 @@ as conda or versioned PyPI dependencies in the manifest.
 
 ## Git and URL dependencies
 
-You can also install packages directly from git repositories or URLs:
+The manifest parser accepts git and URL dependency forms for pixi
+compatibility:
 
 ```toml
 [pypi-dependencies]
@@ -142,8 +147,9 @@ my-fork = { git = "https://github.com/user/project.git", branch = "main" }
 some-wheel = { url = "https://example.com/pkg-1.0-py3-none-any.whl" }
 ```
 
-Like editable installs, these are built post-solve by conda-pypi and
-do not participate in the solver pass.
+These are not installed yet. `conda workspace install` skips them with
+a warning, so use local path dependencies for editable project code or
+publish the package to a channel that conda can solve from.
 
 ## Troubleshooting
 

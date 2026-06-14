@@ -127,7 +127,8 @@ def _build_pypi_specs(
     Uses ``conda_pypi.translate.pypi_to_conda_name`` to map PyPI package
     names to their conda equivalents (via the grayskull mapping).  Only
     simple version-spec dependencies are translated; path, git, and URL
-    deps are skipped (handled separately by ``_install_editable_deps``).
+    deps are skipped. Local path deps are handled separately by
+    ``_install_path_deps``; git and URL deps are not installed yet.
 
     Returns an empty list if ``conda-pypi`` is not installed.
     """
@@ -248,10 +249,11 @@ def install_environment(
     avoids the overhead of a subprocess and gives full control over
     the solve/install transaction.
 
-    PyPI dependencies are translated to conda names and merged into
-    the same solver call as conda dependencies, relying on
+    Version-only PyPI dependencies are translated to conda names and
+    merged into the same solver call as conda dependencies, relying on
     ``conda-pypi`` and ``conda-rattler-solver`` to resolve and install
-    them in a single pass.
+    them in a single pass. Local path PyPI dependencies are built and
+    installed after the conda transaction.
 
     Raises ``SolveError`` if dependency resolution fails.
     """

@@ -29,7 +29,7 @@ definitions, and installation. Running `pixi install` uses rattler
 |---|---|---|
 | Define workspace & envs | `pixi.toml` or `pyproject.toml` | `conda.toml`, `pixi.toml`, or `pyproject.toml` |
 | Define tasks | `pixi.toml` or `pyproject.toml` `[tasks]` | Same manifest file |
-| Solve dependencies | rattler (bundled) | conda / libmamba (existing) |
+| Solve dependencies | rattler (bundled) | configured conda solver backend |
 | Install packages | rattler (into `.pixi/envs/`) | conda (into `.conda/envs/`) |
 | Manage environments | `pixi install` | `conda workspace install` (delegates to conda) |
 | Run tasks | `pixi run <task>` | `conda task run <task>` |
@@ -38,7 +38,7 @@ definitions, and installation. Running `pixi install` uses rattler
 
 This approach has advantages:
 
-- Uses conda's mature solver and package cache
+- Uses conda's configured solver backend and mature package cache
 - Environments are standard conda prefixes (compatible with all conda tooling)
 - No additional resolver or package installation system to maintain
 - Works with existing conda channels, mirrors, and authentication
@@ -64,8 +64,9 @@ check = { depends-on = ["test", "lint"] }
 
 ## Compatibility with pixi
 
-conda-workspaces reads the same manifest format as pixi. A project with a
-`pixi.toml` or `pyproject.toml` can use both tools:
+conda-workspaces reads the supported workspace and task portions of
+pixi manifests. A project with a `pixi.toml` or `pyproject.toml` can use
+both tools when it stays within that shared surface:
 
 - pixi users run `pixi install` and `pixi run` as usual
 - conda users run `conda workspace install` and `conda task run` using conda's solver
@@ -81,7 +82,7 @@ for the compatibility mapping.
 
 | Tool | Scope | Tasks | Multi-env | Lock files | Solver |
 |---|---|---|---|---|---|
-| conda-workspaces | Workspaces + tasks | Yes | Yes | Yes (`conda.lock`) | conda / libmamba |
+| conda-workspaces | Workspaces + tasks | Yes | Yes | Yes (`conda.lock`) | configured conda solver backend |
 | pixi | Full project mgmt | Yes | Yes | Yes | rattler (bundled) |
 | conda-project | Project management | Commands only | Yes | Yes | conda (via conda-lock) |
 | anaconda-project | Project management | Commands only | Yes | Yes | conda |

@@ -15,6 +15,7 @@ from conda.plugins.types import (
     CondaEnvironmentExporter,
     CondaEnvironmentSpecifier,
     CondaSubcommand,
+    EnvironmentFormat,
 )
 
 if TYPE_CHECKING:
@@ -66,6 +67,7 @@ def conda_environment_specifiers() -> Iterable[CondaEnvironmentSpecifier]:
         aliases=lockfile.ALIASES,
         default_filenames=lockfile.DEFAULT_FILENAMES,
         description="conda workspaces lockfile (conda.lock)",
+        environment_format=EnvironmentFormat.lockfile,
         environment_spec=lockfile.CondaLockLoader,
     )
 
@@ -80,6 +82,7 @@ def conda_environment_exporters() -> Iterable[CondaEnvironmentExporter]:
         aliases=lockfile.ALIASES,
         default_filenames=lockfile.DEFAULT_FILENAMES,
         description="conda workspaces lockfile (conda.lock)",
+        environment_format=EnvironmentFormat.lockfile,
         multiplatform_export=export.multiplatform_export,
     )
 

@@ -7,10 +7,11 @@ already know.
 
 ## What stays the same
 
-conda-workspaces is a conda plugin — it uses conda's solver, channels,
-and package infrastructure under the hood. Your `.condarc` settings,
-channel configuration, and package cache all carry over. Environments
-are real conda prefixes you can inspect with `conda list`.
+conda-workspaces is a conda plugin — it uses conda's configured solver
+backend, channels, and package infrastructure under the hood. Your
+`.condarc` settings, channel configuration, and package cache all carry
+over. Environments are real conda prefixes you can inspect with
+`conda list`.
 
 ## What changes
 

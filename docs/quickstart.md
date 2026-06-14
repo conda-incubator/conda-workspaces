@@ -202,7 +202,7 @@ generated automatically after solving.
 You can point to a specific manifest with `--file` / `-f`:
 
 ```bash
-conda workspace install -f path/to/conda.toml
+conda workspace --file path/to/conda.toml install
 ```
 
 To recreate environments from scratch, use `--force-reinstall`:

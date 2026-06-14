@@ -18,7 +18,7 @@ task.
 ## Workspace search order
 
 1. `conda.toml` — conda-native workspace manifest
-2. `pixi.toml` — pixi-native format (compatibility)
+2. `pixi.toml` — pixi-native format (workspace/task compatibility)
 3. `pyproject.toml` — embedded under `[tool.conda.*]` or `[tool.pixi.*]`
 
 ## Task search order
@@ -90,9 +90,9 @@ consume `conda.lock`, conda-workspaces' own lockfile.  It is a
 derivative of rattler-lock v6 (`pixi.lock`): the YAML schema is the
 same, the converters in `conda-lockfiles` are reused, and only the
 on-disk `version` byte differs (`conda.lock` uses `version: 1`,
-`pixi.lock` uses `version: 6`).  The same relationship holds between
-`conda.toml` and `pixi.toml` — conda-workspaces owns the filename and
-the version byte, rattler-lock owns the schema.
+`pixi.lock` uses `version: 6`). A tool can translate between the two
+lockfile names by changing that version field. A plain rename is not a
+valid conversion.
 
 See [Plugin format names and
 aliases](reference/format-aliases.md) for the canonical and alias
@@ -103,9 +103,11 @@ strings accepted by `conda env create --file conda.lock` and
 
 ### conda.toml
 
-The conda-native format. Structurally identical to `pixi.toml` but uses
-`[workspace]` exclusively (no `[project]` fallback). Supports both
-workspace and task definitions in a single file.
+The conda-native format. Its core workspace, feature, environment,
+dependency, and task tables follow the same shape as `pixi.toml`, but it
+uses `[workspace]` exclusively (no `[project]` fallback) and can include
+conda-workspaces-specific extensions. Supports both workspace and task
+definitions in a single file.
 
 ```toml
 [workspace]
@@ -154,8 +156,8 @@ build = "python -m build --wheel"
 
 ### pixi.toml
 
-The pixi-native format. conda-workspaces reads this with full
-compatibility for workspace and task fields:
+The pixi-native format. conda-workspaces reads the workspace and task
+fields documented here, including pixi-style rich platform entries:
 
 ```toml
 [workspace]
@@ -255,7 +257,7 @@ The `[workspace]` (or `[project]`) table defines workspace metadata:
 | `version` | string | Workspace version (optional) |
 | `description` | string | Short description (optional) |
 | `channels` | list of strings | Conda channels, in priority order |
-| `platforms` | list of strings | Supported platforms (e.g. `linux-64`, `osx-arm64`) |
+| `platforms` | list of strings or rich platform tables | Supported platforms (e.g. `linux-64`, `osx-arm64`, `{ platform = "linux-64", cuda = "12.0" }`) |
 | `channel-priority` | string | Channel priority mode: `strict`, `flexible`, or `disabled` |
 
 ## Dependencies
@@ -271,8 +273,8 @@ cuda-toolkit = { version = ">=12", build = "*cuda*" }
 ```
 
 Shared conda specs can live under `[workspace.dependencies]`. Any conda
-dependency table can opt into a shared spec with `{ workspace = true }`;
-the consuming entry may add non-version fields such as `build` or
+dependency table can opt into a shared spec with `{ workspace = true }`.
+The consuming entry may add non-version fields such as `build` or
 `channel`. This matches the workspace dependency inheritance syntax
 that pixi added in 0.70.0.
 
@@ -302,6 +304,8 @@ Each `[feature.<name>]` table can contain:
 | `system-requirements` | table | System-level requirements |
 | `activation.scripts` | list | Activation scripts |
 | `activation.env` | table | Environment variables set on activation |
+| `target` | table | Per-platform dependency overrides for this feature |
+| `tasks` | table | Tasks contributed by this feature |
 
 ## Environments table
 
@@ -310,6 +314,7 @@ Each entry in `[environments]` defines a named environment:
 | Field | Type | Description |
 |---|---|---|
 | `features` | list of strings | Features to include (in addition to default) |
+| `solve-group` | string | Accepted for pixi compatibility. Currently ignored by conda-workspaces |
 | `no-default-feature` | bool | Exclude the default feature (default: false) |
 
 Shorthand forms are supported:
