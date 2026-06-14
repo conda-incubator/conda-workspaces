@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import tomlkit
+from conda.utils import quote_for_shell
 
 from .base import ManifestImporter
 
@@ -79,7 +80,7 @@ class AnacondaProjectImporter(ManifestImporter):
             if url:
                 filename = dl_name.lower().replace("_", "-")
                 tasks[f"download-{filename}"] = {
-                    "cmd": f"curl -fsSL -o {filename} {url}",
+                    "cmd": quote_for_shell("curl", "-fsSL", "-o", filename, str(url)),
                     "description": f"Download {dl_name}",
                 }
 
@@ -96,9 +97,9 @@ class AnacondaProjectImporter(ManifestImporter):
 
         cmd: str | None = None
         if spec.get("notebook"):
-            cmd = f"jupyter notebook {spec['notebook']}"
+            cmd = quote_for_shell("jupyter", "notebook", str(spec["notebook"]))
         elif spec.get("bokeh_app"):
-            cmd = f"bokeh serve {spec['bokeh_app']}"
+            cmd = quote_for_shell("bokeh", "serve", str(spec["bokeh_app"]))
         elif spec.get("unix"):
             cmd = spec["unix"]
         elif spec.get("windows"):
