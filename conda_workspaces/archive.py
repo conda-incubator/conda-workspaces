@@ -13,8 +13,11 @@ import importlib
 import shutil
 import subprocess
 import tarfile
+import tempfile
 from contextlib import contextmanager
-from pathlib import Path
+from dataclasses import dataclass
+from os.path import expanduser
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -25,14 +28,15 @@ from .exceptions import (
     ArchiveHashMismatchError,
     ArchivePathTraversalError,
 )
-from .paths import parse_relative_posix_path
+from .paths import has_absolute_path_syntax, is_path_segment, parse_relative_posix_path
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-    from pathlib import PurePosixPath
+    from collections.abc import Callable, Iterator
     from typing import Any
 
+    from .context import WorkspaceContext
     from .models import ArchiveConfig
+    from .receipts import ArchiveReceipt
 
 ARCHIVE_SUFFIXES: tuple[str, ...] = (
     ".tar.zst",
@@ -140,6 +144,561 @@ BUILTIN_SENSITIVE_EXCLUDE_EXCEPTIONS: tuple[str, ...] = (
     "*/.env.template",
 )
 """Documented dotenv examples that are safe to keep in archives."""
+
+
+@dataclass(frozen=True)
+class WorkspaceArchiveExtractResult:
+    """Result returned by :meth:`WorkspaceArchive.extract`."""
+
+    target: Path
+    receipt_path: Path | None
+    verified: bool
+    info: dict[str, object]
+    primed_packages: int = 0
+    cache_priming_skipped: bool = False
+
+
+@dataclass(frozen=True)
+class WorkspaceArchiveInstallResult:
+    """Result returned by :meth:`WorkspaceArchive.install`."""
+
+    target: Path
+    environment: str | None
+    install_prefix: Path | None
+    runtime_prefix: str | None
+    receipt_path: Path | None
+    verified: bool
+    info: dict[str, object]
+    return_code: int = 0
+    primed_packages: int = 0
+    cache_priming_skipped: bool = False
+    prefix_reference_matches: tuple[Path, ...] = ()
+    prefix_reference_matches_truncated: bool = False
+
+
+@dataclass(frozen=True)
+class WorkspaceArchive:
+    """High-level API for creating, extracting, and installing archives."""
+
+    path: Path
+    receipt: bool | str | Path | None = None
+
+    def __init__(self, path: str | Path, receipt: bool | str | Path | None = None):
+        object.__setattr__(self, "path", Path(path).expanduser().resolve())
+        object.__setattr__(self, "receipt", receipt)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        workspace: str | Path | None = None,
+        output: str | Path | None = None,
+        lock: bool = False,
+        bundle: bool = False,
+        exclude: tuple[str, ...] = (),
+        receipt: bool | str | Path | None = None,
+    ) -> WorkspaceArchive:
+        """Create an archive for *workspace* and return its handle."""
+        from .context import WorkspaceContext
+        from .lockfile import generate_lockfile, lockfile_path
+        from .manifests import detect_and_parse
+        from .models import ArchiveConfig
+
+        _, config = detect_and_parse(workspace)
+        ctx = WorkspaceContext(config)
+
+        if lock:
+            from .resolver import resolve_all_environments
+
+            resolved_envs = resolve_all_environments(config, ctx.platform)
+            generate_lockfile(ctx, resolved_envs, config=config)
+
+        archive_config = ArchiveConfig(
+            include=config.archive.include,
+            exclude=config.archive.exclude + tuple(exclude),
+            compression=config.archive.compression,
+            compression_level=config.archive.compression_level,
+        )
+        output_path = cls.default_output_path(ctx, output)
+        archive = cls(output_path, receipt=receipt)
+        receipt_path = archive.receipt_path
+        manifest_path = Path(config.manifest_path)
+        lock_path = lockfile_path(ctx)
+
+        if receipt_path is not None:
+            archive.validate_receipt_inputs(
+                root=ctx.root,
+                output=output_path,
+                archive_config=archive_config,
+                manifest_path=manifest_path,
+                lockfile_path=lock_path,
+                receipt_path=receipt_path,
+            )
+
+        bundle_packages = None
+        if bundle:
+            from conda.base.context import context as conda_context
+
+            if not lock_path.is_file():
+                raise ArchiveError(
+                    "Cannot bundle packages: no conda.lock found.",
+                    hints=["Run 'conda workspace lock' first."],
+                )
+            cache_dirs = [Path(d) for d in conda_context.pkgs_dirs]
+            bundle_packages = collect_bundle_packages(lock_path, cache_dirs)
+            verify_package_hashes(bundle_packages, lock_path)
+
+        archive_path = create_archive(
+            ctx.root,
+            output_path,
+            archive_config,
+            bundle_packages=bundle_packages,
+        )
+
+        if receipt_path is not None:
+            receipt_obj = cls.build_receipt(
+                ctx=ctx,
+                archive_path=archive_path,
+                archive_config=archive_config,
+                manifest_path=manifest_path,
+                lockfile_path=lock_path,
+                options={
+                    "bundle": bundle,
+                    "lock": lock,
+                    "include": list(archive_config.include),
+                    "exclude": list(archive_config.exclude),
+                    "compressionLevel": archive_config.compression_level,
+                },
+            )
+            receipt_obj.write(receipt_path)
+
+        return cls(archive_path, receipt=receipt_path)
+
+    @staticmethod
+    def default_output_path(ctx: WorkspaceContext, output: str | Path | None) -> Path:
+        """Return the explicit or workspace-name-derived output path."""
+        if output is not None:
+            return Path(output)
+
+        name = ctx.config.name or ctx.root.name
+        if not is_path_segment(name):
+            raise ArchiveError(
+                "Workspace name cannot be used as a default archive filename.",
+                hints=[
+                    "Use a simple workspace name without path separators,",
+                    "or pass -o/--output to choose the archive path explicitly.",
+                ],
+            )
+        ext = {"zst": ".tar.zst", "gz": ".tar.gz", "bz2": ".tar.bz2"}.get(
+            ctx.config.archive.compression,
+            ".tar.zst",
+        )
+        return ctx.root / f"{name}{ext}"
+
+    @staticmethod
+    def validate_receipt_inputs(
+        *,
+        root: Path,
+        output: Path,
+        archive_config: ArchiveConfig,
+        manifest_path: Path,
+        lockfile_path: Path,
+        receipt_path: Path,
+    ) -> None:
+        """Validate inputs required to write a receipt for a new archive."""
+        if receipt_path.resolve() == output.resolve():
+            raise ArchiveError(
+                "Receipt path cannot be the archive path.",
+                hints=["Choose a separate JSON path for --receipt."],
+            )
+        if not manifest_path.is_file():
+            raise ArchiveError(
+                "Cannot write receipt: workspace manifest was not found."
+            )
+        if not lockfile_path.is_file():
+            raise ArchiveError(
+                "Cannot write receipt: no conda.lock found.",
+                hints=["Run 'conda workspace lock' first."],
+            )
+
+        archive_members = {
+            path.relative_to(root).as_posix()
+            for path in collect_archive_files(root, archive_config)
+            if path.resolve() != output.resolve()
+        }
+        required_members: dict[str, Path] = {
+            "workspace manifest": manifest_path,
+            "workspace lockfile": lockfile_path,
+        }
+        missing = []
+        for label, path in required_members.items():
+            try:
+                archive_name = path.relative_to(root).as_posix()
+            except ValueError:
+                missing.append(label)
+                continue
+            if archive_name not in archive_members:
+                missing.append(f"{label} ({archive_name})")
+        if missing:
+            raise ArchiveError(
+                f"Cannot write receipt: archive would not include {missing[0]}.",
+                hints=[
+                    "Receipt verification requires the workspace manifest and"
+                    " conda.lock to be included in the archive.",
+                    "Remove matching include/exclude filters or run without --receipt.",
+                ],
+            )
+
+    @staticmethod
+    def build_receipt(
+        *,
+        ctx: WorkspaceContext,
+        archive_path: Path,
+        archive_config: ArchiveConfig,
+        manifest_path: Path,
+        lockfile_path: Path,
+        options: dict[str, object],
+    ) -> ArchiveReceipt:
+        """Build the external receipt for a newly created archive."""
+        from .receipts import ArchiveReceipt
+
+        return ArchiveReceipt.build(
+            root=ctx.root,
+            archive_path=archive_path,
+            archive_config=archive_config,
+            manifest_path=manifest_path,
+            lockfile_path=lockfile_path,
+            environment_prefixes=receipt_environment_prefixes(
+                config_environments=list(ctx.config.environments),
+                ctx_root=ctx.root,
+                env_prefix=ctx.env_prefix,
+            ),
+            options=options,
+        )
+
+    @property
+    def receipt_path(self) -> Path | None:
+        """Return the configured external receipt path, if any."""
+        return resolve_receipt_path(self.path, self.receipt)
+
+    def default_target(self, cwd: str | Path | None = None) -> Path:
+        """Return the default extraction target derived from the archive name."""
+        stem = self.path.name
+        for suffix in ARCHIVE_SUFFIXES:
+            if stem.endswith(suffix):
+                stem = stem[: -len(suffix)]
+                break
+        return Path.cwd() / stem if cwd is None else Path(cwd) / stem
+
+    def inspect(self) -> dict[str, object]:
+        """Return archive metadata without extracting it."""
+        archive_path = self.require_existing_archive()
+        return inspect_archive(archive_path)
+
+    def verify(self) -> ArchiveReceipt:
+        """Verify the archive against its external receipt."""
+        receipt_path = self.receipt_path
+        if receipt_path is None:
+            raise ArchiveError("--receipt is required to verify an archive.")
+        from .receipts import ArchiveReceipt
+
+        receipt = ArchiveReceipt.load(receipt_path)
+        receipt.verify_archive(self.require_existing_archive())
+        return receipt
+
+    def extract(
+        self,
+        *,
+        target: str | Path | None = None,
+        require_sha256: bool = False,
+        prime_cache: bool = True,
+        package_cache: str | Path | None = None,
+    ) -> WorkspaceArchiveExtractResult:
+        """Extract the archive and optionally prime bundled package cache files."""
+        if require_sha256 and self.receipt_path is None:
+            raise ArchiveError("--require-sha256 requires --receipt.")
+
+        archive_path = self.require_existing_archive()
+        info = inspect_archive(archive_path)
+        if not info["has_manifest"]:
+            raise ArchiveError(
+                "Not a workspace archive: no manifest found.",
+                hints=["This does not appear to be a conda workspace archive."],
+            )
+
+        target_path = (
+            Path(target).expanduser() if target is not None else self.default_target()
+        )
+        receipt = self.verify() if self.receipt_path is not None else None
+        if receipt is None:
+            extracted = extract_archive(archive_path, target_path)
+        else:
+            extracted = extract_verified_archive(
+                archive_path,
+                target_path,
+                receipt,
+                require_sha256=require_sha256,
+            )
+
+        primed_packages = 0
+        cache_priming_skipped = False
+        if info["has_packages"] and prime_cache:
+            if receipt is None:
+                cache_priming_skipped = True
+            else:
+                if package_cache is None:
+                    from conda.base.context import context as conda_context
+
+                    package_cache = conda_context.pkgs_dirs[0]
+                primed_packages = prime_package_cache(
+                    extracted,
+                    Path(package_cache),
+                    verified=True,
+                )
+
+        return WorkspaceArchiveExtractResult(
+            target=extracted,
+            receipt_path=self.receipt_path,
+            verified=receipt is not None,
+            info=info,
+            primed_packages=primed_packages,
+            cache_priming_skipped=cache_priming_skipped,
+        )
+
+    def install(
+        self,
+        *,
+        target: str | Path | None = None,
+        environment: str | None = None,
+        prefix: str | Path | None = None,
+        dest: str | Path | None = None,
+        require_sha256: bool = False,
+        prime_cache: bool = True,
+        package_cache: str | Path | None = None,
+        install_handler: Callable[[Path, str | None, Path | None, str | None], int]
+        | None = None,
+    ) -> WorkspaceArchiveInstallResult:
+        """Extract the archive and install environments from its lockfile."""
+        final_prefix = str(prefix) if prefix is not None else None
+        if final_prefix is not None and not environment:
+            raise ArchiveError(
+                "--prefix requires an explicit environment.",
+                hints=["Pass -e/--environment with --prefix."],
+            )
+        if dest is not None and final_prefix is None:
+            raise ArchiveError(
+                "--dest requires --prefix.",
+                hints=[
+                    "Pass --prefix to declare the final runtime prefix for"
+                    " the selected environment.",
+                ],
+            )
+        if final_prefix is not None:
+            final_prefix = expanduser(final_prefix)
+            if not is_absolute_runtime_prefix(final_prefix):
+                raise ArchiveError(
+                    "--prefix must be an absolute path.",
+                    hints=["Pass an absolute runtime prefix such as /opt/runtime."],
+                )
+
+        extract_result = self.extract(
+            target=target,
+            require_sha256=require_sha256,
+            prime_cache=prime_cache,
+            package_cache=package_cache,
+        )
+
+        install_prefix = Path(final_prefix) if final_prefix is not None else None
+        runtime_prefix = None
+        if final_prefix is not None:
+            if dest is not None:
+                dest_path = Path(dest).expanduser().resolve()
+                install_prefix = dest_path / runtime_prefix_relative_path(final_prefix)
+                runtime_prefix = final_prefix
+            elif str(install_prefix) != final_prefix:
+                runtime_prefix = final_prefix
+
+        handler = install_handler or self.install_from_lockfile
+        return_code = handler(
+            extract_result.target,
+            environment,
+            install_prefix,
+            runtime_prefix,
+        )
+
+        prefix_matches: tuple[Path, ...] = ()
+        prefix_matches_truncated = False
+        if (
+            return_code == 0
+            and install_prefix is not None
+            and runtime_prefix is not None
+        ):
+            matches, prefix_matches_truncated = scan_prefix_references(
+                install_prefix,
+                install_prefix,
+            )
+            prefix_matches = tuple(matches)
+
+        return WorkspaceArchiveInstallResult(
+            target=extract_result.target,
+            environment=environment,
+            install_prefix=install_prefix,
+            runtime_prefix=runtime_prefix,
+            receipt_path=extract_result.receipt_path,
+            verified=extract_result.verified,
+            info=extract_result.info,
+            return_code=return_code,
+            primed_packages=extract_result.primed_packages,
+            cache_priming_skipped=extract_result.cache_priming_skipped,
+            prefix_reference_matches=prefix_matches,
+            prefix_reference_matches_truncated=prefix_matches_truncated,
+        )
+
+    @staticmethod
+    def install_from_lockfile(
+        workspace: Path,
+        environment: str | None,
+        prefix: Path | None,
+        target_prefix_override: str | None,
+    ) -> int:
+        """Install workspace environments from ``conda.lock`` without the CLI."""
+        from .context import WorkspaceContext
+        from .lockfile import install_from_lockfile
+        from .manifests import detect_and_parse
+
+        _, config = detect_and_parse(workspace)
+        ctx = WorkspaceContext(config)
+        if environment is not None:
+            install_from_lockfile(
+                ctx,
+                environment,
+                prefix=prefix,
+                target_prefix_override=target_prefix_override,
+            )
+            return 0
+
+        for name in config.environments:
+            install_from_lockfile(ctx, name)
+        return 0
+
+    def require_existing_archive(self) -> Path:
+        """Return *path* after verifying that it points to an archive file."""
+        if not self.path.is_file():
+            raise ArchiveError(f"Archive not found: {self.path}")
+        return self.path
+
+
+def is_absolute_runtime_prefix(prefix: str) -> bool:
+    """Return whether *prefix* is absolute as a POSIX or Windows path."""
+    return has_absolute_path_syntax(prefix)
+
+
+def runtime_prefix_relative_path(prefix: str) -> Path:
+    """Return *prefix* relative to its root using host path separators."""
+    posix_prefix = PurePosixPath(prefix)
+    if posix_prefix.is_absolute():
+        return Path(*posix_prefix.relative_to(posix_prefix.anchor).parts)
+
+    windows_prefix = PureWindowsPath(prefix)
+    return Path(*windows_prefix.relative_to(windows_prefix.anchor).parts)
+
+
+def file_contains_bytes(
+    path: Path, needle: bytes, *, chunk_size: int = 1024 * 1024
+) -> bool:
+    """Return whether *path* contains *needle* without loading it all at once."""
+    if not needle:
+        return False
+
+    overlap = b""
+    try:
+        with path.open("rb") as fh:
+            while chunk := fh.read(chunk_size):
+                data = overlap + chunk
+                if needle in data:
+                    return True
+                overlap = data[-(len(needle) - 1) :] if len(needle) > 1 else b""
+    except OSError:
+        return False
+    return False
+
+
+def scan_prefix_references(
+    root: Path,
+    prefix: Path,
+    *,
+    limit: int = 10,
+) -> tuple[list[Path], bool]:
+    """Find files below *root* that still contain *prefix* as bytes."""
+    if not root.is_dir():
+        return [], False
+
+    needle = str(prefix).encode()
+    matches: list[Path] = []
+    for path in root.rglob("*"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        if file_contains_bytes(path, needle):
+            matches.append(path)
+            if len(matches) > limit:
+                return matches[:limit], True
+    return matches, False
+
+
+def resolve_receipt_path(archive_path: Path, receipt: object) -> Path | None:
+    """Resolve an optional ``--receipt [PATH]`` style value."""
+    if receipt in (None, False):
+        return None
+    if receipt is True:
+        from .receipts import ArchiveReceipt
+
+        return ArchiveReceipt.default_path(archive_path)
+    if isinstance(receipt, Path):
+        return receipt
+    if isinstance(receipt, str):
+        return Path(receipt)
+    raise ArchiveError("Invalid --receipt value.")
+
+
+def receipt_environment_prefixes(
+    *,
+    config_environments: list[str],
+    ctx_root: Path,
+    env_prefix: Callable[[str], Path],
+) -> dict[str, str]:
+    """Return environment prefixes to record in a receipt predicate."""
+    prefixes: dict[str, str] = {}
+    for name in config_environments:
+        prefix = env_prefix(name)
+        try:
+            prefixes[name] = prefix.relative_to(ctx_root).as_posix()
+        except ValueError:
+            prefixes[name] = prefix.as_posix()
+    return prefixes
+
+
+def extract_verified_archive(
+    archive_path: Path,
+    target: Path,
+    receipt: ArchiveReceipt,
+    *,
+    require_sha256: bool = False,
+) -> Path:
+    """Extract to a staging directory, verify, then move into *target*."""
+    ensure_extract_target_empty(target)
+    target = target.resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staged = Path(tempfile.mkdtemp(prefix=f".{target.name}.verify-", dir=target.parent))
+    try:
+        extract_archive(archive_path, staged)
+        receipt.verify_extracted(staged, require_sha256=require_sha256)
+        if target.exists():
+            target.rmdir()
+        staged.rename(target)
+    except BaseException:
+        shutil.rmtree(staged, ignore_errors=True)
+        raise
+    return target
 
 
 def parse_relative_archive_path(

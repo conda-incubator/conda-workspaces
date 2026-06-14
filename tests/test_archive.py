@@ -4,13 +4,14 @@ import hashlib
 import io
 import subprocess
 import tarfile
-from pathlib import PureWindowsPath
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING
 
 import pytest
 
 from conda_workspaces.archive import (
     ALLOWED_TAR_TYPES,
+    WorkspaceArchive,
     add_files_to_tar,
     collect_archive_files,
     collect_bundle_packages,
@@ -33,7 +34,6 @@ from conda_workspaces.models import ArchiveConfig
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
 
 @pytest.fixture
@@ -135,6 +135,41 @@ def bundled_archive(lockfile_with_packages: Path, tmp_path: Path) -> tuple[Path,
     config = ArchiveConfig()
     create_archive(lockfile_with_packages, output, config, bundle_packages=packages)
     return output, lockfile_with_packages
+
+
+@pytest.fixture
+def workspace_archive_project(tmp_path: Path) -> Path:
+    """Create a workspace that can be archived through the public API."""
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "conda.toml").write_text(
+        """\
+[workspace]
+name = "archive-api-test"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+python = ">=3.10"
+""",
+        encoding="utf-8",
+    )
+    (root / "conda.lock").write_text(
+        """\
+version: 1
+environments:
+  default:
+    channels:
+      - url: https://conda.anaconda.org/conda-forge/
+    packages:
+      linux-64: []
+packages: []
+""",
+        encoding="utf-8",
+    )
+    (root / "src").mkdir()
+    (root / "src" / "app.py").write_text("print('hello')\n", encoding="utf-8")
+    return root
 
 
 def test_collect_files_git_tracked(git_project: Path) -> None:
@@ -769,6 +804,156 @@ def test_inspect_archive_not_workspace(tmp_path: Path) -> None:
 
     result = inspect_archive(archive)
     assert result["has_manifest"] is False
+
+
+def test_workspace_archive_create_writes_receipt(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "workspace.tar.gz"
+
+    archive = WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=output,
+        receipt=True,
+    )
+
+    assert archive.path == output.resolve()
+    assert archive.receipt_path == output.resolve().with_name(
+        "workspace.tar.gz.receipt.json"
+    )
+    assert archive.path.is_file()
+    assert archive.receipt_path is not None
+    assert archive.receipt_path.is_file()
+    assert archive.inspect()["has_manifest"] is True
+    assert archive.verify().workspace_paths == ("conda.toml", "conda.lock")
+
+
+def test_workspace_archive_extract_uses_receipt(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+) -> None:
+    archive = WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=tmp_path / "workspace.tar.gz",
+        receipt=True,
+    )
+
+    result = archive.extract(
+        target=tmp_path / "extracted",
+        require_sha256=True,
+    )
+
+    assert result.target == (tmp_path / "extracted").resolve()
+    assert result.verified is True
+    assert result.receipt_path == archive.receipt_path
+    assert (result.target / "src" / "app.py").is_file()
+
+
+@pytest.mark.parametrize(
+    ("runtime_prefix", "dest", "expected_staged_prefix", "expected_runtime_prefix"),
+    [
+        ("tmp-runtime", None, Path("direct-runtime"), None),
+        (
+            "/opt/runtime",
+            "rootfs",
+            Path("rootfs") / "opt" / "runtime",
+            "/opt/runtime",
+        ),
+    ],
+    ids=["direct-prefix", "staged-dest"],
+)
+def test_workspace_archive_install_uses_public_handler(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    runtime_prefix: str,
+    dest: str | None,
+    expected_staged_prefix: Path,
+    expected_runtime_prefix: str | None,
+) -> None:
+    archive = WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=tmp_path / "workspace.tar.gz",
+    )
+    calls: list[tuple[Path, str | None, Path | None, str | None]] = []
+
+    def install_handler(
+        workspace: Path,
+        environment: str | None,
+        install_prefix: Path | None,
+        target_prefix_override: str | None,
+    ) -> int:
+        calls.append((workspace, environment, install_prefix, target_prefix_override))
+        if install_prefix is not None:
+            install_prefix.mkdir(parents=True, exist_ok=True)
+            (install_prefix / "prefix.txt").write_text(
+                str(install_prefix),
+                encoding="utf-8",
+            )
+        return 0
+
+    dest_path = tmp_path / dest if dest is not None else None
+    prefix = (
+        str(tmp_path / "direct-runtime")
+        if runtime_prefix == "tmp-runtime"
+        else runtime_prefix
+    )
+    result = archive.install(
+        target=tmp_path / "extracted",
+        environment="default",
+        prefix=prefix,
+        dest=dest_path,
+        install_handler=install_handler,
+    )
+
+    resolved_install_prefix = tmp_path / expected_staged_prefix
+    assert calls == [
+        (
+            (tmp_path / "extracted").resolve(),
+            "default",
+            resolved_install_prefix,
+            expected_runtime_prefix,
+        )
+    ]
+    assert result.return_code == 0
+    assert result.install_prefix == resolved_install_prefix
+    assert result.runtime_prefix == expected_runtime_prefix
+    if expected_runtime_prefix is None:
+        assert result.prefix_reference_matches == ()
+    else:
+        assert result.prefix_reference_matches == (
+            resolved_install_prefix / "prefix.txt",
+        )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"prefix": "/opt/runtime"}, "--prefix requires an explicit environment"),
+        (
+            {"environment": "default", "prefix": "relative/runtime"},
+            "--prefix must be an absolute path",
+        ),
+        (
+            {"environment": "default", "dest": "rootfs"},
+            "--dest requires --prefix",
+        ),
+    ],
+    ids=["prefix-without-env", "relative-prefix", "dest-without-prefix"],
+)
+def test_workspace_archive_install_rejects_invalid_prefix_options(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    kwargs: dict[str, str],
+    message: str,
+) -> None:
+    archive = WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=tmp_path / "workspace.tar.gz",
+    )
+
+    with pytest.raises(ArchiveError, match=message):
+        archive.install(target=tmp_path / "extracted", **kwargs)
 
 
 def test_archive_roundtrip(git_project: Path, tmp_path: Path) -> None:
