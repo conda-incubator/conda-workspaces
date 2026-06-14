@@ -61,7 +61,11 @@ class PixiTomlParser(ManifestParser):
         if not ws:
             raise WorkspaceParseError(path, "No [workspace] or [project] table found")
 
-        platforms, platform_system_requirements = self.parse_workspace_platforms(
+        (
+            platforms,
+            platform_subdirs,
+            platform_system_requirements,
+        ) = self.parse_workspace_platforms(
             ws.get("platforms", []),
             path,
         )
@@ -72,6 +76,7 @@ class PixiTomlParser(ManifestParser):
             description=ws.get("description"),
             channels=parse_channels(ws.get("channels", [])),
             platforms=platforms,
+            platform_subdirs=platform_subdirs,
             platform_system_requirements=platform_system_requirements,
             root=root,
             manifest_path=str(path),

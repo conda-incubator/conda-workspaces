@@ -180,7 +180,11 @@ class PyprojectTomlParser(ManifestParser):
 
         ws = source.get("workspace", {})
 
-        platforms, platform_system_requirements = self.parse_workspace_platforms(
+        (
+            platforms,
+            platform_subdirs,
+            platform_system_requirements,
+        ) = self.parse_workspace_platforms(
             ws.get("platforms", []),
             path,
         )
@@ -191,6 +195,7 @@ class PyprojectTomlParser(ManifestParser):
             description=data.get("project", {}).get("description"),
             channels=parse_channels(ws.get("channels", [])),
             platforms=platforms,
+            platform_subdirs=platform_subdirs,
             platform_system_requirements=platform_system_requirements,
             root=root,
             manifest_path=str(path),

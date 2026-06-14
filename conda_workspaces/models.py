@@ -13,10 +13,12 @@ resolution, and spec parsing.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from typing import Any
 
 from conda.base.constants import KNOWN_SUBDIRS
@@ -163,6 +165,7 @@ class WorkspaceConfig:
 
     channels: list[Channel] = field(default_factory=list)
     platforms: list[str] = field(default_factory=list)
+    platform_subdirs: dict[str, str] = field(default_factory=dict)
     platform_system_requirements: dict[str, dict[str, str]] = field(
         default_factory=dict
     )
@@ -190,11 +193,33 @@ class WorkspaceConfig:
     channel_priority: str | None = None  # "strict" | "flexible" | "disabled"
     archive: ArchiveConfig = field(default_factory=ArchiveConfig)
 
+    platform_requirement_toml_aliases: ClassVar[dict[str, str]] = {
+        "glibc": "libc",
+        "__glibc": "__glibc",
+        "osx": "macos",
+        "__osx": "__osx",
+        "win": "windows",
+        "__win": "__win",
+    }
+    rich_platform_name_order: ClassVar[tuple[str, ...]] = (
+        "cuda",
+        "archspec",
+        "glibc",
+        "linux",
+        "osx",
+        "win",
+    )
+    _platform_name_segment_re: ClassVar[re.Pattern[str]] = re.compile(r"[^A-Za-z0-9]+")
+
     def __post_init__(self) -> None:
         """Ensure the default feature and environment always exist.
 
-        Also validates that all declared platforms are recognised
-        conda subdirs (e.g. ``linux-64``, ``osx-arm64``).
+        Also validates that all declared platforms map to recognised
+        conda subdirs (e.g. ``linux-64``, ``osx-arm64``).  Pixi rich
+        platforms may use workspace-scoped names such as
+        ``linux-64-cuda``; those names stay in :attr:`platforms`, while
+        :attr:`platform_subdirs` records the concrete conda subdir the
+        solver should use.
         """
         if Feature.DEFAULT_NAME not in self.features:
             self.features[Feature.DEFAULT_NAME] = Feature(name=Feature.DEFAULT_NAME)
@@ -203,12 +228,101 @@ class WorkspaceConfig:
                 name=Environment.DEFAULT_NAME
             )
 
-        invalid = [p for p in self.platforms if p not in KNOWN_SUBDIRS]
+        for platform in self.platforms:
+            self.platform_subdirs.setdefault(platform, platform)
+
+        invalid = [
+            subdir
+            for platform in self.platforms
+            if (subdir := self.platform_subdirs[platform]) not in KNOWN_SUBDIRS
+        ]
         if invalid:
             raise PlatformError(
                 ", ".join(invalid),
                 sorted(KNOWN_SUBDIRS),
             )
+
+    @staticmethod
+    def default_system_requirements_for_subdir(subdir: str) -> dict[str, str]:
+        """Return Pixi's default rich-platform requirements for *subdir*."""
+        if subdir.startswith("linux-"):
+            return {"glibc": "2.28", "linux": "4.18"}
+        if subdir.startswith("osx-"):
+            return {"osx": "13.0"}
+        return {}
+
+    @classmethod
+    def platform_name_segment(cls, value: str) -> str:
+        """Sanitize one rich-platform name segment the way Pixi does."""
+        return cls._platform_name_segment_re.sub("-", value).strip("-")
+
+    @classmethod
+    def synthesize_platform_name(
+        cls,
+        subdir: str,
+        requirements: dict[str, str],
+    ) -> str:
+        """Return Pixi's generated name for an unnamed rich platform."""
+        defaults = cls.default_system_requirements_for_subdir(subdir)
+        segments = [subdir]
+
+        canonical_requirements: dict[str, str] = {}
+        raw_requirements: dict[str, str] = {}
+        for name, value in requirements.items():
+            bare_name = name.removeprefix("__")
+            if bare_name in cls.rich_platform_name_order:
+                canonical_requirements[bare_name] = value
+            else:
+                raw_requirements[name] = value
+
+        for name in cls.rich_platform_name_order:
+            value = canonical_requirements.get(name)
+            if value is None or defaults.get(name) == value:
+                continue
+            key = cls.platform_name_segment(name)
+            val = cls.platform_name_segment(value)
+            if key and val:
+                segments.extend((key, val))
+
+        for name in sorted(raw_requirements):
+            value = raw_requirements[name]
+            key = cls.platform_name_segment(name.removeprefix("__"))
+            val = cls.platform_name_segment(value)
+            if key and val:
+                segments.extend((key, val))
+
+        return "-".join(segment for segment in segments if segment)
+
+    def platform_subdir(self, platform: str) -> str:
+        """Return the concrete conda subdir for a declared platform name."""
+        return self.platform_subdirs.get(platform, platform)
+
+    def platform_names_for_subdir(
+        self,
+        subdir: str,
+        platforms: Iterable[str] | None = None,
+    ) -> list[str]:
+        """Return declared platform names that solve against *subdir*."""
+        candidates = list(platforms or self.platforms)
+        return [
+            platform
+            for platform in candidates
+            if self.platform_subdir(platform) == subdir
+        ]
+
+    def resolve_platform_name(
+        self,
+        requested: str,
+        platforms: Iterable[str] | None = None,
+    ) -> str:
+        """Resolve a requested name or subdir to a declared platform name."""
+        candidates = list(platforms or self.platforms)
+        if requested in candidates:
+            return requested
+        matches = self.platform_names_for_subdir(requested, candidates)
+        if matches:
+            return matches[0]
+        raise PlatformError(requested, sorted(candidates))
 
     def get_environment(self, name: str) -> Environment:
         """Return the environment with *name*, raising if not found."""
@@ -246,10 +360,12 @@ class WorkspaceConfig:
         target-specific dependencies are also merged in.
         """
         merged: dict[str, MatchSpec] = {}
+        platform_keys = self.target_platform_keys(platform)
         for feature in self.resolve_features(environment):
             merged.update(feature.conda_dependencies)
-            if platform and platform in feature.target_conda_dependencies:
-                merged.update(feature.target_conda_dependencies[platform])
+            for key in platform_keys:
+                if key in feature.target_conda_dependencies:
+                    merged.update(feature.target_conda_dependencies[key])
         return merged
 
     def merged_pypi_dependencies(
@@ -259,10 +375,12 @@ class WorkspaceConfig:
     ) -> dict[str, PyPIDependency]:
         """Merge PyPI dependencies across features for *environment*."""
         merged: dict[str, PyPIDependency] = {}
+        platform_keys = self.target_platform_keys(platform)
         for feature in self.resolve_features(environment):
             merged.update(feature.pypi_dependencies)
-            if platform and platform in feature.target_pypi_dependencies:
-                merged.update(feature.target_pypi_dependencies[platform])
+            for key in platform_keys:
+                if key in feature.target_pypi_dependencies:
+                    merged.update(feature.target_pypi_dependencies[key])
         return merged
 
     def merged_system_requirements(
@@ -278,25 +396,35 @@ class WorkspaceConfig:
             merged.update(self.platform_system_requirements[platform])
         return merged
 
+    def target_platform_keys(self, platform: str | None) -> tuple[str, ...]:
+        """Return target table keys that apply to *platform* in merge order."""
+        if platform is None:
+            return ()
+        subdir = self.platform_subdir(platform)
+        if subdir == platform:
+            return (platform,)
+        return (subdir, platform)
+
     def platforms_for_toml(self) -> list[str | dict[str, str]]:
         """Return platforms in a TOML shape compatible with Pixi."""
-        aliases = {
-            "glibc": "libc",
-            "__glibc": "__glibc",
-            "osx": "macos",
-            "__osx": "__osx",
-            "win": "windows",
-            "__win": "__win",
-        }
         result: list[str | dict[str, str]] = []
         for platform in self.platforms:
+            subdir = self.platform_subdir(platform)
             requirements = self.platform_system_requirements.get(platform)
             if not requirements:
-                result.append(platform)
+                if platform == subdir:
+                    result.append(platform)
+                else:
+                    result.append({"name": platform, "platform": subdir})
                 continue
-            entry = {"platform": platform}
+            entry = {"platform": subdir}
+            if platform != self.synthesize_platform_name(subdir, requirements):
+                entry["name"] = platform
             entry.update(
-                {aliases.get(name, name): value for name, value in requirements.items()}
+                {
+                    self.platform_requirement_toml_aliases.get(name, name): value
+                    for name, value in requirements.items()
+                }
             )
             result.append(entry)
         return result

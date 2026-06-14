@@ -276,6 +276,40 @@ def test_resolve_system_requirements_with_rich_platform(
     assert resolved.system_requirements == expected
 
 
+def test_resolve_named_rich_platform_from_subdir() -> None:
+    """A host subdir can select a Pixi-named rich platform."""
+    default_feat = Feature(
+        name="default",
+        conda_dependencies={"python": MatchSpec("python")},
+        target_conda_dependencies={"linux-64": {"gcc": MatchSpec("gcc")}},
+    )
+    gpu_feat = Feature(
+        name="gpu",
+        platforms=["linux-64-cuda"],
+        target_conda_dependencies={
+            "linux-64-cuda": {"cuda-version": MatchSpec("cuda-version=12")}
+        },
+    )
+    config = WorkspaceConfig(
+        channels=[Channel("conda-forge")],
+        platforms=["linux-64-cuda"],
+        platform_subdirs={"linux-64-cuda": "linux-64"},
+        platform_system_requirements={"linux-64-cuda": {"cuda": "12.0"}},
+        features={"default": default_feat, "gpu": gpu_feat},
+        environments={
+            "default": Environment(name="default"),
+            "gpu": Environment(name="gpu", features=["gpu"]),
+        },
+    )
+
+    resolved = resolve_environment(config, "gpu", platform="linux-64")
+
+    assert resolved.platforms == ["linux-64-cuda"]
+    assert resolved.platform_subdir("linux-64-cuda") == "linux-64"
+    assert set(resolved.conda_dependencies) == {"python", "gcc", "cuda-version"}
+    assert resolved.system_requirements == {"cuda": "12.0"}
+
+
 @pytest.mark.parametrize(
     "priority, expected",
     [

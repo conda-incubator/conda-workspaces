@@ -106,6 +106,37 @@ def test_config_post_init_creates_defaults():
     assert "default" in config.environments
 
 
+@pytest.mark.parametrize(
+    ("subdir", "requirements", "expected"),
+    [
+        pytest.param(
+            "linux-64",
+            {"cuda": "12.0", "glibc": "2.28"},
+            "linux-64-cuda-12-0",
+            id="linux-default-glibc-elided",
+        ),
+        pytest.param(
+            "osx-arm64",
+            {"osx": "13.0"},
+            "osx-arm64",
+            id="osx-default-elided",
+        ),
+        pytest.param(
+            "linux-aarch64",
+            {"archspec": "armv8-a", "__custom": "1.2"},
+            "linux-aarch64-archspec-armv8-a-custom-1-2",
+            id="archspec-and-raw-virtual",
+        ),
+    ],
+)
+def test_config_synthesize_platform_name(
+    subdir: str,
+    requirements: dict[str, str],
+    expected: str,
+) -> None:
+    assert WorkspaceConfig.synthesize_platform_name(subdir, requirements) == expected
+
+
 def test_config_get_environment(sample_config):
     env = sample_config.get_environment("test")
     assert env.name == "test"

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from conda.exceptions import CondaValueError
 from rich.console import Console
 
-from ...exceptions import EnvironmentNotFoundError, PlatformError
+from ...exceptions import EnvironmentNotFoundError
 from ...lockfile import generate_lockfile, merge_lockfiles
 from ...resolver import known_platforms, resolve_all_environments, resolve_environment
 from . import workspace_context_from_args
@@ -93,10 +93,12 @@ def execute_lock(args: argparse.Namespace, *, console: Console | None = None) ->
         # platform set — workspace + feature declarations surfaced via
         # resolved_envs.
         known = known_platforms(config, resolved_envs.values())
+        resolved_platforms: list[str] = []
         for platform in requested_platforms:
-            if platform not in known:
-                raise PlatformError(platform, sorted(known))
-        platforms = tuple(requested_platforms)
+            resolved_platform = config.resolve_platform_name(platform, sorted(known))
+            if resolved_platform not in resolved_platforms:
+                resolved_platforms.append(resolved_platform)
+        platforms = tuple(resolved_platforms)
 
     def _progress(env: str, platform: str) -> None:
         console.print(
