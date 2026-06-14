@@ -162,9 +162,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 ### Changed
 
 - The minimum supported conda dependency is now `conda >=26.3`, and
-  the minimum `conda-pypi` dependency is now `conda-pypi >=0.9.0`.
-  conda-workspaces also uses the current conda environment specifier
-  and exporter plugin metadata APIs. (<gh-pr:65>)
+  PyPI dependency workflows now require `conda-pypi >=0.9.0` and
+  `conda-rattler-solver >=0.1.1`. conda-workspaces also uses the
+  current conda environment specifier and exporter plugin metadata
+  APIs. (<gh-pr:65>)
 - Projects that declare PyPI dependencies now receive a clearer
   runtime warning when `conda-rattler-solver` is not installed.
   `conda-rattler-solver` remains an explicit dependency in the pixi
