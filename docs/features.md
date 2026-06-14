@@ -841,8 +841,12 @@ conda workspace archive --lock --receipt -o my-project.tar.zst
 conda workspace unarchive my-project.tar.zst --receipt --target ./verified
 ```
 
+Python integrations can use `conda_workspaces.archive.WorkspaceArchive`
+for the same archive operations without importing CLI handlers.
+
 See the [archive tutorial](tutorials/archives.md) for a
-full walkthrough and the [archive receipt reference](reference/archive-receipts.md)
+full CLI walkthrough, [Use workspace archives from Python](how-to/archive-api.md)
+for integration examples, and the [archive receipt reference](reference/archive-receipts.md)
 for the receipt JSON format.
 
 ---

@@ -8,6 +8,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Added `conda_workspaces.archive.WorkspaceArchive`, a public Python
+  API for creating, inspecting, verifying, extracting, and installing
+  workspace archives without importing CLI handlers.
 - `conda workspace archive --receipt [PATH]` writes an external
   in-toto Statement JSON receipt for a workspace archive, binding the
   archive, workspace manifest, `conda.lock`, and per-environment

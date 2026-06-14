@@ -584,7 +584,7 @@ def test_execute_unarchive_package_cache_priming_requires_receipt(
         return 1
 
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.archive.prime_package_cache",
+        "conda_workspaces.archive.prime_package_cache",
         fake_prime_package_cache,
     )
 

@@ -135,6 +135,13 @@ Set up your first workspace and tasks in under a minute.
 Your first project, migrating from conda / pixi / anaconda-project / conda-project, CI setup.
 :::
 
+:::{grid-item-card} {octicon}`tools` How-to guides
+:link: how-to/index
+:link-type: doc
+
+Task-oriented guides for integrations and automation.
+:::
+
 :::{grid-item-card} {octicon}`list-unordered` Features
 :link: features
 :link-type: doc
@@ -203,6 +210,14 @@ tutorials/coming-from/index
 tutorials/lockfile-management
 tutorials/ci-pipeline
 tutorials/archives
+```
+
+```{toctree}
+:hidden:
+:caption: How-to guides
+
+how-to/index
+how-to/archive-api
 ```
 
 ```{toctree}

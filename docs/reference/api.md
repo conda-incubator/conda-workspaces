@@ -9,6 +9,7 @@ api/resolver
 api/context
 api/environments
 api/execution
+api/archive
 ```
 
 ::::{grid} 2
@@ -55,6 +56,13 @@ Environment creation, removal, and inspection via conda's APIs.
 :link-type: doc
 
 Task DAG resolution, shell backends, caching, and template rendering.
+:::
+
+:::{grid-item-card} Archives
+:link: api/archive
+:link-type: doc
+
+Workspace archive creation, receipt verification, extraction, and install.
 :::
 
 ::::
