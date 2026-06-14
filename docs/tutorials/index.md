@@ -27,7 +27,7 @@ Migrate from conda, pixi, anaconda-project, or conda-project.
 :link: pypi-dependencies
 :link-type: doc
 
-Add PyPI packages, editable local installs, and git dependencies.
+Add PyPI packages and editable local installs, with notes on unsupported git/URL forms.
 :::
 
 :::{grid-item-card} {octicon}`globe` Multi-platform locking

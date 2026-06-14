@@ -48,10 +48,12 @@ class LockfileStatus:
 class PyPIDependency:
     """A PyPI dependency (PEP 508 string).
 
-    Names are translated to conda equivalents via ``conda-pypi``'s
-    grayskull mapping and merged into the same solver call as conda
-    deps.  Path/git/URL deps are handled post-solve via conda-pypi's
-    build system.
+    Version-only dependencies are translated to conda equivalents via
+    ``conda-pypi``'s grayskull mapping and merged into the same solver
+    call as conda deps. Local ``path`` dependencies are built and
+    installed post-solve via conda-pypi's build system. Git and URL
+    dependencies are parsed for pixi manifest compatibility but are not
+    installed yet.
     """
 
     name: str

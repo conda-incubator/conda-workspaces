@@ -15,7 +15,7 @@ commands to their conda-workspaces equivalents.
 | Multiple environments | separate `environment.yml` files | composable features in one manifest |
 | Commands | flat `commands:` map | `[tasks]` with dependency graphs, caching, templates |
 | Variables | `variables:` with `.env` file | Jinja2 templates + environment variables |
-| Solver | conda / conda-lock | conda / libmamba |
+| Solver | conda / conda-lock | configured conda solver backend |
 | pixi compatibility | no | reads `pixi.toml` and `pyproject.toml` |
 | Platform overrides | per-platform lock only | per-platform dependencies and tasks |
 

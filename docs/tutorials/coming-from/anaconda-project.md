@@ -45,7 +45,7 @@ and interactive variable prompting have no direct equivalent.
 | Downloads | `downloads:` (auto-fetched files) | not supported (use tasks instead) |
 | Services | `services:` (e.g. Redis) | not supported (use tasks or Docker instead) |
 | Archives | `anaconda-project archive` | `conda workspace archive` / `unarchive` |
-| Solver | conda | conda / libmamba |
+| Solver | conda | configured conda solver backend |
 | pixi compatibility | no | reads `pixi.toml` and `pyproject.toml` |
 
 ## Command mapping

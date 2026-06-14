@@ -30,8 +30,13 @@ key differences:
 
 ## What happens if I add keys to conda.toml that conda-workspaces doesn't recognize?
 
-Unknown keys are silently preserved and do not produce warnings. This is
-intentional: it allows other tools or future extensions to use the same
-file without causing noise. The `[workspace]` table already supports
-optional fields like `description` and `version` that not every workflow
-uses.
+The runtime parser is permissive when reading manifests and ignores
+unknown keys in most tables. Commands that edit TOML with `tomlkit`,
+such as `conda workspace add` and `conda task add`, generally preserve
+unrelated tables and comments because they modify the existing document
+in place.
+
+The JSON schema is stricter: it rejects unknown keys so `conda.toml` has
+a stable validation target for the fields conda-workspaces standardizes
+today. Put pixi-only metadata in `pixi.toml` or `[tool.pixi.*]` when you
+need pixi's full manifest surface.

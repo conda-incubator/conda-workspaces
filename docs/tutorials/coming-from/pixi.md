@@ -10,7 +10,7 @@ how the two tools relate and how to use them side by side.
 
 | Aspect | pixi | conda-workspaces |
 |---|---|---|
-| Solver | rattler (bundled) | conda / libmamba |
+| Solver | rattler (bundled) | configured conda solver backend |
 | Environment location | `.pixi/envs/` | `.conda/envs/` |
 | Lock file | `pixi.lock` | `conda.lock` (same schema family as `pixi.lock`, distinct filename and on-disk version byte) |
 | Task runner | Built-in | Built-in (`conda task`) |
@@ -34,8 +34,8 @@ conda workspace install
 conda task run test
 ```
 
-Both read the same `pixi.toml` (or `pyproject.toml`) manifest —
-workspace definitions and task definitions alike.
+Both read the same supported `pixi.toml` (or `pyproject.toml`)
+workspace and task definitions.
 
 ## Command mapping
 
@@ -99,7 +99,8 @@ clean = "{% if conda.is_win %}rd /s /q build{% else %}rm -rf build/{% endif %}"
 ## Using conda.toml instead
 
 If your team uses only conda, you can use `conda.toml` instead of
-`pixi.toml`. The format is structurally identical:
+`pixi.toml`. The core workspace, feature, environment, dependency, and
+task tables use the same structure:
 
 ```bash
 conda workspace init --format conda
@@ -148,7 +149,7 @@ output, or `-o custom.toml` to choose a different output path.
 To export only tasks, use the task export command instead:
 
 ```bash
-conda task export --file pixi.toml -o conda.toml
+conda task --file pixi.toml export -o conda.toml
 ```
 
 ## Cross-platform solving
@@ -211,8 +212,8 @@ A `[system-requirements]` version is lifted into the baseline
 override so the solver's `__<pkg> >=<version>` spec and the virtual
 package record it matches against agree. `__cuda` and `__archspec`
 are *not* auto-seeded — opt in via `[system-requirements]` or
-`CONDA_OVERRIDE_*` when you need them. Every setting here is also
-honoured by `pixi`.
+`CONDA_OVERRIDE_*` when you need them. The `[system-requirements]`
+manifest form is shared with pixi. `CONDA_OVERRIDE_*` is conda-specific.
 
 ## What's not supported
 

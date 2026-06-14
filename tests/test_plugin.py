@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from conda.plugins.types import EnvironmentFormat
 
 from conda_workspaces import env_spec, lockfile
 from conda_workspaces.plugin import (
@@ -38,6 +39,10 @@ def test_conda_environment_specifiers(name: str, expected_cls_name: str) -> None
     items = {s.name: s for s in conda_environment_specifiers()}
     assert name in items
     assert items[name].environment_spec.__name__ == expected_cls_name
+    if name == lockfile.FORMAT:
+        assert items[name].environment_format == EnvironmentFormat.lockfile
+    else:
+        assert items[name].environment_format == EnvironmentFormat.environment
 
 
 def test_conda_environment_exporters_yields_lockfile_and_manifests() -> None:
@@ -53,6 +58,7 @@ def test_conda_environment_exporters_yields_lockfile_and_manifests() -> None:
     lock_exp = items[lockfile.FORMAT]
     assert lock_exp.aliases == lockfile.ALIASES
     assert lock_exp.default_filenames == lockfile.DEFAULT_FILENAMES
+    assert lock_exp.environment_format == EnvironmentFormat.lockfile
     assert callable(lock_exp.multiplatform_export)
 
     for name, filename in [
@@ -62,6 +68,7 @@ def test_conda_environment_exporters_yields_lockfile_and_manifests() -> None:
     ]:
         exp = items[name]
         assert exp.default_filenames == (filename,)
+        assert exp.environment_format == EnvironmentFormat.environment
         assert callable(exp.multiplatform_export)
 
 

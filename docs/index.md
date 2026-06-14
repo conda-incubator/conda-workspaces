@@ -105,8 +105,8 @@ This means:
 
 - Workspaces and tasks read from `conda.toml`, `pixi.toml`, or
   `pyproject.toml` — one manifest, multiple tools
-- Environments are solved by conda / libmamba and installed as regular
-  conda prefixes
+- Environments are solved by conda's configured solver backend and
+  installed as regular conda prefixes
 - Lock files (`conda.lock`) capture exact package URLs for reproducible
   installs without re-solving
 - Task dependencies, caching, Jinja2 templates, and platform overrides

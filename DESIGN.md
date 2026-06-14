@@ -30,8 +30,8 @@ shortcuts `cw` and `ct` are also available as aliases.
 3. **Multi-environment support** — define multiple named environments
    from composable features, matching pixi's feature/environment model.
 
-4. **Conda-native solver** — use conda's own solver (libmamba) rather
-   than bundling a separate resolver.
+4. **Conda-native solver** — use conda's configured solver backend
+   rather than bundling a separate resolver.
 
 5. **Plugin architecture** — integrate via conda's plugin system, adding
    no overhead to unrelated conda operations.
@@ -54,7 +54,7 @@ shortcuts `cw` and `ct` are also available as aliases.
 | `[target.<platform>]` | `target_conda_dependencies` | Per-platform overrides |
 | `channel-priority` | Mapped to conda setting | `strict` / `flexible` / `disabled` |
 | Inline tables `{version = "...", build = "..."}` | Parsed via tomlkit | Dict-form deps |
-| `pixi add` / `pixi remove` | `conda workspace add` / `conda workspace remove` | Solves and installs by default; `--no-install` / `--no-lockfile-update` opt-outs |
+| `pixi add` / `pixi remove` | `conda workspace add` / `conda workspace remove` | Solves and installs by default. `--no-install` / `--no-lockfile-update` opt-outs |
 
 ### Accepted but Ignored
 
@@ -78,7 +78,7 @@ shortcuts `cw` and `ct` are also available as aliases.
 ```
 project/
 ├── pixi.toml              # or pyproject.toml
-├── conda.lock             # lockfile (rattler-lock v6 format)
+├── conda.lock             # lockfile (rattler-lock-derived v1 format)
 ├── .conda/
 │   └── envs/
 │       ├── default/       # default environment
@@ -104,21 +104,24 @@ parsed by conda-workspaces.
 
 ### 3. Solver Strategy
 
-conda-workspaces delegates all solving to conda's solver (libmamba).
-For each environment:
+conda-workspaces delegates all solving to conda's configured solver
+backend. For each environment:
 
 1. Resolve all features into a merged dependency set
-2. Feed specs + channels to `conda create` / `conda install`
-3. Let libmamba handle constraint resolution
+2. Build the `MatchSpec` list, channel list, target subdirs, and any
+   virtual package overrides
+3. Instantiate conda's active solver backend through the plugin manager
+   and let it produce the solve/install transaction
 
 ### 4. conda-native Format (conda.toml)
 
-While pixi.toml is the primary format, a `conda.toml` is also
-supported.  This is structurally identical to pixi.toml but:
+While pixi.toml is the primary compatibility format, a `conda.toml` is
+also supported. Its core workspace, feature, environment, dependency,
+and task tables use the same shape as pixi.toml, but it:
 
 - Uses `[workspace]` exclusively (no `[project]` fallback)
-- May add conda-specific extensions in the future (e.g., custom solver
-  settings, conda-build integration)
+- Includes conda-workspaces-specific extensions such as
+  `default-environment` and `[workspace.archive]`
 - Provides a non-pixi-branded option for teams that only use conda
 
 ### 5. Standalone CLI Aliases (`cw` / `ct`)
@@ -210,21 +213,22 @@ equally to `conda workspace install`.
 
 ### Architectural
 
-1. **No bundled solver** — conda-workspaces uses conda's solver; pixi
-   bundles rattler (a Rust-based solver).  This means solving behavior
-   may differ slightly.
+1. **No bundled solver** — conda-workspaces uses conda's configured
+   solver backend. Pixi bundles rattler (a Rust-based solver), so
+   solving behavior may differ slightly.
 
 2. **No package installation** — conda-workspaces creates real conda
    environments using conda's install machinery.  Pixi uses rattler to
    install packages directly into `.pixi/envs/`, bypassing conda.
 
-3. **Lock files** — conda-workspaces generates a `conda.lock` in
-   rattler-lock v6 format (the same structure as `pixi.lock`) after
-   every install.  The `--locked` flag installs from the lockfile
-   without running the solver, and `conda workspace lock` regenerates
-   the lockfile on demand.
+3. **Lock files** — conda-workspaces generates a `conda.lock` using a
+   rattler-lock-derived schema after every install.  The YAML structure
+   is shared with `pixi.lock`, but `conda.lock` carries a conda-
+   workspaces-owned `version: 1` byte.  The `--locked` flag installs
+   from the lockfile after freshness validation, `--frozen` installs it
+   as-is, and `conda workspace lock` regenerates the lockfile on demand.
 
-4. **Plugin, not standalone** — conda-workspaces is a conda plugin;
+4. **Plugin, not standalone** — conda-workspaces is a conda plugin.
    pixi is a standalone tool that replaces conda entirely for its users.
 
 ### Behavioral
@@ -238,7 +242,7 @@ equally to `conda workspace install`.
    than pixi's system-requirements handling.
 
 3. **Environment activation** — conda environments are activated via
-   `conda activate`; pixi uses `pixi shell` or `pixi run`.
+   `conda activate`. pixi uses `pixi shell` or `pixi run`.
    conda-workspaces environments are standard conda prefixes and work
    with `conda activate <prefix>`.
 
@@ -271,25 +275,29 @@ parses the manifest, resolves the *default* environment's dependencies,
 and returns them as `requested_packages` (a list of `MatchSpec`
 objects).  conda's solver then resolves the full dependency tree.
 
-**`conda-workspaces-lock`** — handles `conda.lock` files (rattler-lock
-v6 format).  When a user runs `conda env create --file conda.lock`,
-the specifier parses the lockfile, extracts the exact package URLs for
-the default environment on the current platform, and returns them as
-`explicit_packages` (a list of `PackageRecord` objects).  The solver
-is bypassed entirely, producing a bit-for-bit reproducible install.
+**`conda-workspaces-lock-v1`** (aliases: `conda-workspaces-lock`,
+`workspace-lock`) — handles `conda.lock` files.  When a user runs
+`conda env create --file conda.lock`, the specifier parses the lockfile,
+selects the package URLs for the default environment on the requested
+platform, and returns them as `explicit_packages` (a list of
+`PackageRecord` objects).  The solver is bypassed entirely, producing a
+bit-for-bit reproducible install.
 
 Both specifiers set `detection_supported = True`, so conda can
-auto-detect the format from the filename without requiring
-`--env-spec=...`.
+auto-detect the format from the filename. On conda 26.5 and newer,
+users should select formats explicitly with `--format` when detection is
+not enough. `--env-spec` / `--environment-specifier` are pending
+deprecation upstream.
 
 ### Environment Exporter (`conda_environment_exporters`)
 
 One environment exporter is registered:
 
-**`conda-workspaces-lock`** (aliases: `workspace-lock`) — exports
-installed environments to `conda.lock` in the rattler-lock v6 format.
-This allows `conda export --format=conda-workspaces-lock --file=conda.lock`
-to produce a lockfile from any conda environment, not just workspace-
+**`conda-workspaces-lock-v1`** (aliases: `conda-workspaces-lock`,
+`workspace-lock`) — exports installed environments to `conda.lock` in
+the conda-workspaces lockfile format. This allows
+`conda export --format=conda-workspaces-lock-v1 --file=conda.lock` to
+produce a lockfile from any conda environment, not just workspace-
 managed ones.
 
 The exporter implements the `multiplatform_export` interface, accepting
@@ -300,21 +308,22 @@ built-in `conda workspace lock` command.
 ### Relationship with conda-lockfiles
 
 The `conda-lockfiles` plugin handles `pixi.lock` files under the
-`rattler-lock-v6` format name.  conda-workspaces extends coverage to
-`conda.lock` files under the `conda-workspaces-lock` format name.  The
-two plugins do not conflict — and neither collides with `conda-lock-v1`
-(the format name `conda-lockfiles` uses for `conda-lock.yml` files
-from the `conda/conda-lock` tool):
+`rattler-lock-v6` format name and `conda-lock.yml` files under
+`conda-lock-v1`. conda 26.5 can consume those formats directly when
+the plugin is installed. conda-workspaces extends coverage to
+`conda.lock` files under the `conda-workspaces-lock-v1` format name.
+The plugins do not conflict:
 
 | Plugin | Env-spec name | Filenames | Exporter name |
 |---|---|---|---|
 | conda-lockfiles | `conda-lock-v1` | `conda-lock.yml` | `conda-lock-v1` |
 | conda-lockfiles | `rattler-lock-v6` | `pixi.lock` | `rattler-lock-v6` |
-| conda-workspaces | `conda-workspaces-lock` | `conda.lock` | `conda-workspaces-lock` |
+| conda-workspaces | `conda-workspaces-lock-v1` | `conda.lock` | `conda-workspaces-lock-v1` |
 
-Both use the same rattler-lock v6 YAML structure, so a `conda.lock`
-can be renamed to `pixi.lock` (and vice versa) and handled by either
-plugin.
+Both use the same rattler-lock v6 YAML structure, but the on-disk
+version byte differs. A tool can translate between `conda.lock` and
+`pixi.lock` by changing the version field and filename. A plain rename
+is not enough.
 
 ### conda-pypi Integration
 
@@ -323,17 +332,20 @@ PyPI dependencies are handled in two phases:
 1. **Standard PyPI deps** (version-spec only) are translated to conda
    package names via `conda-pypi`'s `pypi_to_conda_name` (using the
    grayskull mapping) and merged directly into the solver call alongside
-   conda specs. The rattler solver + conda-pypi's wheel extractor
-   resolve and install everything in a single pass.
+   conda specs. With `conda-rattler-solver` configured and the
+   `conda-pypi` channel available, these resolve and install in the
+   conda transaction.
 
 2. **Path-based PyPI deps** (`path = ".", editable = true`) are built
    into `.conda` packages via `conda-pypi`'s `pypa_to_conda` after the
    main solve completes, then installed with `install_ephemeral_conda`.
 
-Git and URL PyPI dependencies are not yet supported and are skipped
-with a warning. If `conda-pypi` is not installed, all PyPI dependencies
-are skipped with a warning. This keeps conda-pypi as an optional
-dependency — workspaces that only use conda packages never need it.
+Git and URL PyPI dependencies are parsed for manifest compatibility but
+are not yet supported and are skipped with a warning. If `conda-pypi`
+is not installed, version-only and path PyPI dependencies are skipped
+with warnings. If `conda-rattler-solver` is missing, version-only PyPI
+dependencies still become specs, but `install` warns because the
+`conda-pypi` channel requires the rattler solver backend.
 
 The environment specifiers also surface PyPI dependencies as
 `external_packages` (under the `"pip"` key) so that conda's own
@@ -414,12 +426,12 @@ the spec that checks agree on the version. `__cuda` and `__archspec`
 are never auto-baselined — callers who need them must opt in via
 `[system-requirements]` or `CONDA_OVERRIDE_*`.
 
-Cross-platform solves are fail-fast: the first unsatisfiable
+Cross-platform solves are fail-fast by default: the first unsatisfiable
 `(environment, platform)` pair raises `SolveError` with the platform
-in the message, and no `conda.lock` is written. This matches conda's
-and conda-workspaces' convention of refusing to produce partial
-artifacts; a `--skip-failed-platforms` escape hatch is tracked as a
-follow-up.
+in the message, and no `conda.lock` is written. Pass
+`--skip-unsolvable` to keep solving the remaining pairs. If every pair
+fails, the command raises an aggregate error rather than writing an
+empty lockfile.
 
 Users can restrict a run with `conda workspace lock --platform
 <subdir>` (repeatable) to regenerate just a subset, e.g. when a new

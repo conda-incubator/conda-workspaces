@@ -105,11 +105,14 @@ and also provides `cw` and `ct` as shorter aliases.
 | `conda workspace lock` | Generate/update `conda.lock` |
 | `conda workspace list` | List packages in an environment |
 | `conda workspace envs` | List defined environments |
-| `conda workspace info [ENV]` | Show environment details |
+| `conda workspace info -e ENV` | Show environment details |
 | `conda workspace add SPECS...` | Add dependencies |
 | `conda workspace remove SPECS...` | Remove dependencies |
-| `conda workspace shell [ENV]` | Spawn a shell with an environment activated |
-| `conda workspace activate [ENV]` | Print activation instructions |
+| `conda workspace export` | Export environments and manifests through conda exporters |
+| `conda workspace import FILE` | Import supported project manifests |
+| `conda workspace quickstart SPECS...` | Bootstrap a workspace, install it, and optionally open a shell |
+| `conda workspace shell -e ENV` | Spawn a shell with an environment activated |
+| `conda workspace activate -e ENV` | Print activation instructions |
 | `conda workspace clean` | Remove installed environments |
 | `conda workspace archive` | Create a portable workspace archive |
 | `conda workspace unarchive` | Extract and optionally verify a workspace archive |

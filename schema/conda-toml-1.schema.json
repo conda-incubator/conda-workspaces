@@ -102,7 +102,7 @@
           "type": "array",
           "description": "Supported platforms.",
           "items": {
-            "$ref": "#/$defs/platform"
+            "$ref": "#/$defs/workspacePlatform"
           },
           "uniqueItems": true
         },
@@ -118,9 +118,81 @@
         "dependencies": {
           "$ref": "#/$defs/workspaceCondaDependencies",
           "description": "Root-level conda dependency pool. Dependency tables may opt into these specs with { workspace = true }."
+        },
+        "archive": {
+          "$ref": "#/$defs/archive",
+          "description": "Archive include/exclude and compression settings."
         }
       },
       "required": ["channels", "platforms"],
+      "additionalProperties": false
+    },
+    "workspacePlatform": {
+      "description": "A workspace platform, either a conda subdir string or a Pixi rich-platform table.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/platform"
+        },
+        {
+          "$ref": "#/$defs/richPlatform"
+        }
+      ]
+    },
+    "platformName": {
+      "type": "string",
+      "description": "A declared workspace platform name. This may be a conda subdir or a rich-platform name."
+    },
+    "richPlatform": {
+      "type": "object",
+      "description": "Pixi-compatible rich platform entry with an optional workspace-scoped name and virtual package constraints.",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/platformName"
+        },
+        "platform": {
+          "$ref": "#/$defs/platform"
+        },
+        "archspec": {
+          "type": "string"
+        },
+        "cuda": {
+          "type": "string"
+        },
+        "glibc": {
+          "type": "string"
+        },
+        "libc": {
+          "$ref": "#/$defs/libcSystemRequirement"
+        },
+        "linux": {
+          "type": "string"
+        },
+        "macos": {
+          "type": "string"
+        },
+        "osx": {
+          "type": "string"
+        },
+        "win": {
+          "type": "string"
+        },
+        "windows": {
+          "type": "string"
+        }
+      },
+      "patternProperties": {
+        "^__": {
+          "type": "string"
+        }
+      },
+      "anyOf": [
+        {
+          "required": ["name"]
+        },
+        {
+          "required": ["platform"]
+        }
+      ],
       "additionalProperties": false
     },
     "channel": {
@@ -291,6 +363,13 @@
               "type": "string",
               "description": "Version constraint (e.g. '>=2.28')."
             },
+            "extras": {
+              "type": "array",
+              "description": "PyPI extras to request.",
+              "items": {
+                "type": "string"
+              }
+            },
             "path": {
               "type": "string",
               "description": "Local path to the package."
@@ -314,6 +393,10 @@
             "rev": {
               "type": "string",
               "description": "Git revision to use."
+            },
+            "url": {
+              "type": "string",
+              "description": "Direct package URL."
             }
           },
           "additionalProperties": false
@@ -351,15 +434,40 @@
     "systemRequirements": {
       "type": "object",
       "description": "System-level requirements (e.g. minimum glibc or macOS version).",
+      "properties": {
+        "libc": {
+          "$ref": "#/$defs/libcSystemRequirement"
+        }
+      },
       "additionalProperties": {
         "type": "string"
       }
+    },
+    "libcSystemRequirement": {
+      "description": "Pixi-style libc requirement, either as a version string or a family/version table.",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "family": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
     },
     "targets": {
       "type": "object",
       "description": "Per-platform dependency overrides keyed by platform name.",
       "propertyNames": {
-        "$ref": "#/$defs/platform"
+        "$ref": "#/$defs/platformName"
       },
       "additionalProperties": {
         "$ref": "#/$defs/targetOverride"
@@ -403,7 +511,7 @@
           "type": "array",
           "description": "Platform restrictions for this feature.",
           "items": {
-            "$ref": "#/$defs/platform"
+            "$ref": "#/$defs/platformName"
           },
           "uniqueItems": true
         },
@@ -429,6 +537,36 @@
       "additionalProperties": {
         "$ref": "#/$defs/task"
       }
+    },
+    "archive": {
+      "type": "object",
+      "description": "Workspace archive filters and compression settings.",
+      "properties": {
+        "include": {
+          "type": "array",
+          "description": "Glob patterns for files to include.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "exclude": {
+          "type": "array",
+          "description": "Glob patterns for files to exclude.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "compression": {
+          "type": "string",
+          "description": "Archive compression algorithm.",
+          "enum": ["zst", "gz", "bz2"]
+        },
+        "compression-level": {
+          "type": "integer",
+          "description": "Compression level passed to the selected compressor."
+        }
+      },
+      "additionalProperties": false
     },
     "task": {
       "description": "A task definition: either a command string/array or a task table.",
