@@ -103,9 +103,30 @@ A *channel* is either:
 - an inline table `{ channel = "<name-or-url>" }`.  Other keys (e.g.
   `priority`) are reserved and currently ignored by this version.
 
-A *platform* is a conda subdir string from the closed enum defined in
-the [JSON schema][schema] under `$defs.platform` (e.g. `linux-64`,
-`osx-arm64`, `win-64`, `noarch`).
+A *platform* is either a conda subdir string from the closed enum
+defined in the [JSON schema][schema] under `$defs.platform` (e.g.
+`linux-64`, `osx-arm64`, `win-64`, `noarch`) or a Pixi-compatible
+rich-platform inline table. Rich-platform tables may set
+`platform = "<subdir>"`, an optional workspace-scoped `name`, and
+virtual package constraints such as `cuda`, `archspec`, `glibc` /
+`libc`, `linux`, `macos` / `osx`, `windows` / `win`, or raw
+`__<virtual-package>` keys.
+
+```toml
+[workspace]
+platforms = [
+  "linux-64",
+  { name = "linux-64-cuda", platform = "linux-64", cuda = "12.0" },
+]
+```
+
+When `name` is omitted, conda-workspaces follows Pixi's
+generated-name style, for example
+`{ platform = "linux-64", cuda = "12.0" }` becomes
+`linux-64-cuda-12-0`. The declared name is used by feature
+`platforms` restrictions and as the `conda.lock` platform key; the
+backing `platform` subdir is used for conda solves and package URL
+validation.
 
 ### `[workspace.dependencies]`
 
@@ -200,8 +221,10 @@ constraints.  Recognised keys mirror conda's virtual-package names
 
 ### `[target.<platform>]`
 
-Per-platform overrides for the default feature.  `<platform>` MUST be
-one of the *platform* values listed above.
+Per-platform overrides for the default feature.  `<platform>` may be
+a declared platform name or the backing conda subdir of a declared rich
+platform. When both match, the subdir target is merged first and the
+declared rich-platform name can override it.
 
 | Field | Type | Description |
 |---|---|---|
@@ -218,7 +241,7 @@ arbitrary identifier referenced from `[environments]`.
 | `dependencies` | conda deps | Conda dependencies for this feature. |
 | `pypi-dependencies` | PyPI deps | PyPI dependencies for this feature. |
 | `channels` | array of *channel* | Additional channels. |
-| `platforms` | array of *platform* | Restrict the feature to these platforms. |
+| `platforms` | array of *platform* | Restrict the feature to these platform names. |
 | `system-requirements` | table | Per-feature system requirements. |
 | `activation` | table | Per-feature activation. |
 | `target` | table of `[target.<platform>]` | Per-platform dep overrides for the feature. |

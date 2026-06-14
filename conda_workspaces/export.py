@@ -127,6 +127,7 @@ def envs_from_manifest(
     envs: list[Environment] = []
     for platform in targets:
         resolved = resolve_environment(config, env_name, platform)
+        package_platform = resolved.platform_subdir(platform)
 
         requested_packages = [
             MatchSpec(dep.conda_build_form())
@@ -145,7 +146,7 @@ def envs_from_manifest(
         envs.append(
             Environment(
                 name=env_name,
-                platform=platform,
+                platform=package_platform,
                 config=CondaEnvConfig(
                     channels=tuple(ch.canonical_name for ch in resolved.channels),
                 ),

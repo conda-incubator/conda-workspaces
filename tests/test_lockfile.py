@@ -576,6 +576,56 @@ def test_generate_lockfile_resolves_rich_platform_system_requirements(
         assert "CONDA_OVERRIDE_GLIBC" not in observed_overrides[platform]
 
 
+def test_generate_lockfile_uses_named_rich_platform_as_lock_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Named rich platforms solve with the subdir but lock under the name."""
+    config = WorkspaceConfig(
+        name="named-rich-platform-lock",
+        channels=[Channel("conda-forge")],
+        platforms=["linux-64-cuda"],
+        platform_subdirs={"linux-64-cuda": "linux-64"},
+        platform_system_requirements={"linux-64-cuda": {"cuda": "12.0"}},
+        features={"default": Feature(name="default")},
+        environments={"default": Environment(name="default")},
+        root=str(tmp_path),
+        manifest_path=str(tmp_path / "conda.toml"),
+    )
+    ctx = WorkspaceContext(config)
+    ctx._cache["platform"] = "linux-64"
+    resolved_envs = {
+        "default": resolve_environment(config, "default", platform=ctx.platform)
+    }
+    observed: list[tuple[str, dict[str, str]]] = []
+
+    def fake_solve(
+        self: ResolvedEnvironment,
+        platform: str,
+        *,
+        prefix: str | Path,
+    ) -> list[_FakePkg]:
+        observed.append((platform, dict(self.system_requirements)))
+        return [
+            _FakePkg(
+                "python",
+                f"https://conda.anaconda.org/conda-forge/{platform}/python-rich.conda",
+            )
+        ]
+
+    monkeypatch.setattr(ResolvedEnvironment, "solve_for_platform", fake_solve)
+
+    result = generate_lockfile(ctx, resolved_envs, config=config)
+
+    assert observed == [("linux-64", {"cuda": "12.0"})]
+    data = load_yaml(result)
+    packages = data["environments"]["default"]["packages"]
+    assert set(packages) == {"linux-64-cuda"}
+    assert packages["linux-64-cuda"] == [
+        {"conda": ("https://conda.anaconda.org/conda-forge/linux-64/python-rich.conda")}
+    ]
+
+
 def test_generate_lockfile_progress_callback(
     workspace_ctx_factory: Callable[..., WorkspaceContext],
     fake_solver_factory,
@@ -1762,6 +1812,51 @@ def test_satisfiability(
     else:
         assert result.status == LockfileStatus.OUT_OF_DATE
         assert reason_fragment in result.reason.lower()
+
+
+def test_satisfiability_uses_resolved_environment_platforms() -> None:
+    """Feature platform restrictions define required lockfile keys per env."""
+    package_url = (
+        "https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-hab00c5b_0.conda"
+    )
+    config = WorkspaceConfig(
+        name="rich-platform-sat",
+        channels=[Channel("conda-forge")],
+        platforms=["linux-64", "linux-64-cuda"],
+        platform_subdirs={"linux-64-cuda": "linux-64"},
+        features={
+            "default": Feature(name="default"),
+            "gpu": Feature(name="gpu", platforms=["linux-64-cuda"]),
+        },
+        environments={
+            "default": Environment(name="default"),
+            "gpu": Environment(name="gpu", features=["gpu"]),
+        },
+    )
+    data = {
+        "version": LOCKFILE_VERSION,
+        "environments": {
+            "default": {
+                "channels": [{"url": "https://conda.anaconda.org/conda-forge"}],
+                "packages": {
+                    "linux-64": [{"conda": package_url}],
+                    "linux-64-cuda": [{"conda": package_url}],
+                },
+            },
+            "gpu": {
+                "channels": [{"url": "https://conda.anaconda.org/conda-forge"}],
+                "packages": {
+                    "linux-64-cuda": [{"conda": package_url}],
+                },
+            },
+        },
+        "packages": [{"conda": package_url, "sha256": "a" * 64}],
+    }
+
+    result = check_lockfile_satisfiability(config, data, "linux-64")
+
+    assert result.status == LockfileStatus.UP_TO_DATE
+    assert result.reason == ""
 
 
 def test_satisfiability_ignores_extra_lockfile_envs(

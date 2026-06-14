@@ -161,6 +161,95 @@ platforms = [
     }
 
 
+def test_parse_named_rich_platforms(tmp_path):
+    content = """\
+[workspace]
+name = "rich-platform-name-test"
+channels = ["conda-forge"]
+platforms = [
+  { platform = "linux-64", cuda = "12.0", glibc = "2.28" },
+  {name="jetson-nano", platform="linux-aarch64", cuda="12.8", archspec="armv8-a"},
+  { name = "osx-arm64" },
+]
+
+[feature.gpu]
+platforms = ["linux-64-cuda-12-0", "jetson-nano"]
+"""
+    path = tmp_path / "pixi.toml"
+    path.write_text(content, encoding="utf-8")
+
+    config = PixiTomlParser().parse(path)
+
+    assert config.platforms == [
+        "linux-64-cuda-12-0",
+        "jetson-nano",
+        "osx-arm64",
+    ]
+    assert config.platform_subdirs == {
+        "linux-64-cuda-12-0": "linux-64",
+        "jetson-nano": "linux-aarch64",
+        "osx-arm64": "osx-arm64",
+    }
+    assert config.platform_system_requirements == {
+        "linux-64-cuda-12-0": {"cuda": "12.0", "glibc": "2.28"},
+        "jetson-nano": {"cuda": "12.8", "archspec": "armv8-a"},
+    }
+    assert config.features["gpu"].platforms == [
+        "linux-64-cuda-12-0",
+        "jetson-nano",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("platform_entries", "match"),
+    [
+        pytest.param(
+            '  "linux-64",\n  { name = "linux-64", platform = "linux-64" },',
+            "Duplicate workspace platform name",
+            id="duplicate-name",
+        ),
+        pytest.param(
+            "  42,",
+            "strings or inline tables",
+            id="non-table-entry",
+        ),
+        pytest.param(
+            '  { cuda = "12.0" },',
+            "must set `platform` or `name`",
+            id="missing-name-and-platform",
+        ),
+        pytest.param(
+            '  { name = "linux-64-cuda", cuda = "12.0" },',
+            "must also set `platform`",
+            id="custom-name-without-platform",
+        ),
+        pytest.param(
+            '  { name = "osx-arm64", platform = "linux-64" },',
+            "must use the same `platform` value",
+            id="subdir-name-mismatch",
+        ),
+    ],
+)
+def test_parse_invalid_rich_platform_entries(
+    tmp_path,
+    platform_entries: str,
+    match: str,
+) -> None:
+    content = f"""\
+[workspace]
+name = "rich-platform-name-test"
+channels = ["conda-forge"]
+platforms = [
+{platform_entries}
+]
+"""
+    path = tmp_path / "pixi.toml"
+    path.write_text(content, encoding="utf-8")
+
+    with pytest.raises(WorkspaceParseError, match=match):
+        PixiTomlParser().parse(path)
+
+
 def test_parse_target_system_requirements_rejected(tmp_path):
     content = """\
 [workspace]

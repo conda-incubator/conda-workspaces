@@ -9,9 +9,11 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 import tomlkit
+from conda.base.constants import KNOWN_SUBDIRS
 from packaging.requirements import InvalidRequirement, Requirement
 
 from ..exceptions import ManifestExistsError, WorkspaceParseError
+from ..models import WorkspaceConfig
 
 _PYPI_NAME_TAIL_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(.*)$")
 
@@ -24,7 +26,7 @@ if TYPE_CHECKING:
     from tomlkit.container import Container
     from tomlkit.items import InlineTable, Table
 
-    from ..models import Task, WorkspaceConfig
+    from ..models import Task
 
 
 class ManifestParser(ABC):
@@ -241,22 +243,38 @@ class ManifestParser(ABC):
         self,
         raw: Iterable[Any],
         path: Path,
-    ) -> tuple[list[str], dict[str, dict[str, str]]]:
+    ) -> tuple[list[str], dict[str, str], dict[str, dict[str, str]]]:
         """Parse Pixi-compatible workspace platform entries.
 
-        Bare strings remain plain conda subdirs.  Inline tables can add
-        virtual package requirements to that subdir, e.g.
-        ``{ platform = "linux-64", libc = "2.28" }``.  Pixi also
-        supports custom rich-platform names; conda-workspaces still
-        stores lockfile entries by conda subdir, so custom names are
-        rejected instead of being silently discarded.
+        Bare strings remain plain conda subdirs.  Inline tables can
+        add virtual package requirements and optional Pixi rich-platform
+        names, e.g. ``{ name = "linux-64-cuda", platform = "linux-64",
+        cuda = "12" }``.  The returned platform list contains the
+        declared names used by features and lockfiles; ``platform_subdirs``
+        records the concrete conda subdir each name solves against.
         """
         platforms: list[str] = []
+        platform_subdirs: dict[str, str] = {}
         platform_system_requirements: dict[str, dict[str, str]] = {}
+
+        def add_platform(
+            name: str,
+            subdir: str,
+            requirements: dict[str, str],
+        ) -> None:
+            if name in platform_subdirs:
+                raise WorkspaceParseError(
+                    path,
+                    f"Duplicate workspace platform name {name!r}.",
+                )
+            platforms.append(name)
+            platform_subdirs[name] = subdir
+            if requirements:
+                platform_system_requirements[name] = requirements
 
         for item in raw:
             if isinstance(item, str):
-                platforms.append(item)
+                add_platform(item, item, {})
                 continue
             if not isinstance(item, dict):
                 raise WorkspaceParseError(
@@ -264,36 +282,51 @@ class ManifestParser(ABC):
                     "[workspace].platforms entries must be strings or inline tables",
                 )
 
-            subdir = item.get("platform") or item.get("name")
-            if not subdir:
+            raw_subdir = item.get("platform")
+            raw_name = item.get("name")
+            if raw_subdir is None and raw_name is None:
                 raise WorkspaceParseError(
                     path,
                     "Rich platform entries must set `platform` or `name`.",
                 )
-            platform = str(subdir)
-
-            name = item.get("name")
-            if name is not None and "platform" in item and str(name) != platform:
-                raise WorkspaceParseError(
-                    path,
-                    "Custom rich platform names are not supported yet; "
-                    "omit `name` or set it equal to `platform`.",
-                )
-
-            platforms.append(platform)
-
             requirements = {
                 key: value
                 for key, value in item.items()
                 if key in self.rich_platform_system_requirement_keys
                 or str(key).startswith("__")
             }
-            if requirements:
-                platform_system_requirements[platform] = self.parse_system_requirements(
-                    requirements
+            parsed_requirements = self.parse_system_requirements(requirements)
+
+            if raw_subdir is None:
+                subdir = str(raw_name)
+                if subdir not in KNOWN_SUBDIRS:
+                    raise WorkspaceParseError(
+                        path,
+                        "Rich platform entries with custom `name` values "
+                        "must also set `platform`.",
+                    )
+                name = subdir
+            else:
+                subdir = str(raw_subdir)
+                name = (
+                    str(raw_name)
+                    if raw_name is not None
+                    else WorkspaceConfig.synthesize_platform_name(
+                        subdir,
+                        parsed_requirements,
+                    )
                 )
 
-        return platforms, platform_system_requirements
+            if name in KNOWN_SUBDIRS and name != subdir:
+                raise WorkspaceParseError(
+                    path,
+                    "Rich platform entries named after a conda subdir must "
+                    "use the same `platform` value.",
+                )
+
+            add_platform(name, subdir, parsed_requirements)
+
+        return platforms, platform_subdirs, platform_system_requirements
 
     @classmethod
     def for_exporter_format(cls, name: str) -> ManifestParser | None:

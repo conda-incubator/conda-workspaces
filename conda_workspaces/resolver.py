@@ -41,10 +41,33 @@ class ResolvedEnvironment:
     pypi_dependencies: dict[str, PyPIDependency] = field(default_factory=dict)
     channels: list[Channel] = field(default_factory=list)
     platforms: list[str] = field(default_factory=list)
+    platform_subdirs: dict[str, str] = field(default_factory=dict)
     activation_scripts: list[str] = field(default_factory=list)
     activation_env: dict[str, str] = field(default_factory=dict)
     system_requirements: dict[str, str] = field(default_factory=dict)
     channel_priority: str | None = None
+
+    def platform_subdir(self, platform: str) -> str:
+        """Return the concrete conda subdir for a declared platform name."""
+        return self.platform_subdirs.get(platform, platform)
+
+    def resolve_platform_name(
+        self,
+        requested: str,
+        platforms: Iterable[str] | None = None,
+    ) -> str:
+        """Resolve a requested platform name or subdir to a declared name."""
+        candidates = list(platforms or self.platforms)
+        if requested in candidates:
+            return requested
+        matches = [
+            platform
+            for platform in candidates
+            if self.platform_subdir(platform) == requested
+        ]
+        if matches:
+            return matches[0]
+        raise PlatformError(requested, sorted(candidates))
 
     def system_requirement_version(self, name: str) -> str | None:
         """Look up a system requirement by conda or Pixi-facing virtual name."""
@@ -267,12 +290,15 @@ class ResolvedEnvironment:
         by any caller that needs the same policy.
         """
         declared_set = set(self.platforms) or {fallback}
+        declared = sorted(declared_set)
         if not requested:
-            return tuple(sorted(declared_set))
-        unknown = [p for p in requested if p not in declared_set]
-        if unknown:
-            raise PlatformError(unknown[0], sorted(declared_set))
-        return tuple(p for p in requested if p in declared_set)
+            return tuple(declared)
+        targets: list[str] = []
+        for platform in requested:
+            target = self.resolve_platform_name(platform, declared)
+            if target not in targets:
+                targets.append(target)
+        return tuple(targets)
 
 
 def resolve_environment(
@@ -313,20 +339,34 @@ def resolve_environment(
             )
         resolved_platforms = list(config.platforms)
 
-    if platform and resolved_platforms and platform not in resolved_platforms:
-        raise PlatformError(platform, resolved_platforms)
+    selected_platform = platform
+    if platform and resolved_platforms:
+        selected_platform = config.resolve_platform_name(platform, resolved_platforms)
 
     resolved = ResolvedEnvironment(
         name=env_name,
         channel_priority=config.channel_priority,
         platforms=resolved_platforms,
+        platform_subdirs={
+            platform: config.platform_subdir(platform)
+            for platform in resolved_platforms
+        },
     )
 
     # Merge dependencies
-    resolved.conda_dependencies = config.merged_conda_dependencies(env, platform)
-    resolved.pypi_dependencies = config.merged_pypi_dependencies(env, platform)
+    resolved.conda_dependencies = config.merged_conda_dependencies(
+        env,
+        selected_platform,
+    )
+    resolved.pypi_dependencies = config.merged_pypi_dependencies(
+        env,
+        selected_platform,
+    )
     resolved.channels = config.merged_channels(env)
-    resolved.system_requirements = config.merged_system_requirements(env, platform)
+    resolved.system_requirements = config.merged_system_requirements(
+        env,
+        selected_platform,
+    )
 
     # Merge activation settings
     for feat in features:

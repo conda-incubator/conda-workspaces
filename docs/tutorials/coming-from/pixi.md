@@ -174,6 +174,21 @@ most cross-compiles resolve without any manifest changes.
 conda's `context._subdir` at the target so `__linux` / `__osx` /
 `__win` virtual packages line up with the target platform.
 
+Pixi-style rich platform entries are accepted in `workspace.platforms`.
+The declared name is used for feature restrictions and lockfile keys,
+while conda solves against the backing subdir:
+
+```toml
+[workspace]
+platforms = [
+  "linux-64",
+  { name = "linux-64-cuda", platform = "linux-64", cuda = "12.0" },
+]
+
+[feature.gpu]
+platforms = ["linux-64-cuda"]
+```
+
 Conservative virtual package baselines are applied automatically:
 solving `linux-64` from macOS seeds `CONDA_OVERRIDE_GLIBC=2.17` for
 the solve, `osx-arm64` targets get `CONDA_OVERRIDE_OSX=11.0`, `osx-64`

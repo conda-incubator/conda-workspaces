@@ -299,6 +299,40 @@ def test_export_workspace_lock_multiplatform(
     assert "environments" in data
 
 
+def test_export_workspace_lock_rich_platform_uses_conda_subdir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    export_console: Console,
+) -> None:
+    (tmp_path / "pixi.toml").write_text(
+        """\
+[workspace]
+name = "rich-platform-export"
+channels = ["conda-forge"]
+platforms = [
+  { name = "linux-64-cuda", platform = "linux-64", cuda = "12.0" },
+]
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    output = tmp_path / "conda.lock"
+
+    result = execute_export(
+        make_args(
+            _DEFAULTS,
+            file=output,
+            format="conda-workspaces-lock-v1",
+            export_platforms=["linux-64-cuda"],
+        ),
+        console=export_console,
+    )
+
+    assert result == 0
+    data = yaml_loads(output.read_text(encoding="utf-8"))
+    assert data["environments"]["default"]["packages"] == {"linux-64": []}
+
+
 def test_export_from_lockfile_missing_raises(
     pixi_workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -27,6 +27,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Pixi-compatible rich platform entries in `[workspace].platforms` now
+  preserve named platforms such as `linux-64-cuda`, generate Pixi-style
+  names for unnamed rich entries, and write lockfile package sections
+  under the declared platform name while solving against the backing
+  conda subdir. (<gh-pr:106>)
 - `conda workspace archive --receipt` now fails before writing an
   archive when archive filters would omit the workspace manifest or
   `conda.lock`, avoiding archive/receipt pairs that cannot verify.
