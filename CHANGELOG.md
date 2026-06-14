@@ -6,18 +6,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 0.7.0 — 2026-06-14
+
 ### Added
 
 - Added `conda_workspaces.archive.WorkspaceArchive`, a public Python
   API for creating, inspecting, verifying, extracting, and installing
-  workspace archives without importing CLI handlers.
+  workspace archives without importing CLI handlers. (<gh-pr:107>)
+- Pixi-style rich entries in `workspace.platforms` are now supported,
+  including per-platform virtual package requirements such as `libc`,
+  `macos`, and `windows`, and those entries are preserved when
+  importing Pixi and `pyproject.toml` manifests. (<gh-issue:87>,
+  <gh-pr:90>)
 - `conda workspace archive --receipt [PATH]` writes an external
   in-toto Statement JSON receipt for a workspace archive, binding the
   archive, workspace manifest, `conda.lock`, and per-environment
   package inventory from the lockfile. `conda workspace unarchive
   --receipt [PATH]` verifies that receipt during extraction. The
   receipt schema is published as
-  `workspace-archive-receipt-1.schema.json`. (<gh-pr:84>)
+  `workspace-archive-receipt-1.schema.json`. (<gh-issue:83>,
+  <gh-pr:84>)
+- Added archive receipt documentation, including a dedicated reference
+  page, archive tutorial coverage, configuration guidance, README
+  coverage, and a receipt demo. (<gh-pr:92>)
+
+### Changed
+
+- Documentation publishing now runs for changelog-only changes, keeping
+  published release notes in sync with repository updates. (<gh-pr:82>)
+- CI coverage uploads now use `codecov/codecov-action` 7.0.0.
+  (<gh-pr:85>)
 
 ### Security
 
@@ -27,6 +45,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   only then moves the verified workspace into place. `--require-sha256`
   can require every receipt package record to carry a SHA-256 digest.
   (<gh-pr:84>)
+- Installing from `conda.lock` now binds package references to declared
+  channel URLs and exact package metadata, passes digest-bearing
+  explicit specs to conda, and marks off-channel or unhashed lockfile
+  refs out of date. (<gh-pr:93>)
+- Workspace environment names are now rejected when they could resolve
+  outside the project-local environment prefix. (<gh-pr:95>)
+- Archive output and receipt paths now share portable validation, and
+  manifest-controlled workspace names can no longer make the default
+  archive path escape the workspace root. (<gh-pr:96>)
+- `conda workspace import --from conda-project` now rejects external,
+  parent-traversing, absolute, drive-prefixed, or symlink-escaping
+  `env_spec` file references before reading them. (<gh-pr:97>)
+- `conda workspace unarchive` now rejects targets that already point to
+  a file, symlink, or non-empty directory. (<gh-pr:98>)
+- Non-git workspace archives now exclude common credential material by
+  default while keeping documented template files eligible unless users
+  exclude them explicitly. (<gh-pr:99>)
+- Bundled package cache priming during unarchive now requires a
+  verified archive receipt before trusting bundled package metadata.
+  (<gh-pr:100>)
+- Merged multi-platform lockfiles now validate conda package references
+  before writing, reject conflicting metadata for the same URL, and
+  require complete metadata under declared channels. (<gh-pr:104>)
 
 ### Fixed
 
@@ -35,12 +76,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   names for unnamed rich entries, and write lockfile package sections
   under the declared platform name while solving against the backing
   conda subdir. (<gh-pr:106>)
+- `conda workspace lock`, `sync`, and archive locking now resolve
+  workspace environments per target platform, so
+  `[target.<platform>.dependencies]` only applies to that platform's
+  solve. (<gh-issue:86>, <gh-pr:89>)
+- Multi-platform lockfile merges now preserve manifest-declared
+  environment channels as canonical, allowing platform fragments to
+  omit unused channels while preserving manifest order. (<gh-issue:88>,
+  <gh-pr:91>)
 - `conda workspace archive --receipt` now fails before writing an
   archive when archive filters would omit the workspace manifest or
   `conda.lock`, avoiding archive/receipt pairs that cannot verify.
   (<gh-pr:84>)
 - Archive receipts now deduplicate identical `noarch` package records
   that appear under multiple target platforms in `conda.lock`.
+  (<gh-pr:92>)
+- List-form task commands now preserve argument boundaries instead of
+  being converted into shell strings, templated task arguments are
+  quoted for string commands, and cache/display keys are stable across
+  string and list command forms. (<gh-pr:101>)
+- Imported anaconda-project task data fields are now quoted before
+  generating task commands, while explicit platform command fields are
+  preserved as authored. (<gh-pr:102>)
+- Task output caching now compares file digests when available before
+  reusing outputs, falling back to mtime and size for older cache
+  entries. (<gh-pr:103>)
 
 ## 0.6.0 — 2026-06-05
 
