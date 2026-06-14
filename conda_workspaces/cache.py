@@ -5,8 +5,8 @@ Cache entries are stored in a platform-appropriate directory via
 of the project root path. Within that, each task has a JSON file
 containing fingerprints of its inputs and outputs.
 
-A fast pre-check using ``(mtime, size)`` tuples avoids SHA-256
-hashing when files haven't been touched since the last run.
+SHA-256 digests are the authoritative file identity. ``mtime`` and
+``size`` are retained as metadata and for older cache entries.
 """
 
 from __future__ import annotations
@@ -121,8 +121,8 @@ def is_cached(
 
     1. A cache entry exists for the task.
     2. The command and env hashes match.
-    3. All input files match by ``(mtime, size)`` -- falling back to
-       SHA-256 if the fast check fails.
+    3. All input files match by SHA-256 digest, falling back to
+       ``(mtime, size)`` only for older entries without digests.
     4. All output files still exist and match.
     """
     cf = _cache_file(project_root, task_name)
@@ -160,10 +160,17 @@ def _files_match(cached: dict[str, Any], current: dict[str, Any]) -> bool:
         prev = cached.get(path)
         if prev is None:
             return False
-        if prev["mtime"] == cur["mtime"] and prev["size"] == cur["size"]:
+        prev_sha = prev.get("sha256")
+        cur_sha = cur.get("sha256")
+        if prev_sha is not None and cur_sha is not None:
+            if prev_sha != cur_sha or prev.get("size") != cur.get("size"):
+                return False
             continue
-        if prev["sha256"] != cur["sha256"]:
-            return False
+        if prev.get("mtime") == cur.get("mtime") and prev.get("size") == cur.get(
+            "size"
+        ):
+            continue
+        return False
     return True
 
 

@@ -8,6 +8,7 @@ from conda_workspaces.cache import (
     _expand_globs,
     _file_sha256,
     _file_stat,
+    _files_match,
     _fingerprint_files,
     is_cached,
     save_cache,
@@ -85,6 +86,39 @@ def test_fingerprint_files(tmp_path, paths, expected_keys):
 def test_fingerprint_missing_file():
     fp = _fingerprint_files(["/nonexistent/path"])
     assert len(fp) == 0
+
+
+@pytest.mark.parametrize(
+    ("cached", "current", "expected"),
+    [
+        pytest.param(
+            {"main.py": {"mtime": 1.0, "size": 2, "sha256": "old"}},
+            {"main.py": {"mtime": 1.0, "size": 2, "sha256": "new"}},
+            False,
+            id="same-stat-different-digest",
+        ),
+        pytest.param(
+            {"main.py": {"mtime": 1.0, "size": 2, "sha256": "same"}},
+            {"main.py": {"mtime": 2.0, "size": 2, "sha256": "same"}},
+            True,
+            id="same-digest-different-mtime",
+        ),
+        pytest.param(
+            {"main.py": {"mtime": 1.0, "size": 2}},
+            {"main.py": {"mtime": 1.0, "size": 2}},
+            True,
+            id="legacy-same-stat",
+        ),
+        pytest.param(
+            {"main.py": {"mtime": 1.0, "size": 2}},
+            {"main.py": {"mtime": 2.0, "size": 2}},
+            False,
+            id="legacy-mtime-change",
+        ),
+    ],
+)
+def test_files_match_compares_digests_when_available(cached, current, expected):
+    assert _files_match(cached, current) is expected
 
 
 def test_not_cached_initially(tmp_path):
