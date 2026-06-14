@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from conda.base.context import context
+from conda.utils import quote_for_shell
 from rich.console import Console
 from rich.tree import Tree
 
@@ -14,7 +15,7 @@ from ...exceptions import CondaWorkspacesError, TaskExecutionError
 from ...graph import resolve_execution_order
 from ...manifests import detect_and_parse_tasks
 from ...runner import SubprocessShell
-from ...template import render, render_list
+from ...template import render, render_command, render_list
 from .. import status
 
 if TYPE_CHECKING:
@@ -189,10 +190,16 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
         cmd = task.cmd
         if cmd is None:
             continue
-        if isinstance(cmd, list):
-            cmd = " ".join(cmd)
 
-        cmd = render(cmd, manifest_path=task_file, task_args=current_args)
+        if isinstance(cmd, list):
+            cmd = [
+                render(item, manifest_path=task_file, task_args=current_args)
+                for item in cmd
+            ]
+            display_cmd = quote_for_shell(*cmd)
+        else:
+            cmd = render_command(cmd, manifest_path=task_file, task_args=current_args)
+            display_cmd = cmd
 
         task_env = {
             k: render(v, manifest_path=task_file, task_args=current_args)
@@ -246,7 +253,7 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
                 name,
                 style="bold blue",
                 ellipsis=True,
-                detail=cmd if verbose else None,
+                detail=display_cmd if verbose else None,
             )
         task_count += 1
 
@@ -335,10 +342,16 @@ def _execute_dry_run(
         if cmd is None:
             continue
         if isinstance(cmd, list):
-            cmd = " ".join(cmd)
-        rendered_cmds[name] = render(
-            cmd, manifest_path=task_file, task_args=current_args
-        )
+            rendered_cmds[name] = quote_for_shell(
+                *(
+                    render(item, manifest_path=task_file, task_args=current_args)
+                    for item in cmd
+                )
+            )
+        else:
+            rendered_cmds[name] = render_command(
+                cmd, manifest_path=task_file, task_args=current_args
+            )
 
     if not quiet:
         tree = _build_dry_run_tree(target_name, tasks, rendered_cmds)
