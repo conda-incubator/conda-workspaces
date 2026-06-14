@@ -28,7 +28,7 @@ dependencies = [
   #
   # These are optional (gracefully skipped when absent):
   # "conda-pypi >=0.9.0",         # PyPI dependency support
-  # "conda-rattler-solver >=0.1.1",  # solver backend for PyPI deps
+  # "conda-rattler-solver >=0.0.6",  # solver backend for PyPI deps
   "jinja2 >=3.0",
   "packaging >=21.0",
   "platformdirs >=3.0",
@@ -108,7 +108,7 @@ python = ">=3.10"
 conda = ">=26.3"
 conda-lockfiles = ">=0.2.0"
 conda-pypi = ">=0.9.0"
-conda-rattler-solver = ">=0.1.1"
+conda-rattler-solver = ">=0.0.6"
 conda-spawn = ">=0.1.0"
 
 [tool.pixi.pypi-dependencies]
