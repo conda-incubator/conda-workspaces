@@ -265,6 +265,51 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         help="OIDC identity token to use for Sigstore signing.",
     )
 
+    attest_parser = sub.add_parser(
+        "attest",
+        help="Sign the workspace manifest and lockfile.",
+        add_help=False,
+    )
+    add_parser_help(attest_parser)
+    _accept_json_silently(attest_parser)
+    attest_parser.add_argument(
+        "--attestation",
+        type=Path,
+        default=None,
+        help=(
+            "Path for the Sigstore bundle sidecar (default: conda.lock.sigstore.json)."
+        ),
+    )
+    attest_parser.add_argument(
+        "--identity-token",
+        default=None,
+        help="OIDC identity token to use for Sigstore signing.",
+    )
+
+    verify_parser = sub.add_parser(
+        "verify",
+        help="Verify the workspace lockfile Sigstore attestation.",
+        add_help=False,
+    )
+    add_parser_help(verify_parser)
+    add_output_and_prompt_options(verify_parser)
+    verify_parser.add_argument(
+        "--attestation",
+        type=Path,
+        default=None,
+        help="Path to the Sigstore bundle sidecar (default: conda.lock.sigstore.json).",
+    )
+    verify_parser.add_argument(
+        "--cert-identity",
+        default=None,
+        help="Expected Sigstore certificate identity.",
+    )
+    verify_parser.add_argument(
+        "--cert-oidc-issuer",
+        default=None,
+        help="Expected Sigstore OIDC issuer.",
+    )
+
     export_parser = sub.add_parser(
         "export",
         help="Export a workspace environment to environment.yml / conda.lock / ...",
@@ -862,6 +907,14 @@ def _dispatch_workspace(args: argparse.Namespace, subcmd: str) -> int:
         from .workspace.lock import execute_lock
 
         return execute_lock(args)
+    elif subcmd == "attest":
+        from .workspace.attest import execute_attest
+
+        return execute_attest(args)
+    elif subcmd == "verify":
+        from .workspace.attest import execute_verify
+
+        return execute_verify(args)
     elif subcmd == "export":
         from .workspace.export import execute_export
 

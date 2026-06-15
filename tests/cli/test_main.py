@@ -34,6 +34,8 @@ def test_generate_task_parser_returns_parser() -> None:
         "init",
         "install",
         "lock",
+        "attest",
+        "verify",
         "list",
         "envs",
         "info",
@@ -157,6 +159,8 @@ def test_workspace_parser_args(
         ("init", "conda_workspaces.cli.workspace.init", "execute_init"),
         ("install", "conda_workspaces.cli.workspace.install", "execute_install"),
         ("lock", "conda_workspaces.cli.workspace.lock", "execute_lock"),
+        ("attest", "conda_workspaces.cli.workspace.attest", "execute_attest"),
+        ("verify", "conda_workspaces.cli.workspace.attest", "execute_verify"),
         ("list", "conda_workspaces.cli.workspace.list", "execute_list"),
         ("info", "conda_workspaces.cli.workspace.info", "execute_info"),
         ("add", "conda_workspaces.cli.workspace.add", "execute_add"),
@@ -169,6 +173,8 @@ def test_workspace_parser_args(
         "init",
         "install",
         "lock",
+        "attest",
+        "verify",
         "list",
         "info",
         "add",
@@ -241,11 +247,12 @@ def test_shell_accepts_environment_flag() -> None:
     "argv",
     [
         ["init", "--json"],
+        ["attest", "--json"],
         ["activate", "--json"],
         ["run", "--json", "--", "echo", "hi"],
         ["shell", "--json"],
     ],
-    ids=["init", "activate", "run", "shell"],
+    ids=["init", "attest", "activate", "run", "shell"],
 )
 def test_side_effect_subcommands_accept_json_silently(argv: list[str]) -> None:
     """Side-effect subcommands must tolerate ``--json`` without argparse errors.
@@ -332,6 +339,23 @@ def test_lock_subparser_sign() -> None:
     assert ns.identity_token == "token"
 
 
+def test_attest_subparser() -> None:
+    parser = generate_workspace_parser()
+    ns = parser.parse_args(
+        [
+            "attest",
+            "--attestation",
+            "conda.lock.sigstore.json",
+            "--identity-token",
+            "token",
+        ]
+    )
+
+    assert ns.subcmd == "attest"
+    assert ns.attestation == Path("conda.lock.sigstore.json")
+    assert ns.identity_token == "token"
+
+
 def test_install_subparser_verify() -> None:
     parser = generate_workspace_parser()
     ns = parser.parse_args(
@@ -350,6 +374,28 @@ def test_install_subparser_verify() -> None:
     assert ns.verify is True
     assert ns.cert_identity == "user@example.com"
     assert ns.cert_oidc_issuer == "https://issuer.example"
+
+
+def test_verify_subparser() -> None:
+    parser = generate_workspace_parser()
+    ns = parser.parse_args(
+        [
+            "verify",
+            "--attestation",
+            "conda.lock.sigstore.json",
+            "--cert-identity",
+            "user@example.com",
+            "--cert-oidc-issuer",
+            "https://issuer.example",
+            "--json",
+        ]
+    )
+
+    assert ns.subcmd == "verify"
+    assert ns.attestation == Path("conda.lock.sigstore.json")
+    assert ns.cert_identity == "user@example.com"
+    assert ns.cert_oidc_issuer == "https://issuer.example"
+    assert ns.json is True
 
 
 def test_unarchive_subparser_registered() -> None:

@@ -1,8 +1,9 @@
 # Workspace attestation reference
 
 This page describes the Sigstore bundle written by
-`conda workspace lock --sign` and verified by
-`conda workspace install --locked --verify`.
+`conda workspace attest` and verified by `conda workspace verify`.
+`conda workspace lock --sign` is the compact form that solves the
+lockfile and immediately writes the same attestation.
 
 Workspace attestations are sidecar JSON Sigstore bundles. The bundle
 contains a DSSE-signed [in-toto Statement v1][in-toto-statement] payload
@@ -21,8 +22,8 @@ identity.
 | Source schema | [`schema/workspace-attestation-1.schema.json`](https://github.com/conda-incubator/conda-workspaces/blob/main/schema/workspace-attestation-1.schema.json) |
 | Statement type | `https://in-toto.io/Statement/v1` |
 | Predicate type | `https://conda-incubator.github.io/conda-workspaces/workspace-attestation-1.schema.json` |
-| Producer | `conda workspace lock --sign` |
-| Consumers | `conda workspace install --locked --verify`, `conda workspace unarchive --verify` |
+| Producers | `conda workspace attest`, `conda workspace lock --sign` |
+| Consumers | `conda workspace verify`, `conda workspace install --locked --verify`, `conda workspace unarchive --verify` |
 
 ## File naming
 
@@ -34,9 +35,26 @@ conda.lock
 conda.lock.sigstore.json
 ```
 
-Pass `--attestation PATH` to `conda workspace lock --sign` or
+Pass `--attestation PATH` to `conda workspace attest`,
+`conda workspace lock --sign`, `conda workspace verify`, or
 `conda workspace install --verify` when the bundle is stored somewhere
 else.
+
+## Lifecycle
+
+The explicit lifecycle is:
+
+```bash
+conda workspace lock
+conda workspace attest
+conda workspace verify \
+  --cert-identity user@example.com \
+  --cert-oidc-issuer https://issuer.example
+```
+
+Use `conda workspace lock --sign` when solving and signing should happen
+in one step. Use `conda workspace install --locked --verify` when
+verification should gate installation from an existing lockfile.
 
 ## Statement structure
 
@@ -82,7 +100,8 @@ verification material in one JSON sidecar.
 
 ## Verification
 
-`conda workspace install --locked --verify` verifies in this order:
+`conda workspace verify` and `conda workspace install --locked --verify`
+verify in this order:
 
 1. Load the Sigstore bundle from `--attestation` or
    `conda.lock.sigstore.json`.
@@ -93,7 +112,7 @@ verification material in one JSON sidecar.
    version.
 5. Verify the current manifest and `conda.lock` SHA-256 digests against
    the Statement subjects.
-6. Continue with locked installation.
+6. For `install --locked --verify`, continue with locked installation.
 
 `conda workspace unarchive --verify` verifies the bundled
 `conda.lock.sigstore.json` inside a temporary staging directory before
@@ -116,6 +135,7 @@ Workspace attestations and archive receipts solve different problems.
   files, and lockfile package inventory, but does not prove who created
   the receipt.
 
-Use `--sign` / `--verify` when signer provenance matters. Use
+Use `attest` / `verify` when signer provenance matters. Use
+`lock --sign` when solving and signing should be a single command. Use
 `--receipt` when you need an external integrity record for exact archive
 bytes.

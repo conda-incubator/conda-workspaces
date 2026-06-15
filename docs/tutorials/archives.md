@@ -275,8 +275,10 @@ To guard against this:
 - Obtain archives only from trusted sources.
 - Use `--receipt` and distribute the receipt through a separate trusted
   channel when bundled packages should prime a conda package cache.
-- Use `conda workspace lock --sign` before archiving and
-  `conda workspace unarchive --verify` when signer provenance matters.
+- Use `conda workspace attest` after locking, or
+  `conda workspace lock --sign` to solve and sign in one step, before
+  archiving. Use `conda workspace unarchive --verify` when signer
+  provenance matters during extraction.
 - Use `conda workspace install --locked` so the solver does not
   silently add packages beyond what the lockfile specifies.
 
