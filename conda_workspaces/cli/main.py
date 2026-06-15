@@ -164,6 +164,28 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
             " the manifest."
         ),
     )
+    install_parser.add_argument(
+        "--verify",
+        action="store_true",
+        default=False,
+        help="Verify the lockfile Sigstore attestation before installing.",
+    )
+    install_parser.add_argument(
+        "--attestation",
+        type=Path,
+        default=None,
+        help="Path to the Sigstore bundle sidecar (default: conda.lock.sigstore.json).",
+    )
+    install_parser.add_argument(
+        "--cert-identity",
+        default=None,
+        help="Expected Sigstore certificate identity for --verify.",
+    )
+    install_parser.add_argument(
+        "--cert-oidc-issuer",
+        default=None,
+        help="Expected Sigstore OIDC issuer for --verify.",
+    )
 
     lock_parser = sub.add_parser(
         "lock",
@@ -222,6 +244,25 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
             " (e.g. --merge 'conda.lock.*'). Cannot be combined with"
             " --environment, --platform, --skip-unsolvable, or --output."
         ),
+    )
+    lock_parser.add_argument(
+        "--sign",
+        action="store_true",
+        default=False,
+        help="Write a Sigstore DSSE attestation for the generated lockfile.",
+    )
+    lock_parser.add_argument(
+        "--attestation",
+        type=Path,
+        default=None,
+        help=(
+            "Path for the Sigstore bundle sidecar (default: <lockfile>.sigstore.json)."
+        ),
+    )
+    lock_parser.add_argument(
+        "--identity-token",
+        default=None,
+        help="OIDC identity token to use for Sigstore signing.",
     )
 
     export_parser = sub.add_parser(
@@ -575,6 +616,17 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
             " Defaults to <archive>.receipt.json when PATH is omitted."
         ),
     )
+    archive_parser.add_argument(
+        "--sign",
+        action="store_true",
+        default=False,
+        help="Include a Sigstore attestation for conda.lock in the archive.",
+    )
+    archive_parser.add_argument(
+        "--identity-token",
+        default=None,
+        help="OIDC identity token to use for Sigstore signing.",
+    )
 
     unarchive_parser = sub.add_parser(
         "unarchive",
@@ -646,6 +698,22 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         default=False,
         help="Require package records verified by --receipt to include SHA-256.",
+    )
+    unarchive_parser.add_argument(
+        "--verify",
+        action="store_true",
+        default=False,
+        help="Verify the bundled conda.lock Sigstore attestation before extraction.",
+    )
+    unarchive_parser.add_argument(
+        "--cert-identity",
+        default=None,
+        help="Expected Sigstore certificate identity for --verify.",
+    )
+    unarchive_parser.add_argument(
+        "--cert-oidc-issuer",
+        default=None,
+        help="Expected Sigstore OIDC issuer for --verify.",
     )
 
     quickstart_parser = sub.add_parser(

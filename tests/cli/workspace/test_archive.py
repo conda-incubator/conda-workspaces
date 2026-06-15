@@ -24,7 +24,7 @@ from conda_workspaces.cli.workspace.archive import (
     runtime_prefix_relative_path,
     scan_prefix_references,
 )
-from conda_workspaces.exceptions import ArchiveError
+from conda_workspaces.exceptions import ArchiveError, AttestationError
 from conda_workspaces.models import ArchiveConfig
 from conda_workspaces.receipts import ArchiveReceipt
 
@@ -40,6 +40,8 @@ _ARCHIVE_DEFAULTS = {
     "lock": False,
     "exclude": None,
     "receipt": None,
+    "sign": False,
+    "identity_token": None,
     "dry_run": False,
     "json": False,
 }
@@ -55,6 +57,9 @@ _UNARCHIVE_DEFAULTS = {
     "dest": None,
     "receipt": None,
     "require_sha256": False,
+    "verify": False,
+    "cert_identity": None,
+    "cert_oidc_issuer": None,
     "dry_run": False,
     "json": False,
 }
@@ -182,6 +187,53 @@ def test_receipt_environment_prefixes_normalizes_windows_external_prefix() -> No
     )
 
     assert prefixes == {"runtime": "D:/runtime"}
+
+
+def test_execute_archive_sign_includes_attestation_sidecar(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "signed.tar.gz"
+
+    def fake_write_workspace_attestation(**kwargs):
+        path = archive_workspace / "conda.lock.sigstore.json"
+        path.write_text('{"bundle":true}\n', encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(
+        "conda_workspaces.attestations.write_workspace_attestation",
+        fake_write_workspace_attestation,
+    )
+
+    execute_archive(
+        make_args(_ARCHIVE_DEFAULTS, output=archive, sign=True),
+        console=Console(file=StringIO(), width=200, highlight=False),
+    )
+
+    with tarfile.open(archive, "r:gz") as tf:
+        names = set(tf.getnames())
+
+    assert "conda.lock.sigstore.json" in names
+
+
+def test_execute_archive_identity_token_requires_sign(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+
+    with pytest.raises(ArchiveError, match="requires --sign"):
+        execute_archive(
+            make_args(
+                _ARCHIVE_DEFAULTS,
+                output=tmp_path / "archive.tar.gz",
+                identity_token="token",
+            ),
+            console=Console(file=StringIO(), width=200, highlight=False),
+        )
 
 
 @pytest.fixture
@@ -478,6 +530,48 @@ def test_execute_archive_receipt_requires_bound_files_in_archive(
     assert not ArchiveReceipt.default_path(archive).exists()
 
 
+@pytest.mark.parametrize(
+    ("exclude", "match"),
+    [
+        ("conda.toml", "workspace manifest"),
+        ("conda.lock", "workspace lockfile"),
+    ],
+    ids=["manifest", "lockfile"],
+)
+def test_execute_archive_sign_requires_bound_files_in_archive(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    exclude: str,
+    match: str,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "test.tar.gz"
+    console = Console(file=StringIO(), width=200, highlight=False)
+    calls: list[object] = []
+
+    def fake_write_workspace_attestation(**kwargs):
+        calls.append(kwargs)
+        return archive_workspace / "conda.lock.sigstore.json"
+
+    monkeypatch.setattr(
+        "conda_workspaces.attestations.write_workspace_attestation",
+        fake_write_workspace_attestation,
+    )
+
+    args = make_args(
+        _ARCHIVE_DEFAULTS,
+        output=archive,
+        exclude=[exclude],
+        sign=True,
+    )
+    with pytest.raises(ArchiveError, match=match):
+        execute_archive(args, console=console)
+
+    assert calls == []
+    assert not archive.exists()
+
+
 def test_execute_unarchive_basic(
     archive_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -675,6 +769,67 @@ def test_execute_unarchive_require_sha256_requires_receipt(
                 require_sha256=True,
             ),
             console=console,
+        )
+
+
+def test_execute_unarchive_verify_checks_attestation(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    (archive_workspace / "conda.lock.sigstore.json").write_text(
+        '{"bundle":true}\n',
+        encoding="utf-8",
+    )
+    archive = tmp_path / "signed.tar.gz"
+    create_archive(archive_workspace, archive, ArchiveConfig())
+    verify_calls: list[dict[str, object]] = []
+
+    def fake_verify_workspace_attestation(**kwargs):
+        verify_calls.append(kwargs)
+
+    monkeypatch.setattr(
+        "conda_workspaces.attestations.verify_workspace_attestation",
+        fake_verify_workspace_attestation,
+    )
+
+    execute_unarchive(
+        make_args(
+            _UNARCHIVE_DEFAULTS,
+            archive_path=archive,
+            target=tmp_path / "extracted",
+            verify=True,
+            cert_identity="user@example.com",
+            cert_oidc_issuer="https://issuer.example",
+        ),
+        console=Console(file=StringIO(), width=200, highlight=False),
+    )
+
+    assert len(verify_calls) == 1
+    assert verify_calls[0]["root"].name.startswith(".extracted.verify-")
+    assert (tmp_path / "extracted" / "conda.lock.sigstore.json").is_file()
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"cert_identity": "user@example.com"},
+        {"cert_oidc_issuer": "https://issuer.example"},
+    ],
+    ids=["identity", "issuer"],
+)
+def test_execute_unarchive_verification_options_require_verify(
+    tmp_path: Path,
+    kwargs: dict[str, object],
+) -> None:
+    with pytest.raises(AttestationError, match="require --verify"):
+        execute_unarchive(
+            make_args(
+                _UNARCHIVE_DEFAULTS,
+                archive_path=tmp_path / "archive.tar.gz",
+                **kwargs,
+            ),
+            console=Console(file=StringIO(), width=200, highlight=False),
         )
 
 

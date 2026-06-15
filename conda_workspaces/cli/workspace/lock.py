@@ -30,6 +30,12 @@ def execute_lock(args: argparse.Namespace, *, console: Console | None = None) ->
     skip_unsolvable: bool = bool(getattr(args, "skip_unsolvable", False))
     merge_patterns: list[str] | None = getattr(args, "merge", None) or None
     output_path: Path | None = getattr(args, "output", None)
+    sign: bool = bool(getattr(args, "sign", False))
+    attestation_path: Path | None = getattr(args, "attestation", None)
+    identity_token: str | None = getattr(args, "identity_token", None)
+
+    if (attestation_path is not None or identity_token is not None) and not sign:
+        raise CondaValueError("--attestation and --identity-token require --sign.")
 
     if merge_patterns:
         if env_name or requested_platforms or skip_unsolvable or output_path:
@@ -71,8 +77,19 @@ def execute_lock(args: argparse.Namespace, *, console: Console | None = None) ->
         )
         for fragment in fragments:
             console.print(f"  [dim]<-[/dim] {fragment}")
-        merge_lockfiles(fragments, ctx)
+        lock_path = merge_lockfiles(fragments, ctx)
         console.print("[bold cyan]Updated[/bold cyan] [bold]conda.lock[/bold]")
+        if sign:
+            from ...attestations import write_workspace_attestation
+
+            written = write_workspace_attestation(
+                root=ctx.root,
+                manifest_path=Path(config.manifest_path),
+                lockfile_path=lock_path,
+                bundle_path=attestation_path,
+                identity_token=identity_token,
+            )
+            console.print(f"[bold cyan]Signed[/bold cyan] [bold]{written.name}[/bold]")
         return 0
 
     if env_name:
@@ -116,7 +133,7 @@ def execute_lock(args: argparse.Namespace, *, console: Console | None = None) ->
     console.print(
         f"[bold blue]Updating[/bold blue] [bold]{updating_label}[/bold][dim]...[/dim]"
     )
-    generate_lockfile(
+    lock_path = generate_lockfile(
         ctx,
         resolved_envs,
         config=config,
@@ -128,5 +145,16 @@ def execute_lock(args: argparse.Namespace, *, console: Console | None = None) ->
     )
     target_label = output_path.name if output_path is not None else "conda.lock"
     console.print(f"[bold cyan]Updated[/bold cyan] [bold]{target_label}[/bold]")
+    if sign:
+        from ...attestations import write_workspace_attestation
+
+        written = write_workspace_attestation(
+            root=ctx.root,
+            manifest_path=Path(config.manifest_path),
+            lockfile_path=lock_path,
+            bundle_path=attestation_path,
+            identity_token=identity_token,
+        )
+        console.print(f"[bold cyan]Signed[/bold cyan] [bold]{written.name}[/bold]")
 
     return 0

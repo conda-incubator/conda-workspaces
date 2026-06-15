@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
 from conda_workspaces.cli.workspace.install import execute_install
-from conda_workspaces.exceptions import LockfileNotFoundError, LockfileStaleError
+from conda_workspaces.exceptions import (
+    AttestationError,
+    LockfileNotFoundError,
+    LockfileStaleError,
+)
 from conda_workspaces.models import LockfileStatus
 
 from ..conftest import make_args
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 _DEFAULTS = {
     "file": None,
@@ -24,6 +25,10 @@ _DEFAULTS = {
     "locked": False,
     "frozen": False,
     "no_lock": False,
+    "verify": False,
+    "attestation": None,
+    "cert_identity": None,
+    "cert_oidc_issuer": None,
 }
 
 
@@ -187,6 +192,83 @@ def test_install_locked_validates_freshness(
     args = make_args(_DEFAULTS, locked=True)
     with pytest.raises(LockfileStaleError):
         execute_install(args)
+
+
+def test_install_locked_verify_checks_attestation_before_install(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.lockfile_status",
+        lambda ctx, config: LockfileStatus(status=LockfileStatus.UP_TO_DATE),
+    )
+    locked_calls: list[str] = []
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.install_from_lockfile",
+        lambda ctx, name: locked_calls.append(name),
+    )
+    verify_calls: list[dict[str, object]] = []
+
+    def fake_verify_workspace_attestation(**kwargs):
+        verify_calls.append(kwargs)
+
+    monkeypatch.setattr(
+        "conda_workspaces.attestations.verify_workspace_attestation",
+        fake_verify_workspace_attestation,
+    )
+
+    result = execute_install(
+        make_args(
+            _DEFAULTS,
+            locked=True,
+            verify=True,
+            cert_identity="user@example.com",
+            cert_oidc_issuer="https://issuer.example",
+        )
+    )
+
+    assert result == 0
+    assert locked_calls
+    assert len(verify_calls) == 1
+    assert verify_calls[0]["root"] == pixi_workspace
+    assert verify_calls[0]["manifest_path"] == pixi_workspace / "pixi.toml"
+    assert verify_calls[0]["lockfile_path"] == pixi_workspace / "conda.lock"
+
+
+def test_install_verify_requires_locked_or_frozen(pixi_workspace: Path, monkeypatch):
+    monkeypatch.chdir(pixi_workspace)
+
+    with pytest.raises(AttestationError, match="requires --locked or --frozen"):
+        execute_install(
+            make_args(
+                _DEFAULTS,
+                verify=True,
+                cert_identity="user@example.com",
+                cert_oidc_issuer="https://issuer.example",
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"attestation": Path("conda.lock.sigstore.json")},
+        {"cert_identity": "user@example.com"},
+        {"cert_oidc_issuer": "https://issuer.example"},
+    ],
+    ids=["attestation", "identity", "issuer"],
+)
+def test_install_verification_options_require_verify(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kwargs: dict[str, object],
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+
+    with pytest.raises(AttestationError, match="require --verify"):
+        execute_install(make_args(_DEFAULTS, **kwargs))
 
 
 def test_install_default_uses_lockfile_when_satisfiable(

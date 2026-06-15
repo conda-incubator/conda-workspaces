@@ -307,6 +307,51 @@ def test_archive_subparser_receipt(args: list[str], expected: object) -> None:
     assert ns.receipt == expected
 
 
+def test_archive_subparser_sign() -> None:
+    parser = generate_workspace_parser()
+    ns = parser.parse_args(["archive", "-o", "out.tar.gz", "--sign"])
+
+    assert ns.sign is True
+
+
+def test_lock_subparser_sign() -> None:
+    parser = generate_workspace_parser()
+    ns = parser.parse_args(
+        [
+            "lock",
+            "--sign",
+            "--attestation",
+            "conda.lock.sigstore.json",
+            "--identity-token",
+            "token",
+        ]
+    )
+
+    assert ns.sign is True
+    assert ns.attestation == Path("conda.lock.sigstore.json")
+    assert ns.identity_token == "token"
+
+
+def test_install_subparser_verify() -> None:
+    parser = generate_workspace_parser()
+    ns = parser.parse_args(
+        [
+            "install",
+            "--locked",
+            "--verify",
+            "--cert-identity",
+            "user@example.com",
+            "--cert-oidc-issuer",
+            "https://issuer.example",
+        ]
+    )
+
+    assert ns.locked is True
+    assert ns.verify is True
+    assert ns.cert_identity == "user@example.com"
+    assert ns.cert_oidc_issuer == "https://issuer.example"
+
+
 def test_unarchive_subparser_registered() -> None:
     parser = generate_workspace_parser()
     ns = parser.parse_args(
@@ -344,3 +389,22 @@ def test_unarchive_subparser_receipt() -> None:
 
     assert ns.receipt == Path("project.receipt.json")
     assert ns.require_sha256 is True
+
+
+def test_unarchive_subparser_verify() -> None:
+    parser = generate_workspace_parser()
+    ns = parser.parse_args(
+        [
+            "unarchive",
+            "project.tar.gz",
+            "--verify",
+            "--cert-identity",
+            "user@example.com",
+            "--cert-oidc-issuer",
+            "https://issuer.example",
+        ]
+    )
+
+    assert ns.verify is True
+    assert ns.cert_identity == "user@example.com"
+    assert ns.cert_oidc_issuer == "https://issuer.example"

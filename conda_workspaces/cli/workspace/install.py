@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from rich.console import Console
 
-from ...exceptions import LockfileNotFoundError, LockfileStaleError
+from ...exceptions import AttestationError, LockfileNotFoundError, LockfileStaleError
 from ...lockfile import install_from_lockfile, lockfile_path, lockfile_status
 from ...models import LockfileStatus
 from .. import status
@@ -25,7 +25,6 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
     """Install (create/update) workspace environments."""
     if console is None:
         console = Console(highlight=False)
-    config, ctx = workspace_context_from_args(args)
 
     env_name = getattr(args, "environment", None)
     force = getattr(args, "force_reinstall", False)
@@ -35,8 +34,32 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
     no_lock = getattr(args, "no_lock", False)
     prefix = getattr(args, "prefix", None)
     target_prefix_override = getattr(args, "target_prefix_override", None)
+    verify = getattr(args, "verify", False)
+    verification_options = (
+        getattr(args, "attestation", None) is not None
+        or getattr(args, "cert_identity", None) is not None
+        or getattr(args, "cert_oidc_issuer", None) is not None
+    )
+
+    if verification_options and not verify:
+        raise AttestationError(
+            "--attestation, --cert-identity, and --cert-oidc-issuer require --verify."
+        )
+
+    if verify and not (locked or frozen):
+        raise AttestationError(
+            "--verify requires --locked or --frozen.",
+            hints=[
+                "Pass --locked --verify to install only after freshness and"
+                " attestation verification.",
+            ],
+        )
+
+    config, ctx = workspace_context_from_args(args)
 
     if frozen:
+        if verify:
+            verify_lockfile_attestation(args, config, ctx, console)
         return install_from_lockfile_all(
             ctx,
             config,
@@ -57,6 +80,8 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
                 lockfile_path(ctx),
                 reason=lock.reason,
             )
+        if verify:
+            verify_lockfile_attestation(args, config, ctx, console)
         return install_from_lockfile_all(
             ctx,
             config,
@@ -149,3 +174,27 @@ def install_from_lockfile_all(
             status.message(console, "Installed", "environment", name)
 
     return 0
+
+
+def verify_lockfile_attestation(
+    args: argparse.Namespace,
+    config: WorkspaceConfig,
+    ctx: WorkspaceContext,
+    console: Console,
+) -> None:
+    """Verify the current workspace lockfile attestation before install."""
+    from ...attestations import trust_identities_from_cli, verify_workspace_attestation
+
+    identities = trust_identities_from_cli(
+        getattr(args, "cert_identity", None),
+        getattr(args, "cert_oidc_issuer", None),
+    )
+    bundle_path: Path | None = getattr(args, "attestation", None)
+    verify_workspace_attestation(
+        root=ctx.root,
+        manifest_path=Path(config.manifest_path),
+        lockfile_path=lockfile_path(ctx),
+        bundle_path=bundle_path,
+        identities=identities,
+    )
+    console.print("[bold cyan]Verified[/bold cyan] [bold]lockfile attestation[/bold]")

@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://conda-incubator.github.io/conda-workspaces/workspace-attestation-1.schema.json",
+  "title": "conda-workspaces workspace attestation v1",
+  "type": "object",
+  "required": ["_type", "subject", "predicateType", "predicate"],
+  "properties": {
+    "_type": {
+      "const": "https://in-toto.io/Statement/v1"
+    },
+    "subject": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "digest"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "digest": {
+            "type": "object",
+            "required": ["sha256"],
+            "properties": {
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{64}$"
+              }
+            }
+          }
+        }
+      }
+    },
+    "predicateType": {
+      "const": "https://conda-incubator.github.io/conda-workspaces/workspace-attestation-1.schema.json"
+    },
+    "predicate": {
+      "type": "object",
+      "required": ["version", "workspace", "manifest", "lockfile"],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "workspace": {
+          "type": "object",
+          "required": ["manifest", "lockfile"],
+          "properties": {
+            "manifest": {
+              "type": "string",
+              "minLength": 1
+            },
+            "lockfile": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "manifest": {
+          "type": "object",
+          "required": ["format"],
+          "properties": {
+            "format": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "lockfile": {
+          "type": "object",
+          "required": ["format"],
+          "properties": {
+            "format": {
+              "const": "conda-workspaces-lock-v1"
+            }
+          }
+        }
+      }
+    }
+  }
+}

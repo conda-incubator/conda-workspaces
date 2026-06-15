@@ -19,6 +19,9 @@ _DEFAULTS = {
     "skip_unsolvable": False,
     "merge": None,
     "output": None,
+    "sign": False,
+    "attestation": None,
+    "identity_token": None,
 }
 
 
@@ -168,6 +171,47 @@ def test_lock_forwards_output_path(
     result = execute_lock(make_args(_DEFAULTS, output=target))
     assert result == 0
     assert capture_generate_lockfile[0]["output_path"] == target
+
+
+def test_lock_signs_generated_lockfile(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capture_generate_lockfile: list[dict],
+) -> None:
+    """``--sign`` writes an attestation for the generated lockfile path."""
+    monkeypatch.chdir(pixi_workspace)
+    attestation = pixi_workspace / "custom.sigstore.json"
+    calls: list[dict[str, object]] = []
+
+    def fake_write_workspace_attestation(**kwargs):
+        calls.append(kwargs)
+        return attestation
+
+    monkeypatch.setattr(
+        "conda_workspaces.attestations.write_workspace_attestation",
+        fake_write_workspace_attestation,
+    )
+
+    result = execute_lock(
+        make_args(
+            _DEFAULTS,
+            sign=True,
+            attestation=attestation,
+            identity_token="token",
+        )
+    )
+
+    assert result == 0
+    assert len(capture_generate_lockfile) == 1
+    assert calls == [
+        {
+            "root": pixi_workspace,
+            "manifest_path": pixi_workspace / "pixi.toml",
+            "lockfile_path": pixi_workspace / "conda.lock",
+            "bundle_path": attestation,
+            "identity_token": "token",
+        }
+    ]
 
 
 def test_lock_merge_dispatches_to_merge_lockfiles(

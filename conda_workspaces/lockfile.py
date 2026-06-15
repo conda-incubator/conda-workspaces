@@ -47,7 +47,7 @@ import sys
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from conda.models.dist import Dist
 from conda.models.version import VersionSpec
@@ -626,7 +626,7 @@ class CondaLockLoader(EnvironmentSpecBase):
                     explicit_packages=list(env.explicit_packages),
                     external_packages=dict(env.external_packages),
                 )
-            validate_urls(validation_env, FORMAT)
+            validate_urls(cast("Environment", validation_env), FORMAT)
 
             if env_name not in environments:
                 environments[env_name] = {
@@ -778,7 +778,10 @@ def generate_lockfile(
 
     path = output_path if output_path is not None else lockfile_path(ctx)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(multiplatform_export(envs), encoding="utf-8")
+    path.write_text(
+        multiplatform_export(cast("Iterable[Environment]", envs)),
+        encoding="utf-8",
+    )
     return path
 
 

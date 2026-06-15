@@ -18,7 +18,7 @@ from ...archive import (
     runtime_prefix_relative_path,
     scan_prefix_references,
 )
-from ...exceptions import ArchiveError
+from ...exceptions import ArchiveError, AttestationError
 from .. import status
 
 if TYPE_CHECKING:
@@ -77,6 +77,11 @@ def execute_archive(
     if console is None:
         console = Console(highlight=False)
 
+    if getattr(args, "identity_token", None) is not None and not getattr(
+        args, "sign", False
+    ):
+        raise ArchiveError("--identity-token requires --sign.")
+
     if args.lock:
         status.message(
             console,
@@ -93,6 +98,8 @@ def execute_archive(
         bundle=args.bundle,
         exclude=tuple(args.exclude or ()),
         receipt=getattr(args, "receipt", None),
+        sign=getattr(args, "sign", False),
+        identity_token=getattr(args, "identity_token", None),
     )
 
     if args.lock:
@@ -100,6 +107,13 @@ def execute_archive(
     status.message(console, "Created", "archive", str(archive.path))
     if archive.receipt_path is not None:
         status.message(console, "Created", "receipt", str(archive.receipt_path))
+    if archive.workspace_attestation_path is not None:
+        status.message(
+            console,
+            "Created",
+            "attestation",
+            str(archive.workspace_attestation_path),
+        )
     return 0
 
 
@@ -156,6 +170,24 @@ def execute_unarchive(
         args.archive_path,
         receipt=getattr(args, "receipt", None),
     )
+    verify_attestation = getattr(args, "verify", False)
+    verification_options = (
+        getattr(args, "cert_identity", None) is not None
+        or getattr(args, "cert_oidc_issuer", None) is not None
+    )
+    if verification_options and not verify_attestation:
+        raise AttestationError(
+            "--cert-identity and --cert-oidc-issuer require --verify."
+        )
+
+    trusted_identities = ()
+    if verify_attestation:
+        from ...attestations import trust_identities_from_cli
+
+        trusted_identities = trust_identities_from_cli(
+            getattr(args, "cert_identity", None),
+            getattr(args, "cert_oidc_issuer", None),
+        )
     status.message(
         console,
         "Extracting",
@@ -166,34 +198,49 @@ def execute_unarchive(
     )
 
     if args.install:
-        result = archive.install(
+        install_result = archive.install(
             target=args.target,
             environment=getattr(args, "environment", None),
             prefix=getattr(args, "prefix", None),
             dest=getattr(args, "dest", None),
             require_sha256=getattr(args, "require_sha256", False),
             prime_cache=not args.no_install,
+            verify_attestation=verify_attestation,
+            trusted_identities=trusted_identities,
             install_handler=install_from_archive_cli(console),
         )
+        result = install_result
     else:
         result = archive.extract(
             target=args.target,
             require_sha256=getattr(args, "require_sha256", False),
             prime_cache=not args.no_install,
+            verify_attestation=verify_attestation,
+            trusted_identities=trusted_identities,
         )
 
     if result.verified:
         status.message(console, "Verified", "archive", str(archive.path.name))
     status.message(console, "Extracted", "archive", str(result.target))
-    if result.verified:
+    if result.receipt_path is not None:
         status.message(console, "Verified", "receipt", str(result.receipt_path))
+    if result.attestation_verified:
+        status.message(
+            console,
+            "Verified",
+            "attestation",
+            str(result.attestation_path),
+        )
 
     if result.info["has_packages"]:
         console.print(
             f"  Archive includes {result.info['package_count']} bundled packages"
         )
         if result.cache_priming_skipped:
-            console.print("  Skipping package cache priming without verified receipt")
+            console.print(
+                "  Skipping package cache priming without verified receipt"
+                " or attestation"
+            )
         elif result.primed_packages > 0:
             status.message(
                 console,
@@ -205,17 +252,17 @@ def execute_unarchive(
 
     if args.install:
         if (
-            result.return_code == 0
-            and result.install_prefix is not None
-            and result.runtime_prefix is not None
+            install_result.return_code == 0
+            and install_result.install_prefix is not None
+            and install_result.runtime_prefix is not None
         ):
             warn_staging_prefix_references(
                 console,
-                install_prefix=result.install_prefix,
-                runtime_prefix=result.runtime_prefix,
-                matches=result.prefix_reference_matches,
-                truncated=result.prefix_reference_matches_truncated,
+                install_prefix=install_result.install_prefix,
+                runtime_prefix=install_result.runtime_prefix,
+                matches=install_result.prefix_reference_matches,
+                truncated=install_result.prefix_reference_matches_truncated,
             )
-        return result.return_code
+        return install_result.return_code
 
     return 0
