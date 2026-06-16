@@ -845,9 +845,25 @@ conda workspace unarchive my-project.tar.zst --receipt --target ./verified
 
 ### Workspace attestations
 
-Archive receipts answer "does this archive match the integrity record?"
-Workspace attestations answer "did a trusted Sigstore identity sign this
-manifest and lockfile?"
+In conda-workspaces, `conda.lock` is the installation authority for
+reproducible workflows. It records the resolved dependency graph,
+platform-specific package selections, artifact URLs, and package
+digests that `conda workspace install --locked` consumes without
+re-solving. Archives and bundled offline packages also derive their
+package inventory from that same lockfile.
+
+That makes the lockfile more than a cache. If a lockfile is changed,
+the manifest can still look reasonable while the installed package set
+changes underneath it. Package hashes can prove downloaded bytes match
+the lockfile, and archive receipts can prove an archive matches an
+integrity record, but neither answers who produced or approved the
+resolved dependency graph.
+
+Workspace attestations add that missing provenance layer. They bind the
+workspace manifest and `conda.lock` to a Sigstore signing identity, so a
+receiver can require "this exact manifest was resolved into this exact
+lockfile by the release workflow or maintainer identity I trust" before
+installing, extracting, or priming a package cache.
 
 Use `conda workspace lock --sign` when a release job should solve the
 workspace and immediately sign the resulting `conda.lock`. Use

@@ -8,6 +8,11 @@ to gate installation.
 Workspace attestations are useful when a workspace moves between systems
 or people and the receiver needs to know that a trusted identity signed
 the exact `conda.toml` and `conda.lock` they are about to install.
+The lockfile is the important part: it is the resolved dependency graph
+that locked installs consume without asking the solver to make a new
+decision. Signing the manifest and lockfile together gives downstream
+jobs a way to verify that the dependency resolution they are installing
+was produced by the expected maintainer or CI identity.
 
 ## Prerequisites
 

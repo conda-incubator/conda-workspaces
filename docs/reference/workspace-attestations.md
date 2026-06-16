@@ -10,6 +10,13 @@ contains a DSSE-signed [in-toto Statement v1][in-toto-statement] payload
 that binds the workspace manifest and `conda.lock` to the signing
 identity.
 
+The lockfile is attested because it is the resolved dependency decision
+used by locked installs and archive package inventories. Conda package
+hashes and archive receipts can verify integrity against a lockfile, but
+they do not identify the actor or workflow that created the lockfile.
+The Sigstore identity policy supplied during verification fills that
+gap.
+
 [in-toto-statement]: https://github.com/in-toto/attestation/blob/main/spec/v1/statement.md
 
 For a first walkthrough, see
@@ -151,7 +158,7 @@ which signer should be accepted for that same manifest.
 Workspace attestations and archive receipts solve different problems.
 
 - A workspace attestation proves that a trusted Sigstore identity signed
-  a specific manifest and lockfile.
+  the manifest and lockfile that authorize a resolved package set.
 - An archive receipt binds exact archive bytes, extracted workspace
   files, and lockfile package inventory, but does not prove who created
   the receipt.

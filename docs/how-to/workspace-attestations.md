@@ -3,6 +3,12 @@
 Use these recipes when you already have a workspace and want to add
 Sigstore provenance to its manifest and `conda.lock`.
 
+Lockfiles are the handoff point for reproducible installs: they decide
+which package artifacts will be installed after solving is skipped.
+Attest a lockfile when another job, machine, or person should be able to
+verify not only that the file is intact, but that it was produced or
+approved by a Sigstore identity they trust.
+
 ## Install signing support
 
 The conda package keeps Sigstore optional. Install it next to
