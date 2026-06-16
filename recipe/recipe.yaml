@@ -41,6 +41,7 @@ requirements:
   run_constraints:
     - conda-pypi >=0.9.0
     - conda-rattler-solver >=0.0.6
+    - sigstore >=4.0
 
 tests:
   - python:
@@ -67,6 +68,7 @@ about:
     Optional dependencies for additional features:
     - conda-pypi: PyPI dependency resolution and installation
     - conda-rattler-solver: rattler solver backend (required for PyPI deps)
+    - sigstore: workspace attestation signing and verification
   license: BSD-3-Clause
   license_file: LICENSE
   homepage: https://conda-incubator.github.io/conda-workspaces/

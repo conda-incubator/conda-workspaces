@@ -12,6 +12,22 @@ identity.
 
 [in-toto-statement]: https://github.com/in-toto/attestation/blob/main/spec/v1/statement.md
 
+## Install signing support
+
+The base conda package does not install Sigstore automatically. Install
+the optional dependency in the same environment before signing or
+verifying attestations:
+
+```bash
+conda install -c conda-forge conda-workspaces sigstore
+```
+
+For pip installs, use the `signing` extra:
+
+```bash
+python -m pip install "conda-workspaces[signing]"
+```
+
 ## Status
 
 | Field | Value |

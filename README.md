@@ -90,6 +90,12 @@ and task running inside the conda CLI without switching tools.
 conda install -c conda-forge conda-workspaces
 ```
 
+Workspace attestation signing and verification need Sigstore:
+
+```bash
+conda install -c conda-forge conda-workspaces sigstore
+```
+
 ## CLI
 
 conda-workspaces registers `conda workspace` and `conda task` subcommands,
@@ -103,6 +109,8 @@ and also provides `cw` and `ct` as shorter aliases.
 | `conda workspace install` | Create/update workspace environments |
 | `conda workspace install --locked` | Install from lockfile (skip solving) |
 | `conda workspace lock` | Generate/update `conda.lock` |
+| `conda workspace attest` | Sign the workspace manifest and lockfile |
+| `conda workspace verify` | Verify the workspace lockfile attestation |
 | `conda workspace list` | List packages in an environment |
 | `conda workspace envs` | List defined environments |
 | `conda workspace info -e ENV` | Show environment details |
