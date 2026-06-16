@@ -132,7 +132,7 @@ Set up your first workspace and tasks in under a minute.
 :link: tutorials/index
 :link-type: doc
 
-Your first project, migrating from conda / pixi / anaconda-project / conda-project, CI setup.
+Your first project, signed lockfiles, migrations, and CI setup.
 :::
 
 :::{grid-item-card} {octicon}`tools` How-to guides
@@ -215,6 +215,7 @@ tutorials/pypi-dependencies
 tutorials/multi-platform-locking
 tutorials/coming-from/index
 tutorials/lockfile-management
+tutorials/workspace-attestations
 tutorials/ci-pipeline
 tutorials/archives
 ```
@@ -225,6 +226,7 @@ tutorials/archives
 
 how-to/index
 how-to/archive-api
+how-to/workspace-attestations
 ```
 
 ```{toctree}

@@ -240,6 +240,39 @@ jobs:
 This keeps your lockfile fresh with upstream releases while
 preserving the safety of locked installs on every other CI run.
 
+## Signed lockfile refresh
+
+If a refreshed lockfile is published for other jobs or systems to
+consume, sign it in the same workflow that creates it. GitHub Actions
+needs `id-token: write` so Sigstore can use the workflow identity:
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+```
+
+Install Sigstore alongside conda-workspaces and sign the result:
+
+```yaml
+      - run: conda install -c conda-forge conda-workspaces sigstore
+
+      - name: Re-solve and sign lockfile
+        run: conda workspace lock --sign
+```
+
+Downstream jobs should verify against the exact workflow identity and
+issuer they trust:
+
+```bash
+conda workspace install --locked --verify \
+  --cert-identity "https://github.com/ORG/REPO/.github/workflows/refresh-lock.yml@refs/heads/main" \
+  --cert-oidc-issuer "https://token.actions.githubusercontent.com"
+```
+
+See [Sign and verify workspace lockfiles](../how-to/workspace-attestations.md)
+for the full attestation workflow.
+
 ## Task caching in CI
 
 If your tasks use `inputs`/`outputs` caching, the cache directory can

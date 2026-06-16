@@ -12,6 +12,11 @@ identity.
 
 [in-toto-statement]: https://github.com/in-toto/attestation/blob/main/spec/v1/statement.md
 
+For a first walkthrough, see
+[Sign and verify a workspace](../tutorials/workspace-attestations.md).
+For operational recipes, see
+[Sign and verify workspace lockfiles](../how-to/workspace-attestations.md).
+
 ## Install signing support
 
 The base conda package does not install Sigstore automatically. Install

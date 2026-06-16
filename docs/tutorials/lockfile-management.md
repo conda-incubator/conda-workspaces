@@ -207,6 +207,8 @@ Changes that do **not** trigger a re-solve:
 
 ## Next steps
 
+- [Sign and verify a workspace](workspace-attestations.md) for Sigstore
+  attestations over the manifest and lockfile
 - [CI pipeline](ci-pipeline.md) for CI-specific lockfile behavior
 - [Configuration reference](../configuration.md) for workspace settings
 - [Features overview](../features.md) for the full feature summary
