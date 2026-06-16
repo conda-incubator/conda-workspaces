@@ -47,7 +47,10 @@ ARCHIVE_SUFFIXES: tuple[str, ...] = (
 )
 """Recognised archive filename suffixes, longest first."""
 
-MANIFEST_FILENAMES = {"conda.toml", "pixi.toml", "pyproject.toml"}
+MANIFEST_SEARCH_FILENAMES = ("conda.toml", "pixi.toml", "pyproject.toml")
+"""Workspace manifest filenames in parser search order."""
+
+MANIFEST_FILENAMES = frozenset(MANIFEST_SEARCH_FILENAMES)
 """Filenames recognised as workspace manifests inside an archive."""
 
 CONDA_PACKAGE_SUFFIXES: tuple[str, ...] = (".conda", ".tar.bz2")
@@ -572,7 +575,7 @@ class WorkspaceArchive:
             target=extracted,
             receipt_path=self.receipt_path,
             attestation_path=attestation_path,
-            verified=receipt is not None or attestation_verified,
+            verified=receipt is not None,
             attestation_verified=attestation_verified,
             info=info,
             primed_packages=primed_packages,
@@ -841,9 +844,24 @@ def _extract_verified_archive(
             )
 
             attestation_path = default_attestation_path(staged / "conda.lock")
+            manifest_path = next(
+                (
+                    staged / filename
+                    for filename in MANIFEST_SEARCH_FILENAMES
+                    if (staged / filename).is_file()
+                ),
+                None,
+            )
+            if manifest_path is None:
+                raise ArchiveError(
+                    "Cannot verify archive attestation: workspace manifest was "
+                    "not found."
+                )
             verify_workspace_attestation(
                 root=staged,
                 identities=trusted_identities,
+                manifest_path=manifest_path,
+                lockfile_path=staged / "conda.lock",
                 bundle_path=attestation_path,
             )
             attestation_verified = True

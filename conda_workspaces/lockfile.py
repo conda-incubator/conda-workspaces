@@ -48,7 +48,10 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
+from urllib.parse import unquote
 
+from conda.base.constants import KNOWN_SUBDIRS
+from conda.common.url import split_conda_url_easy_parts
 from conda.models.dist import Dist
 from conda.models.version import VersionSpec
 from conda.plugins.types import EnvironmentSpecBase
@@ -531,7 +534,77 @@ class CondaLockLoader(EnvironmentSpecBase):
     @staticmethod
     def url_matches_channel(url: str, channel_urls: tuple[str, ...]) -> bool:
         """Return whether *url* is contained by one declared channel URL."""
-        return any(url.startswith(f"{channel_url}/") for channel_url in channel_urls)
+        url_parts = CondaLockLoader.normalized_url_parts(url)
+        if url_parts is None:
+            return False
+        url_origin, url_path, url_platform, package_filename = url_parts
+        if package_filename is None:
+            return False
+        for channel_url in channel_urls:
+            channel_parts = CondaLockLoader.normalized_url_parts(channel_url)
+            if channel_parts is None:
+                continue
+            channel_origin, channel_path, channel_platform, _ = channel_parts
+            if url_origin != channel_origin:
+                continue
+            if url_path != channel_path:
+                continue
+            if channel_platform is None or url_platform == channel_platform:
+                return True
+        return False
+
+    @staticmethod
+    def normalized_url_parts(
+        url: str,
+    ) -> (
+        tuple[tuple[str, str, int | None], tuple[str, ...], str | None, str | None]
+        | None
+    ):
+        """Return conda-parsed URL origin, channel path, subdir, and package name."""
+        try:
+            parts = split_conda_url_easy_parts(KNOWN_SUBDIRS, url)
+        except ValueError:
+            return None
+        if not parts.scheme or parts.path is None:
+            return None
+        scheme = parts.scheme.lower()
+        if parts.hostname is None and scheme != "file":
+            return None
+        hostname = "" if parts.hostname is None else parts.hostname.lower()
+        if scheme == "file" and hostname == "localhost":
+            hostname = ""
+        raw_port = parts.port
+        if isinstance(raw_port, str):
+            try:
+                port = int(raw_port)
+            except ValueError:
+                return None
+        else:
+            port = raw_port
+        if port is None:
+            port = {"http": 80, "https": 443}.get(scheme)
+
+        path_segments: list[str] = []
+        for raw_segment in parts.path.split("/"):
+            if raw_segment == "":
+                continue
+            segment = unquote(raw_segment)
+            if segment in {".", ".."} or "/" in segment or "\\" in segment:
+                return None
+            path_segments.append(segment)
+
+        package_filename = parts.package_filename
+        if package_filename is not None:
+            decoded_package_filename = unquote(package_filename)
+            if (
+                decoded_package_filename in {".", ".."}
+                or "/" in decoded_package_filename
+                or "\\" in decoded_package_filename
+            ):
+                return None
+
+        origin = (scheme, hostname, port)
+        return origin, tuple(path_segments), parts.platform, package_filename
 
     def digest_fragment_for(self, record: dict[str, Any], url: str) -> str:
         """Return the conda explicit-file digest fragment for *record*."""

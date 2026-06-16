@@ -292,6 +292,67 @@ def test_conda_lock_loader_env_for_errors(
         loader.env_for(**env_for_kwargs)
 
 
+@pytest.mark.parametrize(
+    ("url", "channel_urls", "expected"),
+    [
+        pytest.param(
+            "https://example.com/channel/linux-64/python-3.12.conda",
+            ("https://example.com/channel/linux-64",),
+            True,
+            id="normal-member",
+        ),
+        pytest.param(
+            "https://EXAMPLE.com/channel/linux-64/python-3.12.conda",
+            ("https://example.com/channel/linux-64",),
+            True,
+            id="case-insensitive-origin",
+        ),
+        pytest.param(
+            "https://example.com/channel/linux-64/../evil/python-3.12.conda",
+            ("https://example.com/channel/linux-64",),
+            False,
+            id="dot-segment",
+        ),
+        pytest.param(
+            "https://example.com/channel/linux-64/%2e%2e/evil/python-3.12.conda",
+            ("https://example.com/channel/linux-64",),
+            False,
+            id="encoded-dot-segment",
+        ),
+        pytest.param(
+            "https://example.com/channel/linux-64/python%2fescape.conda",
+            ("https://example.com/channel/linux-64",),
+            False,
+            id="encoded-slash",
+        ),
+        pytest.param(
+            "https://example.com/channel-linux-64/python-3.12.conda",
+            ("https://example.com/channel",),
+            False,
+            id="sibling-prefix",
+        ),
+        pytest.param(
+            "file:///tmp/channel/linux-64/python-3.12.conda",
+            ("file:///tmp/channel/linux-64",),
+            True,
+            id="file-channel-member",
+        ),
+        pytest.param(
+            "file:///tmp/channel/linux-64/../evil/python-3.12.conda",
+            ("file:///tmp/channel/linux-64",),
+            False,
+            id="file-channel-dot-segment",
+        ),
+    ],
+)
+def test_url_matches_channel_normalizes_paths(
+    url: str,
+    channel_urls: tuple[str, ...],
+    expected: bool,
+) -> None:
+    assert CondaLockLoader.url_matches_channel(url, channel_urls) is expected
+
+
 class _FakePkg:
     """Minimal stand-in for ``PackageRecord`` used by lockfile tests."""
 
@@ -840,6 +901,18 @@ def test_install_from_lockfile(
             id="off-channel",
         ),
         pytest.param(
+            "https://example.com/channel/linux-64/../evil/python-3.11.9-hbad_0.tar.bz2",
+            {
+                "conda": (
+                    "https://example.com/channel/linux-64/../evil/"
+                    "python-3.11.9-hbad_0.tar.bz2"
+                ),
+                "sha256": "0" * 64,
+            },
+            "not under any channel",
+            id="dot-segment-channel-escape",
+        ),
+        pytest.param(
             "https://example.com/channel/linux-64/python-3.11.9-hgood_0.tar.bz2",
             None,
             "no top-level package record",
@@ -910,7 +983,21 @@ def test_install_from_lockfile_rejects_unbound_package_refs(
     assert get_records_calls == []
 
 
-def test_lockfile_status_rejects_off_channel_package_refs() -> None:
+@pytest.mark.parametrize(
+    "package_url",
+    [
+        pytest.param(
+            "https://attacker.example/pkgs/linux-64/python-3.11.9-hbad_0.tar.bz2",
+            id="off-channel-host",
+        ),
+        pytest.param(
+            "https://conda.anaconda.org/conda-forge/linux-64/../evil/"
+            "python-3.11.9-hbad_0.tar.bz2",
+            id="dot-segment-channel-escape",
+        ),
+    ],
+)
+def test_lockfile_status_rejects_off_channel_package_refs(package_url: str) -> None:
     """Freshness checks reject the off-channel URL used by the scan PoC."""
     config = WorkspaceConfig(
         name="lock-test",
@@ -924,7 +1011,6 @@ def test_lockfile_status_rejects_off_channel_package_refs() -> None:
         },
         environments={"default": Environment(name="default")},
     )
-    package_url = "https://attacker.example/pkgs/linux-64/python-3.11.9-hbad_0.tar.bz2"
     lockfile_data = {
         "version": LOCKFILE_VERSION,
         "environments": {
@@ -1593,6 +1679,16 @@ packages:
             "https://attacker.example/pkgs/linux-64/demo-1.0-0.tar.bz2",
             "not under any declared channel",
             id="off-channel",
+        ),
+        pytest.param(
+            "packages:\n"
+            "- conda: https://conda.anaconda.org/conda-forge/linux-64/"
+            "../evil/demo-1.0-0.tar.bz2\n"
+            f"  sha256: {'0' * 64}\n",
+            "https://conda.anaconda.org/conda-forge/linux-64/"
+            "../evil/demo-1.0-0.tar.bz2",
+            "not under any declared channel",
+            id="dot-segment-channel-escape",
         ),
     ],
 )

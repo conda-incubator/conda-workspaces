@@ -793,6 +793,7 @@ def test_execute_unarchive_verify_checks_attestation(
         fake_verify_workspace_attestation,
     )
 
+    stream = StringIO()
     execute_unarchive(
         make_args(
             _UNARCHIVE_DEFAULTS,
@@ -802,12 +803,19 @@ def test_execute_unarchive_verify_checks_attestation(
             cert_identity="user@example.com",
             cert_oidc_issuer="https://issuer.example",
         ),
-        console=Console(file=StringIO(), width=200, highlight=False),
+        console=Console(file=stream, width=200, highlight=False),
     )
 
     assert len(verify_calls) == 1
-    assert verify_calls[0]["root"].name.startswith(".extracted.verify-")
+    staged_root = verify_calls[0]["root"]
+    assert isinstance(staged_root, Path)
+    assert staged_root.name.startswith(".extracted.verify-")
+    assert verify_calls[0]["manifest_path"] == staged_root / "conda.toml"
+    assert verify_calls[0]["lockfile_path"] == staged_root / "conda.lock"
     assert (tmp_path / "extracted" / "conda.lock.sigstore.json").is_file()
+    output = stream.getvalue()
+    assert "Verified archive" not in output
+    assert "conda.lock.sigstore.json attestation" in output
 
 
 @pytest.mark.parametrize(

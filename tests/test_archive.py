@@ -850,6 +850,48 @@ def test_workspace_archive_extract_uses_receipt(
     assert (result.target / "src" / "app.py").is_file()
 
 
+def test_workspace_archive_extract_verify_attestation_binds_root_manifest_and_lockfile(
+    workspace_archive_project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sidecar = workspace_archive_project / "conda.lock.sigstore.json"
+    sidecar.write_text('{"bundle": true}\n', encoding="utf-8")
+    archive_path = tmp_path / "signed.tar.gz"
+    create_archive(
+        workspace_archive_project,
+        archive_path,
+        ArchiveConfig(),
+        extra_files=(sidecar,),
+    )
+    verify_calls: list[dict[str, object]] = []
+
+    def fake_verify_workspace_attestation(**kwargs):
+        verify_calls.append(kwargs)
+
+    monkeypatch.setattr(
+        "conda_workspaces.attestations.verify_workspace_attestation",
+        fake_verify_workspace_attestation,
+    )
+
+    result = WorkspaceArchive(archive_path).extract(
+        target=tmp_path / "extracted",
+        verify_attestation=True,
+        trusted_identities=(object(),),
+    )
+
+    assert result.verified is False
+    assert result.attestation_verified is True
+    assert len(verify_calls) == 1
+    staged_root = verify_calls[0]["root"]
+    assert isinstance(staged_root, Path)
+    assert verify_calls[0]["manifest_path"] == staged_root / "conda.toml"
+    assert verify_calls[0]["lockfile_path"] == staged_root / "conda.lock"
+    assert (
+        result.attestation_path == tmp_path / "extracted" / "conda.lock.sigstore.json"
+    )
+
+
 @pytest.mark.parametrize(
     ("runtime_prefix", "dest", "expected_staged_prefix", "expected_runtime_prefix"),
     [
