@@ -22,9 +22,9 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: conda-incubator/setup-miniconda@v3
+      - uses: conda-incubator/setup-miniconda@v4
         with:
           miniforge-version: latest
           activate-environment: ""
@@ -67,7 +67,7 @@ automatically) and committing the updated `conda.lock`.
 Speed up CI by caching the `.conda/envs/` directory:
 
 ```yaml
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: .conda/envs
           key: conda-envs-${{ runner.os }}-${{ hashFiles('conda.lock') }}
@@ -87,8 +87,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: conda-incubator/setup-miniconda@v3
+      - uses: actions/checkout@v6
+      - uses: conda-incubator/setup-miniconda@v4
         with:
           miniforge-version: latest
       - run: conda install -c conda-forge conda-workspaces
@@ -98,8 +98,8 @@ jobs:
   docs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: conda-incubator/setup-miniconda@v3
+      - uses: actions/checkout@v6
+      - uses: conda-incubator/setup-miniconda@v4
         with:
           miniforge-version: latest
       - run: conda install -c conda-forge conda-workspaces
@@ -156,8 +156,8 @@ jobs:
           - os: windows-latest
             platform: win-64
     steps:
-      - uses: actions/checkout@v4
-      - uses: conda-incubator/setup-miniconda@v3
+      - uses: actions/checkout@v6
+      - uses: conda-incubator/setup-miniconda@v4
         with:
           miniforge-version: latest
           activate-environment: ""
@@ -167,7 +167,7 @@ jobs:
           conda workspace lock \
             --platform ${{ matrix.platform }} \
             --output conda.lock.${{ matrix.platform }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: conda-lock-fragment-${{ matrix.platform }}
           path: conda.lock.${{ matrix.platform }}
@@ -176,19 +176,19 @@ jobs:
     needs: solve
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: conda-incubator/setup-miniconda@v3
+      - uses: actions/checkout@v6
+      - uses: conda-incubator/setup-miniconda@v4
         with:
           miniforge-version: latest
           activate-environment: ""
       - run: conda install -c conda-forge conda-workspaces
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: conda-lock-fragment-*
           merge-multiple: true
       - name: Merge fragments into conda.lock
         run: conda workspace lock --merge "conda.lock.*"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: conda-lock
           path: conda.lock
@@ -218,8 +218,8 @@ jobs:
   refresh:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: conda-incubator/setup-miniconda@v3
+      - uses: actions/checkout@v6
+      - uses: conda-incubator/setup-miniconda@v4
         with:
           miniforge-version: latest
           activate-environment: ""
@@ -229,7 +229,7 @@ jobs:
         run: conda workspace lock
 
       - name: Open PR if lockfile changed
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v8
         with:
           commit-message: "Update conda.lock"
           title: "Update conda.lock"
@@ -279,7 +279,7 @@ If your tasks use `inputs`/`outputs` caching, the cache directory can
 be preserved between runs for faster incremental builds:
 
 ```yaml
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: ~/.cache/conda-workspaces
           key: conda-workspaces-tasks-${{ hashFiles('src/**/*.py') }}

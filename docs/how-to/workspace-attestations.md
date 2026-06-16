@@ -107,8 +107,8 @@ jobs:
   lock:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: conda-incubator/setup-miniconda@v3
+      - uses: actions/checkout@v6
+      - uses: conda-incubator/setup-miniconda@v4
         with:
           miniforge-version: latest
           activate-environment: ""
