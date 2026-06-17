@@ -64,6 +64,7 @@ def test_workspace_attestation_statement(attested_workspace: Path) -> None:
 
 def test_write_workspace_attestation_uses_default_sidecar(
     attested_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payloads: list[bytes] = []
 
@@ -72,12 +73,15 @@ def test_write_workspace_attestation_uses_default_sidecar(
         assert identity_token == "token"
         return '{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}'
 
+    monkeypatch.setattr(
+        "conda_workspaces.attestations.sign_payload_with_sigstore",
+        fake_signer,
+    )
     path = write_workspace_attestation(
         root=attested_workspace,
         manifest_path=attested_workspace / "conda.toml",
         lockfile_path=attested_workspace / "conda.lock",
         identity_token="token",
-        signer=fake_signer,
     )
 
     assert path == attested_workspace / "conda.lock.sigstore.json"
@@ -89,6 +93,7 @@ def test_write_workspace_attestation_uses_default_sidecar(
 
 def test_verify_workspace_attestation_checks_identity_and_file_digests(
     attested_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     attestation = WorkspaceAttestation.build(
         root=attested_workspace,
@@ -118,10 +123,13 @@ def test_verify_workspace_attestation_checks_identity_and_file_digests(
         seen_identities.append(trusted)
         return IN_TOTO_PAYLOAD_TYPE, attestation.payload()
 
+    monkeypatch.setattr(
+        "conda_workspaces.attestations.verify_sigstore_bundle",
+        fake_verifier,
+    )
     result = verify_workspace_attestation(
         root=attested_workspace,
         identities=identities,
-        bundle_verifier=fake_verifier,
     )
 
     assert result.workspace_paths == ("conda.toml", "conda.lock")
@@ -130,6 +138,7 @@ def test_verify_workspace_attestation_checks_identity_and_file_digests(
 
 def test_verify_workspace_attestation_detects_tampered_lockfile(
     attested_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     attestation = WorkspaceAttestation.build(
         root=attested_workspace,
@@ -144,15 +153,15 @@ def test_verify_workspace_attestation_detects_tampered_lockfile(
         "version: 1\nenvironments: {}\npackages:\n  - changed\n",
         encoding="utf-8",
     )
+    monkeypatch.setattr(
+        "conda_workspaces.attestations.verify_sigstore_bundle",
+        lambda bundle, identities: (IN_TOTO_PAYLOAD_TYPE, attestation.payload()),
+    )
 
     with pytest.raises(AttestationError, match="digest mismatch"):
         verify_workspace_attestation(
             root=attested_workspace,
             identities=(TrustIdentity(identity="user@example.com", issuer="issuer"),),
-            bundle_verifier=lambda bundle, identities: (
-                IN_TOTO_PAYLOAD_TYPE,
-                attestation.payload(),
-            ),
         )
 
 

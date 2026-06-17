@@ -1400,7 +1400,6 @@ def inspect_archive(archive_path: Path) -> dict[str, object]:
     return {
         "has_manifest": bool(names & MANIFEST_FILENAMES),
         "has_lockfile": "conda.lock" in names,
-        "has_attestation": "conda.lock.sigstore.json" in names,
         "has_packages": len(package_members) > 0,
         "package_count": len(package_members),
     }

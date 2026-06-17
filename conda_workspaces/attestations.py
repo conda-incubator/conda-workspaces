@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import importlib
 import json
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -25,9 +23,6 @@ WORKSPACE_ATTESTATION_PREDICATE_TYPE = (
 )
 WORKSPACE_ATTESTATION_FORMAT_VERSION = 1
 SIGSTORE_JSON_SUFFIX = ".sigstore.json"
-
-SignerCallback = Callable[[bytes, str | None], str]
-BundleVerifierCallback = Callable[[str, tuple["TrustIdentity", ...]], tuple[str, bytes]]
 
 
 @dataclass(frozen=True)
@@ -370,7 +365,6 @@ def write_workspace_attestation(
     lockfile_path: Path,
     bundle_path: Path | None = None,
     identity_token: str | None = None,
-    signer: SignerCallback | None = None,
 ) -> Path:
     """Build, sign, and write a Sigstore bundle for a workspace attestation."""
     attestation = WorkspaceAttestation.build(
@@ -379,11 +373,7 @@ def write_workspace_attestation(
         lockfile_path=lockfile_path,
     )
     payload = attestation.payload()
-    bundle_json = (
-        signer(payload, identity_token)
-        if signer is not None
-        else sign_payload_with_sigstore(payload, identity_token)
-    )
+    bundle_json = sign_payload_with_sigstore(payload, identity_token)
     target = bundle_path or default_attestation_path(lockfile_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(bundle_json.rstrip() + "\n", encoding="utf-8")
@@ -397,7 +387,6 @@ def verify_workspace_attestation(
     manifest_path: Path | None = None,
     lockfile_path: Path | None = None,
     bundle_path: Path | None = None,
-    bundle_verifier: BundleVerifierCallback | None = None,
 ) -> WorkspaceAttestation:
     """Verify a Sigstore bundle and the workspace files named by its payload."""
     if not identities:
@@ -416,11 +405,7 @@ def verify_workspace_attestation(
     except OSError as exc:
         raise AttestationError(f"Attestation bundle not found: {target}") from exc
 
-    payload_type, payload = (
-        bundle_verifier(bundle_json, identities)
-        if bundle_verifier is not None
-        else verify_sigstore_bundle(bundle_json, identities)
-    )
+    payload_type, payload = verify_sigstore_bundle(bundle_json, identities)
     if payload_type != IN_TOTO_PAYLOAD_TYPE:
         raise AttestationError(
             f"Invalid attestation payload type: {payload_type!r}.",
@@ -439,10 +424,10 @@ def verify_workspace_attestation(
 def sign_payload_with_sigstore(payload: bytes, identity_token: str | None) -> str:
     """Sign an in-toto Statement payload with sigstore-python."""
     try:
-        dsse = importlib.import_module("sigstore.dsse")
-        models = importlib.import_module("sigstore.models")
-        oidc = importlib.import_module("sigstore.oidc")
-        sign = importlib.import_module("sigstore.sign")
+        import sigstore.dsse as dsse
+        import sigstore.models as models
+        import sigstore.oidc as oidc
+        import sigstore.sign as sign
     except ImportError as exc:
         raise AttestationError(
             "Sigstore signing support is not installed.",
@@ -473,9 +458,9 @@ def verify_sigstore_bundle(
 ) -> tuple[str, bytes]:
     """Verify a Sigstore DSSE bundle and return its payload type and bytes."""
     try:
-        models = importlib.import_module("sigstore.models")
-        policy_module = importlib.import_module("sigstore.verify.policy")
-        verifier_module = importlib.import_module("sigstore.verify.verifier")
+        import sigstore.models as models
+        import sigstore.verify.policy as policy_module
+        import sigstore.verify.verifier as verifier_module
     except ImportError as exc:
         raise AttestationError(
             "Sigstore verification support is not installed.",

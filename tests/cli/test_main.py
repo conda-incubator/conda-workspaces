@@ -314,88 +314,109 @@ def test_archive_subparser_receipt(args: list[str], expected: object) -> None:
     assert ns.receipt == expected
 
 
-def test_archive_subparser_sign() -> None:
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["archive", "-o", "out.tar.gz", "--sign"], {"sign": True}),
+        (
+            [
+                "lock",
+                "--sign",
+                "--attestation",
+                "conda.lock.sigstore.json",
+                "--identity-token",
+                "token",
+            ],
+            {
+                "sign": True,
+                "attestation": Path("conda.lock.sigstore.json"),
+                "identity_token": "token",
+            },
+        ),
+        (
+            [
+                "attest",
+                "--attestation",
+                "conda.lock.sigstore.json",
+                "--identity-token",
+                "token",
+            ],
+            {
+                "subcmd": "attest",
+                "attestation": Path("conda.lock.sigstore.json"),
+                "identity_token": "token",
+            },
+        ),
+        (
+            [
+                "install",
+                "--locked",
+                "--verify",
+                "--cert-identity",
+                "user@example.com",
+                "--cert-oidc-issuer",
+                "https://issuer.example",
+            ],
+            {
+                "locked": True,
+                "verify": True,
+                "cert_identity": "user@example.com",
+                "cert_oidc_issuer": "https://issuer.example",
+            },
+        ),
+        (
+            [
+                "verify",
+                "--attestation",
+                "conda.lock.sigstore.json",
+                "--cert-identity",
+                "user@example.com",
+                "--cert-oidc-issuer",
+                "https://issuer.example",
+                "--json",
+            ],
+            {
+                "subcmd": "verify",
+                "attestation": Path("conda.lock.sigstore.json"),
+                "cert_identity": "user@example.com",
+                "cert_oidc_issuer": "https://issuer.example",
+                "json": True,
+            },
+        ),
+        (
+            [
+                "unarchive",
+                "project.tar.gz",
+                "--verify",
+                "--cert-identity",
+                "user@example.com",
+                "--cert-oidc-issuer",
+                "https://issuer.example",
+            ],
+            {
+                "verify": True,
+                "cert_identity": "user@example.com",
+                "cert_oidc_issuer": "https://issuer.example",
+            },
+        ),
+    ],
+    ids=[
+        "archive-sign",
+        "lock-sign",
+        "attest",
+        "install-verify",
+        "verify",
+        "unarchive-verify",
+    ],
+)
+def test_workspace_sigstore_parser_args(
+    args: list[str], expected: dict[str, object]
+) -> None:
     parser = generate_workspace_parser()
-    ns = parser.parse_args(["archive", "-o", "out.tar.gz", "--sign"])
+    ns = parser.parse_args(args)
 
-    assert ns.sign is True
-
-
-def test_lock_subparser_sign() -> None:
-    parser = generate_workspace_parser()
-    ns = parser.parse_args(
-        [
-            "lock",
-            "--sign",
-            "--attestation",
-            "conda.lock.sigstore.json",
-            "--identity-token",
-            "token",
-        ]
-    )
-
-    assert ns.sign is True
-    assert ns.attestation == Path("conda.lock.sigstore.json")
-    assert ns.identity_token == "token"
-
-
-def test_attest_subparser() -> None:
-    parser = generate_workspace_parser()
-    ns = parser.parse_args(
-        [
-            "attest",
-            "--attestation",
-            "conda.lock.sigstore.json",
-            "--identity-token",
-            "token",
-        ]
-    )
-
-    assert ns.subcmd == "attest"
-    assert ns.attestation == Path("conda.lock.sigstore.json")
-    assert ns.identity_token == "token"
-
-
-def test_install_subparser_verify() -> None:
-    parser = generate_workspace_parser()
-    ns = parser.parse_args(
-        [
-            "install",
-            "--locked",
-            "--verify",
-            "--cert-identity",
-            "user@example.com",
-            "--cert-oidc-issuer",
-            "https://issuer.example",
-        ]
-    )
-
-    assert ns.locked is True
-    assert ns.verify is True
-    assert ns.cert_identity == "user@example.com"
-    assert ns.cert_oidc_issuer == "https://issuer.example"
-
-
-def test_verify_subparser() -> None:
-    parser = generate_workspace_parser()
-    ns = parser.parse_args(
-        [
-            "verify",
-            "--attestation",
-            "conda.lock.sigstore.json",
-            "--cert-identity",
-            "user@example.com",
-            "--cert-oidc-issuer",
-            "https://issuer.example",
-            "--json",
-        ]
-    )
-
-    assert ns.subcmd == "verify"
-    assert ns.attestation == Path("conda.lock.sigstore.json")
-    assert ns.cert_identity == "user@example.com"
-    assert ns.cert_oidc_issuer == "https://issuer.example"
-    assert ns.json is True
+    for attr, value in expected.items():
+        assert getattr(ns, attr) == value
 
 
 def test_unarchive_subparser_registered() -> None:
@@ -435,22 +456,3 @@ def test_unarchive_subparser_receipt() -> None:
 
     assert ns.receipt == Path("project.receipt.json")
     assert ns.require_sha256 is True
-
-
-def test_unarchive_subparser_verify() -> None:
-    parser = generate_workspace_parser()
-    ns = parser.parse_args(
-        [
-            "unarchive",
-            "project.tar.gz",
-            "--verify",
-            "--cert-identity",
-            "user@example.com",
-            "--cert-oidc-issuer",
-            "https://issuer.example",
-        ]
-    )
-
-    assert ns.verify is True
-    assert ns.cert_identity == "user@example.com"
-    assert ns.cert_oidc_issuer == "https://issuer.example"
