@@ -139,6 +139,3 @@ class CondaProjectImporter(ManifestImporter):
                     " directory and avoid symlinks that point outside it.",
                 ],
             ) from exc
-
-
-convert = CondaProjectImporter().convert

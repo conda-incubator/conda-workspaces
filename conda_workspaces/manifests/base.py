@@ -12,7 +12,7 @@ import tomlkit
 from conda.base.constants import KNOWN_SUBDIRS
 from packaging.requirements import InvalidRequirement, Requirement
 
-from ..exceptions import ManifestExistsError, WorkspaceParseError
+from ..exceptions import ManifestExistsError, TaskNotFoundError, WorkspaceParseError
 from ..models import WorkspaceConfig
 
 _PYPI_NAME_TAIL_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(.*)$")
@@ -557,16 +557,25 @@ class ManifestParser(ABC):
         return {}
 
     def add_task(self, path: Path, name: str, task: Task) -> None:
-        """Persist a new task definition into *path*."""
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support writing tasks to {path.name}."
-        )
+        """Persist a top-level task definition into *path*."""
+        if path.exists():
+            doc = tomlkit.loads(path.read_text(encoding="utf-8"))
+        else:
+            doc = tomlkit.document()
+
+        tasks_section = doc.setdefault("tasks", tomlkit.table())
+        tasks_section[name] = self.task_to_toml_inline(task)
+        path.write_text(tomlkit.dumps(doc), encoding="utf-8")
 
     def remove_task(self, path: Path, name: str) -> None:
-        """Remove the task named *name* from *path*."""
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support writing tasks to {path.name}."
-        )
+        """Remove the top-level task named *name* from *path*."""
+        doc = tomlkit.loads(path.read_text(encoding="utf-8"))
+        tasks_section = doc.get("tasks", {})
+        if name not in tasks_section:
+            raise TaskNotFoundError(name, list(tasks_section.keys()))
+        del tasks_section[name]
+        self.remove_target_overrides(doc, name)
+        path.write_text(tomlkit.dumps(doc), encoding="utf-8")
 
     def task_to_toml_inline(self, task: Task) -> str | InlineTable:
         """Convert a *task* to a TOML-serializable value (string or inline table)."""

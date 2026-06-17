@@ -26,6 +26,3 @@ class PyprojectTomlImporter(ManifestImporter):
         config = parser.parse(path)
         tasks = parser.parse_tasks(path)
         return config_to_toml(config, tasks)
-
-
-convert = PyprojectTomlImporter().convert
