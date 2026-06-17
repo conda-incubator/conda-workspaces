@@ -129,6 +129,3 @@ class AnacondaProjectImporter(ManifestImporter):
         if len(task) == 1 and "cmd" in task:
             return task["cmd"]
         return task
-
-
-convert = AnacondaProjectImporter().convert

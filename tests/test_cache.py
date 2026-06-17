@@ -7,26 +7,11 @@ import pytest
 from conda_workspaces.cache import (
     _expand_globs,
     _file_sha256,
-    _file_stat,
     _files_match,
     _fingerprint_files,
     is_cached,
     save_cache,
 )
-
-
-def test_file_stat(tmp_path):
-    f = tmp_path / "file.txt"
-    f.write_text("hello")
-    stat = _file_stat(str(f))
-    assert stat is not None
-    mtime, size = stat
-    assert size == 5
-    assert mtime > 0
-
-
-def test_file_stat_missing():
-    assert _file_stat("/nonexistent/file") is None
 
 
 def test_file_sha256(tmp_path):
@@ -71,7 +56,7 @@ def test_expand_globs(tmp_path, pattern, setup, expected_count):
 @pytest.mark.parametrize(
     ("paths", "expected_keys"),
     [
-        (["file.txt"], {"mtime", "size", "sha256"}),
+        (["file.txt"], {"sha256"}),
     ],
 )
 def test_fingerprint_files(tmp_path, paths, expected_keys):
@@ -92,32 +77,26 @@ def test_fingerprint_missing_file():
     ("cached", "current", "expected"),
     [
         pytest.param(
-            {"main.py": {"mtime": 1.0, "size": 2, "sha256": "old"}},
-            {"main.py": {"mtime": 1.0, "size": 2, "sha256": "new"}},
+            {"main.py": {"sha256": "old"}},
+            {"main.py": {"sha256": "new"}},
             False,
-            id="same-stat-different-digest",
+            id="different-digest",
         ),
         pytest.param(
-            {"main.py": {"mtime": 1.0, "size": 2, "sha256": "same"}},
-            {"main.py": {"mtime": 2.0, "size": 2, "sha256": "same"}},
+            {"main.py": {"sha256": "same"}},
+            {"main.py": {"sha256": "same"}},
             True,
-            id="same-digest-different-mtime",
+            id="same-digest",
         ),
         pytest.param(
-            {"main.py": {"mtime": 1.0, "size": 2}},
-            {"main.py": {"mtime": 1.0, "size": 2}},
-            True,
-            id="legacy-same-stat",
-        ),
-        pytest.param(
-            {"main.py": {"mtime": 1.0, "size": 2}},
-            {"main.py": {"mtime": 2.0, "size": 2}},
+            {"main.py": {}},
+            {"main.py": {"sha256": "same"}},
             False,
-            id="legacy-mtime-change",
+            id="legacy-missing-digest",
         ),
     ],
 )
-def test_files_match_compares_digests_when_available(cached, current, expected):
+def test_files_match_compares_digests(cached, current, expected):
     assert _files_match(cached, current) is expected
 
 

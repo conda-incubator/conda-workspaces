@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 import tomlkit
 
-from ..exceptions import TaskNotFoundError, TaskParseError, WorkspaceParseError
+from ..exceptions import TaskParseError, WorkspaceParseError
 from ..models import (
     ArchiveConfig,
     Channel,
@@ -77,25 +77,6 @@ class CondaTomlParser(ManifestParser):
         except Exception as exc:
             raise TaskParseError(str(path), str(exc)) from exc
         return parse_tasks_and_targets(data)
-
-    def add_task(self, path: Path, name: str, task: Task) -> None:
-        if path.exists():
-            doc = tomlkit.loads(path.read_text(encoding="utf-8"))
-        else:
-            doc = tomlkit.document()
-
-        tasks_section = doc.setdefault("tasks", tomlkit.table())
-        tasks_section[name] = self.task_to_toml_inline(task)
-        path.write_text(tomlkit.dumps(doc), encoding="utf-8")
-
-    def remove_task(self, path: Path, name: str) -> None:
-        doc = tomlkit.loads(path.read_text(encoding="utf-8"))
-        tasks_section = doc.get("tasks", {})
-        if name not in tasks_section:
-            raise TaskNotFoundError(name, list(tasks_section.keys()))
-        del tasks_section[name]
-        self.remove_target_overrides(doc, name)
-        path.write_text(tomlkit.dumps(doc), encoding="utf-8")
 
 
 def tasks_to_toml(tasks: dict[str, Task]) -> str:

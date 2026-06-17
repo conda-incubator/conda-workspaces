@@ -12,10 +12,8 @@ from typing import TYPE_CHECKING
 import pytest
 from rich.console import Console
 
-from conda_workspaces.archive import create_archive
-from conda_workspaces.cli.workspace.archive import (
-    execute_archive,
-    execute_unarchive,
+from conda_workspaces.archive import (
+    create_archive,
     extract_verified_archive,
     file_contains_bytes,
     is_absolute_runtime_prefix,
@@ -24,6 +22,7 @@ from conda_workspaces.cli.workspace.archive import (
     runtime_prefix_relative_path,
     scan_prefix_references,
 )
+from conda_workspaces.cli.workspace.archive import execute_archive, execute_unarchive
 from conda_workspaces.exceptions import ArchiveError
 from conda_workspaces.models import ArchiveConfig
 from conda_workspaces.receipts import ArchiveReceipt

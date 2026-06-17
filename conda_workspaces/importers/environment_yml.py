@@ -41,6 +41,3 @@ class EnvironmentYmlImporter(ManifestImporter):
             doc.add("pypi-dependencies", tomlkit.item(pypi_deps))
 
         return doc
-
-
-convert = EnvironmentYmlImporter().convert

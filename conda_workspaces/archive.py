@@ -760,13 +760,13 @@ def is_excluded_by_builtins(rel_path: str) -> bool:
     for excl in BUILTIN_EXCLUDE_DIRS:
         if rel_path == excl or rel_path.startswith(excl + "/"):
             return True
-    if is_excluded_by_patterns(rel_path, BUILTIN_SENSITIVE_EXCLUDE_EXCEPTIONS):
+    if matches_patterns(rel_path, BUILTIN_SENSITIVE_EXCLUDE_EXCEPTIONS):
         return False
-    return is_excluded_by_patterns(rel_path, BUILTIN_SENSITIVE_EXCLUDE_PATTERNS)
+    return matches_patterns(rel_path, BUILTIN_SENSITIVE_EXCLUDE_PATTERNS)
 
 
-def is_excluded_by_patterns(rel_path: str, patterns: tuple[str, ...]) -> bool:
-    """Return True if *rel_path* matches any of the user-supplied glob *patterns*."""
+def matches_patterns(rel_path: str, patterns: tuple[str, ...]) -> bool:
+    """Return True if *rel_path* or any parent matches one glob pattern."""
     for pattern in patterns:
         if fnmatch.fnmatch(rel_path, pattern):
             return True
@@ -797,11 +797,9 @@ def collect_archive_files(
         rel = path.relative_to(root).as_posix()
         if is_excluded_by_builtins(rel):
             continue
-        if archive_config.include and not is_included_by_patterns(
-            rel, archive_config.include
-        ):
+        if archive_config.include and not matches_patterns(rel, archive_config.include):
             continue
-        if is_excluded_by_patterns(rel, archive_config.exclude):
+        if matches_patterns(rel, archive_config.exclude):
             continue
         result.append(path)
 
@@ -839,19 +837,6 @@ def zstd_module() -> Any:
             "or choose an archive name ending in .tar.gz or .tar.bz2.",
         ],
     )
-
-
-def is_included_by_patterns(rel_path: str, patterns: tuple[str, ...]) -> bool:
-    """Return True if *rel_path* matches any include pattern."""
-    for pattern in patterns:
-        if fnmatch.fnmatch(rel_path, pattern):
-            return True
-        parts = rel_path.split("/")
-        for i in range(len(parts)):
-            partial = "/".join(parts[: i + 1])
-            if fnmatch.fnmatch(partial, pattern):
-                return True
-    return False
 
 
 @contextmanager
