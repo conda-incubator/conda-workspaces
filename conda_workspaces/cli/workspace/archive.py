@@ -10,12 +10,6 @@ from rich.markup import escape
 
 from ...archive import (
     WorkspaceArchive,
-    extract_verified_archive,
-    file_contains_bytes,
-    is_absolute_runtime_prefix,
-    receipt_environment_prefixes,
-    resolve_receipt_path,
-    runtime_prefix_relative_path,
     scan_prefix_references,
 )
 from ...exceptions import ArchiveError, AttestationError
@@ -23,18 +17,6 @@ from .. import status
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-__all__ = (
-    "execute_archive",
-    "execute_unarchive",
-    "extract_verified_archive",
-    "file_contains_bytes",
-    "is_absolute_runtime_prefix",
-    "receipt_environment_prefixes",
-    "resolve_receipt_path",
-    "runtime_prefix_relative_path",
-    "scan_prefix_references",
-)
 
 
 def warn_staging_prefix_references(

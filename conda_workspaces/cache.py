@@ -5,8 +5,7 @@ Cache entries are stored in a platform-appropriate directory via
 of the project root path. Within that, each task has a JSON file
 containing fingerprints of its inputs and outputs.
 
-SHA-256 digests are the authoritative file identity. ``mtime`` and
-``size`` are retained as metadata and for older cache entries.
+SHA-256 digests are the file identity.
 """
 
 from __future__ import annotations
@@ -14,7 +13,6 @@ from __future__ import annotations
 import glob
 import hashlib
 import json
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -42,15 +40,6 @@ def _cache_file(project_root: Path, task_name: str) -> Path:
     return _project_cache_dir(project_root) / f"{task_name}.json"
 
 
-def _file_stat(path: str) -> tuple[float, int] | None:
-    """Return ``(mtime, size)`` for *path*, or None if missing."""
-    try:
-        st = os.stat(path)
-        return (st.st_mtime, st.st_size)
-    except OSError:
-        return None
-
-
 def _file_sha256(path: str) -> str:
     """Return the hex SHA-256 digest of the file at *path*."""
     h = hashlib.sha256()
@@ -70,17 +59,14 @@ def _expand_globs(patterns: list[str], cwd: Path) -> list[str]:
 
 
 def _fingerprint_files(paths: list[str]) -> dict[str, dict[str, Any]]:
-    """Build a fingerprint dict: ``{path: {mtime, size, sha256}}``."""
+    """Build a fingerprint dict: ``{path: {sha256}}``."""
     fp: dict[str, dict[str, Any]] = {}
     for p in paths:
-        stat = _file_stat(p)
-        if stat is None:
+        try:
+            digest = _file_sha256(p)
+        except OSError:
             continue
-        fp[p] = {
-            "mtime": stat[0],
-            "size": stat[1],
-            "sha256": _file_sha256(p),
-        }
+        fp[p] = {"sha256": digest}
     return fp
 
 
@@ -121,8 +107,7 @@ def is_cached(
 
     1. A cache entry exists for the task.
     2. The command and env hashes match.
-    3. All input files match by SHA-256 digest, falling back to
-       ``(mtime, size)`` only for older entries without digests.
+    3. All input files match by SHA-256 digest.
     4. All output files still exist and match.
     """
     cf = _cache_file(project_root, task_name)
@@ -160,17 +145,8 @@ def _files_match(cached: dict[str, Any], current: dict[str, Any]) -> bool:
         prev = cached.get(path)
         if prev is None:
             return False
-        prev_sha = prev.get("sha256")
-        cur_sha = cur.get("sha256")
-        if prev_sha is not None and cur_sha is not None:
-            if prev_sha != cur_sha or prev.get("size") != cur.get("size"):
-                return False
-            continue
-        if prev.get("mtime") == cur.get("mtime") and prev.get("size") == cur.get(
-            "size"
-        ):
-            continue
-        return False
+        if prev.get("sha256") != cur.get("sha256"):
+            return False
     return True
 
 
