@@ -44,6 +44,13 @@ Lock your workspace for Linux, macOS, and Windows from a single machine.
 Automatic lockfile creation, staleness detection, and strict modes.
 :::
 
+:::{grid-item-card} {octicon}`shield-check` Workspace attestations
+:link: workspace-attestations
+:link-type: doc
+
+Sign a workspace lockfile with Sigstore and verify it before installation.
+:::
+
 :::{grid-item-card} {octicon}`server` CI pipeline
 :link: ci-pipeline
 :link-type: doc

@@ -20221,6 +20221,7 @@ packages:
   - platformdirs>=3.0
   - rich>=13.0
   - tomlkit>=0.13
+  - sigstore>=4.0 ; extra == 'signing'
   requires_python: '>=3.10'
 - pypi: https://files.pythonhosted.org/packages/14/25/b208c5683343959b670dc001595f2f3737e051da617f66c31f7c4fa93abc/rich-14.3.3-py3-none-any.whl
   name: rich

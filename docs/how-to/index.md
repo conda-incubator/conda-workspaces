@@ -14,4 +14,12 @@ Create, verify, extract, and install workspace archives through the public
 Python API.
 :::
 
+:::{grid-item-card} {octicon}`shield-check` Sign and verify workspace lockfiles
+:link: workspace-attestations
+:link-type: doc
+
+Add Sigstore provenance to `conda.lock` and require it before install or
+archive extraction.
+:::
+
 ::::

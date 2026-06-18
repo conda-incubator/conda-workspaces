@@ -275,6 +275,10 @@ To guard against this:
 - Obtain archives only from trusted sources.
 - Use `--receipt` and distribute the receipt through a separate trusted
   channel when bundled packages should prime a conda package cache.
+- Use `conda workspace attest` after locking, or
+  `conda workspace lock --sign` to solve and sign in one step, before
+  archiving. Use `conda workspace unarchive --verify` when signer
+  provenance matters during extraction.
 - Use `conda workspace install --locked` so the solver does not
   silently add packages beyond what the lockfile specifies.
 
@@ -285,11 +289,10 @@ archive, extracted manifest, extracted lockfile, or lockfile package
 inventory differs from the receipt. It does not prove who created the
 receipt.
 
-For provenance-sensitive workflows, distribute the receipt through a
-separate trusted channel or sign it with your release signing system.
-Pair `--receipt` with `--bundle` when you want one archive to carry the
-package artifacts and one sidecar receipt to bind the archive to the
-lockfile inventory.
+For provenance-sensitive workflows, use a Sigstore workspace
+attestation. Pair `--receipt` with `--bundle` when you want one archive
+to carry the package artifacts and one sidecar receipt to bind the
+archive to the lockfile inventory.
 
 ## Next steps
 
@@ -297,5 +300,7 @@ lockfile inventory.
 - {ref}`Archives <archives>` for a feature overview
 - [Archive receipt reference](../reference/archive-receipts.md) for the
   receipt JSON format and verification contract
+- [Workspace attestation reference](../reference/workspace-attestations.md)
+  for the Sigstore bundle format
 - [CLI reference](../reference/cli.md) for the full `archive` and
   `unarchive` command-line options

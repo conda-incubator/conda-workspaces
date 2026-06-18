@@ -170,9 +170,17 @@ whether the archive, extracted manifest, extracted lockfile, or lockfile
 package inventory differs from the receipt, but they do not prove who
 created the receipt.
 
-For provenance-sensitive workflows, distribute the receipt through an
-independent trusted channel or sign it with an external signing system.
-For air-gapped workflows, pair `--receipt` with `--bundle` so the
-archive carries the package artifacts and the receipt carries the
-lockfile inventory that should describe them. `unarchive` only primes a
-conda package cache from bundled packages after receipt verification.
+For provenance-sensitive workflows, pair receipts with
+`conda workspace attest` after locking, or use
+`conda workspace lock --sign` to solve and sign in one step. Verify the
+resulting `conda.lock.sigstore.json` with `conda workspace verify`,
+`conda workspace install --locked --verify`, or
+`conda workspace unarchive --verify`. For air-gapped workflows, pair
+`--receipt` with `--bundle` so the archive carries the package artifacts
+and the receipt carries the lockfile inventory that should describe them.
+`unarchive` primes a conda package cache from bundled packages only after
+receipt verification or attestation verification plus package hash checks
+against the attested lockfile.
+
+See [Workspace attestation reference](workspace-attestations.md) for the
+Sigstore bundle format and verification contract.

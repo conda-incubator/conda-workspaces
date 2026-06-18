@@ -10,6 +10,7 @@ api/context
 api/environments
 api/execution
 api/archive
+api/attestations
 ```
 
 ::::{grid} 2
@@ -63,6 +64,13 @@ Task DAG resolution, shell backends, caching, and template rendering.
 :link-type: doc
 
 Workspace archive creation, receipt verification, extraction, and install.
+:::
+
+:::{grid-item-card} Attestations
+:link: api/attestations
+:link-type: doc
+
+Workspace attestation construction, signing, and verification.
 :::
 
 ::::

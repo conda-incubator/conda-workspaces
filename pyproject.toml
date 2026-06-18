@@ -38,6 +38,11 @@ dependencies = [
 ]
 dynamic = ["version"]
 
+[project.optional-dependencies]
+signing = [
+  "sigstore >=4.0",
+]
+
 [project.urls]
 documentation = "https://conda-incubator.github.io/conda-workspaces"
 repository = "https://github.com/conda-incubator/conda-workspaces"

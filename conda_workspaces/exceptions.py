@@ -372,6 +372,13 @@ class ArchiveError(CondaWorkspacesError):
         super().__init__(message, hints=hints)
 
 
+class AttestationError(CondaWorkspacesError):
+    """General workspace attestation signing or verification failure."""
+
+    def __init__(self, message: str, *, hints: list[str] | None = None) -> None:
+        super().__init__(message, hints=hints)
+
+
 class ArchivePathTraversalError(ArchiveError):
     """A tar member attempts to write outside the target directory."""
 

@@ -47,7 +47,10 @@ ARCHIVE_SUFFIXES: tuple[str, ...] = (
 )
 """Recognised archive filename suffixes, longest first."""
 
-MANIFEST_FILENAMES = {"conda.toml", "pixi.toml", "pyproject.toml"}
+MANIFEST_SEARCH_FILENAMES = ("conda.toml", "pixi.toml", "pyproject.toml")
+"""Workspace manifest filenames in parser search order."""
+
+MANIFEST_FILENAMES = frozenset(MANIFEST_SEARCH_FILENAMES)
 """Filenames recognised as workspace manifests inside an archive."""
 
 CONDA_PACKAGE_SUFFIXES: tuple[str, ...] = (".conda", ".tar.bz2")
@@ -152,7 +155,9 @@ class WorkspaceArchiveExtractResult:
 
     target: Path
     receipt_path: Path | None
+    attestation_path: Path | None
     verified: bool
+    attestation_verified: bool
     info: dict[str, object]
     primed_packages: int = 0
     cache_priming_skipped: bool = False
@@ -167,7 +172,9 @@ class WorkspaceArchiveInstallResult:
     install_prefix: Path | None
     runtime_prefix: str | None
     receipt_path: Path | None
+    attestation_path: Path | None
     verified: bool
+    attestation_verified: bool
     info: dict[str, object]
     return_code: int = 0
     primed_packages: int = 0
@@ -183,7 +190,11 @@ class WorkspaceArchive:
     path: Path
     receipt: bool | str | Path | None = None
 
-    def __init__(self, path: str | Path, receipt: bool | str | Path | None = None):
+    def __init__(
+        self,
+        path: str | Path,
+        receipt: bool | str | Path | None = None,
+    ):
         object.__setattr__(self, "path", Path(path).expanduser().resolve())
         object.__setattr__(self, "receipt", receipt)
 
@@ -197,6 +208,8 @@ class WorkspaceArchive:
         bundle: bool = False,
         exclude: tuple[str, ...] = (),
         receipt: bool | str | Path | None = None,
+        sign: bool = False,
+        identity_token: str | None = None,
     ) -> WorkspaceArchive:
         """Create an archive for *workspace* and return its handle."""
         from .context import WorkspaceContext
@@ -226,13 +239,25 @@ class WorkspaceArchive:
         lock_path = lockfile_path(ctx)
 
         if receipt_path is not None:
-            archive.validate_receipt_inputs(
+            archive.validate_integrity_inputs(
                 root=ctx.root,
                 output=output_path,
                 archive_config=archive_config,
                 manifest_path=manifest_path,
                 lockfile_path=lock_path,
+                action="write receipt",
+                option="receipt",
                 receipt_path=receipt_path,
+            )
+        if sign:
+            archive.validate_integrity_inputs(
+                root=ctx.root,
+                output=output_path,
+                archive_config=archive_config,
+                manifest_path=manifest_path,
+                lockfile_path=lock_path,
+                action="sign archive",
+                option="sign",
             )
 
         bundle_packages = None
@@ -248,11 +273,24 @@ class WorkspaceArchive:
             bundle_packages = collect_bundle_packages(lock_path, cache_dirs)
             verify_package_hashes(bundle_packages, lock_path)
 
+        extra_files: tuple[Path, ...] = ()
+        if sign:
+            from .attestations import write_workspace_attestation
+
+            attestation_path = write_workspace_attestation(
+                root=ctx.root,
+                manifest_path=manifest_path,
+                lockfile_path=lock_path,
+                identity_token=identity_token,
+            )
+            extra_files = (attestation_path,)
+
         archive_path = create_archive(
             ctx.root,
             output_path,
             archive_config,
             bundle_packages=bundle_packages,
+            extra_files=extra_files,
         )
 
         if receipt_path is not None:
@@ -296,56 +334,61 @@ class WorkspaceArchive:
         return ctx.root / f"{name}{ext}"
 
     @staticmethod
-    def validate_receipt_inputs(
+    def validate_integrity_inputs(
         *,
         root: Path,
         output: Path,
         archive_config: ArchiveConfig,
         manifest_path: Path,
         lockfile_path: Path,
-        receipt_path: Path,
+        action: str,
+        option: str,
+        receipt_path: Path | None = None,
     ) -> None:
-        """Validate inputs required to write a receipt for a new archive."""
-        if receipt_path.resolve() == output.resolve():
+        """Validate inputs needed by receipt and attestation verification."""
+        if receipt_path is not None and receipt_path.resolve() == output.resolve():
             raise ArchiveError(
                 "Receipt path cannot be the archive path.",
                 hints=["Choose a separate JSON path for --receipt."],
             )
         if not manifest_path.is_file():
-            raise ArchiveError(
-                "Cannot write receipt: workspace manifest was not found."
-            )
+            raise ArchiveError(f"Cannot {action}: workspace manifest was not found.")
         if not lockfile_path.is_file():
             raise ArchiveError(
-                "Cannot write receipt: no conda.lock found.",
+                f"Cannot {action}: no conda.lock found.",
                 hints=["Run 'conda workspace lock' first."],
             )
-
         archive_members = {
             path.relative_to(root).as_posix()
             for path in collect_archive_files(root, archive_config)
             if path.resolve() != output.resolve()
         }
-        required_members: dict[str, Path] = {
-            "workspace manifest": manifest_path,
-            "workspace lockfile": lockfile_path,
-        }
-        missing = []
-        for label, path in required_members.items():
+        missing = None
+        for label, path in (
+            ("workspace manifest", manifest_path),
+            ("workspace lockfile", lockfile_path),
+        ):
             try:
                 archive_name = path.relative_to(root).as_posix()
             except ValueError:
-                missing.append(label)
-                continue
+                missing = label
+                break
             if archive_name not in archive_members:
-                missing.append(f"{label} ({archive_name})")
+                missing = f"{label} ({archive_name})"
+                break
         if missing:
+            verification = (
+                "Receipt verification"
+                if option == "receipt"
+                else "Attestation verification"
+            )
             raise ArchiveError(
-                f"Cannot write receipt: archive would not include {missing[0]}.",
+                f"Cannot {action}: archive would not include {missing}.",
                 hints=[
-                    "Receipt verification requires the workspace manifest and"
+                    f"{verification} requires the workspace manifest and"
                     " conda.lock to be included in the archive.",
-                    "Remove matching include/exclude filters or run without --receipt.",
+                    "Remove matching include/exclude filters or run without "
+                    f"--{option}.",
                 ],
             )
 
@@ -413,6 +456,8 @@ class WorkspaceArchive:
         require_sha256: bool = False,
         prime_cache: bool = True,
         package_cache: str | Path | None = None,
+        verify_attestation: bool = False,
+        trusted_identities: tuple[Any, ...] = (),
     ) -> WorkspaceArchiveExtractResult:
         """Extract the archive and optionally prime bundled package cache files."""
         if require_sha256 and self.receipt_path is None:
@@ -430,36 +475,48 @@ class WorkspaceArchive:
             Path(target).expanduser() if target is not None else self.default_target()
         )
         receipt = self.verify() if self.receipt_path is not None else None
-        if receipt is None:
+        attestation_path = None
+        attestation_verified = False
+        if receipt is None and not verify_attestation:
             extracted = extract_archive(archive_path, target_path)
         else:
-            extracted = extract_verified_archive(
+            (
+                extracted,
+                attestation_path,
+                attestation_verified,
+            ) = _extract_verified_archive(
                 archive_path,
                 target_path,
                 receipt,
                 require_sha256=require_sha256,
+                verify_attestation=verify_attestation,
+                trusted_identities=trusted_identities,
             )
 
         primed_packages = 0
         cache_priming_skipped = False
         if info["has_packages"] and prime_cache:
-            if receipt is None:
+            if receipt is None and not attestation_verified:
                 cache_priming_skipped = True
             else:
                 if package_cache is None:
                     from conda.base.context import context as conda_context
 
-                    package_cache = conda_context.pkgs_dirs[0]
+                    cache_path = Path(conda_context.pkgs_dirs[0])
+                else:
+                    cache_path = Path(package_cache)
                 primed_packages = prime_package_cache(
                     extracted,
-                    Path(package_cache),
+                    cache_path,
                     verified=True,
                 )
 
         return WorkspaceArchiveExtractResult(
             target=extracted,
             receipt_path=self.receipt_path,
+            attestation_path=attestation_path,
             verified=receipt is not None,
+            attestation_verified=attestation_verified,
             info=info,
             primed_packages=primed_packages,
             cache_priming_skipped=cache_priming_skipped,
@@ -475,6 +532,8 @@ class WorkspaceArchive:
         require_sha256: bool = False,
         prime_cache: bool = True,
         package_cache: str | Path | None = None,
+        verify_attestation: bool = False,
+        trusted_identities: tuple[Any, ...] = (),
         install_handler: Callable[[Path, str | None, Path | None, str | None], int]
         | None = None,
     ) -> WorkspaceArchiveInstallResult:
@@ -506,6 +565,8 @@ class WorkspaceArchive:
             require_sha256=require_sha256,
             prime_cache=prime_cache,
             package_cache=package_cache,
+            verify_attestation=verify_attestation,
+            trusted_identities=trusted_identities,
         )
 
         install_prefix = Path(final_prefix) if final_prefix is not None else None
@@ -545,7 +606,9 @@ class WorkspaceArchive:
             install_prefix=install_prefix,
             runtime_prefix=runtime_prefix,
             receipt_path=extract_result.receipt_path,
+            attestation_path=extract_result.attestation_path,
             verified=extract_result.verified,
+            attestation_verified=extract_result.attestation_verified,
             info=extract_result.info,
             return_code=return_code,
             primed_packages=extract_result.primed_packages,
@@ -684,21 +747,73 @@ def extract_verified_archive(
     *,
     require_sha256: bool = False,
 ) -> Path:
+    """Extract to a staging directory, verify the receipt, then move into *target*."""
+    extracted, _, _ = _extract_verified_archive(
+        archive_path,
+        target,
+        receipt,
+        require_sha256=require_sha256,
+    )
+    return extracted
+
+
+def _extract_verified_archive(
+    archive_path: Path,
+    target: Path,
+    receipt: ArchiveReceipt | None,
+    *,
+    require_sha256: bool = False,
+    verify_attestation: bool = False,
+    trusted_identities: tuple[Any, ...] = (),
+) -> tuple[Path, Path | None, bool]:
     """Extract to a staging directory, verify, then move into *target*."""
     ensure_extract_target_empty(target)
     target = target.resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     staged = Path(tempfile.mkdtemp(prefix=f".{target.name}.verify-", dir=target.parent))
+    attestation_path = None
+    attestation_verified = False
     try:
         extract_archive(archive_path, staged)
-        receipt.verify_extracted(staged, require_sha256=require_sha256)
+        if receipt is not None:
+            receipt.verify_extracted(staged, require_sha256=require_sha256)
+        if verify_attestation:
+            from .attestations import (
+                default_attestation_path,
+                verify_workspace_attestation,
+            )
+
+            attestation_path = default_attestation_path(staged / "conda.lock")
+            manifest_path = next(
+                (
+                    staged / filename
+                    for filename in MANIFEST_SEARCH_FILENAMES
+                    if (staged / filename).is_file()
+                ),
+                None,
+            )
+            if manifest_path is None:
+                raise ArchiveError(
+                    "Cannot verify archive attestation: workspace manifest was "
+                    "not found."
+                )
+            verify_workspace_attestation(
+                root=staged,
+                identities=trusted_identities,
+                manifest_path=manifest_path,
+                lockfile_path=staged / "conda.lock",
+                bundle_path=attestation_path,
+            )
+            attestation_verified = True
         if target.exists():
             target.rmdir()
         staged.rename(target)
     except BaseException:
         shutil.rmtree(staged, ignore_errors=True)
         raise
-    return target
+    if attestation_path is not None:
+        attestation_path = target / attestation_path.relative_to(staged)
+    return target, attestation_path, attestation_verified
 
 
 def parse_relative_archive_path(
@@ -864,6 +979,7 @@ def create_archive(
     archive_config: ArchiveConfig,
     *,
     bundle_packages: list[Path] | None = None,
+    extra_files: tuple[Path, ...] = (),
 ) -> Path:
     """Create a tar archive of the workspace at *root*.
 
@@ -875,7 +991,20 @@ def create_archive(
     output.parent.mkdir(parents=True, exist_ok=True)
 
     files = collect_archive_files(root, archive_config)
+    seen_files = {path.resolve() for path in files}
+    for extra in extra_files:
+        extra = extra.resolve()
+        try:
+            extra.relative_to(root.resolve())
+        except ValueError:
+            raise ArchiveError(
+                f"Cannot include archive sidecar outside workspace: {extra}"
+            ) from None
+        if extra.is_file() and extra not in seen_files:
+            files.append(extra)
+            seen_files.add(extra)
     files = [f for f in files if f.resolve() != output]
+    files = sorted(files)
 
     compression = detect_compression(output)
 
@@ -1131,8 +1260,8 @@ def prime_package_cache(
 ) -> int:
     """Copy bundled packages from an extracted archive into the conda cache.
 
-    Only copies packages after the archive has been verified by an
-    external integrity record. Package SHA256 hashes are still verified
+    Only copies packages after the archive has a verified receipt or a
+    verified workspace attestation. Package SHA256 hashes are still verified
     against the extracted lockfile before copying.
     Returns the number of packages added to the cache.
     """
@@ -1151,9 +1280,11 @@ def prime_package_cache(
         raise ArchiveError(
             "Cannot prime package cache from unverified archive packages.",
             hints=[
-                "Verify the archive with an external receipt before cache priming.",
-                "Use 'conda workspace unarchive --receipt ...' or extract without"
-                " cache priming.",
+                "Verify the archive with a receipt or attestation before cache"
+                " priming.",
+                "Use 'conda workspace unarchive --receipt ...' or"
+                " 'conda workspace unarchive --verify', or extract without cache"
+                " priming.",
             ],
         )
 
