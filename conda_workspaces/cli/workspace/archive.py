@@ -89,13 +89,6 @@ def execute_archive(
     status.message(console, "Created", "archive", str(archive.path))
     if archive.receipt_path is not None:
         status.message(console, "Created", "receipt", str(archive.receipt_path))
-    if archive.workspace_attestation_path is not None:
-        status.message(
-            console,
-            "Created",
-            "attestation",
-            str(archive.workspace_attestation_path),
-        )
     return 0
 
 

@@ -189,25 +189,14 @@ class WorkspaceArchive:
 
     path: Path
     receipt: bool | str | Path | None = None
-    workspace_attestation_path: Path | None = None
 
     def __init__(
         self,
         path: str | Path,
         receipt: bool | str | Path | None = None,
-        workspace_attestation_path: str | Path | None = None,
     ):
         object.__setattr__(self, "path", Path(path).expanduser().resolve())
         object.__setattr__(self, "receipt", receipt)
-        object.__setattr__(
-            self,
-            "workspace_attestation_path",
-            (
-                Path(workspace_attestation_path).expanduser().resolve()
-                if workspace_attestation_path is not None
-                else None
-            ),
-        )
 
     @classmethod
     def create(
@@ -248,24 +237,27 @@ class WorkspaceArchive:
         receipt_path = archive.receipt_path
         manifest_path = Path(config.manifest_path)
         lock_path = lockfile_path(ctx)
-        attestation_path = None
 
         if receipt_path is not None:
-            archive.validate_receipt_inputs(
+            archive.validate_integrity_inputs(
                 root=ctx.root,
                 output=output_path,
                 archive_config=archive_config,
                 manifest_path=manifest_path,
                 lockfile_path=lock_path,
+                action="write receipt",
+                option="receipt",
                 receipt_path=receipt_path,
             )
         if sign:
-            archive.validate_attestation_inputs(
+            archive.validate_integrity_inputs(
                 root=ctx.root,
                 output=output_path,
                 archive_config=archive_config,
                 manifest_path=manifest_path,
                 lockfile_path=lock_path,
+                action="sign archive",
+                option="sign",
             )
 
         bundle_packages = None
@@ -318,11 +310,7 @@ class WorkspaceArchive:
             )
             receipt_obj.write(receipt_path)
 
-        return cls(
-            archive_path,
-            receipt=receipt_path,
-            workspace_attestation_path=attestation_path,
-        )
+        return cls(archive_path, receipt=receipt_path)
 
     @staticmethod
     def default_output_path(ctx: WorkspaceContext, output: str | Path | None) -> Path:
@@ -345,111 +333,63 @@ class WorkspaceArchive:
         )
         return ctx.root / f"{name}{ext}"
 
-    @classmethod
-    def validate_receipt_inputs(
-        cls,
+    @staticmethod
+    def validate_integrity_inputs(
         *,
         root: Path,
         output: Path,
         archive_config: ArchiveConfig,
         manifest_path: Path,
         lockfile_path: Path,
-        receipt_path: Path,
+        action: str,
+        option: str,
+        receipt_path: Path | None = None,
     ) -> None:
-        """Validate inputs required to write a receipt for a new archive."""
-        if receipt_path.resolve() == output.resolve():
+        """Validate inputs needed by receipt and attestation verification."""
+        if receipt_path is not None and receipt_path.resolve() == output.resolve():
             raise ArchiveError(
                 "Receipt path cannot be the archive path.",
                 hints=["Choose a separate JSON path for --receipt."],
             )
         if not manifest_path.is_file():
-            raise ArchiveError(
-                "Cannot write receipt: workspace manifest was not found."
-            )
+            raise ArchiveError(f"Cannot {action}: workspace manifest was not found.")
         if not lockfile_path.is_file():
             raise ArchiveError(
-                "Cannot write receipt: no conda.lock found.",
+                f"Cannot {action}: no conda.lock found.",
                 hints=["Run 'conda workspace lock' first."],
             )
-        cls.validate_required_archive_members(
-            root=root,
-            output=output,
-            archive_config=archive_config,
-            required_members={
-                "workspace manifest": manifest_path,
-                "workspace lockfile": lockfile_path,
-            },
-            action="write receipt",
-            hints=[
-                "Receipt verification requires the workspace manifest and"
-                " conda.lock to be included in the archive.",
-                "Remove matching include/exclude filters or run without --receipt.",
-            ],
-        )
-
-    @classmethod
-    def validate_attestation_inputs(
-        cls,
-        *,
-        root: Path,
-        output: Path,
-        archive_config: ArchiveConfig,
-        manifest_path: Path,
-        lockfile_path: Path,
-    ) -> None:
-        """Validate inputs required to sign a workspace archive."""
-        if not manifest_path.is_file():
-            raise ArchiveError("Cannot sign archive: workspace manifest was not found.")
-        if not lockfile_path.is_file():
-            raise ArchiveError(
-                "Cannot sign archive: no conda.lock found.",
-                hints=["Run 'conda workspace lock' first."],
-            )
-        cls.validate_required_archive_members(
-            root=root,
-            output=output,
-            archive_config=archive_config,
-            required_members={
-                "workspace manifest": manifest_path,
-                "workspace lockfile": lockfile_path,
-            },
-            action="sign archive",
-            hints=[
-                "Attestation verification requires the workspace manifest and"
-                " conda.lock to be included in the archive.",
-                "Remove matching include/exclude filters or run without --sign.",
-            ],
-        )
-
-    @staticmethod
-    def validate_required_archive_members(
-        *,
-        root: Path,
-        output: Path,
-        archive_config: ArchiveConfig,
-        required_members: dict[str, Path],
-        action: str,
-        hints: list[str],
-    ) -> None:
-        """Validate that archive verification inputs are included as members."""
         archive_members = {
             path.relative_to(root).as_posix()
             for path in collect_archive_files(root, archive_config)
             if path.resolve() != output.resolve()
         }
-        missing = []
-        for label, path in required_members.items():
+        missing = None
+        for label, path in (
+            ("workspace manifest", manifest_path),
+            ("workspace lockfile", lockfile_path),
+        ):
             try:
                 archive_name = path.relative_to(root).as_posix()
             except ValueError:
-                missing.append(label)
-                continue
+                missing = label
+                break
             if archive_name not in archive_members:
-                missing.append(f"{label} ({archive_name})")
+                missing = f"{label} ({archive_name})"
+                break
         if missing:
+            verification = (
+                "Receipt verification"
+                if option == "receipt"
+                else "Attestation verification"
+            )
             raise ArchiveError(
-                f"Cannot {action}: archive would not include {missing[0]}.",
-                hints=hints,
+                f"Cannot {action}: archive would not include {missing}.",
+                hints=[
+                    f"{verification} requires the workspace manifest and"
+                    " conda.lock to be included in the archive.",
+                    "Remove matching include/exclude filters or run without "
+                    f"--{option}.",
+                ],
             )
 
     @staticmethod
