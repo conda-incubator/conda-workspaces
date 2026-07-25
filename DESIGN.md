@@ -171,11 +171,11 @@ overrides or Jinja2 conditionals.
 ### 7. Add/Remove Auto-Install
 
 `conda workspace add` and `conda workspace remove` edit the manifest,
-re-solve the affected environments, install the changes into their
-prefixes, and regenerate `conda.lock` in a single step.  This matches
-pixi's `pixi add` / `pixi remove` semantics and closes the loop between
-"I edited my manifest" and "my environment reflects that change", which
-matters most when working inside a `conda workspace shell`.
+install the changes into affected prefixes, and regenerate a complete
+`conda.lock` in a single step. This matches pixi's `pixi add` /
+`pixi remove` semantics and closes the loop between "I edited my
+manifest" and "my environment reflects that change", which matters
+most when working inside a `conda workspace shell`.
 
 Opt-outs are available for partial workflows:
 
@@ -186,13 +186,14 @@ Opt-outs are available for partial workflows:
 - `--force-reinstall` / `--dry-run` — forwarded to the underlying
   `install_environment` call, matching `conda workspace install`.
 
-**Affected environments**: editing the default feature (the default when
-no `--feature` / `-e` is passed) re-syncs every environment that does not
-set `no-default-feature = true`.  Editing a named feature re-syncs every
-environment whose `features` list contains it.  A shared helper
+**Affected environments**: editing the default feature (the default
+when no `--feature` / `-e` is passed) selects every environment that
+does not set `no-default-feature = true` for prefix installation.
+Editing a named feature selects every composing environment. All
+declared environments still feed lock generation. A shared helper
 `sync_environments` in `conda_workspaces/cli/workspace/sync.py` backs
-both commands as well as `conda workspace install`, so there is a single
-canonical solve/install/lock pipeline.
+both commands as well as `conda workspace install`, so there is a
+single canonical synchronization pipeline.
 
 **Shell re-spawn hint**: `conda-spawn` sources activation scripts once at
 spawn time, so packages that ship `etc/conda/activate.d/*.sh` hooks need
@@ -201,13 +202,13 @@ When new files appear under `activate.d/` after an install and the
 command is running inside a spawned shell (`CONDA_SPAWN=1`), a hint is
 printed asking the user to exit and re-run `conda workspace shell`.
 
-**Lockfile scope**: `generate_lockfile` writes a full `conda.lock` from
-the environments it is given.  When only a subset of environments is
-affected (e.g. `conda workspace add --feature test`), the lockfile is
-replaced with entries for just those environments — identical to how
-`conda workspace install -e <env>` behaves today.  Preserving entries
-for unaffected environments is a separate change and would apply
-equally to `conda workspace install`.
+**Lockfile scope**: prefix installation stays limited to the selected
+or affected environments. The canonical `conda.lock` is always
+regenerated from every declared environment and platform, including
+for `conda workspace install -e <env>` and `conda workspace add
+--feature <feature>`. Callers that intentionally need a partial
+artifact use `conda workspace lock -e <env> --output <fragment>` or a
+platform filter with an explicit output path.
 
 ## Differences from Pixi
 
@@ -437,6 +438,6 @@ Users can restrict a run with `conda workspace lock --platform
 <subdir> --output <fragment>` (repeatable) to generate just a subset,
 e.g. when a new dependency only affects one platform. Environment and
 platform filters plus `--skip-unsolvable` always require an explicit
-output path. Only an unfiltered run implicitly replaces the complete
-canonical `conda.lock`. Unknown platforms raise `PlatformError` before
-any solve runs.
+output path. Only an unfiltered `conda workspace lock` run implicitly
+replaces the complete canonical `conda.lock`. Unknown platforms raise
+`PlatformError` before any solve runs.

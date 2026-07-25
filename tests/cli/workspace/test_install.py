@@ -36,7 +36,7 @@ def _stub_lockfile(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize(
-    "env_arg, expected_names, output_fragment",
+    ("env_arg", "expected_installed", "output_fragment"),
     [
         ("default", {"default"}, "Installed"),
         (None, {"default", "test"}, "Installed"),
@@ -48,7 +48,7 @@ def test_install_envs(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     env_arg: str | None,
-    expected_names: set[str],
+    expected_installed: set[str],
     output_fragment: str,
 ) -> None:
     monkeypatch.chdir(pixi_workspace)
@@ -72,10 +72,10 @@ def test_install_envs(
     args = make_args(_DEFAULTS, environment=env_arg)
     result = execute_install(args)
     assert result == 0
-    assert set(calls) == expected_names
+    assert set(calls) == expected_installed
     assert output_fragment in capsys.readouterr().out
     assert len(lock_calls) == 1
-    assert set(lock_calls[0].keys()) == expected_names
+    assert set(lock_calls[0]) == {"default", "test"}
 
 
 @pytest.mark.parametrize(
@@ -139,7 +139,7 @@ def test_install_dry_run_previews_lockfile(
     args = make_args(_DEFAULTS, environment="default", dry_run=True)
     execute_install(args)
     assert len(lock_calls) == 1
-    assert set(lock_calls[0][0]) == {"default"}
+    assert set(lock_calls[0][0]) == {"default", "test"}
     assert lock_calls[0][1] is True
 
 
@@ -320,15 +320,17 @@ def test_install_no_lock_forces_solve(
         "conda_workspaces.cli.workspace.sync.install_environment",
         lambda ctx, resolved, **kw: sync_calls.append(resolved.name),
     )
+    lock_calls: list[dict] = []
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.sync.generate_lockfile",
-        lambda ctx, resolved_envs, **kwargs: None,
+        lambda ctx, resolved_envs, **kwargs: lock_calls.append(resolved_envs),
     )
 
-    args = make_args(_DEFAULTS, no_lock=True)
+    args = make_args(_DEFAULTS, environment="test", no_lock=True)
     result = execute_install(args)
     assert result == 0
-    assert len(sync_calls) > 0
+    assert sync_calls == ["test"]
+    assert set(lock_calls[0]) == {"default", "test"}
 
 
 @pytest.mark.parametrize(

@@ -32,9 +32,9 @@ platforms = ["linux-64", "osx-arm64"]
 
 ## Add dependencies
 
-Each `conda workspace add` updates the manifest, resolves the
-affected environments, installs into their prefixes, and refreshes
-`conda.lock` — no separate install step is needed.
+Each `conda workspace add` updates the manifest, installs into the
+affected prefixes, and refreshes a complete `conda.lock` — no separate
+install step is needed.
 
 Add your base dependencies:
 

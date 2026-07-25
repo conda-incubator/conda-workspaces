@@ -153,7 +153,10 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         "-e",
         "--environment",
         default=None,
-        help="Install only this environment (default: all).",
+        help=(
+            "Install only this environment. Canonical lock refreshes"
+            " still cover the whole workspace."
+        ),
     )
     install_parser.add_argument(
         "--force-reinstall",
@@ -417,7 +420,10 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         "--no-install",
         action="store_true",
         default=False,
-        help="Update manifest and lockfile but skip installing into the environment.",
+        help=(
+            "Update the manifest and complete lockfile but skip installing"
+            " affected environments."
+        ),
     )
     add_parser_cmd.add_argument(
         "--no-lockfile-update",
@@ -465,7 +471,10 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         "--no-install",
         action="store_true",
         default=False,
-        help="Update the manifest and lockfile but skip reinstalling the environment.",
+        help=(
+            "Update the manifest and complete lockfile but skip installing"
+            " affected environments."
+        ),
     )
     rm_parser.add_argument(
         "--no-lockfile-update",

@@ -12,6 +12,7 @@ from conda_workspaces.cli.workspace.sync import (
     affected_environments,
     sync_environments,
 )
+from conda_workspaces.exceptions import EnvironmentNotFoundError, PlatformError
 from conda_workspaces.models import Environment, Feature, WorkspaceConfig
 
 if TYPE_CHECKING:
@@ -110,10 +111,6 @@ def sync_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     calls: list[str] = []
 
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sync.resolve_environment",
-        lambda config, name, platform: type("R", (), {"name": name})(),
-    )
-    monkeypatch.setattr(
         "conda_workspaces.cli.workspace.sync.install_environment",
         lambda *a, **k: calls.append("install"),
     )
@@ -137,6 +134,19 @@ def test_sync_no_env_names_is_noop(
         console=captured_console,
     )
     assert sync_calls == []
+
+
+def test_sync_rejects_unknown_environment(
+    captured_console: Console,
+    fake_ctx,
+) -> None:
+    with pytest.raises(EnvironmentNotFoundError):
+        sync_environments(
+            _config(default={}),
+            fake_ctx,
+            ["missing"],
+            console=captured_console,
+        )
 
 
 @pytest.mark.parametrize(
@@ -167,20 +177,80 @@ def test_sync_pipeline_respects_flags(
     assert sync_calls == expected_calls
 
 
+@pytest.mark.parametrize(
+    ("selected_name", "no_install", "expected_installed"),
+    [
+        ("default", False, ["default"]),
+        ("windows", True, []),
+    ],
+    ids=["unselected-feature-platform", "no-install-feature-platform"],
+)
+def test_sync_locks_feature_only_platforms_without_host_validation(
+    captured_console: Console,
+    fake_ctx,
+    monkeypatch: pytest.MonkeyPatch,
+    selected_name: str,
+    no_install: bool,
+    expected_installed: list[str],
+) -> None:
+    config = _config(default={}, windows={"features": ["windows"]})
+    config.platforms = ["linux-64"]
+    config.features["windows"].platforms = ["win-64"]
+    installed: list[str] = []
+    locked: list[dict] = []
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.install_environment",
+        lambda ctx, resolved, **kwargs: installed.append(resolved.name),
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.generate_lockfile",
+        lambda ctx, resolved_envs, **kwargs: locked.append(resolved_envs),
+    )
+
+    sync_environments(
+        config,
+        fake_ctx,
+        [selected_name],
+        no_install=no_install,
+        console=captured_console,
+    )
+
+    assert installed == expected_installed
+    assert set(locked[0]) == {"default", "windows"}
+    assert locked[0]["windows"].platforms == ["win-64"]
+
+
+def test_sync_validates_selected_platforms_before_installing(
+    captured_console: Console,
+    fake_ctx,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(default={}, windows={"features": ["windows"]})
+    config.platforms = ["linux-64"]
+    config.features["windows"].platforms = ["win-64"]
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.install_environment",
+        lambda *args, **kwargs: pytest.fail("installed before platform validation"),
+    )
+
+    with pytest.raises(PlatformError):
+        sync_environments(
+            config,
+            fake_ctx,
+            ["default", "windows"],
+            console=captured_console,
+        )
+
+
 def test_force_dry_run_reuses_preview_prefix_for_lock_solve(
     tmp_path: Path,
     captured_console: Console,
     fake_ctx,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    preview_prefix = tmp_path / ".default.dry-run"
+    preview_prefix = tmp_path / ".test.dry-run"
     install_calls: list[dict[str, object]] = []
-    lock_calls: list[dict[str, object]] = []
-
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sync.resolve_environment",
-        lambda config, name, platform: type("R", (), {"name": name})(),
-    )
+    lock_calls: list[tuple[dict, dict[str, object]]] = []
 
     def fake_install(ctx, resolved, **kwargs):
         install_calls.append(kwargs)
@@ -192,20 +262,22 @@ def test_force_dry_run_reuses_preview_prefix_for_lock_solve(
     )
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.sync.generate_lockfile",
-        lambda ctx, resolved_envs, **kwargs: lock_calls.append(kwargs),
+        lambda ctx, resolved_envs, **kwargs: lock_calls.append((resolved_envs, kwargs)),
     )
 
     sync_environments(
-        _config(default={}),
+        _config(default={}, test={"features": ["test"]}),
         fake_ctx,
-        ["default"],
+        ["test"],
         force_reinstall=True,
         dry_run=True,
         console=captured_console,
     )
 
     assert install_calls == [{"force_reinstall": True, "dry_run": True}]
-    assert lock_calls[0]["solve_prefixes"] == {"default": preview_prefix}
+    resolved_envs, lock_kwargs = lock_calls[0]
+    assert set(resolved_envs) == {"default", "test"}
+    assert lock_kwargs["solve_prefixes"] == {"test": preview_prefix}
 
 
 @pytest.mark.parametrize(
@@ -228,10 +300,6 @@ def test_sync_activate_d_hint_respects_conda_spawn(
         activate_d.mkdir(parents=True, exist_ok=True)
         (activate_d / "pkg-activate.sh").write_text("# hook")
 
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sync.resolve_environment",
-        lambda config, name, platform: type("R", (), {"name": name})(),
-    )
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.sync.generate_lockfile",
         lambda ctx, resolved_envs, **kwargs: None,
