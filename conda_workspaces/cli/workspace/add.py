@@ -5,11 +5,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import tomlkit
+from conda.exceptions import InvalidMatchSpec
 from conda.models.match_spec import MatchSpec
 from rich.console import Console
 
 from ...context import WorkspaceContext
 from ...manifests import detect_workspace_file, find_parser
+from ...manifests.toml import WorkspaceDependencyResolver
 from . import workspace_manifest_path_from_args
 from .sync import affected_environments, sync_environments
 
@@ -17,18 +19,6 @@ if TYPE_CHECKING:
     import argparse
 
     from tomlkit.items import Table
-
-
-def _parse_spec(spec: str) -> tuple[str, str]:
-    """Extract package name and version constraint from a MatchSpec string.
-
-    Uses conda's own MatchSpec parser (CEP 29) to handle all valid forms:
-    ``python>=3.12``, ``python >=3.12``, ``python=3.12``, ``numpy``, etc.
-    Returns ``"*"`` when no version constraint is present.
-    """
-    ms = MatchSpec(spec)
-    version = str(ms.version) if ms.version else "*"
-    return ms.name, version
 
 
 def execute_add(args: argparse.Namespace, *, console: Console | None = None) -> int:
@@ -132,6 +122,15 @@ def _add_to_toml(
         target = doc
 
     deps = target.setdefault(dep_key, tomlkit.table())
-    for spec in specs:
-        name, version = _parse_spec(spec)
-        deps[name] = version
+    for raw_spec in specs:
+        spec = MatchSpec(raw_spec)
+        name = spec.get_exact_value("name")
+        if not name:
+            raise InvalidMatchSpec(raw_spec, "an exact package name is required")
+        if dep_key == "dependencies":
+            value = WorkspaceDependencyResolver.match_spec_to_toml(spec)
+            if spec.is_name_only_spec and name in deps:
+                continue
+            deps[name] = value
+        else:
+            deps[name] = str(spec.version) if spec.version else "*"

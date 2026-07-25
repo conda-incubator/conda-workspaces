@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 import tomlkit
+from conda.exceptions import InvalidMatchSpec
 from conda_lockfiles.load_yaml import load_yaml
 
 from conda_workspaces.cli.workspace.add import execute_add
@@ -82,8 +83,9 @@ python = ">=3.10"
         (["numpy"], {"numpy": "*"}),
         (["numpy >=1.24"], {"numpy": ">=1.24"}),
         (["numpy >=1.24", "pandas"], {"numpy": ">=1.24", "pandas": "*"}),
+        (["python=*"], {"python": "*"}),
     ],
-    ids=["bare-name", "with-version", "multiple"],
+    ids=["bare-name", "with-version", "multiple", "clear-existing"],
 )
 def test_add_conda_deps_to_pixi_toml(
     pixi_toml: Path, specs: list[str], expected_deps: dict[str, str]
@@ -95,6 +97,151 @@ def test_add_conda_deps_to_pixi_toml(
     doc = tomlkit.loads(pixi_toml.read_text(encoding="utf-8"))
     for name, version in expected_deps.items():
         assert doc["dependencies"][name] == version
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected"),
+    [
+        (
+            "conda-forge::numpy=2.3.1=py314h*",
+            {
+                "version": "2.3.1",
+                "build": "py314h*",
+                "channel": "conda-forge",
+            },
+        ),
+        (
+            "pkgs/main::numpy[build='py*']",
+            {
+                "build": "py*",
+                "channel": "pkgs/main",
+            },
+        ),
+        (
+            (
+                "numpy[version='>=2',build='py*',build_number=2,"
+                "channel='conda-forge',subdir='linux-64',"
+                "md5='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',"
+                "sha256='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',"
+                "url='https://example.com/numpy.conda',"
+                "fn='numpy.conda',license='BSD-3-Clause',license_family='BSD',"
+                "features='mkl blas',track_features='accelerated']"
+            ),
+            {
+                "version": ">=2",
+                "build": "py*",
+                "build-number": "2",
+                "channel": "conda-forge",
+                "subdir": "linux-64",
+                "md5": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "sha256": (
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                ),
+                "url": "https://example.com/numpy.conda",
+                "file-name": "numpy.conda",
+                "license": "bsd-3-clause",
+                "license-family": "bsd",
+                "features": ["blas", "mkl"],
+                "track-features": ["accelerated"],
+            },
+        ),
+    ],
+    ids=["channel-qualified", "multichannel-without-version", "all-supported-fields"],
+)
+def test_add_preserves_conda_matchspec_fields(
+    pixi_toml: Path,
+    spec: str,
+    expected: dict[str, object],
+) -> None:
+    args = make_args(_DEFAULTS, manifest_file=pixi_toml, specs=[spec])
+    assert execute_add(args) == 0
+
+    doc = tomlkit.loads(pixi_toml.read_text(encoding="utf-8"))
+    assert doc["dependencies"]["numpy"].unwrap() == expected
+
+
+@pytest.mark.parametrize(
+    ("filename", "namespace", "root_keys"),
+    [
+        ("conda.toml", "", ()),
+        ("pixi.toml", "", ()),
+        ("pyproject.toml", "tool.conda", ("tool", "conda")),
+        ("pyproject.toml", "tool.pixi", ("tool", "pixi")),
+    ],
+    ids=["conda-toml", "pixi-toml", "pyproject-conda", "pyproject-pixi"],
+)
+def test_add_existing_conda_dependency_across_formats(
+    tmp_path: Path,
+    filename: str,
+    namespace: str,
+    root_keys: tuple[str, ...],
+) -> None:
+    prefix = f"{namespace}." if namespace else ""
+    project = '[project]\nname = "add-test"\n\n' if namespace else ""
+    path = tmp_path / filename
+    path.write_text(
+        f"""{project}[{prefix}workspace]
+name = "add-test"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[{prefix}dependencies]
+python = ">=3.10"
+rich = {{ version = "1", build = "x", channel = "c", subdir = "linux-64" }}
+""",
+        encoding="utf-8",
+    )
+
+    before = path.read_text(encoding="utf-8")
+    args = make_args(_DEFAULTS, manifest_file=path, specs=["rich"])
+    assert execute_add(args) == 0
+    assert path.read_text(encoding="utf-8") == before
+
+    args = make_args(
+        _DEFAULTS,
+        manifest_file=path,
+        specs=["rich[version='>=14.1',channel='defaults']"],
+    )
+    assert execute_add(args) == 0
+
+    root = tomlkit.loads(path.read_text(encoding="utf-8"))
+    for key in root_keys:
+        root = root[key]
+    assert root["dependencies"]["rich"].unwrap() == {
+        "version": ">=14.1",
+        "channel": "defaults",
+    }
+
+
+@pytest.mark.parametrize(
+    ("spec", "message"),
+    [
+        ("python[when='linux']", "cannot be represented"),
+        ("python[optional=true]", "cannot be represented"),
+        ("python[target='x']", "cannot be represented"),
+        ("python[subdir='custom-64']", "not a known conda platform"),
+        ("python*", "package name is required"),
+    ],
+    ids=[
+        "when",
+        "optional",
+        "target",
+        "unknown-subdir",
+        "wildcard-name",
+    ],
+)
+def test_add_rejects_unrepresentable_conda_matchspec(
+    pixi_toml: Path,
+    spec: str,
+    message: str,
+) -> None:
+    before = pixi_toml.read_text(encoding="utf-8")
+    args = make_args(_DEFAULTS, manifest_file=pixi_toml, specs=["pandas>=2", spec])
+
+    with pytest.raises(InvalidMatchSpec, match=message):
+        execute_add(args)
+
+    assert pixi_toml.read_text(encoding="utf-8") == before
 
 
 @pytest.mark.parametrize(

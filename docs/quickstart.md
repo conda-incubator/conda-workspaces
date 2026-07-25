@@ -304,6 +304,13 @@ conda workspace add numpy
 prefixes, and refresh a complete `conda.lock` in one go — the same
 shape as `pixi add` / `pixi remove`.
 
+For `conda workspace add`, a bare package name preserves an existing
+declaration. An explicit MatchSpec replaces the whole declaration, and
+rich fields such as `channel` or `build` are written as an inline
+table. Use an explicit wildcard such as `numpy=*` to clear prior
+constraints. Unsupported MatchSpec fields fail before the manifest is
+written.
+
 Add to a specific feature (only prefixes for environments composing
 that feature are installed or updated):
 

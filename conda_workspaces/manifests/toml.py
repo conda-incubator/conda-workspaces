@@ -13,6 +13,8 @@ import logging
 from typing import TYPE_CHECKING
 
 import tomlkit
+from conda.base.constants import KNOWN_SUBDIRS
+from conda.exceptions import InvalidMatchSpec
 
 from ..exceptions import TaskParseError, WorkspaceParseError
 from ..models import (
@@ -195,6 +197,10 @@ class WorkspaceDependencyResolver:
         "subdirectory",
         "tag",
     }
+    toml_spec_fields: ClassVar[dict[str, str]] = {
+        field: "file-name" if field == "fn" else field.replace("_", "-")
+        for field in dict.fromkeys(spec_field_aliases.values())
+    }
 
     def __init__(
         self,
@@ -227,6 +233,64 @@ class WorkspaceDependencyResolver:
                 table_name=table_name,
             )
         return deps
+
+    @classmethod
+    def match_spec_to_toml(cls, spec: MatchSpec) -> str | InlineTable:
+        """Return the lossless TOML value for a conda *spec*."""
+        unsupported = [
+            field
+            for field in MatchSpec.FIELD_NAMES
+            if field not in cls.toml_spec_fields
+            and field != "name"
+            and spec.get_raw_value(field) is not None
+        ]
+        if spec.optional is not False:
+            unsupported.append("optional")
+        if spec.target is not None:
+            unsupported.append("target")
+        if unsupported:
+            fields = ", ".join(unsupported)
+            raise InvalidMatchSpec(
+                spec,
+                f"field(s) cannot be represented in a workspace manifest: {fields}",
+            )
+
+        subdir = spec.get_raw_value("subdir")
+        if subdir is not None and subdir not in KNOWN_SUBDIRS:
+            raise InvalidMatchSpec(
+                spec,
+                f"subdir '{subdir}' is not a known conda platform",
+            )
+
+        fields: dict[str, Any] = {}
+        for field, key in cls.toml_spec_fields.items():
+            value = spec.get_raw_value(field)
+            if value is None:
+                continue
+            if field == "channel":
+                channel = Channel(value)
+                value = next(
+                    candidate
+                    for candidate in (
+                        channel.canonical_name,
+                        channel.name,
+                        str(channel),
+                    )
+                    if candidate and Channel(candidate) == channel
+                )
+            elif field == "build_number":
+                value = str(value)
+            elif isinstance(value, frozenset):
+                value = sorted(value)
+            fields[key] = value
+
+        if not fields:
+            return "*"
+        if list(fields) == ["version"]:
+            return fields["version"]
+        table = tomlkit.inline_table()
+        table.update(fields)
+        return table
 
     def parse_dependency(
         self,
