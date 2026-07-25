@@ -55,23 +55,16 @@ conda workspace lock
 ```
 
 If you only want to solve the newly added platform (faster for large
-workspaces), target it explicitly:
-
-```bash
-conda workspace lock --platform win-64
-```
-
-This writes a lockfile covering just `win-64`. To fold it into your
-existing `conda.lock` that already covers the other platforms, use
-`--output` and `--merge`:
+workspaces), write it to an explicit fragment:
 
 ```bash
 conda workspace lock --platform win-64 --output conda.lock.win-64
-conda workspace lock --merge "conda.lock.*"
 ```
 
-Or simply re-run `conda workspace lock` without flags to regenerate
-the full lockfile from scratch.
+This leaves the existing canonical lock untouched. Combine it with
+fragments for the other platforms in a matrix workflow, or re-run
+`conda workspace lock` without filters to regenerate the full lockfile
+from scratch.
 
 ## Generate the lockfile
 
@@ -101,17 +94,19 @@ If you only need to refresh one platform (for example, after adding a
 Linux-only dependency), pass `--platform`:
 
 ```bash
-conda workspace lock --platform linux-64
+conda workspace lock --platform linux-64 --output conda.lock.linux-64
 ```
 
 This flag is repeatable:
 
 ```bash
-conda workspace lock --platform linux-64 --platform osx-arm64
+conda workspace lock --platform linux-64 --platform osx-arm64 \
+  --output conda.lock.unix
 ```
 
 Unknown platforms (typos like `lnux-64`) are rejected before the
-solver runs.
+solver runs. The explicit output keeps a partial result from replacing
+the complete canonical lock.
 
 ## Add platform-specific dependencies
 
@@ -146,7 +141,8 @@ glibc than your deployment target.
 You can also pin via environment variables for one-off overrides:
 
 ```bash
-CONDA_OVERRIDE_GLIBC=2.17 conda workspace lock --platform linux-64
+CONDA_OVERRIDE_GLIBC=2.17 conda workspace lock --platform linux-64 \
+  --output conda.lock.linux-64
 ```
 
 ## Handle unsolvable platforms
@@ -157,12 +153,12 @@ command fails on the first broken solve. To keep going and lock what
 you can:
 
 ```bash
-conda workspace lock --skip-unsolvable
+conda workspace lock --skip-unsolvable --output conda.lock.solvable
 ```
 
 This prints a yellow `Skipping ...` line for each failed
-(environment, platform) pair and writes the lockfile with the
-successful solves. If every pair fails, no lockfile is written and the
+(environment, platform) pair and writes the successful solves to the
+explicit fragment. If every pair fails, no lockfile is written and the
 command exits with an error.
 
 ## Install from the lockfile

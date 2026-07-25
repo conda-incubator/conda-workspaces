@@ -195,7 +195,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         "-e",
         "--environment",
         default=None,
-        help="Generate lockfile for this environment only (default: all).",
+        help="Lock this environment only. Requires --output.",
     )
     lock_parser.add_argument(
         "--platform",
@@ -204,7 +204,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         help=(
             "Lock only for this platform (e.g. linux-64). May be passed"
             " multiple times. Defaults to all platforms declared in the"
-            " workspace."
+            " workspace. Requires --output."
         ),
     )
     lock_parser.add_argument(
@@ -215,7 +215,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
             "Continue locking when the solver fails for an (environment,"
             " platform) pair instead of aborting. Other errors (missing"
             " channel, invalid manifest, etc.) still abort. Fails if no"
-            " pair can be solved."
+            " pair can be solved. Requires --output."
         ),
     )
     lock_parser.add_argument(
@@ -224,9 +224,11 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         default=None,
         help=(
             "Write the lockfile to this path instead of the default"
-            " <workspace>/conda.lock. Useful in CI matrices that emit"
-            " per-platform fragments (e.g. --platform linux-64 --output"
-            " conda.lock.linux-64) to be stitched back with --merge."
+            " <workspace>/conda.lock. Required with --environment,"
+            " --platform, or --skip-unsolvable. Useful in CI matrices"
+            " that emit per-platform fragments (e.g. --platform linux-64"
+            " --output conda.lock.linux-64) to be stitched back with"
+            " --merge."
         ),
     )
     lock_parser.add_argument(

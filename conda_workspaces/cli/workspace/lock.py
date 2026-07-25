@@ -77,24 +77,33 @@ def execute_lock(args: argparse.Namespace, *, console: Console | None = None) ->
         console.print(f"[bold cyan]{action}[/bold cyan] [bold]conda.lock[/bold]")
         return 0
 
+    if output_path is None and (env_name or requested_platforms or skip_unsolvable):
+        raise CondaValueError(
+            "--output is required with --environment, --platform, or --skip-unsolvable."
+        )
+
     if env_name:
         if env_name not in config.environments:
             raise EnvironmentNotFoundError(
                 env_name,
                 list(config.environments.keys()),
             )
-        resolved = resolve_environment(config, env_name, ctx.platform)
+        resolved = resolve_environment(config, env_name)
         resolved_envs = {env_name: resolved}
     else:
-        resolved_envs = resolve_all_environments(config, ctx.platform)
+        resolved_envs = resolve_all_environments(config)
 
     platforms: tuple[str, ...] | None = None
     if requested_platforms:
         # Catch --platform typos (e.g. "lixux-64") before the solver
-        # burns any time by validating against the full reachable
-        # platform set — workspace + feature declarations surfaced via
-        # resolved_envs.
-        known = known_platforms(config, resolved_envs.values())
+        # burns any time. An environment filter narrows validation to
+        # that environment. Otherwise use the full workspace + feature
+        # set surfaced via resolved_envs.
+        known = (
+            set(resolved_envs[env_name].platforms)
+            if env_name
+            else known_platforms(config, resolved_envs.values())
+        )
         resolved_platforms: list[str] = []
         for platform in requested_platforms:
             resolved_platform = config.resolve_platform_name(platform, sorted(known))

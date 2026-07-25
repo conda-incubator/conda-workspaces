@@ -8,6 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- `conda workspace lock` now requires an explicit `--output` with
+  `--environment`, `--platform`, or `--skip-unsolvable`. Run an
+  unfiltered lock to replace the complete canonical `conda.lock`, or
+  pass a fragment path for a partial result. Workflows that
+  intentionally replace `conda.lock` with a filtered result must now
+  pass `--output conda.lock`. (#122)
 - `conda workspace init` and generated `quickstart` workspaces now use
   conda's configured channels. Repeated `-c/--channel` values are
   prepended in command-line order, and `--override-channels` keeps only
@@ -26,6 +32,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Platform-filtered lock commands now reach platforms declared only by
+  a feature without requiring feature-restricted environments to
+  support the current host. (#122)
 - Successful `workspace add`, `remove`, `install`, `lock`, `clean`,
   `import`, `archive`, and `unarchive` commands now emit exactly
   `{"success": true}` with `--json`. Human status output from nested

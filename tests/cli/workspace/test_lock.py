@@ -28,7 +28,7 @@ _DEFAULTS = {
 
 
 @pytest.fixture
-def capture_generate_lockfile(monkeypatch: pytest.MonkeyPatch, pixi_workspace: Path):
+def capture_generate_lockfile(monkeypatch: pytest.MonkeyPatch):
     """Patch ``generate_lockfile`` and return a list of captured kwargs.
 
     Each call is recorded as a dict with ``resolved_envs`` (dict of
@@ -62,7 +62,6 @@ def capture_generate_lockfile(monkeypatch: pytest.MonkeyPatch, pixi_workspace: P
                 "dry_run": dry_run,
             }
         )
-        return output_path or (pixi_workspace / "conda.lock")
 
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.lock.generate_lockfile", fake_generate
@@ -71,10 +70,10 @@ def capture_generate_lockfile(monkeypatch: pytest.MonkeyPatch, pixi_workspace: P
 
 
 @pytest.mark.parametrize(
-    "env_arg, expected_keys",
+    ("env_arg", "expected_keys", "output_name"),
     [
-        ("default", {"default"}),
-        (None, {"default", "test"}),
+        ("default", {"default"}, "conda.lock"),
+        (None, {"default", "test"}, None),
     ],
     ids=["single-env", "all-envs"],
 )
@@ -90,19 +89,57 @@ def test_lock_envs(
     capture_generate_lockfile: list[dict],
     env_arg: str | None,
     expected_keys: set[str],
+    output_name: str | None,
     dry_run: bool,
     output_fragment: str,
 ) -> None:
     monkeypatch.chdir(pixi_workspace)
+    output_path = pixi_workspace / output_name if output_name else None
 
-    result = execute_lock(make_args(_DEFAULTS, environment=env_arg, dry_run=dry_run))
+    result = execute_lock(
+        make_args(
+            _DEFAULTS,
+            environment=env_arg,
+            output=output_path,
+            dry_run=dry_run,
+        )
+    )
     assert result == 0
     assert len(capture_generate_lockfile) == 1
     assert set(capture_generate_lockfile[0]["resolved_envs"].keys()) == expected_keys
     assert capture_generate_lockfile[0]["config"] is not None
     assert capture_generate_lockfile[0]["platforms"] is None
+    assert capture_generate_lockfile[0]["output_path"] == output_path
     assert capture_generate_lockfile[0]["dry_run"] is dry_run
     assert output_fragment in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("partial", "dry_run"),
+    [
+        ({"environment": "default"}, False),
+        ({"platform": ["linux-64"]}, False),
+        ({"skip_unsolvable": True}, False),
+        ({"environment": "default"}, True),
+    ],
+    ids=["environment", "platform", "skip-unsolvable", "dry-run"],
+)
+def test_lock_partial_operations_require_output(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot_tree: SnapshotTree,
+    capture_generate_lockfile: list[dict],
+    partial: dict,
+    dry_run: bool,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    before = snapshot_tree(pixi_workspace)
+
+    with pytest.raises(CondaValueError, match="--output is required"):
+        execute_lock(make_args(_DEFAULTS, dry_run=dry_run, **partial))
+
+    assert capture_generate_lockfile == []
+    assert snapshot_tree(pixi_workspace) == before
 
 
 def test_lock_unknown_env(
@@ -112,7 +149,13 @@ def test_lock_unknown_env(
     monkeypatch.chdir(pixi_workspace)
 
     with pytest.raises(EnvironmentNotFoundError):
-        execute_lock(make_args(_DEFAULTS, environment="nonexistent"))
+        execute_lock(
+            make_args(
+                _DEFAULTS,
+                environment="nonexistent",
+                output=pixi_workspace / "conda.lock.nonexistent",
+            )
+        )
 
 
 def test_lock_forwards_platform_flag(
@@ -123,9 +166,55 @@ def test_lock_forwards_platform_flag(
     """Repeated ``--platform`` values reach ``generate_lockfile`` as a tuple."""
     monkeypatch.chdir(pixi_workspace)
 
-    result = execute_lock(make_args(_DEFAULTS, platform=["linux-64", "osx-arm64"]))
+    result = execute_lock(
+        make_args(
+            _DEFAULTS,
+            platform=["linux-64", "osx-arm64"],
+            output=pixi_workspace / "conda.lock.selected-platforms",
+        )
+    )
     assert result == 0
     assert capture_generate_lockfile[0]["platforms"] == ("linux-64", "osx-arm64")
+
+
+def test_lock_accepts_feature_only_platform(
+    broadened_platform_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capture_generate_lockfile: list[dict],
+) -> None:
+    monkeypatch.chdir(broadened_platform_workspace)
+
+    result = execute_lock(
+        make_args(
+            _DEFAULTS,
+            platform=["win-64"],
+            output=broadened_platform_workspace / "conda.lock.win-64",
+        )
+    )
+
+    assert result == 0
+    assert set(capture_generate_lockfile[0]["resolved_envs"]) == {"default", "windows"}
+    assert capture_generate_lockfile[0]["platforms"] == ("win-64",)
+
+
+def test_lock_rejects_platform_unsupported_by_selected_environment(
+    broadened_platform_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capture_generate_lockfile: list[dict],
+) -> None:
+    monkeypatch.chdir(broadened_platform_workspace)
+
+    with pytest.raises(PlatformError, match="linux-64"):
+        execute_lock(
+            make_args(
+                _DEFAULTS,
+                environment="windows",
+                platform=["linux-64"],
+                output=broadened_platform_workspace / "conda.lock.linux-64",
+            )
+        )
+
+    assert capture_generate_lockfile == []
 
 
 def test_lock_rejects_undeclared_platform(
@@ -136,7 +225,13 @@ def test_lock_rejects_undeclared_platform(
     monkeypatch.chdir(pixi_workspace)
 
     with pytest.raises(PlatformError, match="freebsd-64"):
-        execute_lock(make_args(_DEFAULTS, platform=["freebsd-64"]))
+        execute_lock(
+            make_args(
+                _DEFAULTS,
+                platform=["freebsd-64"],
+                output=pixi_workspace / "conda.lock.freebsd-64",
+            )
+        )
 
 
 @pytest.mark.parametrize(
@@ -160,8 +255,15 @@ def test_lock_forwards_skip_unsolvable(
     ``None`` so ``generate_lockfile`` falls back to fail-fast.
     """
     monkeypatch.chdir(pixi_workspace)
+    output_path = pixi_workspace / "conda.lock.solvable" if flag_value else None
 
-    result = execute_lock(make_args(_DEFAULTS, skip_unsolvable=flag_value))
+    result = execute_lock(
+        make_args(
+            _DEFAULTS,
+            skip_unsolvable=flag_value,
+            output=output_path,
+        )
+    )
     assert result == 0
     assert capture_generate_lockfile[0]["skip_unsolvable"] is flag_value
     if expects_on_skip:

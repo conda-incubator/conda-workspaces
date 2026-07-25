@@ -342,8 +342,8 @@ resolving for a specific platform.
 `conda workspace info` surfaces the reachable platform set as a
 `known_platforms` JSON key (and a matching `Known Platforms` row in
 the text view whenever a feature broadens the workspace-level set).
-`conda workspace lock --platform <subdir>` validates against this
-same set.
+`conda workspace lock --platform <subdir> --output <fragment>`
+validates against this same set.
 :::
 
 The workspace-level `platforms` list is the default set every
@@ -357,9 +357,9 @@ conda workspace info            # text view, extra "Known Platforms" row
 conda workspace info --json     # JSON "known_platforms" key
 ```
 
-`conda workspace lock --platform <subdir>` validates against this
-reachable set, so typos like `lixux-64` are rejected before the
-solver runs.
+`conda workspace lock --platform <subdir> --output <fragment>`
+validates against this reachable set, so typos like `lixux-64` are
+rejected before the solver runs.
 
 (pypi-dependencies)=
 
@@ -493,11 +493,12 @@ solution — it does not require environments to be installed first.
 # Generate or update the lockfile for every platform declared in the manifest
 conda workspace lock
 
-# Lock only a subset of platforms (repeatable flag)
-conda workspace lock --platform linux-64 --platform osx-arm64
+# Lock only a subset of platforms into an explicit fragment
+conda workspace lock --platform linux-64 --platform osx-arm64 \
+  --output conda.lock.selected-platforms
 
-# Keep going when individual (environment, platform) pairs fail to solve
-conda workspace lock --skip-unsolvable
+# Keep solvable pairs in an explicit fragment
+conda workspace lock --skip-unsolvable --output conda.lock.solvable
 
 # Install from lockfile, validating freshness against the manifest
 conda workspace install --locked
@@ -514,14 +515,20 @@ tighter constraints with `CONDA_OVERRIDE_*` or the
 `[system-requirements]` table when cross-compiling (for example, to
 fix a minimum `__glibc` version when solving `linux-64` from macOS).
 
+`--environment`, `--platform`, and `--skip-unsolvable` can produce an
+incomplete result, so they require `--output`. An unfiltered lock is
+the only command that implicitly replaces the canonical `conda.lock`.
+Pass `--output conda.lock` when replacing it with a filtered result is
+intentional.
+
 Solves are fail-fast by default: the first platform that cannot be
 resolved raises an error that names the environment and the platform,
 and no lockfile is written. Pass `--skip-unsolvable` to keep locking
-the remaining pairs, emitting a yellow `Skipping ...` line for each
-one that failed. If *every* pair fails, the command still raises
-with an aggregated summary rather than writing an empty lockfile —
-non-solver errors (missing channel, invalid manifest, etc.) always
-abort regardless of the flag.
+the remaining pairs into an explicit `--output` path, emitting a
+yellow `Skipping ...` line for each one that failed. If *every* pair
+fails, the command still raises with an aggregated summary rather than
+writing an empty lockfile — non-solver errors (missing channel, invalid
+manifest, etc.) always abort regardless of the flag.
 
 The lockfile contains all environments and their resolved packages:
 
@@ -638,8 +645,10 @@ conda workspace lock --merge "conda.lock.*"
 ```
 
 `--output` writes the solved lockfile to the given path instead of the
-default `<workspace>/conda.lock`. It may be combined with `--platform`
-so each matrix runner emits exactly one `(env, platform)` slice.
+default `<workspace>/conda.lock`. It is required with `--environment`,
+`--platform`, and `--skip-unsolvable`, so filtered operations cannot
+silently replace the complete canonical lock. Each matrix runner can
+emit exactly one `(env, platform)` slice.
 
 `--merge` loads every fragment, validates that they agree on schema
 version and on each shared environment's channel list, and rejects
