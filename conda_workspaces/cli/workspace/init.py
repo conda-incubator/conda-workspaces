@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from conda.base.context import context as conda_context
+from conda.exceptions import CondaValueError
 from rich.console import Console
 
 from ...manifests.base import ManifestParser
@@ -14,6 +15,17 @@ from . import workspace_manifest_path_from_args
 
 if TYPE_CHECKING:
     import argparse
+
+
+def resolve_init_channels() -> list[str]:
+    """Return conda's resolved channel order for a new workspace."""
+    channels = list(conda_context.channels)
+    if not channels:
+        raise CondaValueError(
+            "No channels are configured. Pass -c/--channel or configure one with"
+            " 'conda config --append channels <channel>'."
+        )
+    return channels
 
 
 def execute_init(args: argparse.Namespace, *, console: Console | None = None) -> int:
@@ -32,7 +44,7 @@ def execute_init(args: argparse.Namespace, *, console: Console | None = None) ->
         console = Console(highlight=False)
 
     name = args.name or Path.cwd().name
-    channels = args.channels or ["conda-forge"]
+    channels = resolve_init_channels()
     platforms = args.platforms or [conda_context.subdir]
     manifest_path = workspace_manifest_path_from_args(args)
     base_dir = manifest_path.parent if manifest_path else Path.cwd()

@@ -16,7 +16,8 @@ If you are starting a new project, pass `--platform` (repeatable) to
 `workspace init`:
 
 ```bash
-conda workspace init --platform linux-64 --platform osx-arm64 --platform win-64
+conda workspace init -c conda-forge --override-channels \
+  --platform linux-64 --platform osx-arm64 --platform win-64
 ```
 
 Or if you already have a `conda.toml`, edit the `platforms` list

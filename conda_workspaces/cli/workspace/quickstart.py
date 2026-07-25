@@ -35,6 +35,7 @@ from contextlib import ExitStack, nullcontext, redirect_stdout
 from pathlib import Path
 
 from conda.base.context import context as conda_context
+from conda.exceptions import ArgumentError
 from rich.console import Console
 
 from ...exceptions import (
@@ -44,7 +45,7 @@ from ...exceptions import (
 )
 from ...manifests.base import ManifestParser
 from .add import execute_add
-from .init import execute_init
+from .init import execute_init, resolve_init_channels
 from .install import execute_install
 from .shell import execute_shell
 
@@ -78,6 +79,11 @@ def execute_quickstart(
             no_color=True,
         )
     copy_from: Path | None = args.copy_from
+    if args.override_channels and not args.channel:
+        raise ArgumentError(
+            "At least one -c / --channel flag must be supplied when using "
+            "--override-channels."
+        )
     specs: list[str] = list(args.specs or [])
     env_name: str = args.environment or "default"
     fmt: str = args.manifest_format or "conda"
@@ -163,7 +169,6 @@ def execute_quickstart(
                     manifest_file=None,
                     manifest_format=args.manifest_format,
                     name=args.name,
-                    channels=args.channels,
                     platforms=args.platforms,
                 ),
                 console=console,
@@ -191,7 +196,7 @@ def execute_quickstart(
                 parser.write_workspace_stub(
                     staged_root,
                     args.name or workspace_root.name,
-                    args.channels or ["conda-forge"],
+                    resolve_init_channels(),
                     args.platforms or [conda_context.subdir],
                 )
 

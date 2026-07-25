@@ -8,7 +8,7 @@ from io import StringIO
 from typing import TYPE_CHECKING
 
 import pytest
-from conda.exceptions import InvalidMatchSpec
+from conda.exceptions import ArgumentError, InvalidMatchSpec
 from rich.console import Console
 
 from conda_workspaces.cli.workspace import quickstart as quickstart_module
@@ -24,16 +24,19 @@ from ..conftest import make_args
 
 if TYPE_CHECKING:
     import argparse
+    from collections.abc import Callable
     from pathlib import Path
 
     from tests.conftest import SnapshotTree
 
+pytestmark = pytest.mark.usefixtures("configure_conda_channels")
 
 _DEFAULTS = {
     "specs": [],
     "manifest_format": "conda",
     "name": None,
-    "channels": None,
+    "channel": None,
+    "override_channels": False,
     "platforms": None,
     "environment": "default",
     "force_reinstall": False,
@@ -155,23 +158,32 @@ def test_quickstart_from_scratch(
 
 
 def test_quickstart_copy_from_dir_skips_init(
-    orchestrated: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    orchestrated: dict,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configure_conda_channels: Callable[..., None],
 ) -> None:
     """``--copy <dir>`` copies the manifest and skips the init step."""
+    configure_conda_channels([])
     source = tmp_path / "source"
     source.mkdir()
-    (source / "pixi.toml").write_text("[workspace]\nname='src'\n", encoding="utf-8")
+    content = "[workspace]\nname='src'\nchannels=['source-channel']\n"
+    (source / "pixi.toml").write_text(content, encoding="utf-8")
 
     dest = tmp_path / "dest"
     dest.mkdir()
     monkeypatch.chdir(dest)
 
-    result = orchestrated["run"](copy_from=source)
+    result = orchestrated["run"](
+        copy_from=source,
+        channel=["ignored"],
+        override_channels=True,
+    )
 
     assert result == 0
     runners = orchestrated["runners"]
     assert runners["init"].calls == []
-    assert (dest / "pixi.toml").exists()
+    assert (dest / "pixi.toml").read_text(encoding="utf-8") == content
     assert len(runners["install"].calls) == 1
     assert len(runners["shell"].calls) == 1
 
@@ -192,6 +204,29 @@ def test_quickstart_copy_from_file(
     assert result == 0
     assert (dest / "conda.toml").exists()
     assert orchestrated["runners"]["init"].calls == []
+
+
+def test_quickstart_copy_rejects_override_without_channel(
+    orchestrated: dict,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "conda.toml").write_text(
+        "[workspace]\nname='source'\nchannels=['source-channel']\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ArgumentError,
+        match="At least one -c / --channel flag must be supplied",
+    ):
+        orchestrated["run"](
+            copy_from=source,
+            override_channels=True,
+        )
+
+    assert not (tmp_path / "conda.toml").exists()
 
 
 def test_quickstart_copy_missing_path_raises(
@@ -304,10 +339,15 @@ def test_quickstart_json_routes_subhandlers_through_silent_console(
 def test_quickstart_dry_run_validates_staged_manifest(
     orchestrated: dict,
     tmp_path: Path,
+    configure_conda_channels: Callable[..., None],
     specs: list[str],
     handler: str,
 ) -> None:
     """``--dry-run`` delegates validation against a temporary manifest."""
+    configure_conda_channels(
+        ["defaults", "Internal"],
+        channel=["Staging", "Second"],
+    )
     staged_contents: list[str] = []
 
     def inspect_manifest(ns, *, console):  # type: ignore[no-untyped-def]
@@ -315,7 +355,11 @@ def test_quickstart_dry_run_validates_staged_manifest(
         staged_contents.append(ns.manifest_file.read_text(encoding="utf-8"))
 
     orchestrated["runners"][handler]._effect = inspect_manifest
-    result = orchestrated["run"](dry_run=True, specs=specs)
+    result = orchestrated["run"](
+        channel=["Staging", "Second"],
+        dry_run=True,
+        specs=specs,
+    )
 
     assert result == 0
     runners = orchestrated["runners"]
@@ -323,16 +367,26 @@ def test_quickstart_dry_run_validates_staged_manifest(
     assert len(runners[handler].calls) == 1
     assert runners[handler].calls[0].dry_run is True
     assert runners["shell"].calls == []
-    assert staged_contents and "[workspace]" in staged_contents[0]
+    assert staged_contents
+    assert (
+        'channels = ["Staging", "Second", "defaults", "Internal"]' in staged_contents[0]
+    )
     assert not (tmp_path / "conda.toml").exists()
 
 
 def test_quickstart_dry_run_with_copy_reports_but_does_not_write(
-    orchestrated: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    orchestrated: dict,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configure_conda_channels: Callable[..., None],
 ) -> None:
+    configure_conda_channels([])
     source = tmp_path / "src"
     source.mkdir()
-    (source / "conda.toml").write_text("[workspace]\nname='x'\n", encoding="utf-8")
+    (source / "conda.toml").write_text(
+        "[workspace]\nname='x'\nchannels=['source-channel']\n",
+        encoding="utf-8",
+    )
 
     dest = tmp_path / "dst"
     dest.mkdir()
@@ -345,12 +399,17 @@ def test_quickstart_dry_run_with_copy_reports_but_does_not_write(
 
     orchestrated["runners"]["install"]._effect = inspect_manifest
 
-    result = orchestrated["run"](dry_run=True, copy_from=source)
+    result = orchestrated["run"](
+        dry_run=True,
+        copy_from=source,
+        channel=["ignored"],
+        override_channels=True,
+    )
 
     assert result == 0
     assert not (dest / "conda.toml").exists()
     assert len(orchestrated["runners"]["install"].calls) == 1
-    assert staged_contents and "name='x'" in staged_contents[0]
+    assert staged_contents and "channels=['source-channel']" in staged_contents[0]
     rendered = orchestrated["console"].file.getvalue()
     assert "Would copy" in rendered
 
@@ -476,13 +535,11 @@ def test_quickstart_dry_run_rejects_dangling_manifest_symlink(
             "init",
             {
                 "name": "demo",
-                "channels": ["conda-forge", "bioconda"],
                 "platforms": ["linux-64", "osx-arm64"],
                 "manifest_format": "pixi",
             },
             {
                 "name": "demo",
-                "channels": ["conda-forge", "bioconda"],
                 "platforms": ["linux-64", "osx-arm64"],
                 "manifest_format": "pixi",
             },

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 import tomlkit
+from conda.exceptions import ArgumentError, CondaValueError
 
 from conda_workspaces.cli.workspace.init import execute_init
 from conda_workspaces.exceptions import ManifestExistsError
@@ -13,12 +14,16 @@ from conda_workspaces.exceptions import ManifestExistsError
 from ..conftest import make_args
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
+
+pytestmark = pytest.mark.usefixtures("configure_conda_channels")
 
 _DEFAULTS = {
     "manifest_format": "conda",
     "name": None,
-    "channels": None,
+    "channel": None,
+    "override_channels": False,
     "platforms": ["linux-64", "osx-arm64", "win-64"],
     "manifest_file": None,
 }
@@ -92,14 +97,16 @@ def test_init_refuses_dangling_manifest_symlink(
 
 
 def test_init_pixi_toml_structure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configure_conda_channels: Callable[..., None],
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    configure_conda_channels(["conda-forge", "bioconda"])
     args = make_args(
         _DEFAULTS,
         manifest_format="pixi",
         name="structured",
-        channels=["conda-forge", "bioconda"],
         platforms=["linux-64"],
     )
     execute_init(args)
@@ -195,6 +202,7 @@ def test_init_silent_on_stdout_under_json(
     from conda_workspaces.cli.workspace import init as init_module
 
     class _JsonContext:
+        channels = ("conda-forge",)
         json = True
 
     monkeypatch.setattr(init_module, "conda_context", _JsonContext())
@@ -209,12 +217,90 @@ def test_init_silent_on_stdout_under_json(
     assert captured.out == ""
 
 
-def test_init_default_channels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("configured", "explicit", "override_channels", "expected"),
+    [
+        (["defaults", "Internal"], None, False, ["defaults", "Internal"]),
+        (
+            ["defaults", "Internal"],
+            ["Staging", "Second"],
+            False,
+            ["Staging", "Second", "defaults", "Internal"],
+        ),
+        (
+            ["defaults", "Internal"],
+            ["Staging", "Second"],
+            True,
+            ["Staging", "Second"],
+        ),
+    ],
+    ids=["configured", "prepend-explicit", "override"],
+)
+def test_init_channels_follow_conda_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configure_conda_channels: Callable[..., None],
+    configured: list[str],
+    explicit: list[str] | None,
+    override_channels: bool,
+    expected: list[str],
+) -> None:
     monkeypatch.chdir(tmp_path)
-    args = make_args(_DEFAULTS, manifest_format="pixi", name="ch-test", channels=None)
+    configure_conda_channels(
+        configured,
+        channel=explicit,
+        override_channels=override_channels,
+    )
+    args = make_args(
+        _DEFAULTS,
+        manifest_format="pixi",
+        name="ch-test",
+        channel=explicit,
+        override_channels=override_channels,
+    )
     execute_init(args)
     doc = tomlkit.loads((tmp_path / "pixi.toml").read_text(encoding="utf-8"))
-    assert doc["workspace"]["channels"] == ["conda-forge"]
+    assert doc["workspace"]["channels"] == expected
+
+
+@pytest.mark.parametrize(
+    ("configured", "override_channels", "expected_error", "message"),
+    [
+        ([], False, CondaValueError, "No channels are configured"),
+        (
+            ["defaults"],
+            True,
+            ArgumentError,
+            "At least one -c / --channel flag must be supplied",
+        ),
+    ],
+    ids=["empty", "override-without-channel"],
+)
+def test_init_rejects_unusable_channel_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configure_conda_channels: Callable[..., None],
+    configured: list[str],
+    override_channels: bool,
+    expected_error: type[Exception],
+    message: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    configure_conda_channels(
+        configured,
+        override_channels=override_channels,
+    )
+
+    with pytest.raises(expected_error, match=message):
+        execute_init(
+            make_args(
+                _DEFAULTS,
+                manifest_format="conda",
+                override_channels=override_channels,
+            )
+        )
+
+    assert not (tmp_path / "conda.toml").exists()
 
 
 def test_init_auto_detects_single_platform(

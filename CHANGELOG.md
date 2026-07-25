@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- `conda workspace init` and generated `quickstart` workspaces now use
+  conda's configured channels. Repeated `-c/--channel` values are
+  prepended in command-line order, and `--override-channels` keeps only
+  those explicit values. Copy and clone continue preserving the source
+  manifest. Users who relied on the implicit conda-forge fallback must
+  configure that channel or pass
+  `-c conda-forge --override-channels`. (#129)
 - The global `conda workspace --file` option now selects the exact
   manifest named by the caller. To use upward auto-discovery, omit the
   option instead of passing a directory. The `export` subcommand keeps
