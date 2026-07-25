@@ -19,13 +19,17 @@ from __future__ import annotations
 
 def main(args: list[str] | None = None) -> None:
     """Entry point for the ``cw`` console script."""
+    from conda.base.context import reset_context
+    from conda.exception_handler import conda_exception_handler
+
     from .cli.main import execute_workspace, generate_workspace_parser
 
     parser = generate_workspace_parser()
     parser.prog = "cw"
 
     parsed = parser.parse_args(args)
-    raise SystemExit(execute_workspace(parsed))
+    reset_context(argparse_args=parsed)
+    raise SystemExit(conda_exception_handler(execute_workspace, parsed))
 
 
 def main_task(args: list[str] | None = None) -> None:

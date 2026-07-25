@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
 from pathlib import Path
 
 import pytest
+from conda.base.context import reset_context
+from conda.exceptions import CondaError, CondaSystemExit, DryRunExit
+from rich.console import Console
 
 from conda_workspaces.cli.main import (
     execute_task,
@@ -208,6 +212,173 @@ def test_workspace_dispatches_to_subcommand(
     result = execute_workspace(args)
     assert result == 0
     assert calls == [subcmd]
+
+
+@pytest.mark.usefixtures("reset_conda_context")
+@pytest.mark.parametrize(
+    ("subcmd", "module_attr", "func_name"),
+    [
+        ("add", "conda_workspaces.cli.workspace.add", "execute_add"),
+        ("remove", "conda_workspaces.cli.workspace.remove", "execute_remove"),
+        ("install", "conda_workspaces.cli.workspace.install", "execute_install"),
+        ("lock", "conda_workspaces.cli.workspace.lock", "execute_lock"),
+        ("clean", "conda_workspaces.cli.workspace.clean", "execute_clean"),
+        (
+            "import",
+            "conda_workspaces.cli.workspace.import_manifest",
+            "execute_import",
+        ),
+        ("archive", "conda_workspaces.cli.workspace.archive", "execute_archive"),
+        (
+            "unarchive",
+            "conda_workspaces.cli.workspace.archive",
+            "execute_unarchive",
+        ),
+    ],
+    ids=[
+        "add",
+        "remove",
+        "install",
+        "lock",
+        "clean",
+        "import",
+        "archive",
+        "unarchive",
+    ],
+)
+def test_workspace_json_mutations_emit_single_result(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    subcmd: str,
+    module_attr: str,
+    func_name: str,
+) -> None:
+    calls: list[str] = []
+
+    def fake_handler(args: argparse.Namespace) -> int:
+        from conda.reporters import render
+
+        calls.append(args.subcmd)
+        Console().print("Rich status")
+        print("plain status")
+        render({"nested": True})
+        return 0
+
+    module = importlib.import_module(module_attr)
+    monkeypatch.setattr(module, func_name, fake_handler)
+    args = argparse.Namespace(subcmd=subcmd, json=True)
+    reset_context(argparse_args=args)
+
+    result = execute_workspace(args)
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert calls == [subcmd]
+    assert json.loads(captured.out) == {"success": True}
+    assert captured.err == ""
+
+
+@pytest.mark.usefixtures("reset_conda_context")
+def test_workspace_json_dry_run_exit_is_success(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def dry_run(args: argparse.Namespace) -> int:
+        del args
+        print("preview")
+        raise DryRunExit
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.add.execute_add",
+        dry_run,
+    )
+    args = argparse.Namespace(subcmd="add", json=True)
+    reset_context(argparse_args=args)
+
+    result = execute_workspace(args)
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert json.loads(captured.out) == {"success": True}
+    assert captured.err == ""
+
+
+@pytest.mark.usefixtures("reset_conda_context")
+@pytest.mark.parametrize(
+    "error_type",
+    [CondaError, CondaSystemExit, RuntimeError],
+    ids=["conda", "conda-system-exit", "unexpected"],
+)
+def test_workspace_json_errors_do_not_leak_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error_type: type[Exception],
+) -> None:
+    def fail(args: argparse.Namespace) -> int:
+        del args
+        print("progress")
+        raise error_type("failed")
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.add.execute_add",
+        fail,
+    )
+    args = argparse.Namespace(subcmd="add", json=True)
+    reset_context(argparse_args=args)
+
+    with pytest.raises(error_type, match="failed"):
+        execute_workspace(args)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+@pytest.mark.usefixtures("reset_conda_context")
+def test_workspace_json_nonzero_result_routes_output_to_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fail(args: argparse.Namespace) -> int:
+        del args
+        print("failed")
+        return 7
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.add.execute_add",
+        fail,
+    )
+    args = argparse.Namespace(subcmd="add", json=True)
+    reset_context(argparse_args=args)
+
+    result = execute_workspace(args)
+
+    captured = capsys.readouterr()
+    assert result == 7
+    assert captured.out == ""
+    assert captured.err == "failed\n"
+
+
+def test_workspace_non_json_output_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def succeed(args: argparse.Namespace) -> int:
+        del args
+        print("status")
+        return 0
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.add.execute_add",
+        succeed,
+    )
+
+    result = execute_workspace(argparse.Namespace(subcmd="add", json=False))
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert captured.out == "status\n"
+    assert captured.err == ""
 
 
 @pytest.mark.parametrize(

@@ -6,7 +6,10 @@ Argparse configuration and dispatch for both subcommands.
 from __future__ import annotations
 
 import argparse
+import sys
 from argparse import SUPPRESS
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 from conda.base.context import context as conda_context
@@ -773,6 +776,32 @@ def execute_workspace(args: argparse.Namespace) -> int:
 
     if subcmd is None:
         generate_workspace_parser().print_help()
+        return 0
+
+    json_result = bool(getattr(args, "json", False)) and subcmd in {
+        "add",
+        "remove",
+        "install",
+        "lock",
+        "clean",
+        "import",
+        "archive",
+        "unarchive",
+    }
+    if json_result:
+        captured = StringIO()
+        with redirect_stdout(captured):
+            try:
+                result = _dispatch_workspace(args, subcmd)
+            except DryRunExit:
+                result = 0
+        if result != 0:
+            sys.stderr.write(captured.getvalue())
+            return result
+
+        from conda.reporters import render
+
+        render({"success": True})
         return 0
 
     try:
