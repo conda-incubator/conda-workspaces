@@ -17,6 +17,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   root. Remove unselected manifests before archiving when using
   `unarchive --install`. (#120)
 
+### Fixed
+
+- `conda workspace --dry-run` now preserves manifests, lockfiles,
+  environment prefixes, activation metadata, archives, receipts,
+  and extraction targets across quickstart, add, remove, install,
+  lock, archive, unarchive, and clean operations. Solver previews use a
+  disposable package cache, and archive previews skip bundled package
+  cache priming, so configured package caches remain unchanged. Commands
+  still perform the read-only validation needed to report the intended
+  work. The selected archive manifest and `conda.lock` must now be regular
+  root members, and bundled packages must be regular direct children of
+  `packages/`. Replace linked required files and move nested package files
+  before using an existing archive. Manifest creation and copy destinations
+  must also be regular paths. Replace a linked destination manifest before
+  running `init` or `quickstart`. (#118)
+
 ## 0.7.0 — 2026-06-14
 
 ### Added

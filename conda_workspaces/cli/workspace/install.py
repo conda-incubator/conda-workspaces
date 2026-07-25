@@ -44,6 +44,7 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
             console=console,
             prefix=prefix,
             target_prefix_override=target_prefix_override,
+            dry_run=dry_run,
         )
 
     strict = locked or (ctx.is_ci and not no_lock)
@@ -64,6 +65,7 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
             console=console,
             prefix=prefix,
             target_prefix_override=target_prefix_override,
+            dry_run=dry_run,
         )
 
     if not no_lock and not force:
@@ -76,6 +78,7 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
                 console=console,
                 prefix=prefix,
                 target_prefix_override=target_prefix_override,
+                dry_run=dry_run,
             )
         if lock.status == LockfileStatus.OUT_OF_DATE:
             console.print(
@@ -103,6 +106,7 @@ def install_from_lockfile_all(
     console: Console,
     prefix: Path | None = None,
     target_prefix_override: str | Path | None = None,
+    dry_run: bool = False,
 ) -> int:
     """Install environments from existing lockfiles (no solving)."""
     if (prefix is not None or target_prefix_override is not None) and not env_name:
@@ -113,39 +117,30 @@ def install_from_lockfile_all(
             hints=["Pass -e/--environment with --prefix."],
         )
 
-    if env_name:
+    env_names = [env_name] if env_name else list(config.environments)
+    for index, name in enumerate(env_names):
+        if index > 0:
+            console.print()
         status.message(
             console,
             "Installing",
             "environment",
-            env_name,
+            name,
             style="bold blue",
             ellipsis=True,
         )
-        if prefix is None and target_prefix_override is None:
-            install_from_lockfile(ctx, env_name)
-        else:
-            install_from_lockfile(
-                ctx,
-                env_name,
-                prefix=prefix,
-                target_prefix_override=target_prefix_override,
-            )
-        status.message(console, "Installed", "environment", env_name)
-    else:
-        env_names = list(config.environments)
-        for i, name in enumerate(env_names):
-            if i > 0:
-                console.print()
-            status.message(
-                console,
-                "Installing",
-                "environment",
-                name,
-                style="bold blue",
-                ellipsis=True,
-            )
-            install_from_lockfile(ctx, name)
-            status.message(console, "Installed", "environment", name)
+        install_from_lockfile(
+            ctx,
+            name,
+            prefix=prefix,
+            target_prefix_override=target_prefix_override,
+            dry_run=dry_run,
+        )
+        status.message(
+            console,
+            "Would install" if dry_run else "Installed",
+            "environment",
+            name,
+        )
 
     return 0

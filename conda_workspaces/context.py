@@ -8,15 +8,48 @@ import-time overhead negligible.
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, cast
 
 from .exceptions import EnvironmentNameInvalidError
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from conda.models.environment import Environment
 
     from .models import WorkspaceConfig
+
+
+@contextmanager
+def isolated_package_cache(enabled: bool) -> Iterator[None]:
+    """Route conda package-cache writes to disposable storage when enabled.
+
+    Conda solvers may populate ``context.pkgs_dirs`` while resolving, before
+    any install transaction runs. Dry-run solver paths copy cached repodata
+    into disposable storage while retaining configured package caches as
+    read sources.
+    """
+    if not enabled:
+        yield
+        return
+
+    import shutil
+    import tempfile
+
+    from conda.base.context import context
+
+    configured_caches = context.pkgs_dirs
+    with tempfile.TemporaryDirectory(prefix="conda-workspaces-pkgs-") as cache_dir:
+        scratch_cache = Path(cache_dir)
+        for configured_cache in configured_caches:
+            repodata_cache = Path(configured_cache) / "cache"
+            if repodata_cache.is_dir():
+                shutil.copytree(repodata_cache, scratch_cache / "cache")
+                break
+        with context._override("_pkgs_dirs", (scratch_cache, *configured_caches)):
+            yield
 
 
 class WorkspaceContext:

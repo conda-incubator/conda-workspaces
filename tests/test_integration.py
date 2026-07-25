@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
     from conda.testing.fixtures import CondaCLIFixture
 
+    from tests.conftest import SnapshotTree
+
 pytestmark = pytest.mark.integration
 
 
@@ -50,10 +52,11 @@ def test_workspace_install_dry_run(
     conda_toml,
     conda_cli: CondaCLIFixture,
     monkeypatch: pytest.MonkeyPatch,
+    snapshot_tree: SnapshotTree,
 ):
     """Workspace install with --dry-run parses manifest and emits status."""
     monkeypatch.delenv("CI", raising=False)
-    conda_toml(WORKSPACE_TOML)
+    manifest = conda_toml(WORKSPACE_TOML)
 
     install_calls = []
 
@@ -71,14 +74,16 @@ def test_workspace_install_dry_run(
         lambda ctx, envs, **kwargs: None,
     )
 
+    before = snapshot_tree(manifest.parent)
     stdout, stderr, exit_code = conda_cli("workspace", "install", "--dry-run")
 
     assert exit_code == 0
+    assert snapshot_tree(manifest.parent) == before
     assert len(install_calls) == 1
     assert install_calls[0]["env"] == "default"
     assert install_calls[0]["dry_run"] is True
     assert "Installing" in stdout
-    assert "Installed" in stdout
+    assert "Would install" in stdout
 
 
 def test_task_run_with_dependencies(
@@ -226,7 +231,7 @@ def test_workspace_run_dispatches_command(
 @pytest.mark.parametrize(
     "scenario, expected_verbs",
     [
-        ("install", ["Installing", "Installed"]),
+        ("install", ["Installing", "Would install"]),
         ("task_run", ["Running", "Finished"]),
     ],
     ids=["workspace-install", "task-run"],

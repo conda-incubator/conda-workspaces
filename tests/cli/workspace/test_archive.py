@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import tarfile
 from io import StringIO
 from pathlib import Path, PureWindowsPath
@@ -15,7 +16,6 @@ from rich.console import Console
 
 from conda_workspaces.archive import (
     create_archive,
-    extract_verified_archive,
     file_contains_bytes,
     is_absolute_runtime_prefix,
     receipt_environment_prefixes,
@@ -32,6 +32,8 @@ from ..conftest import make_args
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from tests.conftest import SnapshotTree
 
 _ARCHIVE_DEFAULTS = {
     "manifest_file": None,
@@ -186,20 +188,18 @@ def test_receipt_environment_prefixes_normalizes_windows_external_prefix() -> No
 
 @pytest.fixture
 def archive_workspace(tmp_path: Path) -> Path:
-    manifest = """\
+    platform = context.subdir
+    manifest = f"""\
 [workspace]
 name = "archive-test"
 channels = ["conda-forge"]
-platforms = ["linux-64", "osx-arm64"]
-
-[dependencies]
-python = ">=3.10"
+platforms = ["{platform}"]
 """
     (tmp_path / "conda.toml").write_text(manifest, encoding="utf-8")
     (tmp_path / "conda.lock").write_text(
         "version: 1\nenvironments:\n  default:\n    channels:\n"
         "      - url: https://conda.anaconda.org/conda-forge/\n"
-        "    packages:\n      linux-64: []\n      osx-arm64: []\npackages: []\n",
+        f"    packages:\n      {platform}: []\npackages: []\n",
         encoding="utf-8",
     )
     (tmp_path / "src").mkdir()
@@ -506,6 +506,75 @@ def test_execute_archive_receipt_requires_bound_files_in_archive(
     assert not ArchiveReceipt.default_path(archive).exists()
 
 
+@pytest.mark.parametrize(
+    "existing_lock",
+    [False, True],
+    ids=["prospective-lock", "existing-lock"],
+)
+def test_execute_archive_dry_run_preserves_outputs(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot_tree: SnapshotTree,
+    existing_lock: bool,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    if not existing_lock:
+        (archive_workspace / "conda.lock").unlink()
+        subprocess.run(
+            ["git", "init"],
+            cwd=archive_workspace,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "add", "conda.toml", "src/app.py"],
+            cwd=archive_workspace,
+            check=True,
+            capture_output=True,
+        )
+    output = archive_workspace / "preview.tar.gz"
+    receipt = archive_workspace / "preview.receipt.json"
+    output.write_bytes(b"existing archive")
+    receipt.write_bytes(b"existing receipt")
+    calls: list[tuple[list[str], bool]] = []
+
+    monkeypatch.setattr(
+        "conda_workspaces.resolver.resolve_all_environments",
+        lambda config, platform: {"default": object()},
+    )
+
+    def fake_render(ctx, resolved_envs, **kwargs):
+        calls.append((list(resolved_envs), kwargs["dry_run"]))
+        return (
+            "version: 1\nenvironments:\n  default:\n"
+            "    channels: []\n    packages:\n      linux-64: []\n"
+            "packages: []\n"
+        )
+
+    monkeypatch.setattr(
+        "conda_workspaces.lockfile.render_lockfile",
+        fake_render,
+    )
+    before = snapshot_tree(archive_workspace)
+    stream = StringIO()
+
+    result = execute_archive(
+        make_args(
+            _ARCHIVE_DEFAULTS,
+            output=output,
+            receipt=receipt,
+            lock=True,
+            dry_run=True,
+        ),
+        console=Console(file=stream, width=200, highlight=False),
+    )
+
+    assert result == 0
+    assert calls == [(["default"], True)]
+    assert snapshot_tree(archive_workspace) == before
+    assert "Would create" in stream.getvalue()
+
+
 def test_execute_unarchive_basic(
     archive_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -558,10 +627,12 @@ def test_execute_unarchive_receipt_default_path(
     assert "Verified" in console.file.getvalue()
 
 
+@pytest.mark.parametrize("dry_run", [False, True], ids=["extract", "dry-run"])
 def test_execute_unarchive_receipt_detects_tampered_archive(
     archive_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    dry_run: bool,
 ) -> None:
     monkeypatch.chdir(archive_workspace)
     archive = tmp_path / "test.tar.gz"
@@ -580,69 +651,14 @@ def test_execute_unarchive_receipt_detects_tampered_archive(
                 archive_path=archive,
                 target=tmp_path / "extracted",
                 receipt=True,
+                dry_run=dry_run,
             ),
             console=console,
         )
 
 
-@pytest.mark.parametrize(
-    ("receipt", "expected_primed"),
-    [
-        (None, False),
-        (True, True),
-    ],
-    ids=["without-receipt", "with-receipt"],
-)
-def test_execute_unarchive_package_cache_priming_requires_receipt(
-    bundled_cli_archive: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    receipt: object,
-    expected_primed: bool,
-) -> None:
-    calls: list[tuple[Path, Path, bool]] = []
-
-    def fake_prime_package_cache(
-        extracted_dir: Path,
-        cache_dir: Path,
-        *,
-        verified: bool = False,
-    ) -> int:
-        calls.append((extracted_dir, cache_dir, verified))
-        return 1
-
-    monkeypatch.setattr(
-        "conda_workspaces.archive.prime_package_cache",
-        fake_prime_package_cache,
-    )
-
-    target = tmp_path / f"extracted-{receipt or 'none'}"
-    stream = StringIO()
-    result = execute_unarchive(
-        make_args(
-            _UNARCHIVE_DEFAULTS,
-            archive_path=bundled_cli_archive,
-            target=target,
-            receipt=receipt,
-        ),
-        console=Console(file=stream, width=200, highlight=False),
-    )
-
-    assert result == 0
-    if expected_primed:
-        assert len(calls) == 1
-        extracted_dir, _, verified = calls[0]
-        assert extracted_dir == target.resolve()
-        assert verified is True
-        assert "Primed" in stream.getvalue()
-    else:
-        assert calls == []
-        assert "Skipping package cache priming without verified receipt" in (
-            stream.getvalue()
-        )
-
-
 @pytest.mark.parametrize("receipt", [False, True], ids=["unsigned", "receipt"])
+@pytest.mark.parametrize("dry_run", [False, True], ids=["extract", "dry-run"])
 @pytest.mark.parametrize(
     "target_setup",
     ["non-empty", "file-target", "symlink-target"],
@@ -654,6 +670,7 @@ def test_execute_unarchive_rejects_existing_target(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     receipt: bool,
+    dry_run: bool,
     target_setup: str,
 ) -> None:
     monkeypatch.chdir(archive_workspace)
@@ -673,6 +690,7 @@ def test_execute_unarchive_rejects_existing_target(
                 archive_path=archive,
                 target=target,
                 receipt=receipt,
+                dry_run=dry_run,
             ),
             console=console,
         )
@@ -681,6 +699,47 @@ def test_execute_unarchive_rejects_existing_target(
         assert (target / "conda.toml").read_text(encoding="utf-8") == "trusted = true\n"
     elif target_setup == "file-target":
         assert target.read_text(encoding="utf-8") == "trusted file\n"
+
+
+@pytest.mark.parametrize(
+    ("already_cached", "expected_count"),
+    [(False, 1), (True, 0)],
+    ids=["uncached", "cached"],
+)
+def test_execute_unarchive_dry_run_reports_prospective_cache_count(
+    bundled_cli_archive: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    already_cached: bool,
+    expected_count: int,
+) -> None:
+    from conda.base.context import context as conda_context
+
+    cache = tmp_path / "preview-cache"
+    cache.mkdir()
+    if already_cached:
+        (cache / "example-1.0-h123.conda").write_bytes(b"example package")
+    monkeypatch.setattr(
+        type(conda_context),
+        "pkgs_dirs",
+        property(lambda self: (str(cache),)),
+    )
+    stream = StringIO()
+
+    result = execute_unarchive(
+        make_args(
+            _UNARCHIVE_DEFAULTS,
+            archive_path=bundled_cli_archive,
+            target=tmp_path / "target",
+            receipt=True,
+            dry_run=True,
+        ),
+        console=Console(file=stream, width=200, highlight=False),
+    )
+
+    assert result == 0
+    assert f"Would prime {expected_count} packages" in stream.getvalue()
+    assert not (tmp_path / "target").exists()
 
 
 def test_execute_unarchive_require_sha256_requires_receipt(
@@ -706,28 +765,79 @@ def test_execute_unarchive_require_sha256_requires_receipt(
         )
 
 
-def test_extract_verified_archive_cleans_failed_staging(
+@pytest.mark.parametrize("install", [False, True], ids=["extract", "install"])
+def test_execute_unarchive_dry_run_preserves_tree(
     archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    snapshot_tree: SnapshotTree,
+    install: bool,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "dry-run.tar.gz"
+    execute_archive(
+        make_args(
+            _ARCHIVE_DEFAULTS,
+            output=archive,
+            receipt=True,
+        ),
+        console=Console(file=StringIO(), width=200, highlight=False),
+    )
+    target = tmp_path / "extracted"
+    dest = tmp_path / "staging"
+    before = snapshot_tree(tmp_path)
+    stream = StringIO()
+
+    result = execute_unarchive(
+        make_args(
+            _UNARCHIVE_DEFAULTS,
+            archive_path=archive,
+            target=target,
+            receipt=True,
+            install=install,
+            environment="default" if install else None,
+            prefix="/opt/runtime" if install else None,
+            dest=dest if install else None,
+            dry_run=True,
+        ),
+        console=Console(file=stream, width=200, highlight=False),
+    )
+
+    assert result == 0
+    assert snapshot_tree(tmp_path) == before
+    assert not target.exists()
+    assert not dest.exists()
+    assert "Would extract" in stream.getvalue()
+    if install:
+        assert "Would install" in stream.getvalue()
+
+
+def test_execute_unarchive_dry_run_resolves_relative_target(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    archive = tmp_path / "test.tar.gz"
-    receipt_path = tmp_path / "test.tar.gz.receipt.json"
-    create_console = Console(file=StringIO(), width=200, highlight=False)
+    archive = tmp_path / "workspace.tar.gz"
+    create_archive(archive_workspace, archive, ArchiveConfig())
+    monkeypatch.chdir(tmp_path)
+    stream = StringIO()
 
-    args = make_args(_ARCHIVE_DEFAULTS, output=archive, receipt=receipt_path)
-    with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.chdir(archive_workspace)
-        execute_archive(args, console=create_console)
+    assert (
+        execute_unarchive(
+            make_args(
+                _UNARCHIVE_DEFAULTS,
+                archive_path=archive,
+                target=Path("relative-target"),
+                dry_run=True,
+            ),
+            console=Console(file=stream, width=200, highlight=False),
+        )
+        == 0
+    )
 
-    receipt = ArchiveReceipt.load(receipt_path)
-    receipt.statement["predicate"]["workspace"]["lockfile"] = "../conda.lock"
-    target = tmp_path / "target"
-
-    with pytest.raises(ArchiveError, match="relative archive path"):
-        extract_verified_archive(archive, target, receipt)
-
+    target = tmp_path / "relative-target"
+    assert str(target.resolve()) in stream.getvalue()
     assert not target.exists()
-    assert not list(tmp_path.glob(".target.verify-*"))
 
 
 def test_execute_unarchive_default_target(
@@ -834,6 +944,7 @@ platforms = ["{platform}"]
     assert install_kwargs == {
         "prefix": Path(prefix),
         "target_prefix_override": expected_override,
+        "dry_run": False,
     }
 
 
@@ -876,7 +987,7 @@ def test_execute_unarchive_install_explicit_prefix_under_dest(
         archive_path=archive,
         target=target,
         install=True,
-        environment="runtime",
+        environment="default",
         prefix=prefix,
         dest=dest,
     )
@@ -921,7 +1032,7 @@ def test_execute_unarchive_install_under_dest_warns_on_staging_prefix_reference(
         archive_path=archive,
         target=target,
         install=True,
-        environment="runtime",
+        environment="default",
         prefix=prefix,
         dest=dest,
     )
@@ -968,7 +1079,7 @@ def test_execute_unarchive_install_under_dest_without_staging_prefix_reference(
         archive_path=archive,
         target=tmp_path / "extracted",
         install=True,
-        environment="runtime",
+        environment="default",
         prefix="/opt/runtime",
         dest=tmp_path / "rootfs",
     )

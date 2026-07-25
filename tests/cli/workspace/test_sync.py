@@ -119,7 +119,7 @@ def sync_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     )
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.sync.generate_lockfile",
-        lambda *a, **k: calls.append("lock"),
+        lambda *a, **k: calls.append("lock-dry" if k.get("dry_run") else "lock"),
     )
     return calls
 
@@ -144,8 +144,8 @@ def test_sync_no_env_names_is_noop(
     [
         ({}, ["install", "lock"]),
         ({"no_install": True}, ["lock"]),
-        ({"dry_run": True}, ["install"]),
-        ({"no_install": True, "dry_run": True}, []),
+        ({"dry_run": True}, ["install", "lock-dry"]),
+        ({"no_install": True, "dry_run": True}, ["lock-dry"]),
     ],
     ids=["default", "no-install", "dry-run", "no-install-and-dry-run"],
 )
@@ -156,7 +156,7 @@ def test_sync_pipeline_respects_flags(
     flags: dict,
     expected_calls: list[str],
 ) -> None:
-    """Install and lockfile steps run only when their gating flags are false."""
+    """Install respects its gate while lock generation always validates."""
     sync_environments(
         _config(default={}),
         fake_ctx,
@@ -165,6 +165,47 @@ def test_sync_pipeline_respects_flags(
         **flags,
     )
     assert sync_calls == expected_calls
+
+
+def test_force_dry_run_reuses_preview_prefix_for_lock_solve(
+    tmp_path: Path,
+    captured_console: Console,
+    fake_ctx,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preview_prefix = tmp_path / ".default.dry-run"
+    install_calls: list[dict[str, object]] = []
+    lock_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.resolve_environment",
+        lambda config, name, platform: type("R", (), {"name": name})(),
+    )
+
+    def fake_install(ctx, resolved, **kwargs):
+        install_calls.append(kwargs)
+        return preview_prefix
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.install_environment",
+        fake_install,
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.generate_lockfile",
+        lambda ctx, resolved_envs, **kwargs: lock_calls.append(kwargs),
+    )
+
+    sync_environments(
+        _config(default={}),
+        fake_ctx,
+        ["default"],
+        force_reinstall=True,
+        dry_run=True,
+        console=captured_console,
+    )
+
+    assert install_calls == [{"force_reinstall": True, "dry_run": True}]
+    assert lock_calls[0]["solve_prefixes"] == {"default": preview_prefix}
 
 
 @pytest.mark.parametrize(

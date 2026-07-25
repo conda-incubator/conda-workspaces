@@ -109,6 +109,12 @@ def cached_parse(path_str: str) -> WorkspaceConfig:
     return parser.parse(path)
 
 
+def clear_workspace_manifest_caches() -> None:
+    """Discard path-keyed workspace detection and parsing results."""
+    ManifestParser.read_toml.cache_clear()
+    cached_parse.cache_clear()
+
+
 def detect_and_parse(
     source: str | Path | None = None,
 ) -> tuple[Path, WorkspaceConfig]:

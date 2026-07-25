@@ -98,6 +98,22 @@ def test_parse_rejects_project_table(tmp_path):
 
 
 @pytest.mark.parametrize(
+    "content",
+    [
+        'workspace = "bad"\n',
+        "[workspace]\nchannels = [{ priority = 1 }]\n",
+    ],
+    ids=["workspace-not-table", "channel-missing-url"],
+)
+def test_parse_wraps_semantic_errors(tmp_path: Path, content: str) -> None:
+    path = tmp_path / "conda.toml"
+    path.write_text(content, encoding="utf-8")
+
+    with pytest.raises(WorkspaceParseError):
+        CondaTomlParser().parse(path)
+
+
+@pytest.mark.parametrize(
     "table, feature_name, platform, expected_build",
     [
         ("dependencies", "default", None, None),

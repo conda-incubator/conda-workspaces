@@ -21,9 +21,16 @@ from conda.base.context import context as conda_context
 from conda.core.envs_manager import PrefixData, unregister_env
 from conda.exceptions import UnsatisfiableError
 from conda.gateways.disk.delete import rm_rf
+from conda.history import History
 from conda.models.match_spec import MatchSpec
 
+from .context import isolated_package_cache
 from .exceptions import SolveError
+from .paths import (
+    output_paths_collide,
+    validate_directory_output,
+    validate_file_output,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -115,6 +122,8 @@ def _apply_activation_scripts(prefix: Path, scripts: list[str]) -> None:
             log.warning("Activation script '%s' not found; skipping", script_path)
             continue
         dest = activate_d / src.name
+        if output_paths_collide(src, dest):
+            continue
         shutil.copy2(src, dest)
         log.info("Copied activation script: %s -> %s", src, dest)
 
@@ -242,7 +251,7 @@ def install_environment(
     *,
     force_reinstall: bool = False,
     dry_run: bool = False,
-) -> None:
+) -> Path:
     """Create or update a project-local environment.
 
     Uses conda's Solver API directly instead of shelling out, which
@@ -255,14 +264,27 @@ def install_environment(
     them in a single pass. Local path PyPI dependencies are built and
     installed after the conda transaction.
 
+    When *dry_run* is true, solving and transaction rendering still run,
+    but the prefix and its activation metadata remain unchanged. The
+    returned path is the prefix used for solving.
+
     Raises ``SolveError`` if dependency resolution fails.
     """
     prefix = ctx.env_prefix(resolved.name)
+    validate_directory_output(prefix)
     exists = ctx.env_exists(resolved.name)
+    solver_prefix = prefix
+    metadata_prefix = prefix
 
     if exists and force_reinstall:
-        rm_rf(prefix)
-        exists = False
+        fresh_prefix = prefix.with_name(f".{prefix.name}.dry-run")
+        suffix = 1
+        while fresh_prefix.exists() or fresh_prefix.is_symlink():
+            fresh_prefix = prefix.with_name(f".{prefix.name}.dry-run-{suffix}")
+            suffix += 1
+        metadata_prefix = fresh_prefix
+        if dry_run:
+            solver_prefix = fresh_prefix
 
     # Build the spec list from resolved dependencies
     specs = [
@@ -276,62 +298,93 @@ def install_environment(
     # Add system requirements as virtual package constraints
     _apply_system_requirements(resolved, specs)
 
+    if resolved.activation_env:
+        state_path = metadata_prefix / "conda-meta" / "state"
+        if state_path.is_symlink() and not state_path.exists():
+            raise FileNotFoundError(
+                f"Activation state path is a broken symlink: {state_path}"
+            )
+        validate_file_output(state_path)
+        if state_path.is_file():
+            PrefixData(str(metadata_prefix)).get_environment_env_vars()
+    if resolved.activation_scripts:
+        activate_d = metadata_prefix / "etc" / "conda" / "activate.d"
+        validate_directory_output(activate_d)
+        for script_path in resolved.activation_scripts:
+            source = Path(script_path)
+            if source.is_absolute() and source.exists():
+                if not source.is_file():
+                    raise IsADirectoryError(
+                        f"Activation script is not a file: {source}"
+                    )
+                validate_file_output(activate_d / source.name)
+
     if not specs:
-        prefix.mkdir(parents=True, exist_ok=True)
-        _apply_activation_env(prefix, resolved.activation_env)
-        _apply_activation_scripts(prefix, resolved.activation_scripts)
-        return
+        validate_file_output(metadata_prefix / "conda-meta" / "history")
 
-    # Get the solver backend (respects solver plugins)
-    solver_backend = (
-        conda_context.plugin_manager.get_cached_solver_backend()  # ty: ignore[missing-argument]
-    )
-    if solver_backend is None:
-        raise SolveError(resolved.name, "No solver backend found")
+    if exists and force_reinstall and not dry_run:
+        rm_rf(prefix)
+        exists = False
 
-    channels = list(resolved.channels)
-    subdirs = conda_context.subdirs
+    if not specs:
+        if not dry_run:
+            History(str(prefix)).init_log_file()
+            _apply_activation_env(prefix, resolved.activation_env)
+            _apply_activation_scripts(prefix, resolved.activation_scripts)
+        return solver_prefix
 
-    with _channel_priority_override(resolved.channel_priority):
-        solver = solver_backend(
-            str(prefix),
-            channels,
-            subdirs,
-            specs_to_add=specs,
+    with isolated_package_cache(dry_run):
+        # Get the solver backend (respects solver plugins)
+        solver_backend = (
+            conda_context.plugin_manager.get_cached_solver_backend()  # ty: ignore[missing-argument]
         )
+        if solver_backend is None:
+            raise SolveError(resolved.name, "No solver backend found")
 
-        try:
-            if exists:
-                txn = solver.solve_for_transaction(
-                    update_modifier=UpdateModifier.FREEZE_INSTALLED,
-                )
-            else:
-                txn = solver.solve_for_transaction()
-        except (UnsatisfiableError, SystemExit) as exc:
-            raise SolveError(resolved.name, str(exc)) from exc
+        channels = list(resolved.channels)
+        subdirs = conda_context.subdirs
 
-    sys.stdout.flush()
+        with _channel_priority_override(resolved.channel_priority):
+            solver = solver_backend(
+                str(solver_prefix),
+                channels,
+                subdirs,
+                specs_to_add=specs,
+            )
 
-    if txn.nothing_to_do:
-        _apply_activation_env(prefix, resolved.activation_env)
-        _apply_activation_scripts(prefix, resolved.activation_scripts)
-        return
+            try:
+                if exists and not force_reinstall:
+                    txn = solver.solve_for_transaction(
+                        update_modifier=UpdateModifier.FREEZE_INSTALLED,
+                    )
+                else:
+                    txn = solver.solve_for_transaction()
+            except (UnsatisfiableError, SystemExit) as exc:
+                raise SolveError(resolved.name, str(exc)) from exc
 
-    if dry_run:
-        txn.print_transaction_summary()
         sys.stdout.flush()
-        return
 
-    txn.download_and_extract()
-    txn.execute()
-    sys.stdout.flush()
+        if txn.nothing_to_do:
+            if not dry_run:
+                _apply_activation_env(prefix, resolved.activation_env)
+                _apply_activation_scripts(prefix, resolved.activation_scripts)
+            return solver_prefix
+
+        if dry_run:
+            txn.print_transaction_summary()
+            sys.stdout.flush()
+            return solver_prefix
+
+        txn.download_and_extract()
+        txn.execute()
+        sys.stdout.flush()
 
     _apply_activation_env(prefix, resolved.activation_env)
     _apply_activation_scripts(prefix, resolved.activation_scripts)
 
     # Install local-path PyPI deps that can't go through the solver
-    if not dry_run:
-        _install_path_deps(prefix, resolved)
+    _install_path_deps(prefix, resolved)
+    return solver_prefix
 
 
 def remove_environment(ctx: WorkspaceContext, env_name: str) -> None:
@@ -347,8 +400,12 @@ def clean_all(ctx: WorkspaceContext) -> None:
     envs_dir = ctx.envs_dir
     for d in _iter_installed_prefixes(envs_dir):
         unregister_env(str(d))
+        rm_rf(d)
     if envs_dir.is_dir():
-        rm_rf(envs_dir)
+        try:
+            envs_dir.rmdir()
+        except OSError:
+            pass
 
 
 def list_installed_environments(ctx: WorkspaceContext) -> list[str]:

@@ -54,19 +54,14 @@ class CondaTomlParser(ManifestParser):
     def has_workspace(self, path: Path) -> bool:
         return "workspace" in self.read_toml(str(path))
 
-    def parse(self, path: Path) -> WorkspaceConfig:
+    def parse_data(self, data: dict[str, Any], path: Path) -> WorkspaceConfig:
+        """Parse already-loaded conda.toml data."""
         # Import inline to avoid circular dependency (pixi_toml imports toml).
         from .pixi_toml import PixiTomlParser
 
-        if not self.has_workspace(path):
+        if "workspace" not in data:
             raise WorkspaceParseError(path, "No [workspace] table found")
-        pixi_parser = PixiTomlParser()
-        try:
-            config = pixi_parser.parse(path)
-        except WorkspaceParseError:
-            raise
-        except Exception as exc:
-            raise WorkspaceParseError(path, str(exc)) from exc
+        config = PixiTomlParser().parse_data(data, path)
         config.manifest_path = str(path)
         return config
 

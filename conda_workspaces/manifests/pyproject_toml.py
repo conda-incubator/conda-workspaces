@@ -31,6 +31,7 @@ from .toml import (
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
+    from typing import Any
 
     from conda.models.environment import Environment
     from tomlkit.items import Table
@@ -75,6 +76,8 @@ class PyprojectTomlParser(ManifestParser):
         :class:`ManifestExistsError`.
         """
         path = self.manifest_path(base_dir)
+        if path.is_symlink():
+            raise ManifestExistsError(path)
         existed = path.exists()
         if existed:
             doc = tomlkit.loads(path.read_text(encoding="utf-8"))
@@ -152,16 +155,8 @@ class PyprojectTomlParser(ManifestParser):
             or tool.get("pixi", {}).get("workspace")
         )
 
-    def parse(self, path: Path) -> WorkspaceConfig:
-        try:
-            text = path.read_text(encoding="utf-8")
-            # ``unwrap()`` collapses tomlkit subclasses to native Python
-            # types so downstream code (resolver, exporter, YAML writer)
-            # never has to defend against ``tomlkit.items.String`` etc.
-            data = tomlkit.loads(text).unwrap()
-        except Exception as exc:
-            raise WorkspaceParseError(path, str(exc)) from exc
-
+    def parse_data(self, data: dict[str, Any], path: Path) -> WorkspaceConfig:
+        """Parse already-loaded pyproject manifest data."""
         tool = data.get("tool", {})
         root = str(path.parent)
 

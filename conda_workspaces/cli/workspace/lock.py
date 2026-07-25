@@ -30,6 +30,7 @@ def execute_lock(args: argparse.Namespace, *, console: Console | None = None) ->
     skip_unsolvable: bool = bool(getattr(args, "skip_unsolvable", False))
     merge_patterns: list[str] | None = getattr(args, "merge", None) or None
     output_path: Path | None = getattr(args, "output", None)
+    dry_run: bool = bool(getattr(args, "dry_run", False))
 
     if merge_patterns:
         if env_name or requested_platforms or skip_unsolvable or output_path:
@@ -71,8 +72,9 @@ def execute_lock(args: argparse.Namespace, *, console: Console | None = None) ->
         )
         for fragment in fragments:
             console.print(f"  [dim]<-[/dim] {fragment}")
-        merge_lockfiles(fragments, ctx)
-        console.print("[bold cyan]Updated[/bold cyan] [bold]conda.lock[/bold]")
+        merge_lockfiles(fragments, ctx, dry_run=dry_run)
+        action = "Would update" if dry_run else "Updated"
+        console.print(f"[bold cyan]{action}[/bold cyan] [bold]conda.lock[/bold]")
         return 0
 
     if env_name:
@@ -125,8 +127,10 @@ def execute_lock(args: argparse.Namespace, *, console: Console | None = None) ->
         skip_unsolvable=skip_unsolvable,
         on_skip=_on_skip if skip_unsolvable else None,
         output_path=output_path,
+        dry_run=dry_run,
     )
     target_label = output_path.name if output_path is not None else "conda.lock"
-    console.print(f"[bold cyan]Updated[/bold cyan] [bold]{target_label}[/bold]")
+    action = "Would update" if dry_run else "Updated"
+    console.print(f"[bold cyan]{action}[/bold cyan] [bold]{target_label}[/bold]")
 
     return 0

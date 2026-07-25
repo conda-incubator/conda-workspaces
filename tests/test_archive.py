@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
+import os
+import shutil
 import subprocess
 import tarfile
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING
 
 import pytest
+from conda.base.context import context as conda_context
 
 from conda_workspaces.archive import (
     ALLOWED_TAR_TYPES,
@@ -20,7 +24,6 @@ from conda_workspaces.archive import (
     inspect_archive,
     open_tar,
     parse_relative_archive_path,
-    prime_package_cache,
     url_to_filename,
     validate_tar_member,
     verify_package_hashes,
@@ -31,9 +34,12 @@ from conda_workspaces.exceptions import (
     ArchivePathTraversalError,
 )
 from conda_workspaces.models import ArchiveConfig
+from conda_workspaces.receipts import ArchiveReceipt
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from tests.conftest import SnapshotTree
 
 
 @pytest.fixture
@@ -140,29 +146,27 @@ def bundled_archive(lockfile_with_packages: Path, tmp_path: Path) -> tuple[Path,
 @pytest.fixture
 def workspace_archive_project(tmp_path: Path) -> Path:
     """Create a workspace that can be archived through the public API."""
+    platform = conda_context.subdir
     root = tmp_path / "workspace"
     root.mkdir()
     (root / "conda.toml").write_text(
-        """\
+        f"""\
 [workspace]
 name = "archive-api-test"
 channels = ["conda-forge"]
-platforms = ["linux-64"]
-
-[dependencies]
-python = ">=3.10"
+platforms = ["{platform}"]
 """,
         encoding="utf-8",
     )
     (root / "conda.lock").write_text(
-        """\
+        f"""\
 version: 1
 environments:
   default:
     channels:
       - url: https://conda.anaconda.org/conda-forge/
     packages:
-      linux-64: []
+      {platform}: []
 packages: []
 """,
         encoding="utf-8",
@@ -170,6 +174,85 @@ packages: []
     (root / "src").mkdir()
     (root / "src" / "app.py").write_text("print('hello')\n", encoding="utf-8")
     return root
+
+
+@pytest.fixture
+def receipt_bundled_archive_factory(
+    tmp_path: Path,
+) -> Callable[[str, str, bytes, str | None], WorkspaceArchive]:
+    """Build receipt-backed archives with one bundled package."""
+
+    def build(
+        label: str,
+        package_name: str,
+        package_content: bytes,
+        manifest_dependency: str | None = None,
+    ) -> WorkspaceArchive:
+        root = tmp_path / label
+        root.mkdir()
+        dependency = (
+            f'\n[dependencies]\n{manifest_dependency} = ">=1"\n'
+            if manifest_dependency is not None
+            else ""
+        )
+        (root / "conda.toml").write_text(
+            f"""\
+[workspace]
+name = "{label}"
+channels = ["conda-forge"]
+platforms = ["{conda_context.subdir}"]
+{dependency}""",
+            encoding="utf-8",
+        )
+        package_url = (
+            "https://conda.anaconda.org/conda-forge/"
+            f"{conda_context.subdir}/{package_name}"
+        )
+        (root / "conda.lock").write_text(
+            f"""\
+version: 1
+environments:
+  default:
+    channels:
+      - url: https://conda.anaconda.org/conda-forge/
+    packages:
+      {conda_context.subdir}:
+        - conda: {package_url}
+packages:
+  - conda: {package_url}
+    sha256: {hashlib.sha256(package_content).hexdigest()}
+    name: {label}
+    version: "1.0"
+    build: h0
+    subdir: {conda_context.subdir}
+    depends: []
+""",
+            encoding="utf-8",
+        )
+        package = tmp_path / f"{label}-cache" / package_name
+        package.parent.mkdir()
+        package.write_bytes(package_content)
+        archive_path = tmp_path / f"{label}.tar.gz"
+        archive_config = ArchiveConfig()
+        create_archive(
+            root,
+            archive_path,
+            archive_config,
+            bundle_packages=[package],
+        )
+        receipt_path = ArchiveReceipt.default_path(archive_path)
+        ArchiveReceipt.build(
+            root=root,
+            archive_path=archive_path,
+            archive_config=archive_config,
+            manifest_path=root / "conda.toml",
+            lockfile_path=root / "conda.lock",
+            environment_prefixes={"default": ".conda/envs/default"},
+            options={"bundle": True, "lock": False},
+        ).write(receipt_path)
+        return WorkspaceArchive(archive_path, receipt=receipt_path)
+
+    return build
 
 
 def test_collect_files_git_tracked(git_project: Path) -> None:
@@ -503,6 +586,31 @@ def test_extract_archive_path_traversal_blocked(
         extract_archive(evil_archive, target)
 
 
+def test_workspace_archive_dry_run_rejects_invalid_member_topology(
+    tmp_path: Path,
+    snapshot_tree: SnapshotTree,
+) -> None:
+    archive = tmp_path / "unsafe.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        manifest = b"[workspace]\nname = 'unsafe'\n"
+        manifest_info = tarfile.TarInfo("conda.toml")
+        manifest_info.size = len(manifest)
+        tar.addfile(manifest_info, io.BytesIO(manifest))
+        link = tarfile.TarInfo("dangling-hardlink")
+        link.type = tarfile.LNKTYPE
+        link.linkname = "missing"
+        tar.addfile(link)
+    before = snapshot_tree(tmp_path)
+
+    with pytest.raises(ArchiveError):
+        WorkspaceArchive(archive).extract(
+            target=tmp_path / "target",
+            dry_run=True,
+        )
+
+    assert snapshot_tree(tmp_path) == before
+
+
 @pytest.mark.parametrize(
     ("path", "allow_parent"),
     [
@@ -633,130 +741,39 @@ def test_create_archive_with_bundle(
 
 
 @pytest.mark.parametrize(
-    ("package_name", "url_suffix", "package_content"),
+    ("member_kind", "member_name", "message"),
     [
-        (
-            "numpy-1.26-h1234.conda",
-            "",
-            b"fake package content",
-        ),
-        (
-            "legacy-1.0-h123.tar.bz2",
-            "?token=abc",
-            b"legacy package content",
-        ),
+        ("nested", "packages/nested/demo-1.0-h0.conda", "direct children"),
+        ("symlink", "packages/demo-1.0-h0.conda", "regular file"),
+        ("hardlink", "packages/demo-1.0-h0.conda", "regular file"),
     ],
-    ids=["conda", "tar-bz2-with-query"],
+    ids=["nested", "symlink", "hardlink"],
 )
-@pytest.mark.parametrize("verified", [False, True], ids=["unverified", "verified"])
-def test_prime_package_cache_requires_verified_archive(
+def test_workspace_archive_rejects_non_regular_or_nested_bundled_packages(
     tmp_path: Path,
-    package_name: str,
-    url_suffix: str,
-    package_content: bytes,
-    verified: bool,
+    member_kind: str,
+    member_name: str,
+    message: str,
 ) -> None:
-    pkg_content = package_content
-    sha256 = hashlib.sha256(pkg_content).hexdigest()
-
-    extracted = tmp_path / "project"
-    extracted.mkdir()
-    (extracted / "packages").mkdir()
-    (extracted / "packages" / package_name).write_bytes(pkg_content)
-
-    lockfile_content = f"""\
-version: 1
-environments:
-  default:
-    channels:
-      - url: https://conda.anaconda.org/conda-forge/
-    packages:
-      linux-64:
-        - conda: https://conda.anaconda.org/conda-forge/linux-64/{package_name}{url_suffix}
-packages:
-  - conda: https://conda.anaconda.org/conda-forge/linux-64/{package_name}{url_suffix}
-    sha256: {sha256}
-    name: numpy
-    version: "1.26"
-    build: h1234
-    subdir: linux-64
-    depends: []
-"""
-    (extracted / "conda.lock").write_text(lockfile_content, encoding="utf-8")
-
-    cache_dir = tmp_path / "pkgs"
-    cache_dir.mkdir()
-
-    if not verified:
-        with pytest.raises(ArchiveError, match="unverified archive packages"):
-            prime_package_cache(extracted, cache_dir)
-        assert not (cache_dir / package_name).exists()
-        return
-
-    count = prime_package_cache(extracted, cache_dir, verified=True)
-
-    assert count == 1
-    assert (cache_dir / package_name).read_bytes() == pkg_content
-
-
-def test_prime_package_cache_no_packages(tmp_path: Path) -> None:
-    extracted = tmp_path / "project"
-    extracted.mkdir()
-    (extracted / "conda.lock").write_text(
-        "version: 1\nenvironments: {}\npackages: []\n"
-    )
-
-    cache_dir = tmp_path / "pkgs"
-    cache_dir.mkdir()
-
-    count = prime_package_cache(extracted, cache_dir)
-    assert count == 0
-
-
-def test_prime_package_cache_hash_mismatch(tmp_path: Path) -> None:
-    extracted = tmp_path / "project"
-    extracted.mkdir()
-    (extracted / "packages").mkdir()
-    (extracted / "packages" / "bad-1.0-h000.conda").write_bytes(b"tampered")
-
-    lockfile_content = """\
-version: 1
-environments:
-  default:
-    channels:
-      - url: https://conda.anaconda.org/conda-forge/
-    packages:
-      linux-64:
-        - conda: https://conda.anaconda.org/conda-forge/linux-64/bad-1.0-h000.conda
-packages:
-  - conda: https://conda.anaconda.org/conda-forge/linux-64/bad-1.0-h000.conda
-    sha256: 0000000000000000000000000000000000000000000000000000000000000000
-    name: bad
-    version: "1.0"
-    build: h000
-    subdir: linux-64
-    depends: []
-"""
-    (extracted / "conda.lock").write_text(lockfile_content, encoding="utf-8")
-
-    cache_dir = tmp_path / "pkgs"
-    cache_dir.mkdir()
-
-    with pytest.raises(ArchiveHashMismatchError, match="bad-1.0-h000"):
-        prime_package_cache(extracted, cache_dir, verified=True)
-
-
-def test_prime_package_cache_requires_lockfile(tmp_path: Path) -> None:
-    extracted = tmp_path / "project"
-    extracted.mkdir()
-    (extracted / "packages").mkdir()
-    (extracted / "packages" / "numpy-1.26-h1234.conda").write_bytes(b"package")
-
-    cache_dir = tmp_path / "pkgs"
-    cache_dir.mkdir()
-
-    with pytest.raises(ArchiveError, match="require conda.lock"):
-        prime_package_cache(extracted, cache_dir, verified=True)
+    package_content = b"package"
+    archive_path = tmp_path / "workspace.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as tar:
+        if member_kind in {"symlink", "hardlink"}:
+            payload = tarfile.TarInfo("payload")
+            payload.size = len(package_content)
+            tar.addfile(payload, io.BytesIO(package_content))
+            member = tarfile.TarInfo(member_name)
+            member.type = (
+                tarfile.SYMTYPE if member_kind == "symlink" else tarfile.LNKTYPE
+            )
+            member.linkname = payload.name
+            tar.addfile(member)
+        else:
+            member = tarfile.TarInfo(member_name)
+            member.size = len(package_content)
+            tar.addfile(member, io.BytesIO(package_content))
+    with pytest.raises(ArchiveError, match=message):
+        inspect_archive(archive_path)
 
 
 def test_inspect_archive_lightweight(project_dir: Path, tmp_path: Path) -> None:
@@ -806,11 +823,31 @@ def test_inspect_archive_not_workspace(tmp_path: Path) -> None:
     assert result["has_manifest"] is False
 
 
+def test_inspect_archive_ignores_ambient_symlinks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "workspace.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        content = b"safe"
+        info = tarfile.TarInfo("linkdir/file.txt")
+        info.size = len(content)
+        tar.addfile(info, io.BytesIO(content))
+
+    ambient = tmp_path / "ambient"
+    ambient.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (ambient / "linkdir").symlink_to(outside, target_is_directory=True)
+    monkeypatch.chdir(ambient)
+
+    assert inspect_archive(archive)["has_manifest"] is False
+
+
 def test_workspace_archive_create_writes_receipt(
     workspace_archive_project: Path,
-    tmp_path: Path,
 ) -> None:
-    output = tmp_path / "workspace.tar.gz"
+    output = workspace_archive_project / "workspace.tar.gz"
 
     archive = WorkspaceArchive.create(
         workspace=workspace_archive_project,
@@ -827,6 +864,307 @@ def test_workspace_archive_create_writes_receipt(
     assert archive.receipt_path.is_file()
     assert archive.inspect()["has_manifest"] is True
     assert archive.verify().workspace_paths == ("conda.toml", "conda.lock")
+
+
+def test_workspace_archive_reads_through_symlink_alias(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "workspace.tar.gz"
+    created = WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=output,
+        receipt=True,
+    )
+    alias = tmp_path / "alias.tar.gz"
+    alias.symlink_to(output)
+
+    archive = WorkspaceArchive(alias, receipt=True)
+
+    assert archive.path == output.resolve()
+    assert archive.receipt_path == created.receipt_path
+    assert archive.inspect()["has_manifest"] is True
+    assert archive.verify().workspace_paths == ("conda.toml", "conda.lock")
+
+
+def test_workspace_archive_extract_rejects_receipt_bound_manifest_symlink(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    snapshot_tree: SnapshotTree,
+) -> None:
+    (workspace_archive_project / "pixi.toml").symlink_to("conda.toml")
+    archive = WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=tmp_path / "workspace.tar.gz",
+        receipt=True,
+    )
+    assert archive.receipt_path is not None
+    statement = json.loads(archive.receipt_path.read_text(encoding="utf-8"))
+    statement["predicate"]["workspace"]["manifest"] = "pixi.toml"
+    for subject in statement["subject"]:
+        if subject["name"] == "conda.toml":
+            subject["name"] = "pixi.toml"
+    archive.receipt_path.write_text(
+        json.dumps(statement),
+        encoding="utf-8",
+    )
+    before = snapshot_tree(tmp_path)
+
+    with pytest.raises(
+        ArchiveError,
+        match="Receipt workspace manifest is not a regular archive member",
+    ):
+        archive.extract(
+            target=tmp_path / "extracted",
+            dry_run=True,
+        )
+
+    assert snapshot_tree(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    ("unsafe_alias", "message"),
+    [
+        ("manifest-symlink", "symbolic links are not supported"),
+        ("archive-symlink", "cannot be a symbolic link"),
+        ("receipt-hardlink", "archived workspace input"),
+    ],
+)
+def test_workspace_archive_create_dry_run_rejects_unsafe_aliases(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    snapshot_tree: SnapshotTree,
+    unsafe_alias: str,
+    message: str,
+) -> None:
+    source = workspace_archive_project / "src" / "app.py"
+    output = tmp_path / "workspace.tar.gz"
+    receipt = None
+    if unsafe_alias == "manifest-symlink":
+        manifest = workspace_archive_project / "conda.toml"
+        target = tmp_path / "outside-manifest"
+        manifest.rename(target)
+        manifest.symlink_to(target)
+    elif unsafe_alias == "archive-symlink":
+        output.symlink_to(source)
+    else:
+        receipt = workspace_archive_project / "receipt.json"
+        receipt.hardlink_to(source)
+    before = snapshot_tree(tmp_path)
+
+    with pytest.raises(ArchiveError, match=message):
+        WorkspaceArchive.create(
+            workspace=workspace_archive_project,
+            output=output,
+            receipt=receipt,
+            dry_run=True,
+        )
+
+    assert snapshot_tree(tmp_path) == before
+    assert source.read_text(encoding="utf-8") == "print('hello')\n"
+
+
+@pytest.mark.parametrize(
+    "alias_kind",
+    ["direct", "symlink", "hardlink"],
+    ids=["direct", "symlink", "hardlink"],
+)
+def test_create_archive_rejects_output_colliding_with_bundled_package(
+    project_dir: Path,
+    tmp_path: Path,
+    snapshot_tree: SnapshotTree,
+    alias_kind: str,
+) -> None:
+    package = tmp_path / "cache" / "demo-1.0-h0.conda"
+    package.parent.mkdir()
+    package.write_bytes(b"package")
+    if alias_kind == "direct":
+        output = package
+    else:
+        output = tmp_path / "workspace.tar.gz"
+        if alias_kind == "symlink":
+            output.symlink_to(package)
+        else:
+            output.hardlink_to(package)
+    before = snapshot_tree(tmp_path)
+
+    with pytest.raises(
+        ArchiveError,
+        match=(
+            "cannot be a symbolic link"
+            if alias_kind == "symlink"
+            else "Archive output cannot overwrite a bundled package input"
+        ),
+    ):
+        create_archive(
+            project_dir,
+            output,
+            ArchiveConfig(),
+            bundle_packages=[package],
+        )
+
+    assert snapshot_tree(tmp_path) == before
+    assert package.read_bytes() == b"package"
+
+
+def test_workspace_archive_create_refreshes_manifest_caches(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+) -> None:
+    secret = workspace_archive_project / "secret.txt"
+    secret.write_text("keep out\n", encoding="utf-8")
+    first = WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=tmp_path / "first.tar.gz",
+    )
+    manifest = workspace_archive_project / "conda.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8")
+        + '\n[workspace.archive]\nexclude = ["secret.txt"]\n',
+        encoding="utf-8",
+    )
+
+    second = WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=tmp_path / "second.tar.gz",
+    )
+
+    with open_tar(first.path) as tar:
+        assert "secret.txt" in tar.getnames()
+    with open_tar(second.path) as tar:
+        assert "secret.txt" not in tar.getnames()
+
+
+def test_workspace_archive_create_refreshes_manifest_selection(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+) -> None:
+    WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=tmp_path / "first.tar.gz",
+    )
+    (workspace_archive_project / "conda.toml").write_text(
+        "[project]\nname = 'not-a-workspace'\n",
+        encoding="utf-8",
+    )
+    (workspace_archive_project / "pixi.toml").write_text(
+        f"""\
+[workspace]
+name = "selected-pixi"
+channels = ["conda-forge"]
+platforms = ["{conda_context.subdir}"]
+""",
+        encoding="utf-8",
+    )
+
+    archive = WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=tmp_path / "second.tar.gz",
+    )
+
+    result = archive.extract(target=tmp_path / "extracted", prime_cache=False)
+    assert (
+        WorkspaceArchive.resolve_extracted_manifest(result.target).name == "pixi.toml"
+    )
+
+
+def test_workspace_archive_lock_includes_generated_lock_in_git_repo(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lockfile = workspace_archive_project / "conda.lock"
+    lockfile.unlink()
+    subprocess.run(
+        ["git", "init"],
+        cwd=workspace_archive_project,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "add", "conda.toml", "src/app.py"],
+        cwd=workspace_archive_project,
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.resolver.resolve_all_environments",
+        lambda config, platform: {"default": object()},
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.lockfile.render_lockfile",
+        lambda ctx, resolved_envs, **kwargs: (
+            """\
+version: 1
+environments:
+  default:
+    channels: []
+    packages:
+      linux-64: []
+packages: []
+"""
+        ),
+    )
+
+    archive = WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=tmp_path / "workspace.tar.gz",
+        lock=True,
+        receipt=True,
+    )
+
+    with open_tar(archive.path) as tar:
+        assert "conda.lock" in tar.getnames()
+    result = archive.extract(target=tmp_path / "extracted")
+    assert result.verified is True
+    assert (result.target / "conda.lock").is_file()
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["create", "dry-run"])
+def test_workspace_archive_lock_preflights_before_writing_generated_lock(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot_tree: SnapshotTree,
+    dry_run: bool,
+) -> None:
+    lockfile = workspace_archive_project / "conda.lock"
+    lockfile.unlink()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside\n", encoding="utf-8")
+    (workspace_archive_project / "outside-link").symlink_to(Path("..") / outside.name)
+    monkeypatch.setattr(
+        "conda_workspaces.resolver.resolve_all_environments",
+        lambda config, platform: {"default": object()},
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.lockfile.render_lockfile",
+        lambda ctx, resolved_envs, **kwargs: (
+            f"""\
+version: 1
+environments:
+  default:
+    channels: []
+    packages:
+      {conda_context.subdir}: []
+packages: []
+"""
+        ),
+    )
+    output = tmp_path / "workspace.tar.gz"
+    before = snapshot_tree(tmp_path)
+
+    with pytest.raises(ArchivePathTraversalError):
+        WorkspaceArchive.create(
+            workspace=workspace_archive_project,
+            output=output,
+            lock=True,
+            dry_run=dry_run,
+        )
+
+    assert snapshot_tree(tmp_path) == before
+    assert not lockfile.exists()
+    assert not output.exists()
 
 
 def test_workspace_archive_extract_uses_receipt(
@@ -848,6 +1186,220 @@ def test_workspace_archive_extract_uses_receipt(
     assert result.verified is True
     assert result.receipt_path == archive.receipt_path
     assert (result.target / "src" / "app.py").is_file()
+
+
+def test_workspace_archive_extract_preserves_empty_target_metadata(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=tmp_path / "workspace.tar.gz",
+    )
+    target = tmp_path / "extracted"
+    target.mkdir(mode=0o700)
+    os.utime(target, ns=(1_700_000_000_123_456_789, 1_700_000_001_987_654_321))
+    expected = target.stat()
+    monkeypatch.setattr(os, "supports_follow_symlinks", set())
+
+    archive.extract(target=target)
+
+    actual = target.stat()
+    assert actual.st_ino == expected.st_ino
+    assert actual.st_uid == expected.st_uid
+    assert actual.st_gid == expected.st_gid
+    assert actual.st_mode == expected.st_mode
+    assert actual.st_atime_ns == expected.st_atime_ns
+    assert actual.st_mtime_ns == expected.st_mtime_ns
+    assert (target / "src" / "app.py").is_file()
+
+
+def test_workspace_archive_extract_rolls_back_empty_target_promotion(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=tmp_path / "workspace.tar.gz",
+    )
+    target = tmp_path / "extracted"
+    target.mkdir(mode=0o700)
+    os.utime(target, ns=(1_700_000_000_123_456_789, 1_700_000_001_987_654_321))
+    expected = target.stat()
+    rename = Path.rename
+    calls = 0
+
+    def fail_second_staged_rename(path: Path, destination: Path) -> Path:
+        nonlocal calls
+        if path.parent.name == "workspace":
+            calls += 1
+            if calls == 2:
+                raise OSError("promotion failed")
+        return rename(path, destination)
+
+    monkeypatch.setattr(Path, "rename", fail_second_staged_rename)
+
+    with pytest.raises(OSError, match="promotion failed"):
+        archive.extract(target=target)
+
+    actual = target.stat()
+    assert actual.st_ino == expected.st_ino
+    assert actual.st_uid == expected.st_uid
+    assert actual.st_gid == expected.st_gid
+    assert actual.st_mode == expected.st_mode
+    assert actual.st_atime_ns == expected.st_atime_ns
+    assert actual.st_mtime_ns == expected.st_mtime_ns
+    assert not any(target.iterdir())
+
+
+@pytest.mark.parametrize("target_existed", [False, True], ids=["absent", "empty"])
+def test_workspace_archive_extract_rejects_target_swap(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_existed: bool,
+) -> None:
+    archive = WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=tmp_path / "workspace.tar.gz",
+    )
+    target = tmp_path / "extracted"
+    if target_existed:
+        target.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    extract = extract_archive
+
+    def swap_target(archive_path: Path, staged: Path) -> Path:
+        result = extract(archive_path, staged)
+        if target.exists():
+            target.rmdir()
+        target.symlink_to(outside, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr("conda_workspaces.archive.extract_archive", swap_target)
+
+    with pytest.raises(ArchiveError, match="target changed"):
+        archive.extract(target=target)
+
+    assert target.is_symlink()
+    assert not any(outside.iterdir())
+
+
+def test_workspace_archive_receipt_refreshes_lockfile_cache(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+) -> None:
+    WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=tmp_path / "first.tar.gz",
+        receipt=True,
+    )
+    package_name = "demo-1.0-h0.conda"
+    package_url = (
+        f"https://conda.anaconda.org/conda-forge/{conda_context.subdir}/{package_name}"
+    )
+    (workspace_archive_project / "conda.lock").write_text(
+        f"""\
+version: 1
+environments:
+  default:
+    channels:
+      - url: https://conda.anaconda.org/conda-forge/
+    packages:
+      {conda_context.subdir}:
+        - conda: {package_url}
+packages:
+  - conda: {package_url}
+    sha256: {"a" * 64}
+    name: demo
+    version: "1.0"
+    build: h0
+    subdir: {conda_context.subdir}
+    depends: []
+""",
+        encoding="utf-8",
+    )
+
+    archive = WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=tmp_path / "second.tar.gz",
+        receipt=True,
+    )
+    result = archive.extract(
+        target=tmp_path / "extracted",
+        prime_cache=False,
+    )
+
+    assert result.verified is True
+    assert package_name in (result.target / "conda.lock").read_text(encoding="utf-8")
+
+
+def test_workspace_archive_extract_refreshes_same_target_lock_cache(
+    tmp_path: Path,
+    receipt_bundled_archive_factory: Callable[
+        [str, str, bytes, str | None], WorkspaceArchive
+    ],
+) -> None:
+    packages = [
+        ("first", "python-1.0-h0.conda", b"python package"),
+        ("second", "numpy-2.0-h0.conda", b"numpy package"),
+    ]
+    archives = [
+        receipt_bundled_archive_factory(label, name, content, None)
+        for label, name, content in packages
+    ]
+
+    target = tmp_path / "extracted"
+    package_cache = tmp_path / "package-cache"
+    first = archives[0].extract(target=target, package_cache=package_cache)
+    shutil.rmtree(target)
+    second = archives[1].extract(target=target, package_cache=package_cache)
+
+    assert first.primed_packages == 1
+    assert second.primed_packages == 1
+    assert {path.name for path in package_cache.iterdir()} == {
+        package_name for _, package_name, _ in packages
+    }
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["extract", "dry-run"])
+@pytest.mark.parametrize("cache_entry", ["corrupt", "symlink"])
+def test_workspace_archive_extract_rejects_invalid_cached_packages(
+    tmp_path: Path,
+    snapshot_tree: SnapshotTree,
+    receipt_bundled_archive_factory: Callable[
+        [str, str, bytes, str | None], WorkspaceArchive
+    ],
+    dry_run: bool,
+    cache_entry: str,
+) -> None:
+    package_name = "demo-1.0-h0.conda"
+    archive = receipt_bundled_archive_factory(
+        "valid",
+        package_name,
+        b"package",
+        None,
+    )
+    cache = tmp_path / "package-cache"
+    cache.mkdir()
+    destination = cache / package_name
+    if cache_entry == "corrupt":
+        destination.write_bytes(b"corrupt")
+    else:
+        destination.symlink_to(tmp_path / "outside-package")
+    before = snapshot_tree(tmp_path)
+
+    with pytest.raises(ArchiveError):
+        archive.extract(
+            target=tmp_path / "extracted",
+            package_cache=cache,
+            dry_run=dry_run,
+        )
+
+    assert snapshot_tree(tmp_path) == before
 
 
 @pytest.mark.parametrize(
@@ -929,6 +1481,7 @@ def test_workspace_archive_install_uses_public_handler(
 def test_workspace_archive_install_validates_manifest_before_public_handler(
     workspace_archive_project: Path,
     tmp_path: Path,
+    snapshot_tree: SnapshotTree,
 ) -> None:
     (workspace_archive_project / "pixi.toml").write_text(
         "[workspace]\nname = 'ambiguous'\n",
@@ -939,23 +1492,17 @@ def test_workspace_archive_install_validates_manifest_before_public_handler(
         output=tmp_path / "workspace.tar.gz",
     )
     calls: list[Path] = []
-
-    def install_handler(
-        workspace: Path,
-        environment: str | None,
-        install_prefix: Path | None,
-        target_prefix_override: str | None,
-    ) -> int:
-        calls.append(workspace)
-        return 0
+    before = snapshot_tree(tmp_path)
 
     with pytest.raises(ArchiveError, match="multiple workspace manifests"):
         archive.install(
             target=tmp_path / "extracted",
-            install_handler=install_handler,
+            install_handler=lambda workspace, *_: calls.append(workspace) or 0,
+            dry_run=True,
         )
 
     assert calls == []
+    assert snapshot_tree(tmp_path) == before
 
 
 @pytest.mark.parametrize(
@@ -1041,26 +1588,6 @@ def test_archive_roundtrip(git_project: Path, tmp_path: Path) -> None:
 
     assert not (target / ".env").exists()
     assert not (target / "data").exists()
-
-
-def test_archive_roundtrip_with_bundle(
-    bundled_archive: tuple[Path, Path],
-    tmp_path: Path,
-) -> None:
-    """Round-trip with bundled packages: archive, extract, prime cache."""
-    archive_path, _ = bundled_archive
-
-    target = tmp_path / "extracted"
-    extract_archive(archive_path, target)
-
-    new_cache = tmp_path / "fresh_cache"
-    new_cache.mkdir()
-    count = prime_package_cache(target, new_cache, verified=True)
-    assert count == 2
-
-    cached_files = {f.name for f in new_cache.iterdir()}
-    assert "zlib-1.2.13-h4dc568a_6.conda" in cached_files
-    assert "zlib-1.2.13-h53f4e23_6.conda" in cached_files
 
 
 @pytest.mark.parametrize(

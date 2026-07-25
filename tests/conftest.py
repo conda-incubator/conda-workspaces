@@ -39,6 +39,34 @@ class ExistingExtractTarget(Protocol):
     def __call__(self, kind: str, *, name: str = "extracted") -> Path: ...
 
 
+class SnapshotTree(Protocol):
+    """Callable signature for byte-for-byte filesystem snapshots."""
+
+    def __call__(self, root: Path) -> dict[str, tuple[str, bytes | str | None]]: ...
+
+
+@pytest.fixture
+def snapshot_tree() -> SnapshotTree:
+    """Return a recursive snapshot function that does not follow symlinks."""
+
+    def _snapshot(root: Path) -> dict[str, tuple[str, bytes | str | None]]:
+        snapshot: dict[str, tuple[str, bytes | str | None]] = {}
+        if not root.exists():
+            return snapshot
+        snapshot["."] = ("directory", None)
+        for path in sorted(root.rglob("*")):
+            relative = path.relative_to(root).as_posix()
+            if path.is_symlink():
+                snapshot[relative] = ("symlink", str(path.readlink()))
+            elif path.is_dir():
+                snapshot[relative] = ("directory", None)
+            else:
+                snapshot[relative] = ("file", path.read_bytes())
+        return snapshot
+
+    return _snapshot
+
+
 @pytest.fixture
 def sample_pixi_toml(tmp_path: Path) -> Path:
     """Create a minimal pixi.toml in tmp_path and return its path."""

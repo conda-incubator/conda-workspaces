@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from conda.base.context import context as conda_context
 from conda.exceptions import CondaSystemExit
 
 from conda_workspaces.cli.workspace.clean import execute_clean
@@ -15,9 +16,9 @@ from ..conftest import make_args
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from tests.conftest import CreateWorkspaceEnv
+    from tests.conftest import CreateWorkspaceEnv, SnapshotTree
 
-_DEFAULTS = {"manifest_file": None, "environment": None}
+_DEFAULTS = {"manifest_file": None, "environment": None, "dry_run": False}
 
 
 def _stub_confirm_and_unregister(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -56,11 +57,50 @@ def test_clean_all_environments(
     _stub_confirm_and_unregister(monkeypatch)
     tmp_workspace_env(pixi_workspace, "default")
     tmp_workspace_env(pixi_workspace, "test")
+    unrelated = pixi_workspace / ".conda" / "envs" / "not-an-environment"
+    unrelated.mkdir()
+    (unrelated / "keep.txt").write_bytes(b"keep")
 
     args = make_args(_DEFAULTS)
     result = execute_clean(args)
     assert result == 0
+    assert (unrelated / "keep.txt").read_bytes() == b"keep"
     assert "Removed" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "environment",
+    ["default", None],
+    ids=["single", "all-with-yes"],
+)
+def test_clean_dry_run_preserves_prefixes(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_workspace_env: CreateWorkspaceEnv,
+    snapshot_tree: SnapshotTree,
+    environment: str | None,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    tmp_workspace_env(pixi_workspace, "default")
+    tmp_workspace_env(pixi_workspace, "test")
+    unrelated = pixi_workspace / ".conda" / "envs" / "not-an-environment"
+    unrelated.mkdir()
+    (unrelated / "keep.txt").write_bytes(b"keep")
+    before = snapshot_tree(pixi_workspace)
+
+    with conda_context._override("always_yes", True):
+        result = execute_clean(
+            make_args(
+                _DEFAULTS,
+                environment=environment,
+                dry_run=True,
+            )
+        )
+
+    assert result == 0
+    assert snapshot_tree(pixi_workspace) == before
+    assert "Would remove" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(

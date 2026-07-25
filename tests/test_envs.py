@@ -8,14 +8,13 @@ import logging
 import sys
 import types
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
-    from tests.conftest import CreateWorkspaceEnv
+    from tests.conftest import CreateWorkspaceEnv, SnapshotTree
 
 from conda.base.constants import ChannelPriority, UpdateModifier
 from conda.base.context import context as conda_context
@@ -110,6 +109,23 @@ def test_clean_all_no_envs_dir(workspace: WorkspaceContext) -> None:
     clean_all(workspace)  # should not raise
 
 
+def test_clean_all_preserves_non_environment_directories(
+    workspace: WorkspaceContext,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_workspace_env: CreateWorkspaceEnv,
+) -> None:
+    prefix = tmp_workspace_env(workspace.root, "default")
+    unrelated = workspace.envs_dir / "not-an-environment"
+    unrelated.mkdir()
+    (unrelated / "keep.txt").write_bytes(b"keep")
+    monkeypatch.setattr("conda_workspaces.envs.unregister_env", lambda path: None)
+
+    clean_all(workspace)
+
+    assert not prefix.exists()
+    assert (unrelated / "keep.txt").read_bytes() == b"keep"
+
+
 @pytest.mark.parametrize(
     "env_names, expected",
     [
@@ -200,8 +216,10 @@ class FakeSolver:
     subdirs: tuple = ()
     specs_to_add: list = field(default_factory=list)
     txn: FakeTransaction = field(default_factory=FakeTransaction)
+    solve_kwargs: dict = field(default_factory=dict)
 
     def solve_for_transaction(self, **kwargs) -> FakeTransaction:
+        self.solve_kwargs = kwargs
         return self.txn
 
 
@@ -227,10 +245,56 @@ def _stub_conda_imports(monkeypatch: pytest.MonkeyPatch, solver: FakeSolver) -> 
 
 
 def test_install_empty_specs(workspace: WorkspaceContext) -> None:
-    """With no dependencies, install just creates the prefix dir."""
+    """With no dependencies, install creates an empty conda environment."""
     resolved = ResolvedEnvironment(name="default")
     install_environment(workspace, resolved)
-    assert workspace.env_prefix("default").is_dir()
+    assert workspace.env_exists("default")
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["install", "dry-run"])
+def test_install_empty_specs_activation(
+    workspace: WorkspaceContext,
+    snapshot_tree: SnapshotTree,
+    dry_run: bool,
+) -> None:
+    script = workspace.root / "activate.sh"
+    script.write_text("export PREVIEW=1\n", encoding="utf-8")
+    resolved = ResolvedEnvironment(
+        name="default",
+        activation_env={"PREVIEW": "1"},
+        activation_scripts=[str(script)],
+    )
+    before = snapshot_tree(workspace.root)
+
+    install_environment(workspace, resolved, dry_run=dry_run)
+
+    prefix = workspace.env_prefix("default")
+    if dry_run:
+        assert snapshot_tree(workspace.root) == before
+        assert not prefix.exists()
+    else:
+        assert workspace.env_exists("default")
+        assert PrefixData(str(prefix)).get_environment_env_vars() == {"PREVIEW": "1"}
+        assert (prefix / "etc" / "conda" / "activate.d" / script.name).is_file()
+
+
+def test_install_dry_run_rejects_invalid_prefix_without_writes(
+    workspace: WorkspaceContext,
+    snapshot_tree: SnapshotTree,
+) -> None:
+    prefix = workspace.env_prefix("default")
+    prefix.parent.mkdir(parents=True)
+    prefix.write_bytes(b"keep")
+    before = snapshot_tree(workspace.root)
+
+    with pytest.raises(FileExistsError):
+        install_environment(
+            workspace,
+            ResolvedEnvironment(name="default"),
+            dry_run=True,
+        )
+
+    assert snapshot_tree(workspace.root) == before
 
 
 @pytest.mark.parametrize(
@@ -267,28 +331,113 @@ def test_install_transaction_outcomes(
     assert txn.executed is expect_executed
 
 
-def test_install_force_reinstall(
+def test_install_dry_run_isolates_package_cache(
     workspace: WorkspaceContext,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_workspace_env: CreateWorkspaceEnv,
+    snapshot_tree: SnapshotTree,
 ) -> None:
-    tmp_workspace_env(workspace.root, "default")
-    assert workspace.env_exists("default")
+    configured_cache = workspace.root / "configured-pkgs"
+    configured_cache.mkdir()
+    (configured_cache / "keep.txt").write_bytes(b"keep")
+    solver_caches: list[tuple[Path, ...]] = []
 
-    txn = FakeTransaction()
-    solver = FakeSolver(txn=txn)
+    class CacheWritingSolver(FakeSolver):
+        def solve_for_transaction(self, **kwargs) -> FakeTransaction:
+            caches = tuple(Path(path) for path in conda_context.pkgs_dirs)
+            cache = caches[0]
+            cache.mkdir(parents=True, exist_ok=True)
+            (cache / "solver-write.txt").write_bytes(b"solver")
+            solver_caches.append(caches)
+            return super().solve_for_transaction(**kwargs)
+
+    solver = CacheWritingSolver()
     _stub_conda_imports(monkeypatch, solver)
-
     resolved = ResolvedEnvironment(
         name="default",
         conda_dependencies={"python": MatchSpec("python >=3.10")},
         channels=[Channel("conda-forge")],
     )
-    install_environment(workspace, resolved, force_reinstall=True)
 
-    # Old env was removed and new one was installed
-    assert txn.downloaded
-    assert txn.executed
+    with conda_context._override("_pkgs_dirs", (str(configured_cache),)):
+        before = snapshot_tree(configured_cache)
+        install_environment(workspace, resolved, dry_run=True)
+        assert snapshot_tree(configured_cache) == before
+        assert conda_context.pkgs_dirs == (str(configured_cache),)
+
+    assert len(solver_caches) == 1
+    assert solver_caches[0][1:] == (configured_cache,)
+    assert not solver_caches[0][0].exists()
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["replace", "dry-run"])
+def test_install_force_reinstall(
+    workspace: WorkspaceContext,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_workspace_env: CreateWorkspaceEnv,
+    snapshot_tree: SnapshotTree,
+    dry_run: bool,
+) -> None:
+    prefix = tmp_workspace_env(workspace.root, "default")
+    (prefix / "keep.txt").write_bytes(b"keep me")
+    txn = FakeTransaction()
+    solver = FakeSolver(txn=txn)
+    _stub_conda_imports(monkeypatch, solver)
+    resolved = ResolvedEnvironment(
+        name="default",
+        conda_dependencies={"python": MatchSpec("python >=3.10")},
+        channels=[Channel("conda-forge")],
+    )
+    preview_prefix = prefix.with_name(".default.dry-run")
+    if dry_run:
+        preview_prefix.symlink_to(prefix.with_name("missing"))
+    before = snapshot_tree(workspace.root)
+
+    install_environment(
+        workspace,
+        resolved,
+        force_reinstall=True,
+        dry_run=dry_run,
+    )
+
+    assert solver.solve_kwargs == {}
+    if dry_run:
+        assert snapshot_tree(workspace.root) == before
+        assert solver.prefix == str(prefix.with_name(".default.dry-run-1"))
+        assert txn.summary_printed
+        assert not txn.downloaded
+        assert not txn.executed
+    else:
+        assert not prefix.exists()
+        assert solver.prefix == str(prefix)
+        assert not txn.summary_printed
+        assert txn.downloaded
+        assert txn.executed
+
+
+def test_install_nothing_to_do_dry_run_skips_activation_writes(
+    workspace: WorkspaceContext,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_workspace_env: CreateWorkspaceEnv,
+    snapshot_tree: SnapshotTree,
+) -> None:
+    tmp_workspace_env(workspace.root, "default")
+    script = workspace.root / "activate.sh"
+    script.write_text("export PREVIEW=1\n", encoding="utf-8")
+    txn = FakeTransaction(nothing_to_do=True)
+    solver = FakeSolver(txn=txn)
+    _stub_conda_imports(monkeypatch, solver)
+    resolved = ResolvedEnvironment(
+        name="default",
+        conda_dependencies={"python": MatchSpec("python >=3.10")},
+        channels=[Channel("conda-forge")],
+        activation_env={"PREVIEW": "1"},
+        activation_scripts=[str(script)],
+    )
+    before = snapshot_tree(workspace.root)
+
+    install_environment(workspace, resolved, dry_run=True)
+
+    assert snapshot_tree(workspace.root) == before
 
 
 def test_install_existing_env_uses_freeze(
