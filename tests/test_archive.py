@@ -926,6 +926,70 @@ def test_workspace_archive_install_uses_public_handler(
         )
 
 
+def test_workspace_archive_install_validates_manifest_before_public_handler(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+) -> None:
+    (workspace_archive_project / "pixi.toml").write_text(
+        "[workspace]\nname = 'ambiguous'\n",
+        encoding="utf-8",
+    )
+    archive = WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=tmp_path / "workspace.tar.gz",
+    )
+    calls: list[Path] = []
+
+    def install_handler(
+        workspace: Path,
+        environment: str | None,
+        install_prefix: Path | None,
+        target_prefix_override: str | None,
+    ) -> int:
+        calls.append(workspace)
+        return 0
+
+    with pytest.raises(ArchiveError, match="multiple workspace manifests"):
+        archive.install(
+            target=tmp_path / "extracted",
+            install_handler=install_handler,
+        )
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("root_manifests", "expected"),
+    [
+        ({"conda.toml": "not a workspace\n"}, "no valid workspace manifest"),
+        (
+            {
+                "conda.toml": "[workspace]\nname = 'conda'\n",
+                "pixi.toml": "[workspace]\nname = 'pixi'\n",
+            },
+            "multiple workspace manifests",
+        ),
+    ],
+    ids=["invalid-root", "ambiguous-root"],
+)
+def test_resolve_extracted_manifest_stays_at_archive_root(
+    tmp_path: Path,
+    root_manifests: dict[str, str],
+    expected: str,
+) -> None:
+    (tmp_path / "conda.toml").write_text(
+        "[workspace]\nname = 'parent'\n",
+        encoding="utf-8",
+    )
+    extracted = tmp_path / "extracted"
+    extracted.mkdir()
+    for filename, content in root_manifests.items():
+        (extracted / filename).write_text(content, encoding="utf-8")
+
+    with pytest.raises(ArchiveError, match=expected):
+        WorkspaceArchive.resolve_extracted_manifest(extracted)
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [

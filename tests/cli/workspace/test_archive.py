@@ -10,6 +10,7 @@ from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING
 
 import pytest
+from conda.base.context import context
 from rich.console import Console
 
 from conda_workspaces.archive import (
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 _ARCHIVE_DEFAULTS = {
-    "file": None,
+    "manifest_file": None,
     "output": None,
     "bundle": False,
     "lock": False,
@@ -44,7 +45,7 @@ _ARCHIVE_DEFAULTS = {
 }
 
 _UNARCHIVE_DEFAULTS = {
-    "file": None,
+    "manifest_file": None,
     "archive_path": None,
     "target": None,
     "install": False,
@@ -298,6 +299,34 @@ def test_execute_archive_no_output(
     assert result == 0
     expected = archive_workspace / "archive-test.tar.zst"
     assert expected.is_file()
+
+
+def test_execute_archive_uses_exact_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = (
+        '[workspace]\nname = "{name}"\nchannels = ["conda-forge"]\n'
+        'platforms = ["linux-64"]\n'
+    )
+    (tmp_path / "conda.toml").write_text(
+        manifest.format(name="conda-priority"),
+        encoding="utf-8",
+    )
+    pixi = tmp_path / "pixi.toml"
+    pixi.write_text(
+        manifest.format(name="pixi-selected"),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    execute_archive(
+        make_args(_ARCHIVE_DEFAULTS, manifest_file=pixi),
+        console=Console(file=StringIO(), width=200, highlight=False),
+    )
+
+    assert (tmp_path / "pixi-selected.tar.zst").is_file()
+    assert not (tmp_path / "conda-priority.tar.zst").exists()
 
 
 @pytest.mark.parametrize(
@@ -750,6 +779,22 @@ def test_execute_unarchive_install_explicit_prefix(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    platform = context.subdir
+    (archive_workspace / "conda.toml").write_text(
+        f"""\
+[workspace]
+name = "archive-test"
+channels = ["conda-forge"]
+platforms = ["{platform}"]
+""",
+        encoding="utf-8",
+    )
+    (archive_workspace / "conda.lock").write_text(
+        "version: 1\nenvironments:\n  default:\n    channels:\n"
+        "      - url: https://conda.anaconda.org/conda-forge/\n"
+        f"    packages:\n      {platform}: []\npackages: []\n",
+        encoding="utf-8",
+    )
     monkeypatch.chdir(archive_workspace)
     archive = tmp_path / "test.tar.gz"
     console = Console(file=StringIO(), width=200, highlight=False)
@@ -757,15 +802,14 @@ def test_execute_unarchive_install_explicit_prefix(
     args_a = make_args(_ARCHIVE_DEFAULTS, output=archive)
     execute_archive(args_a, console=console)
 
-    install_calls: list[object] = []
+    install_calls: list[tuple[object, str, dict[str, object]]] = []
 
-    def fake_execute_install(args, *, console=None):
-        install_calls.append(args)
-        return 0
+    def fake_install_from_lockfile(ctx, name, **kwargs):
+        install_calls.append((ctx, name, kwargs))
 
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.execute_install",
-        fake_execute_install,
+        "conda_workspaces.cli.workspace.install.install_from_lockfile",
+        fake_install_from_lockfile,
     )
 
     target = tmp_path / "extracted"
@@ -775,20 +819,22 @@ def test_execute_unarchive_install_explicit_prefix(
         archive_path=archive,
         target=target,
         install=True,
-        environment="runtime",
+        environment="default",
         prefix=prefix,
     )
     result = execute_unarchive(args_u, console=console)
 
     assert result == 0
     assert len(install_calls) == 1
-    install_args = install_calls[0]
-    assert install_args.file == str(target)
-    assert install_args.environment == "runtime"
-    assert install_args.locked is True
-    assert install_args.prefix == Path(prefix)
+    install_ctx, environment, install_kwargs = install_calls[0]
+    assert install_ctx.root == target
+    assert Path(install_ctx.config.manifest_path) == target / "conda.toml"
+    assert environment == "default"
     expected_override = None if str(Path(prefix)) == prefix else prefix
-    assert install_args.target_prefix_override == expected_override
+    assert install_kwargs == {
+        "prefix": Path(prefix),
+        "target_prefix_override": expected_override,
+    }
 
 
 @pytest.mark.parametrize(

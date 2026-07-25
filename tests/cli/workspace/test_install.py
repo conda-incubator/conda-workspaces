@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _DEFAULTS = {
-    "file": None,
+    "manifest_file": None,
     "environment": None,
     "force_reinstall": False,
     "dry_run": False,

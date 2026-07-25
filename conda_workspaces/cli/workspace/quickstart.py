@@ -152,7 +152,7 @@ def execute_quickstart(
     else:
         execute_init(
             with_prompts(
-                file=None,
+                manifest_file=None,
                 manifest_format=args.manifest_format,
                 name=args.name,
                 channels=args.channels,
@@ -169,7 +169,7 @@ def execute_quickstart(
     elif specs:
         execute_add(
             with_prompts(
-                file=None,
+                manifest_file=None,
                 specs=list(specs),
                 environment=None,
                 feature=None,
@@ -183,7 +183,7 @@ def execute_quickstart(
     else:
         execute_install(
             with_prompts(
-                file=None,
+                manifest_file=None,
                 environment=args.environment,
                 force_reinstall=args.force_reinstall,
                 locked=args.locked,
@@ -196,7 +196,7 @@ def execute_quickstart(
     if not no_shell and not dry_run:
         execute_shell(
             with_prompts(
-                file=None,
+                manifest_file=None,
                 environment=env_name,
                 cmd=None,
             )

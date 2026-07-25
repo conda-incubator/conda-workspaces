@@ -72,7 +72,7 @@ def execute_export(
 
     exporter, resolved_format = resolve_exporter(
         format_name=args.format,
-        file_path=args.file,
+        file_path=args.output,
     )
 
     if len(envs) > 1 and not exporter.multiplatform_export:
@@ -82,7 +82,7 @@ def execute_export(
 
     content = run_exporter(exporter, envs)
 
-    output_path: Path | None = args.file
+    output_path: Path | None = args.output
     dry_run: bool = args.dry_run
     json_output: bool = args.json
 

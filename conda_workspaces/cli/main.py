@@ -83,6 +83,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         "-f",
         type=Path,
         default=None,
+        dest="manifest_file",
         help="Path to a specific workspace manifest instead of auto-detection.",
     )
 
@@ -255,7 +256,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         help=(
             "Export format name or alias (e.g. environment-yaml, json, "
             "conda-workspaces-lock-v1). Defaults to environment-yaml when "
-            "--file is omitted, or detected from --file's basename."
+            "--file is omitted, or detected from the output filename."
         ),
     )
     export_parser.add_argument(
@@ -263,6 +264,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         "--file",
         type=Path,
         default=None,
+        dest="output",
         help="Write output to this file (default: stdout).",
     )
     export_parser.add_argument(

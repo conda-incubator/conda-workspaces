@@ -14,6 +14,7 @@ from ...archive import (
 )
 from ...exceptions import ArchiveError
 from .. import status
+from . import workspace_manifest_path_from_args
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -69,7 +70,7 @@ def execute_archive(
             ellipsis=True,
         )
     archive = WorkspaceArchive.create(
-        workspace=getattr(args, "file", None),
+        workspace=workspace_manifest_path_from_args(args),
         output=args.output,
         lock=args.lock,
         bundle=args.bundle,
@@ -99,7 +100,7 @@ def install_from_archive_cli(
         from .install import execute_install
 
         install_args = argparse.Namespace(
-            file=str(workspace),
+            manifest_file=WorkspaceArchive.resolve_extracted_manifest(workspace),
             environment=environment,
             force_reinstall=False,
             locked=True,

@@ -7,6 +7,7 @@ from io import StringIO
 from typing import TYPE_CHECKING
 
 import pytest
+from conda.exceptions import CondaValueError
 from rich.console import Console
 
 from conda_workspaces.cli.workspace.info import execute_info
@@ -19,7 +20,7 @@ if TYPE_CHECKING:
 
     from tests.conftest import CreateWorkspaceEnv
 
-_DEFAULTS = {"file": None, "environment": None, "json": False}
+_DEFAULTS = {"manifest_file": None, "environment": None, "json": False}
 
 
 def test_info_workspace_overview(
@@ -37,6 +38,21 @@ def test_info_workspace_overview(
     assert "default" in out
     assert "test" in out
     assert "conda-forge" in out
+
+
+@pytest.mark.parametrize(
+    "selector",
+    ["directory", "missing"],
+    ids=["directory", "missing"],
+)
+def test_info_rejects_non_file_manifest_selector(
+    tmp_path: Path,
+    selector: str,
+) -> None:
+    manifest_file = tmp_path if selector == "directory" else tmp_path / "missing.toml"
+
+    with pytest.raises(CondaValueError, match="must name an existing"):
+        execute_info(make_args(_DEFAULTS, manifest_file=manifest_file))
 
 
 @pytest.mark.parametrize(

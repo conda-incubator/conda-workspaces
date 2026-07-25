@@ -20,7 +20,7 @@ _DEFAULTS = {
     "name": None,
     "channels": None,
     "platforms": ["linux-64", "osx-arm64", "win-64"],
-    "file": None,
+    "manifest_file": None,
 }
 
 

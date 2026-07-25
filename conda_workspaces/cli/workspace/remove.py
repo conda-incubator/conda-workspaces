@@ -8,7 +8,7 @@ import tomlkit
 from rich.console import Console
 
 from ...manifests import detect_workspace_file
-from . import workspace_context_from_args
+from . import workspace_context_from_args, workspace_manifest_path_from_args
 from .sync import affected_environments, sync_environments
 
 if TYPE_CHECKING:
@@ -19,7 +19,7 @@ def execute_remove(args: argparse.Namespace, *, console: Console | None = None) 
     """Remove dependencies from the workspace manifest."""
     if console is None:
         console = Console(highlight=False)
-    manifest_path = getattr(args, "file", None) or detect_workspace_file()
+    manifest_path = workspace_manifest_path_from_args(args) or detect_workspace_file()
     specs = args.specs
     is_pypi = getattr(args, "pypi", False)
     feature = getattr(args, "feature", None)

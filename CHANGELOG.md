@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Changed
+
+- The global `conda workspace --file` option now selects the exact
+  manifest named by the caller. To use upward auto-discovery, omit the
+  option instead of passing a directory. The `export` subcommand keeps
+  its own `--file` option for the output path, so a source manifest and
+  unrelated export destination can be supplied together. Archive
+  installation now requires exactly one valid manifest at the archive
+  root. Remove unselected manifests before archiving when using
+  `unarchive --install`. (#120)
+
 ## 0.7.0 — 2026-06-14
 
 ### Added

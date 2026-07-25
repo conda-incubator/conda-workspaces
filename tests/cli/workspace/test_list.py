@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from tests.conftest import CreateWorkspaceEnv
 
 _DEFAULTS = {
-    "file": None,
+    "manifest_file": None,
     "installed": False,
     "json": False,
     "envs": False,
