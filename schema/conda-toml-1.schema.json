@@ -674,7 +674,7 @@
       ]
     },
     "environment": {
-      "description": "A named environment composed from features.",
+      "description": "A named environment composed from features and private dependencies.",
       "oneOf": [
         {
           "type": "array",
@@ -702,6 +702,14 @@
               "type": "boolean",
               "description": "Exclude the default feature from this environment.",
               "default": false
+            },
+            "dependencies": {
+              "$ref": "#/$defs/condaDependencies",
+              "description": "Conda dependencies private to this environment."
+            },
+            "pypi-dependencies": {
+              "$ref": "#/$defs/pypiDependencies",
+              "description": "PyPI dependencies private to this environment."
             }
           },
           "additionalProperties": false

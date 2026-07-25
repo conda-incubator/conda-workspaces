@@ -316,6 +316,8 @@ Each entry in `[environments]` defines a named environment:
 | `features` | list of strings | Features to include (in addition to default) |
 | `solve-group` | string | Accepted for pixi compatibility. Currently ignored by conda-workspaces |
 | `no-default-feature` | bool | Exclude the default feature (default: false) |
+| `dependencies` | table | Conda dependencies private to this environment |
+| `pypi-dependencies` | table | PyPI dependencies private to this environment |
 
 Shorthand forms are supported:
 

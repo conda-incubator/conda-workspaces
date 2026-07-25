@@ -265,8 +265,9 @@ arbitrary identifier referenced from `[environments]`.
 
 ### `[environments]`
 
-A named environment is a composition of one or more features plus
-(by default) the *default feature* defined by the top-level
+A named environment is a composition of one or more features, private
+dependencies declared directly on that environment, plus (by default)
+the *default feature* defined by the top-level
 `[dependencies]`, `[pypi-dependencies]`, `[activation]` and
 `[system-requirements]` tables.
 
@@ -274,8 +275,17 @@ Two forms are accepted:
 
 ```toml
 [environments]
-test = ["test"]                                     # shorthand
+lint = ["lint"]                                     # shorthand
 docs = { features = ["docs"], no-default-feature = false }
+
+[environments.test]
+features = ["test"]
+
+[environments.test.dependencies]
+coverage = "*"
+
+[environments.test.pypi-dependencies]
+pytest-plugin = ">=1"
 ```
 
 | Field | Type | Description |
@@ -283,10 +293,16 @@ docs = { features = ["docs"], no-default-feature = false }
 | `features` | array of string | Feature names to include in addition to the default feature. |
 | `solve-group` | string | Accepted for pixi compatibility. Currently ignored. Environments are solved independently. |
 | `no-default-feature` | boolean | If `true`, exclude the default feature from this environment.  Default: `false`. |
+| `dependencies` | conda deps | Conda dependencies private to this environment. |
+| `pypi-dependencies` | PyPI deps | PyPI dependencies private to this environment. |
 
 When `[environments]` is omitted entirely, a single implicit
 environment named `default` is used, composed from the default feature
 only.
+
+Environment-local dependencies are merged after shared features. They
+therefore affect only that environment and override a same-named
+dependency contributed by a feature.
 
 ### `[tasks]`
 
@@ -331,7 +347,8 @@ When a tool resolves an environment named `<env>`:
 2. Merge in each named feature listed in `features`, in order.  Later
    features override earlier ones for conflicting keys. Lists are
    concatenated and de-duplicated.
-3. Apply `[target.<platform>]` overrides for the host's platform last.
+3. Apply `[target.<platform>]` overrides for the host's platform.
+4. Merge dependencies declared directly on the environment.
 
 Channel order is preserved.  Duplicate dependency names within the
 same stack (conda or PyPI) are an error and the tool MUST surface them

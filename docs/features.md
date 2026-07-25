@@ -237,13 +237,23 @@ Each environment is installed under `.conda/envs/<name>/` in your project.
 ```toml
 [environments]
 default = []
-test = { features = ["test"] }
 docs = { features = ["docs"] }
+
+[environments.test]
+features = ["test"]
+
+[environments.test.dependencies]
+coverage = "*"
+
+[environments.test.pypi-dependencies]
+pytest-plugin = ">=1"
 ```
 
-The `default` environment always exists and includes the top-level
-`[dependencies]`. Named environments inherit the default feature unless
-`no-default-feature = true` is set.
+An implicit `default` environment is created when `[environments]` is
+omitted. Every declared environment inherits the top-level default
+feature unless `no-default-feature = true` is set. Dependencies declared below
+`[environments.<name>]` are private to that environment and are merged
+after its shared features.
 
 :::{note}
 Pixi's `solve-group` key is accepted in manifests for compatibility but

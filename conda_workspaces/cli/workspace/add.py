@@ -8,17 +8,17 @@ import tomlkit
 from conda.exceptions import InvalidMatchSpec
 from conda.models.match_spec import MatchSpec
 from rich.console import Console
+from tomlkit.items import InlineTable, Table
 
 from ...context import WorkspaceContext
 from ...manifests import detect_workspace_file, find_parser
 from ...manifests.toml import WorkspaceDependencyResolver
+from ...models import Feature
 from . import workspace_manifest_path_from_args
 from .sync import affected_environments, sync_environments
 
 if TYPE_CHECKING:
     import argparse
-
-    from tomlkit.items import Table
 
 
 def execute_add(args: argparse.Namespace, *, console: Console | None = None) -> int:
@@ -29,8 +29,9 @@ def execute_add(args: argparse.Namespace, *, console: Console | None = None) -> 
     specs = args.specs
     is_pypi = getattr(args, "pypi", False)
     feature = getattr(args, "feature", None)
+    if feature == Feature.DEFAULT_NAME:
+        feature = None
     environment = getattr(args, "environment", None)
-    target_feature = feature or environment
     dry_run = getattr(args, "dry_run", False)
 
     text = manifest_path.read_text(encoding="utf-8")
@@ -50,7 +51,8 @@ def execute_add(args: argparse.Namespace, *, console: Console | None = None) -> 
         source,
         specs,
         dep_key,
-        target_feature,
+        feature,
+        environment,
         dry_run=dry_run,
         console=console,
     )
@@ -67,7 +69,12 @@ def execute_add(args: argparse.Namespace, *, console: Console | None = None) -> 
         manifest_path.write_text(tomlkit.dumps(doc), encoding="utf-8")
 
     label = "PyPI" if is_pypi else "conda"
-    location = f"feature '{target_feature}'" if target_feature else "default"
+    if environment:
+        location = f"environment '{environment}'"
+    elif feature:
+        location = f"feature '{feature}'"
+    else:
+        location = "default"
     n = len(specs)
     noun = "dependency" if n == 1 else "dependencies"
     action = "Would add" if dry_run else "Added"
@@ -80,7 +87,11 @@ def execute_add(args: argparse.Namespace, *, console: Console | None = None) -> 
         return 0
 
     ctx = WorkspaceContext(config)
-    env_names = affected_environments(config, target_feature)
+    env_names = affected_environments(
+        config,
+        feature,
+        target_environment=environment,
+    )
     if env_names:
         console.print()
         sync_environments(
@@ -100,6 +111,7 @@ def _add_to_toml(
     specs: list[str],
     dep_key: str,
     feature: str | None,
+    environment: str | None,
     *,
     dry_run: bool,
     console: Console,
@@ -118,6 +130,26 @@ def _add_to_toml(
             console.print(
                 f"[bold cyan]{action}[/bold cyan] [bold]{feature}[/bold] environment"
             )
+    elif environment:
+        envs = doc.setdefault("environments", tomlkit.table())
+        definition = envs.get(environment)
+        if definition is None:
+            target = tomlkit.table()
+            envs[environment] = target
+            action = "Would create" if dry_run else "Created"
+            console.print(
+                f"[bold cyan]{action}[/bold cyan]"
+                f" [bold]{environment}[/bold] environment"
+            )
+        elif isinstance(definition, Table):
+            target = definition
+        else:
+            target = tomlkit.table()
+            if isinstance(definition, list):
+                target["features"] = list(definition)
+            elif isinstance(definition, InlineTable):
+                target.update(definition)
+            envs[environment] = target
     else:
         target = doc
 

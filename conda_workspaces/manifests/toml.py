@@ -416,6 +416,9 @@ def parse_pypi_dependencies(raw: dict[str, Any]) -> dict[str, PyPIDependency]:
                 path=spec.get("path"),
                 editable=spec.get("editable", False),
                 git=spec.get("git"),
+                branch=spec.get("branch"),
+                tag=spec.get("tag"),
+                rev=spec.get("rev"),
                 url=spec.get("url"),
             )
         else:
@@ -423,7 +426,12 @@ def parse_pypi_dependencies(raw: dict[str, Any]) -> dict[str, PyPIDependency]:
     return deps
 
 
-def parse_environment(name: str, raw: Any, path: Path) -> Environment:
+def parse_environment(
+    name: str,
+    raw: Any,
+    path: Path,
+    resolver: WorkspaceDependencyResolver | None = None,
+) -> Environment:
     """Parse a single environment entry.
 
     Environments can be specified as:
@@ -433,10 +441,16 @@ def parse_environment(name: str, raw: Any, path: Path) -> Environment:
     if isinstance(raw, list):
         return Environment(name=name, features=raw)
     if isinstance(raw, dict):
+        resolver = resolver or WorkspaceDependencyResolver(path=path)
         return Environment(
             name=name,
             features=list(raw.get("features", [])),
             no_default_feature=raw.get("no-default-feature", False),
+            conda_dependencies=resolver.parse_dependency_table(
+                raw.get("dependencies", {}),
+                table_name=f"[environments.{name}.dependencies]",
+            ),
+            pypi_dependencies=parse_pypi_dependencies(raw.get("pypi-dependencies", {})),
         )
     raise WorkspaceParseError(
         path,
@@ -548,7 +562,12 @@ def parse_features_and_envs(
     envs_data = source.get("environments", {})
     if envs_data:
         for env_name, env_val in envs_data.items():
-            config.environments[env_name] = parse_environment(env_name, env_val, path)
+            config.environments[env_name] = parse_environment(
+                env_name,
+                env_val,
+                path,
+                resolver,
+            )
     else:
         config.environments[Environment.DEFAULT_NAME] = Environment(
             name=Environment.DEFAULT_NAME

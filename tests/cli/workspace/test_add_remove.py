@@ -11,6 +11,8 @@ from conda_lockfiles.load_yaml import load_yaml
 
 from conda_workspaces.cli.workspace.add import execute_add
 from conda_workspaces.cli.workspace.remove import execute_remove
+from conda_workspaces.exceptions import CondaWorkspacesError
+from conda_workspaces.manifests import find_parser
 from conda_workspaces.resolver import ResolvedEnvironment
 
 from ..conftest import make_args
@@ -245,19 +247,28 @@ def test_add_rejects_unrepresentable_conda_matchspec(
 
 
 @pytest.mark.parametrize(
-    "kwargs",
+    ("kwargs", "target_keys"),
     [
-        {"feature": "test"},
-        {"environment": "test"},
+        ({"feature": "test"}, ("feature", "test")),
+        ({"environment": "test"}, ("environments", "test")),
     ],
     ids=["via-feature", "via-environment"],
 )
-def test_add_to_feature(pixi_toml: Path, kwargs: dict) -> None:
+def test_add_to_location(
+    pixi_toml: Path,
+    kwargs: dict,
+    target_keys: tuple[str, ...],
+) -> None:
     args = make_args(_DEFAULTS, manifest_file=pixi_toml, specs=["coverage"], **kwargs)
     execute_add(args)
 
     doc = tomlkit.loads(pixi_toml.read_text(encoding="utf-8"))
-    assert doc["feature"]["test"]["dependencies"]["coverage"] == "*"
+    target = doc
+    for key in target_keys:
+        target = target[key]
+    assert target["dependencies"]["coverage"] == "*"
+    if "environment" in kwargs:
+        assert "coverage" not in doc["feature"]["test"]["dependencies"]
 
 
 def test_add_pypi_deps(pixi_toml: Path) -> None:
@@ -271,6 +282,33 @@ def test_add_pypi_deps(pixi_toml: Path) -> None:
 
     doc = tomlkit.loads(pixi_toml.read_text(encoding="utf-8"))
     assert doc["pypi-dependencies"]["requests"] == ">=2.0"
+
+
+def test_explicit_default_feature_targets_top_level(pixi_toml: Path) -> None:
+    add_args = make_args(
+        _DEFAULTS,
+        manifest_file=pixi_toml,
+        specs=["click"],
+        feature="default",
+    )
+    assert execute_add(add_args) == 0
+
+    doc = tomlkit.loads(pixi_toml.read_text(encoding="utf-8"))
+    assert "default" not in doc["feature"]
+    config = find_parser(pixi_toml).parse(pixi_toml)
+    default = config.environments["default"]
+    assert set(config.merged_conda_dependencies(default)) == {"python", "click"}
+
+    remove_args = make_args(
+        _DEFAULTS,
+        manifest_file=pixi_toml,
+        specs=["click"],
+        feature="default",
+    )
+    assert execute_remove(remove_args) == 0
+    config = find_parser(pixi_toml).parse(pixi_toml)
+    default = config.environments["default"]
+    assert set(config.merged_conda_dependencies(default)) == {"python"}
 
 
 def test_add_to_pyproject(pyproject_toml: Path) -> None:
@@ -431,20 +469,36 @@ name = "no-tool"
 
 
 @pytest.mark.parametrize(
-    "fixture_attr, root_keys",
+    ("filename", "namespace", "root_keys"),
     [
-        ("pixi_toml", ()),
-        ("pyproject_toml", ("tool", "pixi")),
+        ("conda.toml", "", ()),
+        ("pixi.toml", "", ()),
+        ("pyproject.toml", "tool.conda", ("tool", "conda")),
+        ("pyproject.toml", "tool.pixi", ("tool", "pixi")),
     ],
-    ids=["pixi-toml", "pyproject-toml"],
+    ids=["conda-toml", "pixi-toml", "pyproject-conda", "pyproject-pixi"],
 )
 def test_add_environment_auto_creates_env_entry(
-    fixture_attr: str,
+    tmp_path: Path,
+    filename: str,
+    namespace: str,
     root_keys: tuple[str, ...],
-    request: pytest.FixtureRequest,
 ) -> None:
     """Adding to an undefined environment auto-creates the env entry."""
-    path = request.getfixturevalue(fixture_attr)
+    prefix = f"{namespace}." if namespace else ""
+    project = '[project]\nname = "add-test"\n\n' if namespace else ""
+    path = tmp_path / filename
+    path.write_text(
+        f"""{project}[{prefix}workspace]
+name = "add-test"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[{prefix}dependencies]
+python = ">=3.10"
+""",
+        encoding="utf-8",
+    )
     args = make_args(
         _DEFAULTS,
         manifest_file=path,
@@ -458,33 +512,123 @@ def test_add_environment_auto_creates_env_entry(
     root = doc
     for key in root_keys:
         root = root[key]
-    assert root["feature"]["newenv"]["dependencies"]["numpy"] == "*"
-    assert "newenv" in root["environments"]
-    assert root["environments"]["newenv"]["features"] == ["newenv"]
+    assert root["environments"]["newenv"]["dependencies"]["numpy"] == "*"
+    assert "feature" not in root
 
 
-def test_add_environment_existing_env_no_duplicate(pixi_toml: Path) -> None:
-    """Adding to an existing feature+env doesn't duplicate the env entry."""
+@pytest.fixture
+def environment_toml(tmp_path: Path) -> Path:
+    path = tmp_path / "pixi.toml"
+    path.write_text(
+        """\
+[workspace]
+name = "environment-test"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+python = ">=3.10"
+
+[feature.test.dependencies]
+pytest = ">=8"
+
+[feature.lint.dependencies]
+ruff = "*"
+
+[feature.qa.dependencies]
+same-name = "*"
+
+[environments]
+qa = ["test", "lint"]
+isolated = { features = ["lint"], no-default-feature = true }
+""",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_add_environment_dependencies_are_private_and_resolved(
+    environment_toml: Path,
+) -> None:
+    mutations = [
+        ("qa", "coverage", False),
+        ("qa", "requests >=2", True),
+        ("isolated", "click", False),
+        ("default", "rich", False),
+    ]
+    for environment, spec, pypi in mutations:
+        args = make_args(
+            _DEFAULTS,
+            manifest_file=environment_toml,
+            specs=[spec],
+            environment=environment,
+            pypi=pypi,
+        )
+        assert execute_add(args) == 0
+
+    doc = tomlkit.loads(environment_toml.read_text(encoding="utf-8"))
+    assert doc["environments"]["qa"]["features"] == ["test", "lint"]
+    assert doc["environments"]["qa"]["dependencies"]["coverage"] == "*"
+    assert doc["environments"]["qa"]["pypi-dependencies"]["requests"] == ">=2"
+    assert doc["feature"]["qa"]["dependencies"].unwrap() == {"same-name": "*"}
+    assert doc["environments"]["isolated"]["no-default-feature"] is True
+    assert doc["environments"]["default"]["dependencies"]["rich"] == "*"
+    assert "default" not in doc["feature"]
+
+    config = find_parser(environment_toml).parse(environment_toml)
+    qa = config.environments["qa"]
+    assert set(config.merged_conda_dependencies(qa)) == {
+        "python",
+        "pytest",
+        "ruff",
+        "coverage",
+    }
+    assert set(config.merged_pypi_dependencies(qa)) == {"requests"}
+    isolated = config.environments["isolated"]
+    assert set(config.merged_conda_dependencies(isolated)) == {"ruff", "click"}
+    default = config.environments["default"]
+    assert set(config.merged_conda_dependencies(default)) == {"python", "rich"}
+
+
+def test_remove_environment_local_dependency(environment_toml: Path) -> None:
+    add_args = make_args(
+        _DEFAULTS,
+        manifest_file=environment_toml,
+        specs=["coverage"],
+        environment="qa",
+    )
+    execute_add(add_args)
+
+    remove_args = make_args(
+        _DEFAULTS,
+        manifest_file=environment_toml,
+        specs=["coverage"],
+        environment="qa",
+    )
+    assert execute_remove(remove_args) == 0
+
+    config = find_parser(environment_toml).parse(environment_toml)
+    qa = config.environments["qa"]
+    assert "coverage" not in qa.conda_dependencies
+    assert "pytest" in config.merged_conda_dependencies(qa)
+
+
+def test_remove_inherited_environment_dependency_fails_without_write(
+    environment_toml: Path,
+) -> None:
+    before = environment_toml.read_bytes()
     args = make_args(
         _DEFAULTS,
-        manifest_file=pixi_toml,
-        specs=["coverage"],
-        environment="test",
+        manifest_file=environment_toml,
+        specs=["pytest"],
+        environment="qa",
     )
-    execute_add(args)
 
-    # First add auto-created the env entry. Add again — it shouldn't duplicate.
-    args2 = make_args(
-        _DEFAULTS,
-        manifest_file=pixi_toml,
-        specs=["hypothesis"],
-        environment="test",
-    )
-    execute_add(args2)
+    with pytest.raises(CondaWorkspacesError, match="not declared directly") as exc_info:
+        execute_remove(args)
 
-    doc2 = tomlkit.loads(pixi_toml.read_text(encoding="utf-8"))
-    assert doc2["feature"]["test"]["dependencies"]["hypothesis"] == "*"
-    assert "test" in doc2["environments"]
+    assert environment_toml.read_bytes() == before
+    assert any("--feature test pytest" in hint for hint in exc_info.value.hints)
 
 
 @pytest.mark.parametrize(
@@ -529,9 +673,14 @@ python = ">=3.10"
 [feature.test.dependencies]
 pytest = ">=8.0"
 
-[environments]
-default = []
-test = {features = ["test"]}
+[environments.default]
+features = []
+
+[environments.test]
+features = ["test"]
+
+[environments.test.dependencies]
+coverage = "*"
 """
     path = tmp_path / "pixi.toml"
     path.write_text(content, encoding="utf-8")
@@ -606,23 +755,28 @@ def test_default_feature_syncs_all_envs(
 
 
 @pytest.mark.parametrize(
-    "execute_fn, spec",
-    [(execute_add, "coverage"), (execute_remove, "pytest")],
-    ids=["add", "remove"],
+    ("execute_fn", "spec", "location"),
+    [
+        (execute_add, "coverage", {"feature": "test"}),
+        (execute_remove, "pytest", {"feature": "test"}),
+        (execute_add, "hypothesis", {"environment": "test"}),
+        (execute_remove, "coverage", {"environment": "test"}),
+    ],
+    ids=["feature-add", "feature-remove", "environment-add", "environment-remove"],
 )
-def test_named_feature_syncs_only_composing_envs(
+def test_explicit_location_syncs_only_selected_environment(
     sync_workspace: Path,
     stub_sync: list[tuple[list[str], dict]],
     execute_fn,
     spec: str,
+    location: dict[str, str],
 ) -> None:
-    """``--feature test`` selects only environments that compose ``test``."""
     args = make_args(
         _DEFAULTS,
         manifest_file=sync_workspace,
         specs=[spec],
-        feature="test",
         no_lockfile_update=False,
+        **location,
     )
     execute_fn(args)
 

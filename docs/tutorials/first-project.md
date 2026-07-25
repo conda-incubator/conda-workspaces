@@ -43,16 +43,16 @@ conda workspace add "python>=3.10"
 conda workspace add "numpy>=1.24" "scipy>=1.11"
 ```
 
-Add test dependencies to a test feature:
+Add test dependencies to a shared test feature:
 
 ```bash
-conda workspace add -e test "pytest>=8.0" "pytest-cov>=4.0"
+conda workspace add --feature test "pytest>=8.0" "pytest-cov>=4.0"
 ```
 
-Add documentation dependencies:
+Add documentation dependencies to a shared docs feature:
 
 ```bash
-conda workspace add -e docs "sphinx>=7.0" "myst-parser>=3.0"
+conda workspace add --feature docs "sphinx>=7.0" "myst-parser>=3.0"
 ```
 
 Your `conda.toml` now looks like:

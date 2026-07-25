@@ -187,10 +187,11 @@ Opt-outs are available for partial workflows:
   `install_environment` call, matching `conda workspace install`.
 
 **Affected environments**: editing the default feature (the default
-when no `--feature` / `-e` is passed) selects every environment that
+when no location selector is passed) selects every environment that
 does not set `no-default-feature = true` for prefix installation.
-Editing a named feature selects every composing environment. All
-declared environments still feed lock generation. A shared helper
+Editing a named feature selects every composing environment. Editing
+private dependencies with `--environment` selects only that environment.
+All declared environments still feed lock generation. A shared helper
 `sync_environments` in `conda_workspaces/cli/workspace/sync.py` backs
 both commands as well as `conda workspace install`, so there is a
 single canonical synchronization pipeline.

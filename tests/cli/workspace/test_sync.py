@@ -86,6 +86,22 @@ def test_affected_environments(
     assert set(affected_environments(config, target)) == expected
 
 
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [("dev", ["dev"]), ("default", ["default"]), ("missing", [])],
+)
+def test_affected_environment_target(target: str, expected: list[str]) -> None:
+    config = _config(default={}, dev={"features": ["shared"]})
+    assert (
+        affected_environments(
+            config,
+            None,
+            target_environment=target,
+        )
+        == expected
+    )
+
+
 @pytest.fixture
 def captured_console() -> Console:
     """A Console that writes to StringIO so we can inspect output."""

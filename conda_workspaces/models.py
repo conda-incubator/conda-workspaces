@@ -62,6 +62,9 @@ class PyPIDependency:
     path: str | None = None
     editable: bool = False
     git: str | None = None
+    branch: str | None = None
+    tag: str | None = None
+    rev: str | None = None
     url: str | None = None
 
     def __str__(self) -> str:
@@ -78,6 +81,21 @@ class PyPIDependency:
         if self.spec:
             return f"{base}{self.spec}"
         return base
+
+    def to_toml(self) -> str | dict[str, object]:
+        """Return this dependency in its manifest representation."""
+        fields: dict[str, object] = {
+            "version": self.spec,
+            "extras": list(self.extras),
+            "path": self.path,
+            "editable": self.editable,
+            "git": self.git,
+            "branch": self.branch,
+            "tag": self.tag,
+            "rev": self.rev,
+            "url": self.url,
+        }
+        return {key: value for key, value in fields.items() if value} or "*"
 
 
 @dataclass
@@ -118,11 +136,12 @@ class Feature:
 
 @dataclass
 class Environment:
-    """A named environment composed from one or more features.
+    """A named environment composed from features and private dependencies.
 
     This maps to a ``[environments]`` entry in a pixi manifest.
     An environment inherits the ``default`` feature plus any additional
-    features listed in *features*.
+    features listed in *features*. Dependencies declared directly on the
+    environment are private to it and override dependencies from its features.
 
     *no_default_feature* can be set to exclude the default feature,
     matching pixi's ``no-default-feature = true`` option.
@@ -133,6 +152,8 @@ class Environment:
     name: str
     features: list[str] = field(default_factory=list)
     no_default_feature: bool = False
+    conda_dependencies: dict[str, MatchSpec] = field(default_factory=dict)
+    pypi_dependencies: dict[str, PyPIDependency] = field(default_factory=dict)
 
     @property
     def is_default(self) -> bool:
@@ -368,6 +389,7 @@ class WorkspaceConfig:
             for key in platform_keys:
                 if key in feature.target_conda_dependencies:
                     merged.update(feature.target_conda_dependencies[key])
+        merged.update(environment.conda_dependencies)
         return merged
 
     def merged_pypi_dependencies(
@@ -383,6 +405,7 @@ class WorkspaceConfig:
             for key in platform_keys:
                 if key in feature.target_pypi_dependencies:
                     merged.update(feature.target_pypi_dependencies[key])
+        merged.update(environment.pypi_dependencies)
         return merged
 
     def merged_system_requirements(
