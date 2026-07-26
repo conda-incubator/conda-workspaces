@@ -14,6 +14,7 @@ from rich.console import Console
 from conda_workspaces.cli.workspace import quickstart as quickstart_module
 from conda_workspaces.cli.workspace.quickstart import execute_quickstart
 from conda_workspaces.exceptions import (
+    EnvironmentNameInvalidError,
     LockfileNotFoundError,
     LockfileStaleError,
     ManifestExistsError,
@@ -155,6 +156,7 @@ def test_quickstart_from_scratch(
     assert len(runners["shell"].calls) == 1
     if expect_add:
         assert runners["add"].calls[0].specs == specs
+        assert runners["add"].calls[0].environment == "default"
 
 
 def test_quickstart_copy_from_dir_skips_init(
@@ -278,6 +280,39 @@ def test_quickstart_json_suppresses_shell_and_emits_payload(
     assert payload["specs_added"] == ["python=3.14"]
     assert payload["shell_spawned"] is False
     assert payload["manifest"] == "conda.toml"
+
+
+def test_quickstart_specs_install_selected_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    def fake_sync(config, ctx, env_names, **kwargs):  # type: ignore[no-untyped-def]
+        del config, kwargs
+        for name in env_names:
+            ctx.env_prefix(name).mkdir(parents=True)
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.add.sync_environments",
+        fake_sync,
+    )
+
+    result = execute_quickstart(
+        make_args(
+            _DEFAULTS,
+            specs=["python=3.14"],
+            environment="dev",
+            no_shell=True,
+        ),
+        console=Console(file=StringIO(), force_terminal=False),
+    )
+
+    assert result == 0
+    manifest = tmp_path / "conda.toml"
+    config = quickstart_module.ManifestParser.for_format_alias("conda").parse(manifest)
+    assert str(config.environments["dev"].conda_dependencies["python"]) == "python=3.14"
+    assert {path.name for path in (tmp_path / ".conda" / "envs").iterdir()} == {"dev"}
 
 
 def test_quickstart_json_does_not_forward_flag_to_subhandlers(
@@ -446,6 +481,44 @@ def test_quickstart_dry_run_validates_prospective_workspace(
             make_args(
                 _DEFAULTS,
                 dry_run=True,
+                no_shell=True,
+                **overrides,
+            ),
+            console=Console(file=StringIO(), force_terminal=False),
+        )
+
+    assert snapshot_tree(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_error", "message"),
+    [
+        ({"locked": True}, ArgumentError, "cannot be combined"),
+        ({"frozen": True}, ArgumentError, "cannot be combined"),
+        (
+            {"environment": "../outside"},
+            EnvironmentNameInvalidError,
+            "not valid",
+        ),
+    ],
+    ids=["locked", "frozen", "invalid-environment"],
+)
+def test_quickstart_rejects_invalid_specs_options_before_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot_tree: SnapshotTree,
+    overrides: dict,
+    expected_error: type[Exception],
+    message: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    before = snapshot_tree(tmp_path)
+
+    with pytest.raises(expected_error, match=message):
+        execute_quickstart(
+            make_args(
+                _DEFAULTS,
+                specs=["python=3.14"],
                 no_shell=True,
                 **overrides,
             ),
