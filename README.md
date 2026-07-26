@@ -151,8 +151,8 @@ of workspace and task features.
 
 ```bash
 pixi install
-pixi run test
-pixi run lint
+pixi run -e test test
+pixi run -e dev check
 ```
 
 ## Acknowledgements

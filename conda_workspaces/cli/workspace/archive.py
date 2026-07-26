@@ -10,6 +10,7 @@ from rich.markup import escape
 
 from ...archive import (
     WorkspaceArchive,
+    WorkspaceArchiveInstallResult,
     scan_prefix_references,
 )
 from ...exceptions import ArchiveError
@@ -206,6 +207,7 @@ def execute_unarchive(
             )
 
     if args.install:
+        assert isinstance(result, WorkspaceArchiveInstallResult)
         if dry_run:
             name = getattr(args, "environment", None) or "workspace environments"
             status.message(console, "Would install", "environment", name)

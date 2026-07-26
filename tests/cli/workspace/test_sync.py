@@ -202,7 +202,7 @@ def test_sync_dry_run_reuses_package_cache_across_pipeline(
     configured_cache = tmp_path / "configured-pkgs"
     cache_paths: list[Path] = []
 
-    def record_cache(*args, **kwargs):
+    def record_cache(*_args: object, **_kwargs: object) -> None:
         cache_paths.append(Path(conda_context.pkgs_dirs[0]))
 
     monkeypatch.setattr(

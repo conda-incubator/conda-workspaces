@@ -172,11 +172,12 @@
   subdirectory `conftest.py` for module-specific ones).
 
 - After adding or modifying tests or production code, always run the
-  full test suite (`pixi run -e test pytest`) **and** both
-  `pixi run ruff check` and `pixi run ruff format --check` to verify
-  the changes pass before considering the work done. Fix any lint or
-  formatting issues introduced by the changes; do not leave them for
-  CI to catch.
+  full test suite (`pixi run -e test pytest`), lint
+  (`pixi run -e dev lint`), formatting
+  (`pixi run -e dev format-check`), and type checking
+  (`pixi run -e dev type-check`) before considering the work done. Fix
+  any issues introduced by the changes; do not leave them for CI to
+  catch.
 
 - Coverage is measured with `pytest-cov`. Thresholds and exclusions are
   configured in `pyproject.toml` under `[tool.coverage.*]`. Run

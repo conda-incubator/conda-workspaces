@@ -843,7 +843,7 @@ class CondaLockLoader(EnvironmentSpecBase):
                     explicit_packages=list(env.explicit_packages),
                     external_packages=dict(env.external_packages),
                 )
-            validate_urls(validation_env, FORMAT)
+            validate_urls(cast("Environment", validation_env), FORMAT)
 
             if env_name not in environments:
                 environments[env_name] = {
@@ -1076,7 +1076,7 @@ def render_lockfile(
     if failures and not envs:
         raise AllTargetsUnsolvableError(failures)
 
-    return multiplatform_export(envs)
+    return multiplatform_export(cast("Iterable[Environment]", envs))
 
 
 def generate_lockfile(
