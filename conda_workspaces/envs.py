@@ -19,13 +19,13 @@ from typing import TYPE_CHECKING, TypedDict
 from conda.base.constants import ChannelPriority, UpdateModifier
 from conda.base.context import context as conda_context
 from conda.core.envs_manager import PrefixData, unregister_env
-from conda.exceptions import UnsatisfiableError
+from conda.exceptions import PackageNotInstalledError, UnsatisfiableError
 from conda.gateways.disk.delete import rm_rf
 from conda.history import History
 from conda.models.match_spec import MatchSpec
 
 from .context import isolated_package_cache
-from .exceptions import SolveError
+from .exceptions import EnvironmentNotInstalledError, SolveError
 from .paths import (
     output_paths_collide,
     validate_directory_output,
@@ -34,6 +34,7 @@ from .paths import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from typing import Any
 
     from .context import WorkspaceContext
     from .resolver import ResolvedEnvironment
@@ -260,6 +261,7 @@ def install_environment(
     force_reinstall: bool = False,
     dry_run: bool = False,
     prune: bool = False,
+    update_names: set[str] | None = None,
 ) -> Path:
     """Create or update a project-local environment.
 
@@ -282,6 +284,11 @@ def install_environment(
     installed. Conda-libmamba requires add and remove requests to use
     separate solver instances.
 
+    When *update_names* is supplied, the prefix must already exist. Only
+    those declared and installed conda roots are passed to the solver,
+    while other installed records remain frozen unless satisfying the
+    requested update requires a dependency change.
+
     Raises ``SolveError`` if dependency resolution fails.
     """
     prefix = ctx.env_prefix(resolved.name)
@@ -300,14 +307,25 @@ def install_environment(
         if dry_run:
             solver_prefix = fresh_prefix
 
-    # Build the spec list from resolved dependencies
-    specs = [
-        MatchSpec(dep.conda_build_form())
-        for dep in resolved.conda_dependencies.values()
-    ]
-
-    # Translate PyPI deps to conda specs and merge into the same list
-    specs.extend(_build_pypi_specs(resolved))
+    if update_names is not None:
+        if force_reinstall or prune:
+            raise ValueError(
+                "Selective updates cannot be combined with reinstall or prune"
+            )
+        if not exists:
+            raise EnvironmentNotInstalledError(resolved.name)
+        missing = update_names - resolved.conda_dependencies.keys()
+        if missing:
+            names = ", ".join(sorted(missing))
+            raise ValueError(f"Cannot update undeclared conda dependencies: {names}")
+        prefix_data = PrefixData(str(prefix))
+        for name in sorted(update_names):
+            if prefix_data.get(name, None) is None:
+                raise PackageNotInstalledError(str(prefix), name)
+        specs = [resolved.conda_dependencies[name] for name in sorted(update_names)]
+    else:
+        specs = list(resolved.conda_dependencies.values())
+        specs.extend(_build_pypi_specs(resolved))
 
     # Add system requirements as virtual package constraints
     _apply_system_requirements(resolved, specs)
@@ -416,11 +434,15 @@ def install_environment(
                     _apply_activation_scripts(prefix, resolved.activation_scripts)
                 return solver_prefix
 
+            solver_kwargs: dict[str, Any] = (
+                {"command": "update"} if update_names is not None else {}
+            )
             solver = solver_backend(
                 str(solver_prefix),
                 channels,
                 subdirs,
                 specs_to_add=specs,
+                **solver_kwargs,
             )
 
             try:
@@ -454,7 +476,8 @@ def install_environment(
     _apply_activation_scripts(prefix, resolved.activation_scripts)
 
     # Install local-path PyPI deps that can't go through the solver
-    _install_path_deps(prefix, resolved)
+    if update_names is None:
+        _install_path_deps(prefix, resolved)
     return solver_prefix
 
 

@@ -369,9 +369,10 @@ to the user.
 
 ## Dependency mutation rules
 
-`conda workspace add` and `conda workspace remove` address one
-declaration location. They MUST NOT search the composed environment and
-choose the effective winning declaration.
+`conda workspace add`, `conda workspace update`, and
+`conda workspace remove` address one declaration location. They MUST
+NOT search the composed environment and choose the effective winning
+declaration.
 
 | Selectors | Conda declaration table |
 |---|---|
@@ -397,6 +398,18 @@ the selected location. An explicit spec replaces only that selected
 marker. Removing a marker removes membership from the selected table.
 Neither operation changes the shared `[workspace.dependencies]` entry.
 Target declarations change only when `--platform` selects them.
+
+A bare update MUST leave the selected declaration unchanged. An
+explicit update spec replaces only that membership declaration. Update
+does not support `--pypi`. It selects every environment and platform
+where the chosen declaration is effective, updates installed host
+prefixes with conda's frozen-installed solve, and selectively solves
+the same roots against a complete canonical lockfile baseline.
+Every required solve MUST complete before update publishes the desired
+manifest and lock. Prefix transactions start only after publication so
+the reported `conda workspace install -e NAME` commands can reconcile a
+failed multi-prefix update without creating previously uninstalled
+environments.
 
 After an add, the command reports any later declaration that still
 overrides the added value and gives the selector for that location. A

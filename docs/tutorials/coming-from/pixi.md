@@ -49,6 +49,7 @@ workspace and task definitions.
 | `pixi add --feature test pytest` | `conda workspace add --feature test pytest` |
 | `pixi add --pypi requests` | `conda workspace add --pypi requests` |
 | `pixi add --no-install foo` | `conda workspace add --no-install foo` |
+| `pixi update numpy` | `conda workspace update numpy` |
 | `pixi remove numpy` | `conda workspace remove numpy` (uninstalls by default, like pixi) |
 | `pixi run <task>` | `conda task run <task>` |
 | `pixi run CMD` | `conda workspace run -- CMD` or `conda workspace shell -- CMD` |

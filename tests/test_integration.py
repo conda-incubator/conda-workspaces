@@ -67,6 +67,7 @@ def test_workspace_install_dry_run(
         force_reinstall=False,
         dry_run=False,
         prune=False,
+        update_names=None,
     ):
         install_calls.append(
             {"env": resolved.name, "dry_run": dry_run, "force": force_reinstall}
@@ -332,6 +333,7 @@ def test_workspace_install_resolves_pypi_deps(
         force_reinstall=False,
         dry_run=False,
         prune=False,
+        update_names=None,
     ):
         resolved_envs.append(resolved)
 
@@ -405,6 +407,7 @@ def test_workspace_install_resolves_editable_deps(
         force_reinstall=False,
         dry_run=False,
         prune=False,
+        update_names=None,
     ):
         resolved_envs.append(resolved)
 

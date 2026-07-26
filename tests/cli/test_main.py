@@ -42,6 +42,7 @@ def test_generate_task_parser_returns_parser() -> None:
         "envs",
         "info",
         "add",
+        "update",
         "remove",
         "clean",
         "activate",
@@ -50,7 +51,7 @@ def test_generate_task_parser_returns_parser() -> None:
 )
 def test_workspace_subcommands_registered(subcmd: str) -> None:
     parser = generate_workspace_parser()
-    if subcmd in ("add", "remove"):
+    if subcmd in ("add", "update", "remove"):
         args = parser.parse_args([subcmd, "numpy"])
     else:
         args = parser.parse_args([subcmd])
@@ -136,6 +137,8 @@ def test_workspace_unknown_subcmd_prints_help(
         (["info"], "environment", None),
         (["add", "--pypi", "requests"], "pypi", True),
         (["add", "--feature", "dev", "numpy"], "feature", "dev"),
+        (["update", "--feature", "dev", "numpy"], "feature", "dev"),
+        (["update", "--no-install", "numpy"], "no_install", True),
         (["remove", "--pypi", "requests"], "pypi", True),
         (["clean", "-e", "test"], "environment", "test"),
         (["activate", "-e", "docs"], "environment", "docs"),
@@ -157,6 +160,8 @@ def test_workspace_unknown_subcmd_prints_help(
         "info-default",
         "add-pypi",
         "add-feature",
+        "update-feature",
+        "update-no-install",
         "remove-pypi",
         "clean-env",
         "activate-named",
@@ -171,7 +176,7 @@ def test_workspace_parser_args(
     assert getattr(parsed, expected_attr) == expected_value
 
 
-@pytest.mark.parametrize("subcmd", ["add", "remove"])
+@pytest.mark.parametrize("subcmd", ["add", "update", "remove"])
 @pytest.mark.parametrize(
     "selectors",
     [
@@ -191,7 +196,7 @@ def test_workspace_mutation_platform_parser_args(
     assert parsed.platform == "linux-64"
 
 
-@pytest.mark.parametrize("subcmd", ["add", "remove"])
+@pytest.mark.parametrize("subcmd", ["add", "update", "remove"])
 def test_workspace_mutation_locations_are_mutually_exclusive(subcmd: str) -> None:
     parser = generate_workspace_parser()
     with pytest.raises(SystemExit):
@@ -227,6 +232,7 @@ def test_workspace_parser_separates_manifest_and_export_paths() -> None:
         ("list", "conda_workspaces.cli.workspace.list", "execute_list"),
         ("info", "conda_workspaces.cli.workspace.info", "execute_info"),
         ("add", "conda_workspaces.cli.workspace.add", "execute_add"),
+        ("update", "conda_workspaces.cli.workspace.update", "execute_update"),
         ("remove", "conda_workspaces.cli.workspace.remove", "execute_remove"),
         ("clean", "conda_workspaces.cli.workspace.clean", "execute_clean"),
         ("activate", "conda_workspaces.cli.workspace.activate", "execute_activate"),
@@ -239,6 +245,7 @@ def test_workspace_parser_separates_manifest_and_export_paths() -> None:
         "list",
         "info",
         "add",
+        "update",
         "remove",
         "clean",
         "activate",
@@ -271,6 +278,7 @@ def test_workspace_dispatches_to_subcommand(
     ("subcmd", "module_attr", "func_name"),
     [
         ("add", "conda_workspaces.cli.workspace.add", "execute_add"),
+        ("update", "conda_workspaces.cli.workspace.update", "execute_update"),
         ("remove", "conda_workspaces.cli.workspace.remove", "execute_remove"),
         ("install", "conda_workspaces.cli.workspace.install", "execute_install"),
         ("lock", "conda_workspaces.cli.workspace.lock", "execute_lock"),
@@ -289,6 +297,7 @@ def test_workspace_dispatches_to_subcommand(
     ],
     ids=[
         "add",
+        "update",
         "remove",
         "install",
         "lock",

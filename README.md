@@ -107,6 +107,7 @@ and also provides `cw` and `ct` as shorter aliases.
 | `conda workspace envs` | List defined environments |
 | `conda workspace info` | Show workspace or environment details |
 | `conda workspace add SPECS...` | Add dependencies |
+| `conda workspace update SPECS...` | Update selected conda roots while preserving constraints |
 | `conda workspace remove SPECS...` | Remove dependencies |
 | `conda workspace export` | Export environments and manifests through conda exporters |
 | `conda workspace import FILE` | Import supported project manifests |

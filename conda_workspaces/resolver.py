@@ -20,6 +20,7 @@ from .exceptions import (
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
     from pathlib import Path
+    from typing import Any
 
     from conda.models.records import PackageRecord
 
@@ -177,6 +178,7 @@ class ResolvedEnvironment:
         platform: str,
         *,
         prefix: str | Path,
+        update_names: set[str] | None = None,
     ) -> list[PackageRecord]:
         """Solve this environment for *platform* and return package records.
 
@@ -186,8 +188,10 @@ class ResolvedEnvironment:
         :func:`conda_workspaces.envs.install_environment`: PyPI deps
         are translated and merged, system requirements are added as
         virtual package constraints, and channel priority is honoured.
-        The solve prunes prefix history so the manifest alone defines
-        lockfile contents.
+        The default solve prunes prefix history so the manifest alone
+        defines lockfile contents. When *update_names* is supplied, the
+        existing prefix is treated as the locked baseline and only those
+        direct roots are made eligible for an update.
 
         The solver is targeted at *platform* by (a) constructing it
         with ``subdirs=(platform, "noarch")`` and (b) overriding
@@ -214,10 +218,10 @@ class ResolvedEnvironment:
         the solver cannot satisfy the specs or no backend is
         registered.
         """
+        from conda.base.constants import UpdateModifier
         from conda.base.context import context as conda_context
         from conda.common.io import captured
         from conda.exceptions import UnsatisfiableError
-        from conda.models.match_spec import MatchSpec as CondaMatchSpec
 
         from .envs import (
             _apply_system_requirements,
@@ -226,12 +230,17 @@ class ResolvedEnvironment:
         )
         from .exceptions import SolveError
 
-        specs = [
-            CondaMatchSpec(dep.conda_build_form())
-            for dep in self.conda_dependencies.values()
-        ]
-
-        specs.extend(_build_pypi_specs(self))
+        if update_names is None:
+            specs = list(self.conda_dependencies.values())
+            specs.extend(_build_pypi_specs(self))
+        else:
+            missing = update_names - self.conda_dependencies.keys()
+            if missing:
+                names = ", ".join(sorted(missing))
+                raise ValueError(
+                    f"Cannot update undeclared conda dependencies: {names}"
+                )
+            specs = [self.conda_dependencies[name] for name in sorted(update_names)]
         _apply_system_requirements(self, specs)
 
         if not specs:
@@ -260,14 +269,25 @@ class ResolvedEnvironment:
             conda_context._override("quiet", True),
             captured(),
         ):
+            solver_kwargs: dict[str, Any] = (
+                {"command": "update"} if update_names is not None else {}
+            )
             solver = solver_backend(
                 str(prefix),
                 list(self.channels),
                 subdirs,
                 specs_to_add=specs,
+                **solver_kwargs,
             )
 
             try:
+                if update_names is not None:
+                    return list(
+                        solver.solve_final_state(
+                            update_modifier=UpdateModifier.FREEZE_INSTALLED,
+                            prune=False,
+                        )
+                    )
                 return list(solver.solve_final_state(prune=True))
             except (UnsatisfiableError, SystemExit) as exc:
                 raise SolveError(self.name, str(exc), platform=platform) from exc

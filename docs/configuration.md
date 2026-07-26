@@ -293,10 +293,11 @@ cmake = { workspace = true, build = "h*" }
 
 ### Dependency mutation locations
 
-`conda workspace add` and `conda workspace remove` address one explicitly
-selected declaration instead of searching for the composed winner. See the
-{ref}`dependency mutation rules <dependency-mutation-rules>` for the selector
-mapping, inheritance behavior, and wrong-location diagnostics.
+`conda workspace add`, `conda workspace update`, and
+`conda workspace remove` address one explicitly selected declaration
+instead of searching for the composed winner. See the
+{ref}`dependency mutation rules <dependency-mutation-rules>` for the
+selector mapping, inheritance behavior, and wrong-location diagnostics.
 
 ## Feature table
 

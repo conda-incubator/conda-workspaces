@@ -1,4 +1,4 @@
-"""Dependency declaration locations shared by workspace add and remove."""
+"""Dependency locations shared by workspace add, update, and remove."""
 
 from __future__ import annotations
 

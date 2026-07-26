@@ -19,7 +19,8 @@ if TYPE_CHECKING:
 from conda.base.constants import ChannelPriority, UpdateModifier
 from conda.base.context import context as conda_context
 from conda.core.envs_manager import PrefixData
-from conda.exceptions import UnsatisfiableError
+from conda.exceptions import PackageNotInstalledError, UnsatisfiableError
+from conda.models.records import PrefixRecord
 
 import conda_workspaces.envs as envs_mod
 from conda_workspaces.context import WorkspaceContext
@@ -36,7 +37,7 @@ from conda_workspaces.envs import (
     list_installed_environments,
     remove_environment,
 )
-from conda_workspaces.exceptions import SolveError
+from conda_workspaces.exceptions import EnvironmentNotInstalledError, SolveError
 from conda_workspaces.models import (
     Channel,
     Environment,
@@ -216,6 +217,7 @@ class FakeSolver:
     subdirs: tuple = ()
     specs_to_add: list = field(default_factory=list)
     specs_to_remove: list = field(default_factory=list)
+    constructor_kwargs: dict = field(default_factory=dict)
     txn: FakeTransaction = field(default_factory=FakeTransaction)
     solve_kwargs: dict = field(default_factory=dict)
 
@@ -242,6 +244,7 @@ def _stub_conda_imports(monkeypatch: pytest.MonkeyPatch, solver: FakeSolver) -> 
                 solver.subdirs = subdirs
                 solver.specs_to_add = list(specs_to_add)
                 solver.specs_to_remove = list(specs_to_remove)
+                solver.constructor_kwargs = kw
                 return solver
 
             return factory
@@ -485,6 +488,131 @@ def test_install_existing_env_uses_freeze(
     install_environment(workspace, resolved)
 
     assert recorded_kwargs.get("update_modifier") is UpdateModifier.FREEZE_INSTALLED
+
+
+def test_install_selective_update_uses_only_requested_constrained_roots(
+    workspace: WorkspaceContext,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_workspace_env: CreateWorkspaceEnv,
+) -> None:
+    """Selective updates leave every unrequested direct root frozen."""
+    prefix = tmp_workspace_env(workspace.root, "default")
+    PrefixData(str(prefix)).insert(
+        PrefixRecord(
+            name="python",
+            version="3.10.0",
+            build="0",
+            build_number=0,
+            channel="conda-forge",
+            subdir="linux-64",
+            fn="python-3.10.0-0.conda",
+            url=(
+                "https://conda.anaconda.org/conda-forge/linux-64/python-3.10.0-0.conda"
+            ),
+            depends=[],
+        )
+    )
+    solver = FakeSolver()
+    _stub_conda_imports(monkeypatch, solver)
+    python_spec = MatchSpec(
+        name="python",
+        version=">=3.10",
+        channel="conda-forge",
+        subdir="linux-64",
+        build="0",
+    )
+    resolved = ResolvedEnvironment(
+        name="default",
+        conda_dependencies={
+            "numpy": MatchSpec("numpy <2"),
+            "python": python_spec,
+        },
+        channels=[Channel("conda-forge")],
+    )
+
+    install_environment(workspace, resolved, update_names={"python"})
+
+    assert solver.specs_to_add == [python_spec]
+    assert solver.constructor_kwargs == {"command": "update"}
+    assert solver.solve_kwargs == {"update_modifier": UpdateModifier.FREEZE_INSTALLED}
+
+
+def test_install_normal_update_keeps_full_manifest_request(
+    workspace: WorkspaceContext,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_workspace_env: CreateWorkspaceEnv,
+) -> None:
+    """The existing non-selective install path keeps its solver contract."""
+    tmp_workspace_env(workspace.root, "default")
+    solver = FakeSolver()
+    _stub_conda_imports(monkeypatch, solver)
+    python_spec = MatchSpec(
+        name="python",
+        version=">=3.10",
+        channel="conda-forge",
+        subdir="linux-64",
+        build="0",
+    )
+    resolved = ResolvedEnvironment(
+        name="default",
+        conda_dependencies={
+            "numpy": MatchSpec("numpy <2"),
+            "python": python_spec,
+        },
+        channels=[Channel("conda-forge")],
+    )
+
+    install_environment(workspace, resolved)
+
+    assert solver.specs_to_add == list(resolved.conda_dependencies.values())
+    assert solver.constructor_kwargs == {}
+    assert solver.solve_kwargs == {"update_modifier": UpdateModifier.FREEZE_INSTALLED}
+
+
+def test_install_selective_update_requires_installed_environment(
+    workspace: WorkspaceContext,
+) -> None:
+    resolved = ResolvedEnvironment(
+        name="default",
+        conda_dependencies={"python": MatchSpec("python >=3.10")},
+    )
+
+    with pytest.raises(EnvironmentNotInstalledError, match="default"):
+        install_environment(workspace, resolved, update_names={"python"})
+
+
+@pytest.mark.parametrize(
+    ("update_names", "error", "match"),
+    [
+        pytest.param(
+            {"numpy"},
+            ValueError,
+            "undeclared conda dependencies: numpy",
+            id="undeclared-root",
+        ),
+        pytest.param(
+            {"python"},
+            PackageNotInstalledError,
+            "python",
+            id="uninstalled-root",
+        ),
+    ],
+)
+def test_install_selective_update_rejects_missing_roots(
+    workspace: WorkspaceContext,
+    tmp_workspace_env: CreateWorkspaceEnv,
+    update_names: set[str],
+    error: type[Exception],
+    match: str,
+) -> None:
+    tmp_workspace_env(workspace.root, "default")
+    resolved = ResolvedEnvironment(
+        name="default",
+        conda_dependencies={"python": MatchSpec("python >=3.10")},
+    )
+
+    with pytest.raises(error, match=match):
+        install_environment(workspace, resolved, update_names=update_names)
 
 
 @pytest.mark.parametrize(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -14,10 +15,12 @@ if TYPE_CHECKING:
 
     from tests.conftest import SnapshotTree
 
+from conda.base.constants import UpdateModifier
 from conda.base.context import context as conda_context
 from conda.common.serialize.yaml import dump as yaml_dump
 from conda.core.prefix_data import PrefixData
 from conda.history import History
+from conda.models.environment import EnvironmentConfig
 from conda.models.match_spec import MatchSpec
 from conda.models.records import PrefixRecord
 from conda_lockfiles.load_yaml import load_yaml
@@ -36,11 +39,15 @@ from conda_workspaces.lockfile import (
     LOCKFILE_NAME,
     LOCKFILE_VERSION,
     CondaLockLoader,
+    _SolvedEnvironment,
     check_lockfile_satisfiability,
     generate_lockfile,
     install_from_lockfile,
+    load_lockfile_data,
     lockfile_path,
     merge_lockfiles,
+    render_lockfile,
+    write_lockfile,
 )
 from conda_workspaces.models import (
     Channel,
@@ -83,6 +90,61 @@ def lockfile_with_platforms(tmp_path: Path, lockfile_content: str) -> Path:
     path = tmp_path / LOCKFILE_NAME
     path.write_text(lockfile_content, encoding="utf-8")
     return path
+
+
+@pytest.fixture
+def selective_lock_data() -> dict:
+    """Canonical lock data with shared, untouched, and unreferenced records."""
+    channel = "https://conda.anaconda.org/conda-forge"
+    python_linux = f"{channel}/linux-64/python-3.10.0-h1_0.conda"
+    python_osx = f"{channel}/osx-arm64/python-3.10.0-h2_0.conda"
+    pytest_linux = f"{channel}/linux-64/pytest-8.0.0-py_0.conda"
+    certifi = f"{channel}/noarch/certifi-2026.1-pyhd_0.conda"
+    orphan = f"{channel}/noarch/orphan-1.0-0.conda"
+    pypi = "https://files.pythonhosted.org/packages/requests-2.0.whl"
+    return {
+        "version": 1,
+        "environments": {
+            "default": {
+                "channels": [{"url": channel}],
+                "packages": {
+                    "linux-64": [
+                        {"conda": python_linux},
+                        {"conda": certifi},
+                        {"pypi": pypi},
+                    ],
+                    "osx-arm64": [
+                        {"conda": python_osx},
+                        {"conda": certifi},
+                    ],
+                },
+            },
+            "test": {
+                "channels": [{"url": channel}],
+                "packages": {
+                    "linux-64": [
+                        {"conda": pytest_linux},
+                        {"conda": certifi},
+                    ]
+                },
+            },
+        },
+        "packages": [
+            {
+                "conda": python_linux,
+                "sha256": "a" * 64,
+                "depends": ["openssl >=3"],
+                "constrains": ["python_abi 3.10.* *_cp310"],
+                "license": "PSF-2.0",
+                "size": 10,
+            },
+            {"conda": python_osx, "sha256": "b" * 64},
+            {"conda": pytest_linux, "sha256": "c" * 64},
+            {"conda": certifi, "md5": "d" * 32},
+            {"conda": orphan, "sha256": "e" * 64},
+            {"pypi": pypi},
+        ],
+    }
 
 
 @pytest.fixture
@@ -311,6 +373,162 @@ class _FakePkg:
         return default
 
 
+def test_conda_lock_loader_reconstructs_package_records_from_metadata(
+    selective_lock_data: dict,
+) -> None:
+    records = CondaLockLoader.package_records_for_env_data(
+        selective_lock_data,
+        "default",
+        "linux-64",
+    )
+
+    assert [record.name for record in records] == ["python", "certifi"]
+    python, certifi = records
+    assert (
+        python.version,
+        python.build,
+        python.build_number,
+        python.channel.canonical_name,
+        python.subdir,
+        python.depends,
+        python.constrains,
+        python.sha256,
+    ) == (
+        "3.10.0",
+        "h1_0",
+        0,
+        "conda-forge",
+        "linux-64",
+        ("openssl >=3",),
+        ("python_abi 3.10.* *_cp310",),
+        "a" * 64,
+    )
+    assert certifi.subdir == "noarch"
+    assert certifi.md5 == "d" * 32
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        pytest.param(
+            lambda data: data["environments"].pop("default"),
+            "Environment 'default' is missing",
+            id="missing-environment",
+        ),
+        pytest.param(
+            lambda data: data["environments"]["default"]["packages"].pop("linux-64"),
+            "does not include platform 'linux-64'",
+            id="missing-platform",
+        ),
+        pytest.param(
+            lambda data: data["packages"].pop(0),
+            "has no top-level record",
+            id="missing-package-record",
+        ),
+    ],
+)
+def test_conda_lock_loader_reconstruct_package_record_errors(
+    selective_lock_data: dict,
+    mutation,
+    match: str,
+) -> None:
+    mutation(selective_lock_data)
+
+    with pytest.raises(ValueError, match=match):
+        CondaLockLoader.package_records_for_env_data(
+            selective_lock_data,
+            "default",
+            "linux-64",
+        )
+
+
+def test_conda_lock_loader_seeds_prefix_metadata_and_requested_history(
+    tmp_path: Path,
+    selective_lock_data: dict,
+) -> None:
+    prefix = tmp_path / "metadata-prefix"
+
+    records = CondaLockLoader.seed_prefix_from_data(
+        selective_lock_data,
+        "default",
+        "linux-64",
+        prefix,
+        [MatchSpec("python >=3.10")],
+    )
+
+    assert [record.name for record in records] == ["python", "certifi"]
+    prefix_data = PrefixData(str(prefix))
+    assert prefix_data.get("python").version == "3.10.0"
+    assert prefix_data.get("certifi").subdir == "noarch"
+    requested = History(str(prefix)).get_requested_specs_map()
+    assert set(requested) == {"python"}
+    assert str(requested["python"].version) == ">=3.10"
+
+
+def test_conda_lock_loader_preserves_rich_requested_history(
+    tmp_path: Path,
+    selective_lock_data: dict,
+) -> None:
+    prefix = tmp_path / "metadata-prefix"
+    spec = MatchSpec(
+        name="python",
+        channel="conda-forge",
+        subdir="linux-64",
+        version="3.10.0",
+        build="h1_0",
+        sha256="a" * 64,
+    )
+
+    CondaLockLoader.seed_prefix_from_data(
+        selective_lock_data,
+        "default",
+        "linux-64",
+        prefix,
+        [spec],
+    )
+
+    assert History(str(prefix)).get_requested_specs_map()["python"] == spec
+
+
+def test_conda_lock_loader_replace_solutions_preserves_and_canonicalizes(
+    selective_lock_data: dict,
+) -> None:
+    channel = "https://conda.anaconda.org/conda-forge"
+    python_new = f"{channel}/linux-64/python-3.12.0-h3_0.conda"
+    certifi = f"{channel}/noarch/certifi-2026.1-pyhd_0.conda"
+    baseline = deepcopy(selective_lock_data)
+    updated = _SolvedEnvironment(
+        name="default",
+        platform="linux-64",
+        package_platform="linux-64",
+        config=EnvironmentConfig(channels=(channel,)),
+        explicit_packages=[
+            _FakePkg("python", python_new),
+            _FakePkg("certifi", certifi),
+        ],
+    )
+
+    result = CondaLockLoader.replace_solutions(selective_lock_data, [updated])
+
+    assert selective_lock_data == baseline
+    assert result["environments"]["default"]["packages"]["linux-64"] == [
+        {"conda": certifi},
+        {"conda": python_new},
+    ]
+    assert (
+        result["environments"]["default"]["packages"]["osx-arm64"]
+        == baseline["environments"]["default"]["packages"]["osx-arm64"]
+    )
+    assert result["environments"]["test"] == baseline["environments"]["test"]
+    referenced_urls = [
+        record.get("conda") or record.get("pypi") for record in result["packages"]
+    ]
+    assert referenced_urls.count(certifi) == 1
+    assert python_new in referenced_urls
+    assert f"{channel}/linux-64/python-3.10.0-h1_0.conda" not in referenced_urls
+    assert f"{channel}/noarch/orphan-1.0-0.conda" not in referenced_urls
+
+
 @pytest.fixture
 def fake_solver_factory(monkeypatch: pytest.MonkeyPatch):
     """Replace ``ResolvedEnvironment.solve_for_platform`` with a deterministic stub.
@@ -365,6 +583,105 @@ def resolved_envs_factory():
         }
 
     return _factory
+
+
+def test_render_lockfile_selective_update_only_replaces_target(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    selective_lock_data: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channel = "https://conda.anaconda.org/conda-forge"
+    python_new = f"{channel}/linux-64/python-3.12.0-h3_0.conda"
+    certifi = f"{channel}/noarch/certifi-2026.1-pyhd_0.conda"
+    ctx = workspace_ctx_factory(platform="linux-64", env_names=["default", "test"])
+    resolved_envs = {
+        "default": ResolvedEnvironment(
+            name="default",
+            channels=[Channel(channel)],
+            platforms=["linux-64", "osx-arm64"],
+            conda_dependencies={"python": MatchSpec("python >=3.10")},
+            pypi_dependencies={
+                "certifi": PyPIDependency(name="certifi", spec=">=2026")
+            },
+        ),
+        "test": ResolvedEnvironment(
+            name="test",
+            channels=[Channel(channel)],
+            platforms=["linux-64"],
+            conda_dependencies={"pytest": MatchSpec("pytest >=8")},
+        ),
+    }
+    baseline = deepcopy(selective_lock_data)
+    calls: list[tuple[str, str, Path, set[str], str, set[str]]] = []
+    monkeypatch.setattr(
+        "conda_workspaces.envs._build_pypi_specs",
+        lambda resolved: [MatchSpec("certifi >=2026")],
+    )
+
+    def fake_solve(self, platform, *, prefix, update_names=None):
+        prefix = Path(prefix)
+        requested = History(str(prefix)).get_requested_specs_map()
+        installed = PrefixData(str(prefix))
+        calls.append(
+            (
+                self.name,
+                platform,
+                prefix,
+                set(update_names or ()),
+                installed.get("python").version,
+                set(requested),
+            )
+        )
+        return [
+            _FakePkg("certifi", certifi),
+            _FakePkg("python", python_new),
+        ]
+
+    monkeypatch.setattr(ResolvedEnvironment, "solve_for_platform", fake_solve)
+    progress: list[tuple[str, str]] = []
+
+    content = render_lockfile(
+        ctx,
+        resolved_envs,
+        baseline_data=selective_lock_data,
+        update_targets={("default", "linux-64"): {"python"}},
+        progress=lambda name, platform: progress.append((name, platform)),
+    )
+
+    assert selective_lock_data == baseline
+    assert progress == [("default", "linux-64")]
+    assert len(calls) == 1
+    name, platform, solve_prefix, update_names, version, requested = calls[0]
+    assert (name, platform, update_names, version, requested) == (
+        "default",
+        "linux-64",
+        {"python"},
+        "3.10.0",
+        {"certifi", "python"},
+    )
+    assert not solve_prefix.exists()
+
+    result = load_lockfile_data(content)
+    assert result["environments"]["default"]["packages"]["linux-64"] == [
+        {"conda": certifi},
+        {"conda": python_new},
+    ]
+    assert (
+        result["environments"]["default"]["packages"]["osx-arm64"]
+        == baseline["environments"]["default"]["packages"]["osx-arm64"]
+    )
+    assert result["environments"]["test"] == baseline["environments"]["test"]
+
+
+def test_write_lockfile_writes_rendered_content(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+) -> None:
+    ctx = workspace_ctx_factory()
+
+    result = write_lockfile(ctx, "version: 1\n")
+
+    assert result == lockfile_path(ctx)
+    assert result.read_text(encoding="utf-8") == "version: 1\n"
 
 
 @pytest.mark.parametrize(
@@ -1463,6 +1780,81 @@ def test_solve_for_platform_virtual_package_env(
     assert os.environ.get("CONDA_OVERRIDE_GLIBC") is None
 
 
+def test_solve_for_platform_selective_update_uses_constrained_root(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+) -> None:
+    ctx = workspace_ctx_factory()
+    python_spec = MatchSpec(
+        name="python",
+        version=">=3.10",
+        channel="conda-forge",
+        subdir="linux-64",
+        build="py_0",
+        sha256="a" * 64,
+    )
+    resolved = ResolvedEnvironment(
+        name="default",
+        channels=[Channel("conda-forge")],
+        conda_dependencies={
+            "numpy": MatchSpec("numpy <2"),
+            "python": python_spec,
+        },
+        pypi_dependencies={"requests": PyPIDependency(name="requests", spec=">=2")},
+    )
+    observed: dict[str, object] = {}
+
+    class FakeSolver:
+        def __init__(self, prefix, channels, subdirs, specs_to_add=(), **kwargs):
+            observed["prefix"] = prefix
+            observed["channels"] = channels
+            observed["subdirs"] = subdirs
+            observed["specs"] = list(specs_to_add)
+            observed["constructor_kwargs"] = kwargs
+
+        def solve_final_state(self, **kwargs):
+            observed["solve_kwargs"] = kwargs
+            return []
+
+    monkeypatch.setattr(
+        conda_context.plugin_manager,
+        "get_cached_solver_backend",
+        lambda: FakeSolver,
+    )
+
+    resolved.solve_for_platform(
+        "linux-64",
+        prefix=ctx.env_prefix("default"),
+        update_names={"python"},
+    )
+
+    specs = observed["specs"]
+    assert isinstance(specs, list)
+    assert specs == [python_spec]
+    assert observed["constructor_kwargs"] == {"command": "update"}
+    assert observed["solve_kwargs"] == {
+        "update_modifier": UpdateModifier.FREEZE_INSTALLED,
+        "prune": False,
+    }
+
+
+def test_solve_for_platform_selective_update_rejects_undeclared_root(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+) -> None:
+    ctx = workspace_ctx_factory()
+    resolved = ResolvedEnvironment(
+        name="default",
+        conda_dependencies={"python": MatchSpec("python >=3.10")},
+    )
+
+    with pytest.raises(ValueError, match="undeclared conda dependencies: numpy"):
+        resolved.solve_for_platform(
+            "linux-64",
+            prefix=ctx.env_prefix("default"),
+            update_names={"numpy"},
+        )
+
+
 @pytest.fixture
 def write_fragment() -> Callable[[WorkspaceContext, dict, str], Path]:
     """Factory that solves one platform into a ``conda.lock.<platform>`` fragment.
@@ -2168,6 +2560,124 @@ def test_satisfiability(
     else:
         assert result.status == LockfileStatus.OUT_OF_DATE
         assert reason_fragment in result.reason.lower()
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        MatchSpec(name="python", build="wrong_0"),
+        MatchSpec(name="python", build_number=1),
+        MatchSpec(name="python", channel="defaults"),
+        MatchSpec(name="python", subdir="win-64"),
+        MatchSpec(name="python", md5="b" * 32),
+        MatchSpec(name="python", sha256="b" * 64),
+    ],
+    ids=["build", "build-number", "channel", "subdir", "md5", "sha256"],
+)
+def test_satisfiability_rejects_full_match_spec_mismatch(
+    satisfiability_config_factory,
+    lockfile_data_factory,
+    spec: MatchSpec,
+) -> None:
+    config = satisfiability_config_factory(
+        platforms=["linux-64"],
+        deps={"python": spec},
+    )
+
+    result = check_lockfile_satisfiability(
+        config,
+        lockfile_data_factory(),
+        "linux-64",
+    )
+
+    assert result.status == LockfileStatus.OUT_OF_DATE
+    assert "does not satisfy" in result.reason
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["missing", "version", "constraint"],
+    ids=["missing-dependency", "dependency-version", "constraint-version"],
+)
+def test_satisfiability_rejects_dependency_closure_mismatch(
+    satisfiability_config_factory,
+    lockfile_data_factory,
+    mode: str,
+) -> None:
+    config = satisfiability_config_factory(platforms=["linux-64"])
+    data = lockfile_data_factory()
+    python_record = data["packages"][0]
+    relation = "depends" if mode != "constraint" else "constrains"
+    python_record[relation] = ["numpy >=2"]
+    if mode != "missing":
+        numpy_url = (
+            "https://conda.anaconda.org/conda-forge/linux-64/numpy-1.0.0-py_0.conda"
+        )
+        data["environments"]["default"]["packages"]["linux-64"].append(
+            {"conda": numpy_url}
+        )
+        data["packages"].append({"conda": numpy_url, "sha256": "c" * 64})
+
+    result = check_lockfile_satisfiability(config, data, "linux-64")
+
+    assert result.status == LockfileStatus.OUT_OF_DATE
+    assert "numpy" in result.reason
+
+
+def test_satisfiability_accepts_virtual_package_dependency(
+    satisfiability_config_factory,
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = satisfiability_config_factory(platforms=["linux-64"])
+    data = lockfile_data_factory()
+    data["packages"][0]["depends"] = ["__glibc >=2.17"]
+    virtual = PrefixRecord(
+        name="__glibc",
+        version="2.28",
+        build="0",
+        build_number=0,
+        channel="@",
+        subdir="linux-64",
+        fn="__glibc",
+    )
+    monkeypatch.setattr(
+        conda_context.plugin_manager,
+        "get_virtual_package_records",
+        lambda: (virtual,),
+    )
+
+    result = check_lockfile_satisfiability(config, data, "linux-64")
+
+    assert result.status == LockfileStatus.UP_TO_DATE
+
+
+def test_satisfiability_validates_translated_pypi_roots(
+    satisfiability_config_factory,
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = satisfiability_config_factory(platforms=["linux-64"])
+    config.features["default"].pypi_dependencies = {
+        "requests": PyPIDependency(name="requests", spec=">=3")
+    }
+    data = lockfile_data_factory()
+    requests_url = (
+        "https://conda.anaconda.org/conda-forge/noarch/requests-2.0.0-py_0.conda"
+    )
+    data["environments"]["default"]["packages"]["linux-64"].append(
+        {"conda": requests_url}
+    )
+    data["packages"].append({"conda": requests_url, "sha256": "c" * 64})
+    monkeypatch.setattr(
+        "conda_workspaces.envs._build_pypi_specs",
+        lambda resolved: [MatchSpec("requests >=3")],
+    )
+
+    result = check_lockfile_satisfiability(config, data, "linux-64")
+
+    assert result.status == LockfileStatus.OUT_OF_DATE
+    assert "requests" in result.reason
 
 
 def test_satisfiability_uses_resolved_environment_platforms() -> None:
