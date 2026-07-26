@@ -374,7 +374,13 @@ def check_lockfile_satisfiability(
                 )
 
         for record, spec in dependencies:
-            if not any(spec.match(candidate) for candidate in candidates):
+            dep_name = spec.get_exact_value("name")
+            if dep_name is None:
+                satisfied = any(spec.match(candidate) for candidate in candidates)
+            else:
+                candidate = candidates_by_name.get(dep_name)
+                satisfied = candidate is not None and spec.match(candidate)
+            if not satisfied:
                 return LockfileStatus(
                     status=_stale,
                     reason=(

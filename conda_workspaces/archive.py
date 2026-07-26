@@ -1475,6 +1475,7 @@ def validate_tar_members(
 ) -> None:
     """Validate the paths and extraction topology of all archive *members*."""
     seen: dict[tuple[str, ...], tuple[PurePosixPath, tarfile.TarInfo]] = {}
+    descendants: dict[tuple[str, ...], PurePosixPath] = {}
     materialized_files: set[PurePosixPath] = set()
 
     for member in members:
@@ -1493,15 +1494,7 @@ def validate_tar_members(
                 )
 
         if not member.isdir():
-            descendant = next(
-                (
-                    path
-                    for key, (path, _) in seen.items()
-                    if key[: len(path_parts)] == path_parts
-                    and len(key) > len(path_parts)
-                ),
-                None,
-            )
+            descendant = descendants.get(path_parts)
             if descendant is not None:
                 raise ArchiveError(
                     f"Archive member '{member.name}' conflicts with"
@@ -1517,6 +1510,8 @@ def validate_tar_members(
                 )
 
         seen[path_parts] = (member_path, member)
+        for size in range(1, len(path_parts)):
+            descendants.setdefault(path_parts[:size], member_path)
         if member.isreg() or member.islnk():
             materialized_files.add(member_path)
 

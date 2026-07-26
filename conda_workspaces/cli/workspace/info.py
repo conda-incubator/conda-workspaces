@@ -21,7 +21,6 @@ from ...resolver import known_platforms, resolve_all_environments, resolve_envir
 from . import workspace_context_from_args
 from .dependencies import (
     DependencyLocation,
-    effective_dependency_location,
     workspace_toml_source,
 )
 from .list import package_table
@@ -30,7 +29,7 @@ if TYPE_CHECKING:
     import argparse
 
     from ...context import WorkspaceContext
-    from ...models import Environment, WorkspaceConfig
+    from ...models import WorkspaceConfig
 
 
 def execute_info(args: argparse.Namespace, *, console: Console | None = None) -> int:
@@ -100,7 +99,7 @@ def _show_workspace_info(
             ctx,
             include_packages=include_packages,
         )
-        console.print_json(json.dumps(info))
+        print(json.dumps(info), file=console.file)
     else:
         table = Table(show_header=False, show_edge=False, pad_edge=False)
         table.add_column("Key", style="bold")
@@ -177,7 +176,7 @@ def _show_env_info(
         info["packages_installed"] = install_info.get("packages", 0)
 
     if json_output:
-        console.print_json(json.dumps(info))
+        print(json.dumps(info), file=console.file)
     else:
         table = Table(show_header=False, show_edge=False, pad_edge=False)
         table.add_column("Key", style="bold")
@@ -232,6 +231,22 @@ def _environment_details(
         resolutions = []
         for platform in base.target_platforms(fallback=ctx.platform):
             resolved = resolve_environment(config, env_name, platform)
+            locations: dict[str, dict[str, DependencyLocation]] = {
+                "dependencies": {},
+                "pypi-dependencies": {},
+            }
+            for location in DependencyLocation.precedence(
+                config,
+                environment,
+                platform,
+            ):
+                table = location.find_table(source)
+                if table is None:
+                    continue
+                for dependency_key, winners in locations.items():
+                    winners.update(
+                        dict.fromkeys(table.get(dependency_key, {}), location)
+                    )
             resolutions.append(
                 {
                     "platform": platform,
@@ -241,11 +256,10 @@ def _environment_details(
                             source,
                             namespace,
                             config,
-                            environment,
-                            platform,
                             "dependencies",
                             name,
                             dep.conda_build_form(),
+                            locations["dependencies"].get(name),
                         )
                         for name, dep in resolved.conda_dependencies.items()
                     },
@@ -254,11 +268,10 @@ def _environment_details(
                             source,
                             namespace,
                             config,
-                            environment,
-                            platform,
                             "pypi-dependencies",
                             name,
                             dep.to_toml(),
+                            locations["pypi-dependencies"].get(name),
                         )
                         for name, dep in resolved.pypi_dependencies.items()
                     },
@@ -289,21 +302,12 @@ def _dependency_detail(
     source: tomlkit.TOMLDocument | TomlTable | InlineTable,
     namespace: tuple[str, ...],
     config: WorkspaceConfig,
-    environment: Environment,
-    platform: str,
     dependency_key: str,
     name: str,
     spec: object,
+    location: DependencyLocation | None,
 ) -> dict[str, object]:
     """Return one resolved dependency and its winning manifest declaration."""
-    location = effective_dependency_location(
-        source,
-        config,
-        environment,
-        platform,
-        dependency_key,
-        name,
-    )
     if location is None:
         raise WorkspaceParseError(
             config.manifest_path,

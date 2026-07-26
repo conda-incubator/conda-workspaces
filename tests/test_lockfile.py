@@ -2652,6 +2652,22 @@ def test_satisfiability_accepts_virtual_package_dependency(
     assert result.status == LockfileStatus.UP_TO_DATE
 
 
+def test_satisfiability_accepts_wildcard_dependency_name(
+    satisfiability_config_factory,
+    lockfile_data_factory,
+) -> None:
+    config = satisfiability_config_factory(platforms=["linux-64"])
+    data = lockfile_data_factory()
+    data["packages"][0]["depends"] = ["num* >=1"]
+    numpy_url = "https://conda.anaconda.org/conda-forge/linux-64/numpy-1.0.0-py_0.conda"
+    data["environments"]["default"]["packages"]["linux-64"].append({"conda": numpy_url})
+    data["packages"].append({"conda": numpy_url, "sha256": "c" * 64})
+
+    result = check_lockfile_satisfiability(config, data, "linux-64")
+
+    assert result.status == LockfileStatus.UP_TO_DATE
+
+
 def test_satisfiability_validates_translated_pypi_roots(
     satisfiability_config_factory,
     lockfile_data_factory,
