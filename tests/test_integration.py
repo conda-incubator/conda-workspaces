@@ -60,7 +60,14 @@ def test_workspace_install_dry_run(
 
     install_calls = []
 
-    def fake_install(ctx, resolved, *, force_reinstall=False, dry_run=False):
+    def fake_install(
+        ctx,
+        resolved,
+        *,
+        force_reinstall=False,
+        dry_run=False,
+        prune=False,
+    ):
         install_calls.append(
             {"env": resolved.name, "dry_run": dry_run, "force": force_reinstall}
         )
@@ -250,7 +257,7 @@ def test_rich_output_contains_status(
 
         monkeypatch.setattr(
             "conda_workspaces.cli.workspace.sync.install_environment",
-            lambda ctx, resolved, *, force_reinstall=False, dry_run=False: None,
+            lambda *args, **kwargs: None,
         )
         monkeypatch.setattr(
             "conda_workspaces.cli.workspace.sync.generate_lockfile",
@@ -318,7 +325,14 @@ def test_workspace_install_resolves_pypi_deps(
 
     resolved_envs = []
 
-    def capture_install(ctx, resolved, *, force_reinstall=False, dry_run=False):
+    def capture_install(
+        ctx,
+        resolved,
+        *,
+        force_reinstall=False,
+        dry_run=False,
+        prune=False,
+    ):
         resolved_envs.append(resolved)
 
     monkeypatch.setattr(
@@ -384,7 +398,14 @@ def test_workspace_install_resolves_editable_deps(
 
     resolved_envs = []
 
-    def capture_install(ctx, resolved, *, force_reinstall=False, dry_run=False):
+    def capture_install(
+        ctx,
+        resolved,
+        *,
+        force_reinstall=False,
+        dry_run=False,
+        prune=False,
+    ):
         resolved_envs.append(resolved)
 
     monkeypatch.setattr(

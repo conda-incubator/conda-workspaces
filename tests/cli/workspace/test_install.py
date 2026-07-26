@@ -56,7 +56,14 @@ def test_install_envs(
 
     calls: list[str] = []
 
-    def fake_install(ctx, resolved, *, force_reinstall=False, dry_run=False):
+    def fake_install(
+        ctx,
+        resolved,
+        *,
+        force_reinstall=False,
+        dry_run=False,
+        prune=False,
+    ):
         calls.append(resolved.name)
 
     monkeypatch.setattr(
@@ -99,7 +106,14 @@ def test_install_flags_forwarded(
 
     recorded: list[tuple[bool, bool]] = []
 
-    def fake_install(ctx, resolved, *, force_reinstall=False, dry_run=False):
+    def fake_install(
+        ctx,
+        resolved,
+        *,
+        force_reinstall=False,
+        dry_run=False,
+        prune=False,
+    ):
         recorded.append((force_reinstall, dry_run))
 
     monkeypatch.setattr(

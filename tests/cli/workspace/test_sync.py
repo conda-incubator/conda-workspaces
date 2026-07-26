@@ -287,10 +287,11 @@ def test_force_dry_run_reuses_preview_prefix_for_lock_solve(
         ["test"],
         force_reinstall=True,
         dry_run=True,
+        prune=True,
         console=captured_console,
     )
 
-    assert install_calls == [{"force_reinstall": True, "dry_run": True}]
+    assert install_calls == [{"force_reinstall": True, "dry_run": True, "prune": True}]
     resolved_envs, lock_kwargs = lock_calls[0]
     assert set(resolved_envs) == {"default", "test"}
     assert lock_kwargs["solve_prefixes"] == {"test": preview_prefix}
@@ -312,7 +313,14 @@ def test_sync_activate_d_hint_respects_conda_spawn(
     """A new activate.d script only prints the re-spawn hint inside a spawned shell."""
     activate_d = tmp_path / "etc" / "conda" / "activate.d"
 
-    def fake_install(ctx, resolved, *, force_reinstall=False, dry_run=False):
+    def fake_install(
+        ctx,
+        resolved,
+        *,
+        force_reinstall=False,
+        dry_run=False,
+        prune=False,
+    ):
         activate_d.mkdir(parents=True, exist_ok=True)
         (activate_d / "pkg-activate.sh").write_text("# hook")
 

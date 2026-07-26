@@ -215,6 +215,7 @@ class FakeSolver:
     channels: list = field(default_factory=list)
     subdirs: tuple = ()
     specs_to_add: list = field(default_factory=list)
+    specs_to_remove: list = field(default_factory=list)
     txn: FakeTransaction = field(default_factory=FakeTransaction)
     solve_kwargs: dict = field(default_factory=dict)
 
@@ -228,11 +229,19 @@ def _stub_conda_imports(monkeypatch: pytest.MonkeyPatch, solver: FakeSolver) -> 
 
     class FakePluginManager:
         def get_cached_solver_backend(self):
-            def factory(prefix, channels, subdirs, specs_to_add=(), **kw):
+            def factory(
+                prefix,
+                channels,
+                subdirs,
+                specs_to_add=(),
+                specs_to_remove=(),
+                **kw,
+            ):
                 solver.prefix = prefix
                 solver.channels = channels
                 solver.subdirs = subdirs
                 solver.specs_to_add = list(specs_to_add)
+                solver.specs_to_remove = list(specs_to_remove)
                 return solver
 
             return factory
@@ -476,6 +485,99 @@ def test_install_existing_env_uses_freeze(
     install_environment(workspace, resolved)
 
     assert recorded_kwargs.get("update_modifier") is UpdateModifier.FREEZE_INSTALLED
+
+
+@pytest.mark.parametrize(
+    ("has_remaining_spec", "expected_removed"),
+    [
+        (True, {"boltons"}),
+        (False, {"boltons", "python"}),
+    ],
+    ids=["remaining-spec", "empty-environment"],
+)
+@pytest.mark.parametrize("dry_run", [False, True], ids=["install", "dry-run"])
+def test_install_prune_reconciles_requested_specs(
+    workspace: WorkspaceContext,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_workspace_env: CreateWorkspaceEnv,
+    has_remaining_spec: bool,
+    expected_removed: set[str],
+    dry_run: bool,
+) -> None:
+    """Pruning removes stale requests before installing the remaining specs."""
+    tmp_workspace_env(workspace.root, "default")
+    solver_calls: list[FakeSolver] = []
+
+    class FakePluginManager:
+        def get_cached_solver_backend(self):
+            def factory(
+                prefix,
+                channels,
+                subdirs,
+                specs_to_add=(),
+                specs_to_remove=(),
+                **kw,
+            ):
+                solver = FakeSolver(
+                    prefix=prefix,
+                    channels=list(channels),
+                    subdirs=tuple(subdirs),
+                    specs_to_add=list(specs_to_add),
+                    specs_to_remove=list(specs_to_remove),
+                )
+                solver_calls.append(solver)
+                return solver
+
+            return factory
+
+    class FakeContext:
+        plugin_manager = FakePluginManager()
+        subdirs = ("linux-64", "noarch")
+
+    monkeypatch.setattr(
+        envs_mod.History,
+        "get_requested_specs_map",
+        lambda self: {
+            "python": MatchSpec("python >=3.10"),
+            "boltons": MatchSpec("boltons"),
+        },
+    )
+    monkeypatch.setattr(envs_mod, "conda_context", FakeContext())
+
+    dependencies = {"python": MatchSpec("python >=3.10")} if has_remaining_spec else {}
+    resolved = ResolvedEnvironment(
+        name="default",
+        conda_dependencies=dependencies,
+        channels=[Channel("conda-forge")],
+    )
+    install_environment(workspace, resolved, dry_run=dry_run, prune=True)
+
+    expected_call_count = 2 if has_remaining_spec and not dry_run else 1
+    assert len(solver_calls) == expected_call_count
+    if dry_run and has_remaining_spec:
+        assert {spec.name for spec in solver_calls[0].specs_to_add} == {"python"}
+        assert solver_calls[0].specs_to_remove == []
+        assert solver_calls[0].solve_kwargs == {
+            "update_modifier": UpdateModifier.UPDATE_SPECS,
+            "prune": True,
+        }
+    else:
+        assert {
+            spec.name for spec in solver_calls[0].specs_to_remove
+        } == expected_removed
+        assert solver_calls[0].specs_to_add == []
+        assert solver_calls[0].solve_kwargs == {
+            "update_modifier": UpdateModifier.UPDATE_SPECS
+        }
+    if has_remaining_spec and not dry_run:
+        assert {spec.name for spec in solver_calls[1].specs_to_add} == {"python"}
+        assert solver_calls[1].specs_to_remove == []
+        assert solver_calls[1].solve_kwargs == {
+            "update_modifier": UpdateModifier.FREEZE_INSTALLED
+        }
+
+    assert all(solver.txn.summary_printed is dry_run for solver in solver_calls)
+    assert all(solver.txn.executed is not dry_run for solver in solver_calls)
 
 
 def test_install_solve_error(

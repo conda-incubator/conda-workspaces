@@ -186,6 +186,8 @@ class ResolvedEnvironment:
         :func:`conda_workspaces.envs.install_environment`: PyPI deps
         are translated and merged, system requirements are added as
         virtual package constraints, and channel priority is honoured.
+        The solve prunes prefix history so the manifest alone defines
+        lockfile contents.
 
         The solver is targeted at *platform* by (a) constructing it
         with ``subdirs=(platform, "noarch")`` and (b) overriding
@@ -266,7 +268,7 @@ class ResolvedEnvironment:
             )
 
             try:
-                return list(solver.solve_final_state())
+                return list(solver.solve_final_state(prune=True))
             except (UnsatisfiableError, SystemExit) as exc:
                 raise SolveError(self.name, str(exc), platform=platform) from exc
 

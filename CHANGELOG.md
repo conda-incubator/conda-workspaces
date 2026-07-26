@@ -38,6 +38,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- `conda workspace remove` now clears direct requested specs that are
+  absent from the resolved manifest before installing the remaining
+  dependency closure. Packages still required transitively remain
+  installed without remaining direct requests. Lock generation now
+  ignores stale prefix history, including with `remove --no-install`.
+  Installing from `conda.lock` now removes conda packages absent from
+  the lock and records only manifest roots as direct requests. Declare
+  packages in the workspace instead of installing unmanaged additions
+  directly into its prefixes.
+  Workspaces affected by 0.7.x can run
+  `conda workspace install --force-reinstall` once to rebuild existing
+  prefixes and `conda.lock` from the manifest. (#117)
 - `conda workspace add` and `remove` now mutate one explicit dependency
   declaration location. With no selector, commands address the default
   feature. `--feature default` is accepted as an explicit equivalent.

@@ -251,6 +251,7 @@ def install_environment(
     *,
     force_reinstall: bool = False,
     dry_run: bool = False,
+    prune: bool = False,
 ) -> Path:
     """Create or update a project-local environment.
 
@@ -267,6 +268,11 @@ def install_environment(
     When *dry_run* is true, solving and transaction rendering still run,
     but the prefix and its activation metadata remain unchanged. The
     returned path is the prefix used for solving.
+
+    When *prune* is true, requested specs absent from *resolved* are
+    removed in a separate transaction before the remaining specs are
+    installed. Conda-libmamba requires add and remove requests to use
+    separate solver instances.
 
     Raises ``SolveError`` if dependency resolution fails.
     """
@@ -298,6 +304,15 @@ def install_environment(
     # Add system requirements as virtual package constraints
     _apply_system_requirements(resolved, specs)
 
+    specs_to_remove: list[MatchSpec] = []
+    if prune and exists and not force_reinstall:
+        desired_names = {spec.name for spec in specs}
+        specs_to_remove = [
+            spec
+            for name, spec in History(str(prefix)).get_requested_specs_map().items()
+            if name not in desired_names
+        ]
+
     if resolved.activation_env:
         state_path = metadata_prefix / "conda-meta" / "state"
         if state_path.is_symlink() and not state_path.exists():
@@ -319,14 +334,14 @@ def install_environment(
                     )
                 validate_file_output(activate_d / source.name)
 
-    if not specs:
+    if not specs and not specs_to_remove:
         validate_file_output(metadata_prefix / "conda-meta" / "history")
 
     if exists and force_reinstall and not dry_run:
         rm_rf(prefix)
         exists = False
 
-    if not specs:
+    if not specs and not specs_to_remove:
         if not dry_run:
             History(str(prefix)).init_log_file()
             _apply_activation_env(prefix, resolved.activation_env)
@@ -345,6 +360,54 @@ def install_environment(
         subdirs = conda_context.subdirs
 
         with _channel_priority_override(resolved.channel_priority):
+            if dry_run and prune and specs:
+                preview_solver = solver_backend(
+                    str(solver_prefix),
+                    channels,
+                    subdirs,
+                    specs_to_add=specs,
+                )
+                try:
+                    preview_txn = preview_solver.solve_for_transaction(
+                        update_modifier=UpdateModifier.UPDATE_SPECS,
+                        prune=True,
+                    )
+                except (UnsatisfiableError, SystemExit) as exc:
+                    raise SolveError(resolved.name, str(exc)) from exc
+
+                sys.stdout.flush()
+                preview_txn.print_transaction_summary()
+                sys.stdout.flush()
+                return solver_prefix
+
+            if specs_to_remove:
+                removal_solver = solver_backend(
+                    str(solver_prefix),
+                    channels,
+                    subdirs,
+                    specs_to_remove=specs_to_remove,
+                )
+                try:
+                    removal_txn = removal_solver.solve_for_transaction(
+                        update_modifier=UpdateModifier.UPDATE_SPECS,
+                    )
+                except (UnsatisfiableError, SystemExit) as exc:
+                    raise SolveError(resolved.name, str(exc)) from exc
+
+                sys.stdout.flush()
+                if dry_run:
+                    removal_txn.print_transaction_summary()
+                elif not removal_txn.nothing_to_do:
+                    removal_txn.download_and_extract()
+                    removal_txn.execute()
+                sys.stdout.flush()
+
+            if not specs:
+                if not dry_run:
+                    _apply_activation_env(prefix, resolved.activation_env)
+                    _apply_activation_scripts(prefix, resolved.activation_scripts)
+                return solver_prefix
+
             solver = solver_backend(
                 str(solver_prefix),
                 channels,

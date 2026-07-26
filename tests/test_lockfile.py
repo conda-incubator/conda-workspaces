@@ -16,7 +16,10 @@ if TYPE_CHECKING:
 
 from conda.base.context import context as conda_context
 from conda.common.serialize.yaml import dump as yaml_dump
+from conda.core.prefix_data import PrefixData
+from conda.history import History
 from conda.models.match_spec import MatchSpec
+from conda.models.records import PrefixRecord
 from conda_lockfiles.load_yaml import load_yaml
 
 from conda_workspaces.context import WorkspaceContext
@@ -44,6 +47,7 @@ from conda_workspaces.models import (
     Environment,
     Feature,
     LockfileStatus,
+    PyPIDependency,
     WorkspaceConfig,
 )
 from conda_workspaces.resolver import ResolvedEnvironment, resolve_environment
@@ -972,8 +976,14 @@ def test_install_from_lockfile(
 
     install_calls: list[dict] = []
 
-    def fake_install(*, package_cache_records, prefix):
-        install_calls.append({"records": package_cache_records, "prefix": prefix})
+    def fake_install(*, package_cache_records, prefix, requested_specs=None):
+        install_calls.append(
+            {
+                "records": package_cache_records,
+                "prefix": prefix,
+                "requested_specs": requested_specs,
+            }
+        )
 
     monkeypatch.setattr(
         "conda.misc.install_explicit_packages",
@@ -995,6 +1005,104 @@ def test_install_from_lockfile(
         assert len(install_calls) == 1
         assert install_calls[0]["records"] == records_sentinel
         assert install_calls[0]["prefix"] == str(ctx.env_prefix("default"))
+        assert install_calls[0]["requested_specs"] == []
+
+
+@pytest.mark.parametrize(
+    (
+        "candidate_locked",
+        "path_declared",
+        "candidate_installed",
+        "expected_requested",
+    ),
+    [
+        (False, False, False, {"python"}),
+        (True, False, True, {"python"}),
+        (False, True, True, {"boltons", "python"}),
+    ],
+    ids=["removed-package", "transitive-package", "local-path-package"],
+)
+def test_install_from_lockfile_reconciles_prefix_and_requested_specs(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    monkeypatch: pytest.MonkeyPatch,
+    candidate_locked: bool,
+    path_declared: bool,
+    candidate_installed: bool,
+    expected_requested: set[str],
+) -> None:
+    """Locked installs remove extras and clear stale direct requests."""
+    ctx = workspace_ctx_factory()
+    ctx.config.features["default"].conda_dependencies = {"python": MatchSpec("python")}
+    if path_declared:
+        ctx.config.features["default"].pypi_dependencies = {
+            "boltons": PyPIDependency(name="boltons", path=".")
+        }
+    prefix = ctx.env_prefix("default")
+    (prefix / "conda-meta").mkdir(parents=True)
+    history = History(str(prefix))
+    Path(history.path).write_text(
+        "==> 2026-07-25 00:00:00 <==\n# cmd: test setup\n",
+        encoding="utf-8",
+    )
+
+    def prefix_record(name: str) -> PrefixRecord:
+        return PrefixRecord(
+            name=name,
+            version="1.0",
+            build="0",
+            build_number=0,
+            channel="https://example.com/channel",
+            subdir="linux-64",
+            fn=f"{name}-1.0-0.conda",
+            url=f"https://example.com/channel/linux-64/{name}-1.0-0.conda",
+            depends=[],
+        )
+
+    python_record = prefix_record("python")
+    candidate_record = prefix_record("boltons")
+    prefix_data = PrefixData(str(prefix))
+    prefix_data.insert(python_record)
+    prefix_data.insert(candidate_record)
+    history.write_specs(update_specs=(MatchSpec("python"), MatchSpec("boltons")))
+
+    locked_records = [python_record]
+    package_refs = f"      - conda: {python_record.url}\n"
+    package_rows = f"- conda: {python_record.url}\n  sha256: {'a' * 64}\n"
+    if candidate_locked:
+        locked_records.append(candidate_record)
+        package_refs += f"      - conda: {candidate_record.url}\n"
+        package_rows += f"- conda: {candidate_record.url}\n  sha256: {'b' * 64}\n"
+    (tmp_path / LOCKFILE_NAME).write_text(
+        "version: 1\n"
+        "environments:\n"
+        "  default:\n"
+        "    channels:\n"
+        "    - url: https://example.com/channel\n"
+        "    packages:\n"
+        "      linux-64:\n"
+        f"{package_refs}"
+        "packages:\n"
+        f"{package_rows}",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "conda.misc.get_package_records_from_explicit",
+        lambda urls: locked_records,
+    )
+    install_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "conda.misc.install_explicit_packages",
+        lambda **kwargs: install_calls.append(kwargs),
+    )
+
+    install_from_lockfile(ctx, "default")
+
+    installed_names = {record.name for record in PrefixData(str(prefix)).iter_records()}
+    assert ("boltons" in installed_names) is candidate_installed
+    assert set(History(str(prefix)).get_requested_specs_map()) == expected_requested
+    assert set(install_calls[0]["requested_specs"]) == expected_requested
 
 
 @pytest.mark.parametrize("dry_run", [False, True], ids=["install", "dry-run"])
@@ -1190,11 +1298,12 @@ def test_install_from_lockfile_explicit_prefix_override(
     final_prefix = tmp_path / "final" / "runtime"
     install_calls: list[dict] = []
 
-    def fake_install(*, package_cache_records, prefix):
+    def fake_install(*, package_cache_records, prefix, requested_specs=None):
         install_calls.append(
             {
                 "records": package_cache_records,
                 "prefix": prefix,
+                "requested_specs": requested_specs,
                 "target_prefix_override": conda_context.target_prefix_override,
             }
         )
@@ -1214,6 +1323,7 @@ def test_install_from_lockfile_explicit_prefix_override(
     assert len(install_calls) == 1
     assert install_calls[0]["records"] == records_sentinel
     assert install_calls[0]["prefix"] == str(install_prefix)
+    assert install_calls[0]["requested_specs"] == []
     assert install_calls[0]["target_prefix_override"] == str(final_prefix)
     assert conda_context.target_prefix_override == ""
 
@@ -1326,14 +1436,15 @@ def test_solve_for_platform_virtual_package_env(
     resolved = resolved_envs_factory(default=[target])["default"]
     resolved.conda_dependencies = {"python": MatchSpec("python=3.12")}
 
-    observed: dict[str, str | None] = {}
+    observed: dict[str, object] = {}
 
     class FakeSolver:
         def __init__(self, *args, **kwargs) -> None:
             observed["CONDA_OVERRIDE_GLIBC"] = os.environ.get("CONDA_OVERRIDE_GLIBC")
             observed["_subdir"] = conda_context.subdir
 
-        def solve_final_state(self) -> list:
+        def solve_final_state(self, **kwargs) -> list:
+            observed["solve_kwargs"] = kwargs
             return []
 
     monkeypatch.setattr(
@@ -1346,6 +1457,7 @@ def test_solve_for_platform_virtual_package_env(
 
     assert observed["CONDA_OVERRIDE_GLIBC"] == expected_glibc_during_solve
     assert observed["_subdir"] == target
+    assert observed["solve_kwargs"] == {"prune": True}
     # After the solve, any baseline the context manager applied must
     # have been restored — nothing leaks into the surrounding process.
     assert os.environ.get("CONDA_OVERRIDE_GLIBC") is None
