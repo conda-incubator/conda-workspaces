@@ -170,6 +170,26 @@ def test_workspace_parser_args(
 
 
 @pytest.mark.parametrize("subcmd", ["add", "remove"])
+@pytest.mark.parametrize(
+    "selectors",
+    [
+        pytest.param(["--platform", "linux-64"], id="base"),
+        pytest.param(["--feature", "dev", "--platform", "linux-64"], id="feature"),
+        pytest.param(
+            ["--environment", "qa", "--platform", "linux-64"],
+            id="environment",
+        ),
+    ],
+)
+def test_workspace_mutation_platform_parser_args(
+    subcmd: str,
+    selectors: list[str],
+) -> None:
+    parsed = generate_workspace_parser().parse_args([subcmd, *selectors, "numpy"])
+    assert parsed.platform == "linux-64"
+
+
+@pytest.mark.parametrize("subcmd", ["add", "remove"])
 def test_workspace_mutation_locations_are_mutually_exclusive(subcmd: str) -> None:
     parser = generate_workspace_parser()
     with pytest.raises(SystemExit):
@@ -387,6 +407,46 @@ def test_workspace_json_nonzero_result_routes_output_to_stderr(
     assert result == 7
     assert captured.out == ""
     assert captured.err == "failed\n"
+
+
+@pytest.mark.usefixtures("reset_conda_context")
+def test_workspace_add_override_warning_preserves_json_stdout(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "pixi.toml"
+    path.write_text(
+        """\
+[workspace]
+name = "json-warning"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+numpy = ">=2"
+
+[target.linux-64.dependencies]
+numpy = ">=2.1"
+""",
+        encoding="utf-8",
+    )
+    args = generate_workspace_parser().parse_args(
+        [
+            "--file",
+            str(path),
+            "add",
+            "--json",
+            "--no-lockfile-update",
+            "numpy=2.3",
+        ]
+    )
+    reset_context(argparse_args=args)
+
+    assert execute_workspace(args) == 0
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"success": True}
+    assert "[target.linux-64.dependencies] overrides" in captured.err
 
 
 def test_workspace_non_json_output_is_unchanged(

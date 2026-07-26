@@ -38,6 +38,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- `conda workspace add` and `remove` now mutate one explicit dependency
+  declaration location. With no selector, commands address the default
+  feature. `--feature default` is accepted as an explicit equivalent.
+  Raw `[feature.default]` tables are now rejected. Move their contents
+  to the corresponding top-level tables.
+  `--feature` addresses a named feature, `--environment` addresses private
+  environment dependencies, and `--platform` nests a target table below
+  the selected location. Bare adds preserve existing
+  `{ workspace = true }` entries, while explicit specs replace only the
+  selected membership entry and never change `[workspace.dependencies]`.
+  `add` warns when a later declaration still overrides the result.
+  `remove` now fails before writing when a package is absent from the
+  selected location but declared elsewhere, and lists the exact selector
+  for every matching location. Scripts that expected `add` or `remove` to
+  find the effective declaration must now pass the selectors for that
+  table, such as `--feature test --platform linux-64` or
+  `--environment test --platform linux-64`. The broken `tomlkit 0.15.0`
+  release is excluded because it can serialize invalid TOML when these
+  commands extend an existing inline table. (#125)
 - `conda workspace add` and `remove` now treat `--environment` as a
   private dependency location below `[environments.<name>]` instead of
   assuming a same-named feature. Composed environments, the `default`

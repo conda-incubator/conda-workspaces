@@ -15,17 +15,23 @@ from ..manifests.toml import CondaTomlParser, WorkspaceDependencyResolver
 from ..models import Feature
 
 if TYPE_CHECKING:
+    from typing import Any
+
+    from conda.models.match_spec import MatchSpec
     from tomlkit.items import Table
 
-    from ..models import Task, WorkspaceConfig
+    from ..models import Environment, Task, WorkspaceConfig
 
 
 def config_to_toml(
     config: WorkspaceConfig,
     tasks: dict[str, Task] | None = None,
+    *,
+    source: dict[str, Any] | None = None,
 ) -> tomlkit.TOMLDocument:
     """Convert a parsed workspace config (and optional tasks) to a TOML document."""
     doc = tomlkit.document()
+    source = source or {}
 
     ws = tomlkit.table()
     if config.name:
@@ -36,6 +42,14 @@ def config_to_toml(
         ws.add("platforms", config.platforms_for_toml())
     if config.channel_priority:
         ws.add("channel-priority", config.channel_priority)
+    if config.workspace_dependencies:
+        ws.add(
+            "dependencies",
+            _conda_dependencies_to_toml(
+                config.workspace_dependencies,
+                source.get("workspace", {}).get("dependencies", {}),
+            ),
+        )
     doc.add("workspace", ws)
 
     default_feature = config.features.get(Feature.DEFAULT_NAME)
@@ -43,10 +57,10 @@ def config_to_toml(
         doc.add(
             "dependencies",
             tomlkit.item(
-                {
-                    name: WorkspaceDependencyResolver.match_spec_to_toml(spec)
-                    for name, spec in default_feature.conda_dependencies.items()
-                }
+                _conda_dependencies_to_toml(
+                    default_feature.conda_dependencies,
+                    source.get("dependencies", {}),
+                )
             ),
         )
 
@@ -77,18 +91,26 @@ def config_to_toml(
             tomlkit.item(dict(default_feature.system_requirements)),
         )
 
-    if default_feature and default_feature.target_conda_dependencies:
-        _add_target_overrides(doc, default_feature)
+    if default_feature and (
+        default_feature.target_conda_dependencies
+        or default_feature.target_pypi_dependencies
+    ):
+        _add_target_overrides(doc, default_feature, source)
 
     for feat_name, feature in config.features.items():
         if feature.is_default:
             continue
-        _add_feature(doc, feature)
+        _add_feature(doc, feature, source.get("feature", {}).get(feat_name, {}))
 
     if config.environments:
         envs = tomlkit.table()
         for env_name, env in config.environments.items():
-            if env.conda_dependencies or env.pypi_dependencies:
+            if (
+                env.conda_dependencies
+                or env.pypi_dependencies
+                or env.target_conda_dependencies
+                or env.target_pypi_dependencies
+            ):
                 env_table = tomlkit.table()
                 if env.features:
                     env_table.add("features", env.features)
@@ -97,10 +119,12 @@ def config_to_toml(
                 if env.conda_dependencies:
                     env_table.add(
                         "dependencies",
-                        {
-                            name: WorkspaceDependencyResolver.match_spec_to_toml(spec)
-                            for name, spec in env.conda_dependencies.items()
-                        },
+                        _conda_dependencies_to_toml(
+                            env.conda_dependencies,
+                            source.get("environments", {})
+                            .get(env_name, {})
+                            .get("dependencies", {}),
+                        ),
                     )
                 if env.pypi_dependencies:
                     env_table.add(
@@ -109,6 +133,12 @@ def config_to_toml(
                             name: dependency.to_toml()
                             for name, dependency in env.pypi_dependencies.items()
                         },
+                    )
+                if env.target_conda_dependencies or env.target_pypi_dependencies:
+                    _add_target_overrides(
+                        env_table,
+                        env,
+                        source.get("environments", {}).get(env_name, {}),
                     )
                 envs.add(env_name, env_table)
             elif env.no_default_feature:
@@ -134,7 +164,26 @@ def config_to_toml(
     return doc
 
 
-def _add_feature(doc: tomlkit.TOMLDocument, feature: Feature) -> None:
+def _conda_dependencies_to_toml(
+    dependencies: dict[str, MatchSpec],
+    source: dict[str, Any],
+) -> dict[str, object]:
+    """Serialize MatchSpecs while retaining workspace membership markers."""
+    result: dict[str, object] = {}
+    for name, spec in dependencies.items():
+        raw = source.get(name)
+        if isinstance(raw, dict) and raw.get("workspace") is True:
+            result[name] = raw
+        else:
+            result[name] = WorkspaceDependencyResolver.match_spec_to_toml(spec)
+    return result
+
+
+def _add_feature(
+    doc: tomlkit.TOMLDocument,
+    feature: Feature,
+    source: dict[str, Any],
+) -> None:
     """Add ``[feature.<name>.*]`` tables to *doc*."""
     if "feature" not in doc:
         doc.add("feature", tomlkit.table(is_super_table=True))
@@ -145,10 +194,10 @@ def _add_feature(doc: tomlkit.TOMLDocument, feature: Feature) -> None:
     if feature.conda_dependencies:
         feat_tbl.add(
             "dependencies",
-            {
-                name: WorkspaceDependencyResolver.match_spec_to_toml(spec)
-                for name, spec in feature.conda_dependencies.items()
-            },
+            _conda_dependencies_to_toml(
+                feature.conda_dependencies,
+                source.get("dependencies", {}),
+            ),
         )
 
     if feature.pypi_dependencies:
@@ -177,32 +226,42 @@ def _add_feature(doc: tomlkit.TOMLDocument, feature: Feature) -> None:
             activation.add("env", dict(feature.activation_env))
         feat_tbl.add("activation", activation)
 
-    if feature.target_conda_dependencies:
-        target_tbl = tomlkit.table(is_super_table=True)
-        for platform in sorted(feature.target_conda_dependencies):
-            plat_tbl = tomlkit.table()
-            if platform_deps := feature.target_conda_dependencies.get(platform):
-                plat_deps: dict[str, str] = {}
-                for name, ms in platform_deps.items():
-                    plat_deps[name] = str(ms.version) if ms.version else "*"
-                plat_tbl.add("dependencies", plat_deps)
-            target_tbl.add(platform, plat_tbl)
-        feat_tbl.add("target", target_tbl)
+    if feature.target_conda_dependencies or feature.target_pypi_dependencies:
+        _add_target_overrides(feat_tbl, feature, source)
 
     feat_container.add(feature.name, feat_tbl)
 
 
-def _add_target_overrides(doc: tomlkit.TOMLDocument, feature: Feature) -> None:
-    """Add ``[target.<platform>.*]`` overrides for the default feature."""
-    if "target" not in doc:
-        doc.add("target", tomlkit.table(is_super_table=True))
-    target = cast("Table", doc["target"])
+def _add_target_overrides(
+    parent: tomlkit.TOMLDocument | Table,
+    owner: Feature | Environment,
+    source: dict[str, Any],
+) -> None:
+    """Add lossless target dependency overrides for *owner*."""
+    if "target" not in parent:
+        parent.add("target", tomlkit.table(is_super_table=True))
+    target = cast("Table", parent["target"])
 
-    for platform in sorted(feature.target_conda_dependencies):
+    platforms = sorted(
+        set(owner.target_conda_dependencies) | set(owner.target_pypi_dependencies)
+    )
+    for platform in platforms:
         plat_tbl = tomlkit.table()
-        if platform_deps := feature.target_conda_dependencies.get(platform):
-            plat_deps: dict[str, str] = {}
-            for name, ms in platform_deps.items():
-                plat_deps[name] = str(ms.version) if ms.version else "*"
-            plat_tbl.add("dependencies", plat_deps)
+        target_source = source.get("target", {}).get(platform, {})
+        if conda_dependencies := owner.target_conda_dependencies.get(platform):
+            plat_tbl.add(
+                "dependencies",
+                _conda_dependencies_to_toml(
+                    conda_dependencies,
+                    target_source.get("dependencies", {}),
+                ),
+            )
+        if pypi_dependencies := owner.target_pypi_dependencies.get(platform):
+            plat_tbl.add(
+                "pypi-dependencies",
+                {
+                    name: dependency.to_toml()
+                    for name, dependency in pypi_dependencies.items()
+                },
+            )
         target.add(platform, plat_tbl)

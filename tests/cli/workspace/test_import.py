@@ -499,31 +499,73 @@ name = "import-test"
 channels = ["conda-forge"]
 platforms = ["linux-64"]
 
+[{prefix}workspace.dependencies]
+inherited = {{ version = ">=4", build = "base*" }}
+
+[{prefix}dependencies]
+inherited = {{ workspace = true }}
+
 [{prefix}pypi-dependencies]
 root-package = {{ git = "https://example.com/root.git", branch = "main" }}
 
+[{prefix}target.linux-64.dependencies]
+root-target = {{ version = ">=1", build = "py*", channel = "conda-forge" }}
+
+[{prefix}target.linux-64.pypi-dependencies]
+root-target-package = {{ git = "https://example.com/root-target.git", branch = "main" }}
+
 [{prefix}feature.shared.pypi-dependencies]
 feature-package = {{ git = "https://example.com/feature.git", tag = "v1.0" }}
+
+[{prefix}feature.shared.target.linux-64.dependencies]
+feature-target = {{ version = ">=2", build-number = ">=1" }}
+
+[{prefix}feature.shared.target.linux-64.pypi-dependencies]
+feature-target-package = {{ git = "https://example.com/ft.git", tag = "v2.0" }}
 
 [{prefix}environments.default]
 no-default-feature = true
 
 [{prefix}environments.qa.dependencies]
 coverage = {{ version = ">=7", channel = "conda-forge" }}
+inherited = {{ workspace = true }}
 
 [{prefix}environments.qa.pypi-dependencies]
 pytest-plugin = {{ version = ">=1", extras = ["reports"] }}
 branch-package = {{ git = "https://example.com/branch.git", branch = "main" }}
 tag-package = {{ git = "https://example.com/tag.git", tag = "v1.0" }}
 rev-package = {{ git = "https://example.com/rev.git", rev = "abc123" }}
+
+[{prefix}environments.qa.target.linux-64.dependencies]
+environment-target = {{ version = ">=3", build = "h*" }}
+inherited = {{ workspace = true, build = "env*" }}
+
+[{prefix}environments.qa.target.linux-64.pypi-dependencies]
+environment-target-package = {{ git = "https://example.com/et.git", rev = "def456" }}
 """,
         encoding="utf-8",
     )
 
     doc = find_importer(path).convert(path)
 
+    assert doc["workspace"]["dependencies"]["inherited"].unwrap() == {
+        "version": ">=4",
+        "build": "base*",
+    }
+    assert doc["dependencies"]["inherited"].unwrap() == {"workspace": True}
     assert doc["pypi-dependencies"]["root-package"].unwrap() == {
         "git": "https://example.com/root.git",
+        "branch": "main",
+    }
+    assert doc["target"]["linux-64"]["dependencies"]["root-target"].unwrap() == {
+        "version": ">=1",
+        "build": "py*",
+        "channel": "conda-forge",
+    }
+    assert doc["target"]["linux-64"]["pypi-dependencies"][
+        "root-target-package"
+    ].unwrap() == {
+        "git": "https://example.com/root-target.git",
         "branch": "main",
     }
     assert doc["feature"]["shared"]["pypi-dependencies"][
@@ -532,12 +574,22 @@ rev-package = {{ git = "https://example.com/rev.git", rev = "abc123" }}
         "git": "https://example.com/feature.git",
         "tag": "v1.0",
     }
+    feature_target = doc["feature"]["shared"]["target"]["linux-64"]
+    assert feature_target["dependencies"]["feature-target"].unwrap() == {
+        "version": ">=2",
+        "build-number": ">=1",
+    }
+    assert feature_target["pypi-dependencies"]["feature-target-package"].unwrap() == {
+        "git": "https://example.com/ft.git",
+        "tag": "v2.0",
+    }
     assert doc["environments"]["default"]["no-default-feature"] is True
     environment = doc["environments"]["qa"]
     assert environment["dependencies"]["coverage"].unwrap() == {
         "version": ">=7",
         "channel": "conda-forge",
     }
+    assert environment["dependencies"]["inherited"].unwrap() == {"workspace": True}
     assert environment["pypi-dependencies"]["pytest-plugin"].unwrap() == {
         "version": ">=1",
         "extras": ["reports"],
@@ -553,6 +605,21 @@ rev-package = {{ git = "https://example.com/rev.git", rev = "abc123" }}
     assert environment["pypi-dependencies"]["rev-package"].unwrap() == {
         "git": "https://example.com/rev.git",
         "rev": "abc123",
+    }
+    environment_target = environment["target"]["linux-64"]
+    assert environment_target["dependencies"]["environment-target"].unwrap() == {
+        "version": ">=3",
+        "build": "h*",
+    }
+    assert environment_target["dependencies"]["inherited"].unwrap() == {
+        "workspace": True,
+        "build": "env*",
+    }
+    assert environment_target["pypi-dependencies"][
+        "environment-target-package"
+    ].unwrap() == {
+        "git": "https://example.com/et.git",
+        "rev": "def456",
     }
 
 

@@ -32,6 +32,11 @@
     "feature": {
       "type": "object",
       "description": "Named features that group dependencies and settings.",
+      "propertyNames": {
+        "not": {
+          "const": "default"
+        }
+      },
       "additionalProperties": {
         "$ref": "#/$defs/feature"
       }
@@ -473,6 +478,29 @@
         "$ref": "#/$defs/targetOverride"
       }
     },
+    "environmentTargets": {
+      "type": "object",
+      "description": "Per-platform private environment dependencies keyed by platform name.",
+      "propertyNames": {
+        "$ref": "#/$defs/platformName"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/environmentTargetOverride"
+      }
+    },
+    "environmentTargetOverride": {
+      "type": "object",
+      "description": "Platform-specific private environment dependencies.",
+      "properties": {
+        "dependencies": {
+          "$ref": "#/$defs/condaDependencies"
+        },
+        "pypi-dependencies": {
+          "$ref": "#/$defs/pypiDependencies"
+        }
+      },
+      "additionalProperties": false
+    },
     "targetOverride": {
       "type": "object",
       "description": "Platform-specific overrides.",
@@ -710,6 +738,10 @@
             "pypi-dependencies": {
               "$ref": "#/$defs/pypiDependencies",
               "description": "PyPI dependencies private to this environment."
+            },
+            "target": {
+              "$ref": "#/$defs/environmentTargets",
+              "description": "Per-platform dependencies private to this environment."
             }
           },
           "additionalProperties": false

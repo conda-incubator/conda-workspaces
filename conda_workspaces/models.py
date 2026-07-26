@@ -154,6 +154,12 @@ class Environment:
     no_default_feature: bool = False
     conda_dependencies: dict[str, MatchSpec] = field(default_factory=dict)
     pypi_dependencies: dict[str, PyPIDependency] = field(default_factory=dict)
+    target_conda_dependencies: dict[str, dict[str, MatchSpec]] = field(
+        default_factory=dict
+    )
+    target_pypi_dependencies: dict[str, dict[str, PyPIDependency]] = field(
+        default_factory=dict
+    )
 
     @property
     def is_default(self) -> bool:
@@ -390,6 +396,9 @@ class WorkspaceConfig:
                 if key in feature.target_conda_dependencies:
                     merged.update(feature.target_conda_dependencies[key])
         merged.update(environment.conda_dependencies)
+        for key in platform_keys:
+            if key in environment.target_conda_dependencies:
+                merged.update(environment.target_conda_dependencies[key])
         return merged
 
     def merged_pypi_dependencies(
@@ -406,6 +415,9 @@ class WorkspaceConfig:
                 if key in feature.target_pypi_dependencies:
                     merged.update(feature.target_pypi_dependencies[key])
         merged.update(environment.pypi_dependencies)
+        for key in platform_keys:
+            if key in environment.target_pypi_dependencies:
+                merged.update(environment.target_pypi_dependencies[key])
         return merged
 
     def merged_system_requirements(

@@ -291,6 +291,13 @@ numpy = { workspace = true }
 cmake = { workspace = true, build = "h*" }
 ```
 
+### Dependency mutation locations
+
+`conda workspace add` and `conda workspace remove` address one explicitly
+selected declaration instead of searching for the composed winner. See the
+{ref}`dependency mutation rules <dependency-mutation-rules>` for the selector
+mapping, inheritance behavior, and wrong-location diagnostics.
+
 ## Feature table
 
 Each `[feature.<name>]` table can contain:
@@ -318,6 +325,7 @@ Each entry in `[environments]` defines a named environment:
 | `no-default-feature` | bool | Exclude the default feature (default: false) |
 | `dependencies` | table | Conda dependencies private to this environment |
 | `pypi-dependencies` | table | PyPI dependencies private to this environment |
+| `target` | table | Per-platform private dependency overrides for this environment |
 
 Shorthand forms are supported:
 
@@ -331,6 +339,20 @@ lint = ["lint"]
 
 # Default environment shorthand
 default = []
+```
+
+Environment targets are merged after the environment's unqualified
+private dependencies:
+
+```toml
+[environments.test]
+features = ["test"]
+
+[environments.test.target.win-64.dependencies]
+pywin32 = "*"
+
+[environments.test.target.win-64.pypi-dependencies]
+colorama = ">=0.4"
 ```
 
 ## Task fields

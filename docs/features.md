@@ -247,13 +247,17 @@ coverage = "*"
 
 [environments.test.pypi-dependencies]
 pytest-plugin = ">=1"
+
+[environments.test.target.win-64.dependencies]
+pywin32 = "*"
 ```
 
 An implicit `default` environment is created when `[environments]` is
 omitted. Every declared environment inherits the top-level default
 feature unless `no-default-feature = true` is set. Dependencies declared below
 `[environments.<name>]` are private to that environment and are merged
-after its shared features.
+after its shared features. Environment target dependencies are merged
+after its unqualified private dependencies for the selected platform.
 
 :::{note}
 Pixi's `solve-group` key is accepted in manifests for compatibility but
@@ -305,6 +309,26 @@ consuming entry may add non-version fields such as `build`, `channel`,
 or `subdir`. Restating `version` alongside `workspace = true` is an
 error.
 
+### Dependency mutation locations
+
+`conda workspace add` and `conda workspace remove` change one explicit
+declaration location. They do not search the composed environment for
+the declaration that currently wins. The
+{ref}`dependency mutation rules <dependency-mutation-rules>` define the
+selector mapping, workspace inheritance behavior, and wrong-location
+diagnostics.
+
+```bash
+# Shared feature declaration for every platform
+conda workspace add --feature test pytest
+
+# Platform override within that feature
+conda workspace add --feature test --platform win-64 "pytest<9"
+
+# Private platform override within one environment
+conda workspace add --environment test --platform win-64 pywin32
+```
+
 ## Channels
 
 Channels are specified at the workspace level and can be overridden per
@@ -341,10 +365,18 @@ linux-headers = ">=5.10"
 
 [target.osx-arm64.dependencies]
 llvm-openmp = ">=14.0"
+
+[feature.test.target.win-64.dependencies]
+pytest = "<9"
+
+[environments.test.target.win-64.dependencies]
+pywin32 = "*"
 ```
 
-Platform overrides are merged on top of the base dependencies when
-resolving for a specific platform.
+Each platform override is merged on top of the unqualified dependencies
+owned by the same default feature, named feature, or environment. An
+environment's target dependencies are the last dependency layer for the
+selected platform.
 
 ### Known vs. declared platforms
 

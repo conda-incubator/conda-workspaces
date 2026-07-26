@@ -33,7 +33,7 @@ dependencies = [
   "packaging >=21.0",
   "platformdirs >=3.0",
   "rich >=13.0",
-  "tomlkit >=0.13",
+  "tomlkit >=0.13,!=0.15.0",
   "backports.zstd; python_version < '3.14'",
 ]
 dynamic = ["version"]
@@ -122,7 +122,7 @@ pre-commit = ">=4.0"
 [tool.pixi.feature.test.dependencies]
 pytest = ">=8.0"
 pytest-cov = ">=4.0"
-tomlkit = ">=0.13"
+tomlkit = ">=0.13,!=0.15.0"
 platformdirs = ">=3.0"
 
 [tool.pixi.feature.py310.dependencies]
