@@ -105,7 +105,7 @@ and also provides `cw` and `ct` as shorter aliases.
 | `conda workspace lock` | Generate/update `conda.lock` |
 | `conda workspace list` | List packages in an environment |
 | `conda workspace envs` | List defined environments |
-| `conda workspace info -e ENV` | Show environment details |
+| `conda workspace info` | Show workspace or environment details |
 | `conda workspace add SPECS...` | Add dependencies |
 | `conda workspace remove SPECS...` | Remove dependencies |
 | `conda workspace export` | Export environments and manifests through conda exporters |

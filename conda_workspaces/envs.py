@@ -14,7 +14,7 @@ import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from conda.base.constants import ChannelPriority, UpdateModifier
 from conda.base.context import context as conda_context
@@ -39,6 +39,14 @@ if TYPE_CHECKING:
     from .resolver import ResolvedEnvironment
 
 log = logging.getLogger(__name__)
+
+
+class PackageRow(TypedDict):
+    """JSON-compatible details for an installed package."""
+
+    name: str
+    version: str
+    build: str
 
 
 def _iter_installed_prefixes(envs_dir: Path) -> Iterator[Path]:
@@ -474,6 +482,15 @@ def clean_all(ctx: WorkspaceContext) -> None:
 def list_installed_environments(ctx: WorkspaceContext) -> list[str]:
     """Return names of environments that are currently installed."""
     return sorted(d.name for d in _iter_installed_prefixes(ctx.envs_dir))
+
+
+def list_installed_packages(ctx: WorkspaceContext, env_name: str) -> list[PackageRow]:
+    """Return installed package details sorted by package name."""
+    records = PrefixData(str(ctx.env_prefix(env_name))).iter_records()
+    return [
+        {"name": record.name, "version": record.version, "build": record.build}
+        for record in sorted(records, key=lambda record: record.name)
+    ]
 
 
 def get_environment_info(

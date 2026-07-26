@@ -404,6 +404,8 @@ conda workspace envs              # list defined environments
 ```bash
 conda workspace info
 conda workspace info -e test      # details for a specific environment
+conda workspace info --json       # complete machine-readable snapshot
+conda workspace info --json --packages  # include installed package records
 ```
 
 ## Next steps

@@ -88,6 +88,35 @@ def test_list_json_output(
     names = {row["name"] for row in data}
     assert "default" in names
     assert "test" in names
+    assert all(row["no_default_feature"] is False for row in data)
+
+
+@pytest.mark.parametrize("json_flag", [False, True], ids=["text", "json"])
+def test_list_environment_without_default_feature(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rich_console: Console,
+    json_flag: bool,
+) -> None:
+    manifest = pixi_workspace / "pixi.toml"
+    content = manifest.read_text(encoding="utf-8").replace(
+        'test = {features = ["test"]}',
+        "test = {no-default-feature = true}",
+    )
+    manifest.write_text(content, encoding="utf-8")
+    monkeypatch.chdir(pixi_workspace)
+
+    args = make_args(_DEFAULTS, envs=True, json=json_flag)
+    execute_list(args, console=rich_console)
+    out = rich_console.file.getvalue()
+
+    if json_flag:
+        test = next(row for row in json.loads(out) if row["name"] == "test")
+        assert test["features"] == []
+        assert test["no_default_feature"] is True
+    else:
+        assert "test" in out
+        assert "(none)" in out
 
 
 def test_list_packages_not_installed(
@@ -122,8 +151,8 @@ def _stub_prefix_data(monkeypatch: pytest.MonkeyPatch) -> None:
         build: str
 
     records = [
-        FakeRecord("numpy", "1.26.4", "py312h1234abc_0"),
         FakeRecord("python", "3.12.3", "h5678def_0"),
+        FakeRecord("numpy", "1.26.4", "py312h1234abc_0"),
     ]
 
     class FakePrefixData:
@@ -136,9 +165,7 @@ def _stub_prefix_data(monkeypatch: pytest.MonkeyPatch) -> None:
         def iter_records(self):
             return iter(records)
 
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.list.PrefixData", FakePrefixData
-    )
+    monkeypatch.setattr("conda_workspaces.envs.PrefixData", FakePrefixData)
 
 
 @pytest.mark.parametrize(
@@ -164,9 +191,10 @@ def test_list_packages(
 
     if json_flag:
         data = json.loads(out)
-        names = {r["name"] for r in data}
-        assert names == {"numpy", "python"}
-        assert data[0]["version"] == "1.26.4"
+        assert data == [
+            {"name": "numpy", "version": "1.26.4", "build": "py312h1234abc_0"},
+            {"name": "python", "version": "3.12.3", "build": "h5678def_0"},
+        ]
     else:
         assert "numpy" in out
         assert "python" in out
@@ -192,9 +220,7 @@ def test_list_packages_empty(
         def iter_records(self):
             return iter([])
 
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.list.PrefixData", EmptyPrefixData
-    )
+    monkeypatch.setattr("conda_workspaces.envs.PrefixData", EmptyPrefixData)
 
     args = make_args(_DEFAULTS)
     result = execute_list(args, console=rich_console)

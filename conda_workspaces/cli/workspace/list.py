@@ -5,11 +5,10 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, TypedDict
 
-from conda.core.envs_manager import PrefixData
 from rich.console import Console
 from rich.table import Table
 
-from ...envs import list_installed_environments
+from ...envs import list_installed_environments, list_installed_packages
 from ...exceptions import EnvironmentNotFoundError, EnvironmentNotInstalledError
 from . import workspace_context_from_args
 
@@ -17,6 +16,7 @@ if TYPE_CHECKING:
     import argparse
 
     from ...context import WorkspaceContext
+    from ...envs import PackageRow
     from ...models import WorkspaceConfig
 
 
@@ -25,7 +25,19 @@ class EnvironmentRow(TypedDict):
 
     name: str
     features: list[str]
+    no_default_feature: bool
     installed: bool
+
+
+def package_table(packages: list[PackageRow]) -> Table:
+    """Return the shared Rich table for installed package records."""
+    table = Table(show_edge=False, pad_edge=False)
+    table.add_column("Name")
+    table.add_column("Version")
+    table.add_column("Build")
+    for package in packages:
+        table.add_row(package["name"], package["version"], package["build"])
+    return table
 
 
 def execute_list(args: argparse.Namespace, *, console: Console | None = None) -> int:
@@ -59,34 +71,19 @@ def _list_packages(
     if not ctx.env_exists(env_name):
         raise EnvironmentNotInstalledError(env_name)
 
-    prefix = ctx.env_prefix(env_name)
-    pd = PrefixData(str(prefix))
-    records = sorted(pd.iter_records(), key=lambda r: r.name)
+    packages = list_installed_packages(ctx, env_name)
 
     if json_output:
-        console.print_json(
-            json.dumps(
-                [
-                    {"name": r.name, "version": r.version, "build": r.build}
-                    for r in records
-                ]
-            )
-        )
+        console.print_json(json.dumps(packages))
     else:
-        if not records:
+        if not packages:
             console.print(
                 f"No packages in [bold]{env_name}[/bold] environment."
                 f" Run 'conda workspace install -e {env_name}' first."
             )
             return 0
 
-        table = Table(show_edge=False, pad_edge=False)
-        table.add_column("Name")
-        table.add_column("Version")
-        table.add_column("Build")
-        for r in records:
-            table.add_row(r.name, r.version, r.build)
-        console.print(table)
+        console.print(package_table(packages))
 
     return 0
 
@@ -109,6 +106,7 @@ def _list_environments(
             {
                 "name": name,
                 "features": env.features,
+                "no_default_feature": env.no_default_feature,
                 "installed": name in installed,
             }
         )
@@ -134,7 +132,12 @@ def _list_environments(
         table.add_column("Features")
         table.add_column("Installed")
         for row in rows:
-            feats = ", ".join(row["features"]) if row["features"] else "(default)"
+            if row["features"]:
+                feats = ", ".join(row["features"])
+            elif row["no_default_feature"]:
+                feats = "(none)"
+            else:
+                feats = "(default)"
             status = "yes" if row["installed"] else "no"
             table.add_row(row["name"], feats, status)
         console.print(table)
