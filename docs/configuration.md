@@ -6,8 +6,10 @@ All paths below use `~/` as shorthand for your home directory:
 `%USERPROFILE%` (typically `C:\Users\<user>\`) on Windows.
 :::
 
-conda-workspaces searches for manifests in the current directory and its
-parents. The first matching file is used.
+When the global `--file` option is omitted, conda-workspaces searches for
+manifests in the current directory and its parents. The first matching file is
+used. `conda workspace --file PATH ...` selects one existing manifest file
+exactly. It does not accept a directory or search from the selected path.
 
 For the normative description of every field accepted in `conda.toml` and
 the `[tool.conda.*]` embedded form, see the [`conda.toml`

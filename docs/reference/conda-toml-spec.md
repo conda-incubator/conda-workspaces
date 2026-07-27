@@ -367,15 +367,14 @@ When a tool resolves an environment named `<env>`:
 2. Merge each named feature listed in `features`, in order. For each
    feature, merge its unqualified declarations and then its matching
    `[feature.<name>.target.<platform>]` overrides. Later features
-   override earlier ones for conflicting keys. Lists are concatenated
-   and de-duplicated.
+   override earlier ones for conflicting dependency keys.
 3. Merge dependencies declared directly on the environment.
 4. Merge matching
    `[environments.<env>.target.<platform>]` dependencies.
 
-Channel order is preserved.  Duplicate dependency names within the
-same stack (conda or PyPI) are an error and the tool MUST surface them
-to the user.
+Conda and PyPI dependency maps follow these ordered last-wins rules.
+Channel order is preserved and duplicate channels are removed. Activation
+scripts are concatenated in feature order without implicit de-duplication.
 
 (dependency-mutation-rules)=
 
@@ -395,9 +394,31 @@ declaration.
 | `--environment E` | `[environments.E.dependencies]` |
 | `--environment E --platform P` | `[environments.E.target.P.dependencies]` |
 
-`--feature default` is equivalent to using no location selector. A raw
-`[feature.default]` table is reserved and invalid. Default feature
-content belongs in the corresponding top-level tables.
+`--feature default` is equivalent to using no location selector. Version 1
+continues to read a legacy `[feature.default]` table with its established
+replacement semantics, where it replaces rather than merges top-level default
+feature content. New manifests MUST put default feature content in the
+corresponding top-level tables. `add`, `update`, and `remove` require manual
+migration before mutating a manifest that contains the legacy table. Move its
+dependencies and settings with the mappings below. Review feature-specific
+channels and platforms manually because they have no exact top-level equivalent.
+
+| Legacy table | Top-level destination |
+|---|---|
+| `[feature.default.dependencies]` | `[dependencies]` |
+| `[feature.default.pypi-dependencies]` | `[pypi-dependencies]` |
+| `[feature.default.activation]` | `[activation]` |
+| `[feature.default.system-requirements]` | `[system-requirements]` |
+| `[feature.default.target.P.dependencies]` | `[target.P.dependencies]` |
+| `[feature.default.target.P.pypi-dependencies]` | `[target.P.pypi-dependencies]` |
+
+For dependencies and settings, preserve the legacy values when both locations
+exist because the legacy feature replaces the top-level default feature in
+0.7. Legacy `[feature.default.tasks]` and
+`[feature.default.target.P.tasks]` remain ignored in `conda.toml`, matching 0.7.
+Do not move them unless you intend to activate those commands. Remove the
+legacy table after preserving or deliberately discarding its content.
+
 `--pypi` selects the corresponding `pypi-dependencies` table.
 `--feature` and `--environment` are mutually exclusive. `--platform`
 composes with either selector. `P` MUST identify a declared platform

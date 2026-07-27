@@ -18,6 +18,7 @@ from . import workspace_manifest_path_from_args
 from .dependencies import (
     DependencyLocation,
     dependency_declarations,
+    reject_legacy_default_feature,
     workspace_toml_source,
 )
 from .sync import affected_environments, sync_environments
@@ -62,6 +63,7 @@ def execute_remove(args: argparse.Namespace, *, console: Console | None = None) 
 
     source, namespace = workspace_toml_source(doc, manifest_path, create=False)
     if source is not None:
+        reject_legacy_default_feature(source)
         current = parser.parse_data_with_redacted_errors(doc.unwrap(), manifest_path)
         if location.environment is not None:
             current.get_environment(location.environment)

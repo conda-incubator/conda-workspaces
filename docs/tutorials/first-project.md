@@ -6,7 +6,7 @@ to automate your workflow.
 
 ## Prerequisites
 
-- conda (>= 24.7) with the conda-workspaces plugin installed
+- conda (>= 26.3) with the conda-workspaces plugin installed
 - A project directory to work in
 
 ## Create the workspace manifest
@@ -16,7 +16,8 @@ Start by creating a `conda.toml` in your project root:
 ```bash
 mkdir my-project && cd my-project
 conda workspace init --format conda --name my-project \
-  -c conda-forge --override-channels
+  -c conda-forge --override-channels \
+  --platform linux-64 --platform osx-arm64 --platform win-64
 ```
 
 This creates a `conda.toml` with sensible defaults:
@@ -25,7 +26,7 @@ This creates a `conda.toml` with sensible defaults:
 [workspace]
 name = "my-project"
 channels = ["conda-forge"]
-platforms = ["linux-64", "osx-arm64"]
+platforms = ["linux-64", "osx-arm64", "win-64"]
 
 [dependencies]
 ```
@@ -46,7 +47,7 @@ conda workspace add "numpy>=1.24" "scipy>=1.11"
 Add test dependencies to a shared test feature:
 
 ```bash
-conda workspace add --feature test "pytest>=8.0" "pytest-cov>=4.0"
+conda workspace add --feature test "pytest>=8.0" "pytest-cov>=4.0" "ruff>=0.9"
 ```
 
 Add documentation dependencies to a shared docs feature:
@@ -61,7 +62,7 @@ Your `conda.toml` now looks like:
 [workspace]
 name = "my-project"
 channels = ["conda-forge"]
-platforms = ["linux-64", "osx-arm64"]
+platforms = ["linux-64", "osx-arm64", "win-64"]
 
 [dependencies]
 python = ">=3.10"
@@ -71,6 +72,7 @@ scipy = ">=1.11"
 [feature.test.dependencies]
 pytest = ">=8.0"
 pytest-cov = ">=4.0"
+ruff = ">=0.9"
 
 [feature.docs.dependencies]
 sphinx = ">=7.0"

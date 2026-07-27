@@ -10,7 +10,7 @@ format identifier (`conda env create --format=...`, `conda export
 
 conda-workspaces follows the naming policy that `conda-lockfiles`
 documents in [its own format-aliases
-reference](https://github.com/conda-incubator/conda-lockfiles/blob/main/docs/format-aliases.md):
+reference](https://github.com/conda/conda-lockfiles/blob/main/docs/format-aliases.md):
 
 - The canonical `FORMAT` is **versioned** when the format has an
   on-disk schema version byte (for example

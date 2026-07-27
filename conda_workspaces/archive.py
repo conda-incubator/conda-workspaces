@@ -826,9 +826,9 @@ class WorkspaceArchive:
                             expected=captured_archive_output.sha256,
                             actual=live_archive_sha256,
                         )
-                    receipt_obj = cls.build_receipt(
-                        ctx=ctx,
-                        archive_config=archive_config,
+                    from .receipts import ArchiveReceipt
+
+                    receipt_obj = ArchiveReceipt.build_from_captured(
                         archive_name=archive_path.name,
                         archive_sha256=captured_archive_output.sha256,
                         manifest_name=manifest_member,
@@ -836,6 +836,12 @@ class WorkspaceArchive:
                         lockfile_name=lock_member,
                         lockfile_sha256=regular_member_hashes[lock_member],
                         lockfile_data=lock_data,
+                        archive_config=archive_config,
+                        environment_prefixes=receipt_environment_prefixes(
+                            config_environments=list(ctx.config.environments),
+                            ctx_root=ctx.root,
+                            env_prefix=ctx.env_prefix,
+                        ),
                         options={
                             "bundle": bundle,
                             "lock": lock,
@@ -1011,28 +1017,21 @@ class WorkspaceArchive:
     def build_receipt(
         *,
         ctx: WorkspaceContext,
+        archive_path: Path,
         archive_config: ArchiveConfig,
-        archive_name: str,
-        archive_sha256: str,
-        manifest_name: str,
-        manifest_sha256: str,
-        lockfile_name: str,
-        lockfile_sha256: str,
-        lockfile_data: object,
+        manifest_path: Path,
+        lockfile_path: Path,
         options: dict[str, object],
     ) -> ArchiveReceipt:
-        """Build the external receipt from captured archive inputs."""
+        """Build the external receipt for a newly created archive."""
         from .receipts import ArchiveReceipt
 
-        return ArchiveReceipt.build_from_captured(
-            archive_name=archive_name,
-            archive_sha256=archive_sha256,
-            manifest_name=manifest_name,
-            manifest_sha256=manifest_sha256,
-            lockfile_name=lockfile_name,
-            lockfile_sha256=lockfile_sha256,
-            lockfile_data=lockfile_data,
+        return ArchiveReceipt.build(
+            root=ctx.root,
+            archive_path=archive_path,
             archive_config=archive_config,
+            manifest_path=manifest_path,
+            lockfile_path=lockfile_path,
             environment_prefixes=receipt_environment_prefixes(
                 config_environments=list(ctx.config.environments),
                 ctx_root=ctx.root,

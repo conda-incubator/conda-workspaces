@@ -23,6 +23,7 @@ from .dependencies import (
     DependencyLocation,
     effective_dependency_location,
     ensure_child_table,
+    reject_legacy_default_feature,
     workspace_toml_source,
 )
 from .sync import affected_environments, sync_environments
@@ -67,11 +68,12 @@ def execute_add(args: argparse.Namespace, *, console: Console | None = None) -> 
     validation_manifest_path = (
         getattr(args, "validation_manifest_path", None) or manifest_path
     )
+    source, namespace = workspace_toml_source(doc, manifest_path, create=True)
+    assert source is not None
+    reject_legacy_default_feature(source)
     current = parser.parse_data_with_redacted_errors(
         doc.unwrap(), validation_manifest_path
     )
-    source, namespace = workspace_toml_source(doc, manifest_path, create=True)
-    assert source is not None
     location.validate_platform(current, source)
     added_names = _add_to_toml(
         source,

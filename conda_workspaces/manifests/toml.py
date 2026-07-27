@@ -505,13 +505,7 @@ def parse_features_and_envs(
         resolver,
     )
 
-    feature_data = source.get("feature", {})
-    if Feature.DEFAULT_NAME in feature_data:
-        resolver.error(
-            "[feature.default] is reserved. Declare default feature content"
-            " in top-level tables."
-        )
-    for feat_name, feat_data in feature_data.items():
+    for feat_name, feat_data in source.get("feature", {}).items():
         config.features[feat_name] = parse_feature(
             feat_name,
             feat_data,

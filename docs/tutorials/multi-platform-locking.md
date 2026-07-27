@@ -6,7 +6,7 @@ environments from the same `conda.lock`.
 
 ## Prerequisites
 
-- conda (>= 24.7) with conda-workspaces >= 0.4.0 installed
+- conda (>= 26.3) with conda-workspaces >= 0.8.0 installed
 - An existing workspace with a `conda.toml` (see [Your first
   project](first-project.md) if you need one)
 
