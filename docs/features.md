@@ -41,7 +41,7 @@ Tasks with no `cmd` that only list dependencies act as aliases:
 
 ```toml
 [tasks.check]
-depends-on = ["test", "lint", "typecheck"]
+depends-on = ["test", "lint", "type-check"]
 description = "Run all checks"
 ```
 

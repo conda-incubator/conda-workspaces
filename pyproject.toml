@@ -164,13 +164,13 @@ docs = {features = ["docs"], solve-group = "default"}
 lint = { cmd = "ruff check conda_workspaces tests", description = "Check code style" }
 format = { cmd = "ruff format conda_workspaces tests", description = "Auto-format code" }
 format-check = { cmd = "ruff format --check conda_workspaces tests", description = "Verify formatting" }
-typecheck = { cmd = "ty check conda_workspaces", description = "Run type checker" }
+type-check = { cmd = "ty check conda_workspaces", description = "Run type checker" }
 test = { cmd = "pytest", description = "Run test suite" }
 test-cov = { cmd = "pytest --cov --cov-report=term-missing --cov-report=html --cov-report=xml", description = "Tests with coverage" }
 docs = { cmd = "sphinx-build -b dirhtml docs docs/_build/dirhtml", description = "Build documentation" }
 
 [tool.pixi.tasks.check]
-depends-on = ["lint", "format-check", "typecheck"]
+depends-on = ["lint", "format-check", "type-check"]
 description = "Run all checks"
 
 [tool.pixi.tasks.demos]

@@ -16,21 +16,21 @@ Please read it before participating.
 4. Run the tests to make sure everything works:
 
    ```bash
-   pixi run test
+   pixi run -e test test
    ```
 
 ## Development setup
 
 conda-workspaces uses pixi for development environment management. The
-available tasks are defined in `pixi.toml`:
+available tasks are defined in `pyproject.toml`:
 
 ```bash
-pixi run test          # run tests
-pixi run test-cov      # run tests with coverage
-pixi run lint          # run ruff linter
-pixi run format        # run ruff formatter
-pixi run typecheck     # run ty type checker
-pixi run docs          # build documentation
+pixi run -e test test        # run tests
+pixi run -e test test-cov    # run tests with coverage
+pixi run -e dev lint         # run ruff linter
+pixi run -e dev format       # run ruff formatter
+pixi run -e dev type-check   # run ty type checker
+pixi run -e docs docs        # build documentation
 ```
 
 ## Making changes
@@ -47,8 +47,8 @@ pixi run docs          # build documentation
 - All code must be typed using modern annotations (`str | None`, `list[str]`).
 - Use `from __future__ import annotations` in all modules.
 - Use relative imports for intra-package references.
-- Run `pixi run lint` and `pixi run format` before committing.
-- Run `pixi run typecheck` to verify type annotations.
+- Run `pixi run -e dev lint` and `pixi run -e dev format` before committing.
+- Run `pixi run -e dev type-check` to verify type annotations.
 
 ### Testing
 
