@@ -131,23 +131,6 @@ def test_info_json_env(
     assert "channels" in data
 
 
-_BROADENED_WORKSPACE = """\
-[workspace]
-name = "broadened"
-channels = ["conda-forge"]
-platforms = ["linux-64", "osx-arm64"]
-
-[dependencies]
-python = ">=3.10"
-
-[feature.windows]
-platforms = ["win-64"]
-
-[environments]
-windows = ["windows"]
-"""
-
-
 @pytest.mark.parametrize(
     ("json_output", "assertions"),
     [
@@ -168,7 +151,7 @@ windows = ["windows"]
     ],
 )
 def test_info_workspace_known_platforms_when_broadened(
-    tmp_path: Path,
+    broadened_platform_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
     rich_console: Console,
     json_output: bool,
@@ -176,13 +159,12 @@ def test_info_workspace_known_platforms_when_broadened(
 ) -> None:
     """A feature-declared platform surfaces in both text and JSON workspace info.
 
-    ``conda workspace lock --platform <p>`` can solve for platforms no
-    workspace-level ``platforms`` entry names as long as a feature
-    declares them, so the reachable set must be visible alongside the
-    workspace set.
+    ``conda workspace lock --platform <p> --output <fragment>`` can
+    solve for platforms no workspace-level ``platforms`` entry names
+    as long as a feature declares them, so the reachable set must be
+    visible alongside the workspace set.
     """
-    (tmp_path / "pixi.toml").write_text(_BROADENED_WORKSPACE, encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(broadened_platform_workspace)
 
     args = make_args(_DEFAULTS, json=json_output)
     execute_info(args, console=rich_console)

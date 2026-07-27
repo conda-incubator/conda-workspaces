@@ -51,11 +51,11 @@ Enter
 Wait /\$/
 Sleep 3s
 
-Type "# Narrow to a subset when iterating — typos fail fast"
+Type "# Partial locks require an explicit output and leave conda.lock untouched"
 Enter
 Sleep 500ms
 
-Type@80ms "conda workspace lock --platform linux-64"
+Type@80ms "conda workspace lock --platform linux-64 --output conda.lock.linux-64"
 Enter
 Wait /\$/
 Sleep 3s

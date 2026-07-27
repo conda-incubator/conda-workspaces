@@ -429,11 +429,14 @@ are never auto-baselined — callers who need them must opt in via
 Cross-platform solves are fail-fast by default: the first unsatisfiable
 `(environment, platform)` pair raises `SolveError` with the platform
 in the message, and no `conda.lock` is written. Pass
-`--skip-unsolvable` to keep solving the remaining pairs. If every pair
-fails, the command raises an aggregate error rather than writing an
-empty lockfile.
+`--skip-unsolvable --output <fragment>` to keep solving the remaining
+pairs. If every pair fails, the command raises an aggregate error
+rather than writing an empty lockfile.
 
 Users can restrict a run with `conda workspace lock --platform
-<subdir>` (repeatable) to regenerate just a subset, e.g. when a new
-dependency only affects one platform. Unknown platforms raise
-`PlatformError` before any solve runs.
+<subdir> --output <fragment>` (repeatable) to generate just a subset,
+e.g. when a new dependency only affects one platform. Environment and
+platform filters plus `--skip-unsolvable` always require an explicit
+output path. Only an unfiltered run implicitly replaces the complete
+canonical `conda.lock`. Unknown platforms raise `PlatformError` before
+any solve runs.

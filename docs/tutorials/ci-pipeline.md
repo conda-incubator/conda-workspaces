@@ -302,13 +302,14 @@ Use `--skip-unsolvable` to let the solver continue past platforms
 where no solution exists:
 
 ```bash
-conda workspace lock --skip-unsolvable
+conda workspace lock --skip-unsolvable --output conda.lock.solvable
 ```
 
-Skipped platforms are reported as warnings. The resulting lockfile
-covers only the platforms that solved successfully. CI jobs for
-skipped platforms will fail at install time with a clear
-`LockfileNotFoundError`.
+Skipped platforms are reported as warnings. The explicit fragment
+covers only the platforms that solved successfully. Merge it with
+fragments covering the remaining required pairs before using it as
+the canonical lock. CI jobs for skipped platforms will fail at
+install time with a clear `LockfileNotFoundError`.
 
 ### How do I manage disk space on long-lived CI runners?
 
