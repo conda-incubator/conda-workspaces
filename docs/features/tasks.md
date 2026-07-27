@@ -90,9 +90,9 @@ Commands support Jinja2 templates with `conda.*` context variables:
 | Variable | Description |
 |---|---|
 | `{{ conda.platform }}` | Current platform (e.g. `osx-arm64`) |
-| `{{ conda.environment_name }}` | Name of the active conda environment |
-| `{{ conda.environment.name }}` | Active environment name |
-| `{{ conda.prefix }}` | Target conda environment prefix path |
+| `{{ conda.environment_name }}` | Selected task environment name, or active environment name when none is selected |
+| `{{ conda.environment.name }}` | Selected task environment name, or active environment name when none is selected |
+| `{{ conda.prefix }}` | Selected task environment prefix, or active target prefix when none is selected |
 | `{{ conda.version }}` | conda version |
 | `{{ conda.manifest_path }}` | Path to the task file |
 | `{{ conda.init_cwd }}` | Current working directory at rendering time |
@@ -103,6 +103,11 @@ Commands support Jinja2 templates with `conda.*` context variables:
 
 When reading from `pixi.toml`, `{{ pixi.platform }}` etc. also work as
 aliases.
+
+Each executable task renders these values from the environment in which it
+will run. This includes `-e`, `default-environment`, and an `environment`
+selector on a dependency. Dependency argument values and templated ad-hoc
+commands follow the same rule.
 
 ## Task environment variables
 
@@ -139,7 +144,9 @@ outputs = ["dist/*.whl"]
 
 :::{tip}
 The cache compares SHA-256 fingerprints for declared inputs and outputs,
-favoring correctness over timestamp shortcuts.
+favoring correctness over timestamp shortcuts. The selected environment prefix,
+or the current conda prefix when no environment is selected, is part of the
+cache identity, so switching environments reruns the task.
 :::
 
 ## Platform-specific tasks

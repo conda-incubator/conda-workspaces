@@ -218,6 +218,8 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
             target_name,
             task_args,
             task_file,
+            conda_prefix,
+            task_prefixes,
             quiet=quiet,
             console=console,
         )
@@ -232,6 +234,8 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
         if task.is_alias:
             continue
 
+        task_prefix = task_prefixes.get(name, conda_prefix)
+
         if name == target_name:
             current_args = task_args
         else:
@@ -243,12 +247,23 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
             if dep_info and dep_info.args:
                 for i, da in enumerate(dep_info.args):
                     if isinstance(da, dict):
-                        current_args.update(da)
+                        current_args.update(
+                            {
+                                key: render(
+                                    value,
+                                    manifest_path=task_file,
+                                    task_args=task_args,
+                                    target_prefix=task_prefix,
+                                )
+                                for key, value in da.items()
+                            }
+                        )
                     elif i < len(task.args):
                         current_args[task.args[i].name] = render(
                             da,
                             manifest_path=task_file,
                             task_args=task_args,
+                            target_prefix=task_prefix,
                         )
 
         cmd = task.cmd
@@ -257,30 +272,52 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
 
         if isinstance(cmd, list):
             cmd = [
-                render(item, manifest_path=task_file, task_args=current_args)
+                render(
+                    item,
+                    manifest_path=task_file,
+                    task_args=current_args,
+                    target_prefix=task_prefix,
+                )
                 for item in cmd
             ]
             display_cmd = quote_for_shell(*cmd)
         else:
-            cmd = render_command(cmd, manifest_path=task_file, task_args=current_args)
+            cmd = render_command(
+                cmd,
+                manifest_path=task_file,
+                task_args=current_args,
+                target_prefix=task_prefix,
+            )
             display_cmd = cmd
 
         task_env = {
-            k: render(v, manifest_path=task_file, task_args=current_args)
+            k: render(
+                v,
+                manifest_path=task_file,
+                task_args=current_args,
+                target_prefix=task_prefix,
+            )
             for k, v in task.env.items()
         }
 
         cwd = Path(getattr(args, "cwd", None) or task.cwd or project_root)
         clean_env = getattr(args, "clean_env", False) or task.clean_env
 
-        task_prefix = task_prefixes.get(name, conda_prefix)
-
         rendered_inputs = render_list(
-            task.inputs, manifest_path=task_file, task_args=current_args
+            task.inputs,
+            manifest_path=task_file,
+            task_args=current_args,
+            target_prefix=task_prefix,
         )
         rendered_outputs = render_list(
-            task.outputs, manifest_path=task_file, task_args=current_args
+            task.outputs,
+            manifest_path=task_file,
+            task_args=current_args,
+            target_prefix=task_prefix,
         )
+        cache_prefix = task_prefix
+        if cache_prefix is None and (rendered_inputs or rendered_outputs):
+            cache_prefix = Path(context.target_prefix)
 
         if rendered_inputs or rendered_outputs:
             if is_cached(
@@ -291,6 +328,7 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
                 rendered_inputs,
                 rendered_outputs,
                 cwd,
+                conda_prefix=cache_prefix,
             ):
                 if not quiet:
                     status.message(
@@ -359,6 +397,7 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
                 rendered_inputs,
                 rendered_outputs,
                 cwd,
+                conda_prefix=cache_prefix,
             )
 
     if has_deps and not quiet and tasks[target_name].is_alias:
@@ -373,6 +412,8 @@ def _execute_dry_run(
     target_name: str,
     task_args: dict[str, str],
     task_file: Path,
+    conda_prefix: Path | None,
+    task_prefixes: dict[str, Path | None],
     *,
     quiet: bool,
     console: Console,
@@ -383,6 +424,8 @@ def _execute_dry_run(
         task = tasks[name]
         if task.is_alias:
             continue
+
+        task_prefix = task_prefixes.get(name, conda_prefix)
 
         if name == target_name:
             current_args = task_args
@@ -395,12 +438,23 @@ def _execute_dry_run(
             if dep_info and dep_info.args:
                 for i, da in enumerate(dep_info.args):
                     if isinstance(da, dict):
-                        current_args.update(da)
+                        current_args.update(
+                            {
+                                key: render(
+                                    value,
+                                    manifest_path=task_file,
+                                    task_args=task_args,
+                                    target_prefix=task_prefix,
+                                )
+                                for key, value in da.items()
+                            }
+                        )
                     elif i < len(task.args):
                         current_args[task.args[i].name] = render(
                             da,
                             manifest_path=task_file,
                             task_args=task_args,
+                            target_prefix=task_prefix,
                         )
 
         cmd = task.cmd
@@ -409,13 +463,21 @@ def _execute_dry_run(
         if isinstance(cmd, list):
             rendered_cmds[name] = quote_for_shell(
                 *(
-                    render(item, manifest_path=task_file, task_args=current_args)
+                    render(
+                        item,
+                        manifest_path=task_file,
+                        task_args=current_args,
+                        target_prefix=task_prefix,
+                    )
                     for item in cmd
                 )
             )
         else:
             rendered_cmds[name] = render_command(
-                cmd, manifest_path=task_file, task_args=current_args
+                cmd,
+                manifest_path=task_file,
+                task_args=current_args,
+                target_prefix=task_prefix,
             )
 
     if not quiet:
@@ -435,15 +497,20 @@ def _run_adhoc(
     task_args = list(getattr(args, "task_args", []))
     full_cmd = " ".join([cmd_name, *task_args])
 
-    templated = getattr(args, "templated", False)
-    if templated:
-        full_cmd = render(full_cmd, manifest_path=task_file)
-
-    dry_run = getattr(args, "dry_run", False)
     user_env = getattr(args, "environment", None)
     conda_prefix = _env_prefix_or_none(args, required=user_env is not None)
     if conda_prefix is None and user_env is None:
         conda_prefix = _env_prefix_or_none(args, "default")
+
+    templated = getattr(args, "templated", False)
+    if templated:
+        full_cmd = render(
+            full_cmd,
+            manifest_path=task_file,
+            target_prefix=conda_prefix,
+        )
+
+    dry_run = getattr(args, "dry_run", False)
 
     if dry_run:
         if not getattr(args, "quiet", False):

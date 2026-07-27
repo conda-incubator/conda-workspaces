@@ -1875,12 +1875,34 @@ def test_install_from_lockfile_errors(
         install_from_lockfile(ctx, env_name)
 
 
+def test_install_from_lockfile_rejects_explicit_prefix_replacement(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+) -> None:
+    ctx = workspace_ctx_factory()
+
+    with pytest.raises(CondaWorkspacesError, match="explicit prefix"):
+        install_from_lockfile(
+            ctx,
+            "default",
+            prefix=tmp_path / "explicit",
+            replace_existing=True,
+            dry_run=True,
+        )
+
+
 @pytest.mark.parametrize("dry_run", [False, True], ids=["install", "dry-run"])
+@pytest.mark.parametrize(
+    "replace_existing",
+    [False, True],
+    ids=["update", "replace"],
+)
 def test_install_from_lockfile(
     tmp_path: Path,
     workspace_ctx_factory: Callable[..., WorkspaceContext],
     monkeypatch: pytest.MonkeyPatch,
     dry_run: bool,
+    replace_existing: bool,
 ) -> None:
     """install_from_lockfile validates URLs before its dry-run write boundary."""
     ctx = workspace_ctx_factory()
@@ -1936,7 +1958,18 @@ def test_install_from_lockfile(
         fake_install,
     )
 
-    install_from_lockfile(ctx, "default", dry_run=dry_run)
+    prefix = ctx.env_prefix("default")
+    marker = prefix / "old-prefix"
+    if replace_existing:
+        prefix.mkdir(parents=True)
+        marker.write_text("old", encoding="utf-8")
+
+    install_from_lockfile(
+        ctx,
+        "default",
+        dry_run=dry_run,
+        replace_existing=replace_existing,
+    )
 
     assert len(get_records_calls) == 1
     assert get_records_calls[0] == [
@@ -1945,12 +1978,14 @@ def test_install_from_lockfile(
     ]
     if dry_run:
         assert install_calls == []
-        assert not ctx.env_prefix("default").exists()
+        assert prefix.exists() is replace_existing
+        assert marker.exists() is replace_existing
     else:
         assert len(install_calls) == 1
         assert install_calls[0]["records"] == records_sentinel
-        assert install_calls[0]["prefix"] == str(ctx.env_prefix("default"))
+        assert install_calls[0]["prefix"] == str(prefix)
         assert install_calls[0]["requested_specs"] == []
+        assert not marker.exists()
 
 
 @pytest.mark.parametrize(
@@ -2102,10 +2137,17 @@ def test_install_from_lockfile_revalidates_workspace_after_package_fetch(
     assert not ctx.env_prefix("default").exists()
 
 
+@pytest.mark.parametrize(
+    ("replace_existing", "expected_prune"),
+    [(False, True), (True, False)],
+    ids=["update", "replace"],
+)
 def test_install_from_lockfile_dry_run_builds_requested_and_prune_plan(
     tmp_path: Path,
     workspace_ctx_factory: Callable[..., WorkspaceContext],
     monkeypatch: pytest.MonkeyPatch,
+    replace_existing: bool,
+    expected_prune: bool,
 ) -> None:
     ctx = workspace_ctx_factory()
     ctx.config.features["default"].conda_dependencies = {
@@ -2153,14 +2195,20 @@ def test_install_from_lockfile_dry_run_builds_requested_and_prune_plan(
         lambda **kwargs: pytest.fail("dry-run mutated the prefix"),
     )
 
-    plan = install_from_lockfile(ctx, "default", dry_run=True)
+    plan = install_from_lockfile(
+        ctx,
+        "default",
+        dry_run=True,
+        replace_existing=replace_existing,
+    )
 
     assert {MatchSpec(spec).name for spec in plan.requested_specs or ()} == {
         "python",
         "local-project",
     }
-    assert plan.prune_setup is not None
-    assert [record.name for record in plan.prune_setup.unlink_precs] == ["extra"]
+    assert (plan.prune_setup is not None) is expected_prune
+    if plan.prune_setup is not None:
+        assert [record.name for record in plan.prune_setup.unlink_precs] == ["extra"]
     assert PrefixData(str(prefix)).get("extra", None) == extra
 
 

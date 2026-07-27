@@ -352,6 +352,15 @@ def test_conda_context_prefix():
     assert CondaContext().prefix == context.target_prefix
 
 
+def test_conda_context_selected_prefix():
+    selected_prefix = Path("/workspace/.conda/envs/test")
+    ctx = CondaContext(target_prefix=selected_prefix)
+
+    assert ctx.prefix == str(selected_prefix)
+    assert ctx.environment_name == "test"
+    assert ctx.environment.name == "test"
+
+
 def test_conda_context_version():
     assert CondaContext().version == conda_version
 

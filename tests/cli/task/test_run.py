@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+from conda.base.context import Context
 from conda.utils import quote_for_shell
 
 import conda_workspaces.cli.task.run as run_mod
@@ -471,20 +472,60 @@ def test_execute_run_with_cwd_override(tmp_path, capsys, fake_shell):
     assert Path(fake_shell.calls[0][2]) == subdir
 
 
-def test_execute_run_saves_cache(tmp_path, fake_shell, monkeypatch):
-    """Successful run with inputs/outputs saves to cache."""
-    task_file = tmp_path / "conda.toml"
-    task_file.write_text(
-        '[tasks.build]\ncmd = "make"\ninputs = ["src/*.py"]\noutputs = ["dist/"]\n'
-    )
+@pytest.mark.parametrize(
+    "environment_source",
+    ["selected", "current"],
+    ids=["selected", "current"],
+)
+def test_execute_run_saves_cache_for_effective_environment(
+    workspace_task_file,
+    fake_shell,
+    env_prefix_stub,
+    tmp_path,
+    monkeypatch,
+    environment_source,
+):
+    """Successful run caches against the environment that executes it."""
+    effective_prefix = tmp_path / ".conda" / "envs" / environment_source
+    if environment_source == "selected":
+        workspace_task_file.write_text(
+            '[workspace]\nname = "test"\nchannels = ["conda-forge"]\n'
+            'platforms = ["linux-64"]\n\n[environments]\nmyenv = []\n\n'
+            '[tasks.build]\ncmd = "make"\ndefault-environment = "myenv"\n'
+            'inputs = ["src/*.py"]\noutputs = ["dist/"]\n'
+        )
+        env_prefix_stub["myenv"] = effective_prefix
+        shell_prefix = effective_prefix
+    else:
+        workspace_task_file.write_text(
+            '[tasks.build]\ncmd = "make"\ninputs = ["src/*.py"]\noutputs = ["dist/"]\n'
+        )
+        monkeypatch.setattr(
+            Context,
+            "target_prefix",
+            property(lambda self: str(effective_prefix)),
+        )
+        shell_prefix = None
 
-    save_calls: list[tuple] = []
-    monkeypatch.setattr(run_mod, "is_cached", lambda *a, **kw: False)
-    monkeypatch.setattr(run_mod, "save_cache", lambda *a, **kw: save_calls.append(a))
-    result = execute_run(_run_args(task_file, task_name="build", quiet=True))
+    cache_calls: list[tuple[str, dict]] = []
+
+    def is_cached(*args, **kwargs):
+        cache_calls.append(("load", kwargs))
+        return False
+
+    def save_cache(*args, **kwargs):
+        cache_calls.append(("save", kwargs))
+
+    monkeypatch.setattr(run_mod, "is_cached", is_cached)
+    monkeypatch.setattr(run_mod, "save_cache", save_cache)
+    result = execute_run(_run_args(workspace_task_file, task_name="build", quiet=True))
 
     assert result == 0
-    assert len(save_calls) == 1
+    assert cache_calls == [
+        ("load", {"conda_prefix": effective_prefix}),
+        ("save", {"conda_prefix": effective_prefix}),
+    ]
+    assert fake_shell.calls[0][3] == shell_prefix
 
 
 @pytest.mark.parametrize("installed", [True, False], ids=["installed", "uninstalled"])
@@ -512,6 +553,77 @@ def test_execute_run_explicit_env_overrides_default(
     result = execute_run(_run_args(workspace_task_file, environment="myenv"))
     assert result == 0
     assert fake_shell.calls[0][3] == test_prefix
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["execute", "dry-run"])
+@pytest.mark.parametrize(
+    "selector",
+    ["cli", "task-default", "dependency", "adhoc"],
+    ids=["cli", "task-default", "dependency", "adhoc"],
+)
+def test_execute_run_templates_use_selected_environment(
+    workspace_task_file,
+    fake_shell,
+    env_prefix_stub,
+    tmp_path,
+    rich_console,
+    selector,
+    dry_run,
+):
+    template = (
+        "echo {{ conda.prefix }} {{ conda.environment_name }} "
+        "{{ conda.environment.name }}"
+    )
+    workspace = (
+        '[workspace]\nname = "test"\nchannels = ["conda-forge"]\n'
+        'platforms = ["linux-64"]\n\n[environments]\nmyenv = []\n\n'
+    )
+    if selector == "cli":
+        task_body = f'[tasks]\ngreet = "{template}"\n'
+        overrides = {"environment": "myenv"}
+    elif selector == "task-default":
+        task_body = (
+            f'[tasks.greet]\ncmd = "{template}"\ndefault-environment = "myenv"\n'
+        )
+        overrides = {}
+    elif selector == "dependency":
+        task_body = (
+            "[tasks.setup]\n"
+            'cmd = "echo {{ prefix }} {{ name }} {{ nested }}"\n'
+            'args = [{ arg = "prefix" }, { arg = "name" }, '
+            '{ arg = "nested" }]\n\n'
+            '[tasks.greet]\ncmd = "echo hello"\n'
+            'depends-on = [{ task = "setup", environment = "myenv", '
+            'args = [{ prefix = "{{ conda.prefix }}", '
+            'name = "{{ conda.environment_name }}", '
+            'nested = "{{ conda.environment.name }}" }] }]\n'
+        )
+        overrides = {}
+    else:
+        task_body = '[tasks]\ngreet = "echo hello"\n'
+        overrides = {
+            "environment": "myenv",
+            "task_name": template,
+            "templated": True,
+        }
+    workspace_task_file.write_text(f"{workspace}{task_body}")
+    selected_prefix = tmp_path / ".conda" / "envs" / "myenv"
+    env_prefix_stub["myenv"] = selected_prefix
+    expected_command = f"echo {selected_prefix} myenv myenv"
+
+    result = execute_run(
+        _run_args(workspace_task_file, dry_run=dry_run, **overrides),
+        console=rich_console,
+    )
+
+    assert result == 0
+    if dry_run:
+        assert expected_command in rich_console.file.getvalue()
+        assert fake_shell.calls == []
+    else:
+        assert (expected_command, selected_prefix) in [
+            (call[0], call[3]) for call in fake_shell.calls
+        ]
 
 
 @pytest.mark.parametrize(

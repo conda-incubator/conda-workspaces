@@ -345,8 +345,13 @@ class CondaContext:
     template references a variable.
     """
 
-    def __init__(self, manifest_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        manifest_path: Path | None = None,
+        target_prefix: Path | None = None,
+    ) -> None:
         self._manifest_path = manifest_path
+        self._target_prefix = target_prefix
 
     @property
     def platform(self) -> str:
@@ -357,7 +362,10 @@ class CondaContext:
 
     @property
     def environment_name(self) -> str:
-        """Name of the currently active conda environment, or ``"base"``."""
+        """Name of the selected or currently active conda environment."""
+        if self._target_prefix is not None:
+            return self._target_prefix.name
+
         from conda.base.context import context
 
         if context.active_prefix:
@@ -372,6 +380,9 @@ class CondaContext:
     @property
     def prefix(self) -> str:
         """Absolute path to the target conda environment prefix."""
+        if self._target_prefix is not None:
+            return str(self._target_prefix)
+
         from conda.base.context import context
 
         return str(context.target_prefix)
@@ -432,6 +443,7 @@ class _EnvironmentProxy:
 def build_template_context(
     manifest_path: Path | None = None,
     task_args: dict[str, str] | None = None,
+    target_prefix: Path | None = None,
 ) -> dict[str, object]:
     """Build the full Jinja2 template context dict.
 
@@ -440,7 +452,7 @@ def build_template_context(
     - ``pixi``: alias to the same context (for pixi.toml compatibility)
     - Any user-supplied task argument values
     """
-    ctx = CondaContext(manifest_path=manifest_path)
+    ctx = CondaContext(manifest_path=manifest_path, target_prefix=target_prefix)
     result: dict[str, object] = {"conda": ctx, "pixi": ctx}
     if task_args:
         reserved = {"conda", "pixi"}

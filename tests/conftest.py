@@ -58,12 +58,19 @@ class ReplacePublicationWriter(Protocol):
 @pytest.fixture
 def replace_lockfile_install_plan(
     monkeypatch: pytest.MonkeyPatch,
-) -> Callable[[str, Callable[..., None]], None]:
+) -> Callable[..., None]:
     """Replace one module's prepared lockfile installer with a recording fake."""
 
-    def replace(module: str, record: Callable[..., None]) -> None:
+    def replace(
+        module: str,
+        record: Callable[..., None],
+        *,
+        preflight_prefix_identity: tuple[int, int] | None = None,
+    ) -> None:
+        identity = preflight_prefix_identity
+
         class FakeInstallPlan:
-            preflight_prefix_identity = None
+            preflight_prefix_identity = identity
 
             def __init__(
                 self,
@@ -87,6 +94,15 @@ def replace_lockfile_install_plan(
 
             def execute(self) -> None:
                 record("execute", self.ctx, self.name, self.kwargs)
+
+            def remove_preflight_prefix(self, ctx: object) -> None:
+                if self.preflight_prefix_identity is not None:
+                    record(
+                        "remove",
+                        ctx,
+                        self.name,
+                        {"expected_prefix_identity": self.preflight_prefix_identity},
+                    )
 
         monkeypatch.setattr(f"{module}.LockfileInstallPlan", FakeInstallPlan)
 

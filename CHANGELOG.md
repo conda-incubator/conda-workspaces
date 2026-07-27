@@ -59,6 +59,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Task templates now render `conda.prefix`, `conda.environment_name`, and
+  `conda.environment.name` from the environment selected for each executable
+  task, including dependency-selected environments, dry runs, and templated
+  ad-hoc commands. Named dependency argument values now follow the same rule as
+  positional values. Task cache entries now include the selected or current
+  prefix, so switching environments produces a cache miss instead of reusing
+  another environment's result. Existing cache entries refresh automatically
+  on the next run.
+- `conda workspace install --force-reinstall` now removes and recreates
+  prefixes when a satisfiable, frozen, locked, or CI-required lockfile is used.
+  The flag no longer forces a re-solve by itself. Workflows that relied on that
+  side effect should combine `--force-reinstall` with `--no-lock`.
 - Receipt-verified bundles now publish the URL, SHA-256, size, and filename
   metadata that conda needs to recognize bundled packages. Both
   `unarchive --install` and a later `install --locked` now work from an empty

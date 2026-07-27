@@ -75,6 +75,7 @@ def _compute_entry(
     env: dict[str, str],
     input_files: list[str],
     output_files: list[str],
+    conda_prefix: Path | None = None,
 ) -> dict[str, Any]:
     """Compute a cache entry from current state."""
     cmd_data = (
@@ -87,6 +88,7 @@ def _compute_entry(
     return {
         "cmd_hash": cmd_hash,
         "env_hash": env_hash,
+        "conda_prefix": str(conda_prefix) if conda_prefix is not None else None,
         "inputs": _fingerprint_files(input_files),
         "outputs": _fingerprint_files(output_files),
     }
@@ -100,6 +102,8 @@ def is_cached(
     input_patterns: list[str],
     output_patterns: list[str],
     cwd: Path,
+    *,
+    conda_prefix: Path | None = None,
 ) -> bool:
     """Check whether the task can be skipped (cache hit).
 
@@ -122,11 +126,19 @@ def is_cached(
     input_files = _expand_globs(input_patterns, cwd)
     output_files = _expand_globs(output_patterns, cwd)
 
-    current = _compute_entry(cmd, env, input_files, output_files)
+    current = _compute_entry(
+        cmd,
+        env,
+        input_files,
+        output_files,
+        conda_prefix=conda_prefix,
+    )
 
     if cached.get("cmd_hash") != current["cmd_hash"]:
         return False
     if cached.get("env_hash") != current["env_hash"]:
+        return False
+    if cached.get("conda_prefix") != current["conda_prefix"]:
         return False
 
     if not _files_match(cached.get("inputs", {}), current["inputs"]):
@@ -158,10 +170,18 @@ def save_cache(
     input_patterns: list[str],
     output_patterns: list[str],
     cwd: Path,
+    *,
+    conda_prefix: Path | None = None,
 ) -> None:
     """Write or update the cache entry for a task."""
     input_files = _expand_globs(input_patterns, cwd)
     output_files = _expand_globs(output_patterns, cwd)
-    entry = _compute_entry(cmd, env, input_files, output_files)
+    entry = _compute_entry(
+        cmd,
+        env,
+        input_files,
+        output_files,
+        conda_prefix=conda_prefix,
+    )
     cf = _cache_file(project_root, task_name)
     cf.write_text(json.dumps(entry, indent=2), encoding="utf-8")

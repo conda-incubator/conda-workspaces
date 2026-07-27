@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 from conda.common.io import captured
 
 from ...context import isolated_package_cache
-from ...envs import activate_d_scripts, install_environment, remove_environment
+from ...envs import activate_d_scripts, install_environment
 from ...lockfile import (
     LockfileInstallPlan,
     load_lockfile_data,
@@ -226,15 +226,7 @@ def sync_environments(
                     if not update_names:
                         continue
                 if force_reinstall and not dry_run:
-                    remove_environment(
-                        ctx,
-                        name,
-                        expected_prefix_identity=getattr(
-                            install_plans[name],
-                            "preflight_prefix_identity",
-                            None,
-                        ),
-                    )
+                    install_plans[name].remove_preflight_prefix(ctx)
                 if not dry_run:
                     install_plans[name].execute()
                 status.message(

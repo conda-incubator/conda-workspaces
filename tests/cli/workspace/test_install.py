@@ -224,15 +224,10 @@ def test_install_flags_forwarded(
     _stub_lockfile(monkeypatch)
 
     installed: list[tuple[str, bool]] = []
-    removed: list[str] = []
 
     replace_lockfile_install_plan(
         "conda_workspaces.cli.workspace.sync",
         lambda phase, ctx, name, kwargs: installed.append((name, phase == "prepare")),
-    )
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sync.remove_environment",
-        lambda ctx, name, **kwargs: removed.append(name),
     )
 
     args = make_args(
@@ -244,10 +239,8 @@ def test_install_flags_forwarded(
     execute_install(args)
     if dry_run:
         assert installed == [("default", True)]
-        assert removed == []
     else:
         assert installed == [("default", True), ("default", False)]
-        assert removed == (["default"] if force else [])
 
 
 def test_install_dry_run_previews_lockfile(
@@ -355,23 +348,42 @@ def test_install_prevalidates_all_environments_before_mutation(
 ) -> None:
     monkeypatch.chdir(pixi_workspace)
     write_stub_lockfile(pixi_workspace)
-    calls: list[tuple[str, bool]] = []
+    calls: list[tuple[str, str]] = []
 
     def reject_second_preview(phase, ctx, name, kwargs) -> None:
-        preparing = phase == "prepare"
-        calls.append((name, preparing))
-        if name == "test" and preparing:
+        calls.append((name, phase))
+        if name == "test" and phase == "prepare":
             raise CondaWorkspacesError("invalid test environment")
 
     replace_lockfile_install_plan(
         "conda_workspaces.cli.workspace.install",
         reject_second_preview,
+        preflight_prefix_identity=(7, 11),
     )
 
     with pytest.raises(CondaWorkspacesError, match="invalid test environment"):
-        execute_install(make_args(_DEFAULTS, frozen=True))
+        execute_install(make_args(_DEFAULTS, frozen=True, force_reinstall=True))
 
-    assert calls == [("default", True), ("test", True)]
+    assert calls == [("default", "prepare"), ("test", "prepare")]
+
+
+def test_install_force_reinstall_rejects_explicit_prefix(
+    pixi_workspace: Path,
+    rich_console: Console,
+) -> None:
+    config, ctx = workspace_context_from_args(
+        make_args(_DEFAULTS, manifest_file=pixi_workspace / "pixi.toml")
+    )
+
+    with pytest.raises(CondaWorkspacesError, match="explicit prefix"):
+        install_from_lockfile_all(
+            ctx,
+            config,
+            "default",
+            console=rich_console,
+            prefix=pixi_workspace / "custom-prefix",
+            force_reinstall=True,
+        )
 
 
 def test_install_fetches_every_environment_before_mutation(
@@ -464,8 +476,13 @@ def test_install_revalidates_guard_after_lock_snapshot(
 
 @pytest.mark.parametrize(
     "mode",
-    ["frozen", "locked", "current"],
-    ids=["frozen", "locked", "up-to-date"],
+    ["frozen", "locked", "current", "ci"],
+    ids=["frozen", "locked", "up-to-date", "ci"],
+)
+@pytest.mark.parametrize(
+    "force_reinstall",
+    [False, True],
+    ids=["ordinary", "force"],
 )
 def test_install_lockfile_paths_forward_dry_run(
     pixi_workspace: Path,
@@ -473,10 +490,14 @@ def test_install_lockfile_paths_forward_dry_run(
     capsys: pytest.CaptureFixture[str],
     write_stub_lockfile: Callable[[Path], None],
     mode: str,
+    force_reinstall: bool,
     replace_lockfile_install_plan,
 ) -> None:
     monkeypatch.chdir(pixi_workspace)
-    monkeypatch.delenv("CI", raising=False)
+    if mode == "ci":
+        monkeypatch.setenv("CI", "true")
+    else:
+        monkeypatch.delenv("CI", raising=False)
     write_stub_lockfile(pixi_workspace)
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.install.lockfile_status",
@@ -486,29 +507,84 @@ def test_install_lockfile_paths_forward_dry_run(
         "conda_workspaces.cli.workspace.install.check_lockfile_satisfiability",
         lambda config, data, platform: LockfileStatus(status=LockfileStatus.UP_TO_DATE),
     )
-    calls: list[tuple[str, bool]] = []
+    calls: list[tuple[str, bool, bool]] = []
 
     def record_install(phase, ctx, name, kwargs) -> None:
-        calls.append((name, phase == "prepare"))
+        calls.append((name, phase == "prepare", kwargs["replace_existing"]))
 
     replace_lockfile_install_plan(
         "conda_workspaces.cli.workspace.install",
         record_install,
     )
-    kwargs = {mode: True} if mode != "current" else {}
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.sync_environments",
+        lambda *args, **kwargs: pytest.fail("used the solver instead of the lockfile"),
+    )
+    kwargs = {mode: True} if mode in {"frozen", "locked"} else {}
 
     result = execute_install(
         make_args(
             _DEFAULTS,
             environment="default",
             dry_run=True,
+            force_reinstall=force_reinstall,
             **kwargs,
         )
     )
 
     assert result == 0
-    assert calls == [("default", True)]
+    assert calls == [("default", True, force_reinstall)]
     assert "Would install" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "prefix_identity",
+    [(7, 11), None],
+    ids=["existing-prefix", "absent-prefix"],
+)
+def test_install_from_lockfile_all_force_reinstall(
+    pixi_workspace: Path,
+    rich_console: Console,
+    write_stub_lockfile: Callable[[Path], None],
+    prefix_identity: tuple[int, int] | None,
+    replace_lockfile_install_plan,
+) -> None:
+    write_stub_lockfile(pixi_workspace)
+    config, ctx = workspace_context_from_args(
+        make_args(_DEFAULTS, manifest_file=pixi_workspace / "pixi.toml")
+    )
+    events: list[tuple[str, object]] = []
+
+    def record_install(phase, ctx, name, kwargs) -> None:
+        if phase == "prepare":
+            events.append(("prepare", kwargs["replace_existing"]))
+        elif phase == "remove":
+            events.append(("remove", kwargs["expected_prefix_identity"]))
+        else:
+            events.append(("execute", None))
+
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.install",
+        record_install,
+        preflight_prefix_identity=prefix_identity,
+    )
+
+    assert (
+        install_from_lockfile_all(
+            ctx,
+            config,
+            "default",
+            console=rich_console,
+            force_reinstall=True,
+        )
+        == 0
+    )
+
+    expected = [("prepare", True)]
+    if prefix_identity is not None:
+        expected.append(("remove", prefix_identity))
+    expected.append(("execute", None))
+    assert events == expected
 
 
 def test_install_locked_validates_freshness(
