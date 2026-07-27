@@ -268,12 +268,22 @@ standalone = ">=1"
     pypi = resolution["pypi_dependencies"]
     assert conda["python"]["provenance"] == {
         "table": f"[{prefix}dependencies]",
+        "location": {
+            "environment": None,
+            "feature": None,
+            "platform": None,
+        },
         "inherited_from": f"[{prefix}workspace.dependencies]",
     }
     assert conda["shared"]["spec"].endswith(">=4")
     assert conda["shared"]["provenance"]["table"] == (
         f"[{prefix}environments.test.target.linux-64-cuda.dependencies]"
     )
+    assert conda["shared"]["provenance"]["location"] == {
+        "environment": "test",
+        "feature": None,
+        "platform": "linux-64-cuda",
+    }
     assert conda["pytest"]["provenance"]["table"] == (
         f"[{prefix}feature.test.dependencies]"
     )
@@ -283,6 +293,11 @@ standalone = ">=1"
     assert pypi["requests"]["provenance"]["table"] == (
         f"[{prefix}feature.test.pypi-dependencies]"
     )
+    assert pypi["requests"]["provenance"]["location"] == {
+        "environment": None,
+        "feature": "test",
+        "platform": None,
+    }
     assert pypi["requests"]["spec"] == {"version": ">=2"}
     assert pypi["vcs"]["spec"] == {
         "git": "https://example.com/repo.git",
