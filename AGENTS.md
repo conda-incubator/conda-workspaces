@@ -227,7 +227,8 @@
   |----------------------------------------------------------|---------------------------------------------------------|
   | `info`, `list`, `envs`, `export`, `quickstart`,          | `init`, `activate`, `run`, `shell`                      |
   | `install`, `lock`, `add`, `remove`, `clean`, `import`,   |                                                         |
-  | `task run`, `task list`, `task add`, `task remove`,      |                                                         |
+  | `archive`, `unarchive`, `task run`, `task list`,         |                                                         |
+  | `task add`, `task remove`,                               |                                                         |
   | `task export`                                            |                                                         |
 
   When a side-effect subcommand grows a genuinely structured result
@@ -248,10 +249,10 @@
 
 - Orchestrator subcommands that call other subcommands (`quickstart`,
   any future composite) own the JSON surface themselves: they emit
-  one structured payload on stdout at the end, and route every
-  nested handler through a silent Rich `Console` so the sub-handler's
-  status lines land in a throwaway buffer instead of corrupting the
-  payload. Do not propagate `--json` into the sub-handler's
+  one structured payload on stdout at the end, capture direct nested
+  stdout, and route every nested handler through a silent Rich
+  `Console` so status lines land in a throwaway buffer instead of
+  corrupting the payload. Do not propagate `--json` into the sub-handler's
   ``Namespace`` — the nested handlers stay in human-output mode, and
   the orchestrator silences their ``Console`` instead. See
   ``execute_quickstart`` in ``cli/workspace/quickstart.py`` for the

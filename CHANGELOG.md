@@ -19,6 +19,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Successful `workspace add`, `remove`, `install`, `lock`, `clean`,
+  `import`, `archive`, and `unarchive` commands now emit exactly
+  `{"success": true}` with `--json`. Human status output from nested
+  operations is suppressed so stdout remains one parseable value. The
+  standalone `cw --json` entry point now initializes conda's JSON
+  reporter too. Scripts that parsed status prose should switch to the
+  `success` field. (#119)
 - `conda workspace --dry-run` now preserves manifests, lockfiles,
   environment prefixes, activation metadata, archives, receipts,
   and extraction targets across quickstart, add, remove, install,

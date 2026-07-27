@@ -31,7 +31,7 @@ import json
 import shutil
 import sys
 import tempfile
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext, redirect_stdout
 from pathlib import Path
 
 from conda.base.context import context as conda_context
@@ -157,16 +157,17 @@ def execute_quickstart(
         if manifest_path.is_symlink():
             raise ManifestExistsError(manifest_path)
     else:
-        execute_init(
-            with_prompts(
-                manifest_file=None,
-                manifest_format=args.manifest_format,
-                name=args.name,
-                channels=args.channels,
-                platforms=args.platforms,
-            ),
-            console=console,
-        )
+        with redirect_stdout(io.StringIO()) if json_output else nullcontext():
+            execute_init(
+                with_prompts(
+                    manifest_file=None,
+                    manifest_format=args.manifest_format,
+                    name=args.name,
+                    channels=args.channels,
+                    platforms=args.platforms,
+                ),
+                console=console,
+            )
         parser = ManifestParser.for_format_alias(fmt)
         manifest_path = parser.manifest_path(workspace_root)
 
@@ -194,33 +195,34 @@ def execute_quickstart(
                     args.platforms or [conda_context.subdir],
                 )
 
-        if specs:
-            execute_add(
-                with_prompts(
-                    manifest_file=handler_manifest_path,
-                    validation_manifest_path=manifest_path if dry_run else None,
-                    specs=list(specs),
-                    environment=None,
-                    feature=None,
-                    pypi=False,
-                    no_install=False,
-                    no_lockfile_update=False,
-                    force_reinstall=args.force_reinstall,
-                ),
-                console=console,
-            )
-        else:
-            execute_install(
-                with_prompts(
-                    manifest_file=handler_manifest_path,
-                    validation_manifest_path=manifest_path if dry_run else None,
-                    environment=args.environment,
-                    force_reinstall=args.force_reinstall,
-                    locked=args.locked,
-                    frozen=args.frozen,
-                ),
-                console=console,
-            )
+        with redirect_stdout(io.StringIO()) if json_output else nullcontext():
+            if specs:
+                execute_add(
+                    with_prompts(
+                        manifest_file=handler_manifest_path,
+                        validation_manifest_path=manifest_path if dry_run else None,
+                        specs=list(specs),
+                        environment=None,
+                        feature=None,
+                        pypi=False,
+                        no_install=False,
+                        no_lockfile_update=False,
+                        force_reinstall=args.force_reinstall,
+                    ),
+                    console=console,
+                )
+            else:
+                execute_install(
+                    with_prompts(
+                        manifest_file=handler_manifest_path,
+                        validation_manifest_path=manifest_path if dry_run else None,
+                        environment=args.environment,
+                        force_reinstall=args.force_reinstall,
+                        locked=args.locked,
+                        frozen=args.frozen,
+                    ),
+                    console=console,
+                )
 
     shell_spawned = False
     if not no_shell and not dry_run:

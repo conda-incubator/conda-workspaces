@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from io import StringIO
 from typing import TYPE_CHECKING
 
@@ -281,6 +282,7 @@ def test_quickstart_json_routes_subhandlers_through_silent_console(
         del ns
         if console is not None:
             console.print("[bold cyan]Created[/bold cyan] workspace stub")
+        sys.stdout.write("plain status\n")
 
     orchestrated["runners"]["init"]._effect = _noisy
     orchestrated["runners"]["add"]._effect = _noisy
