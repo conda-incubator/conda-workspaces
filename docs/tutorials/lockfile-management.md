@@ -119,7 +119,9 @@ conda workspace install
 
 This time the lockfile already satisfies the manifest, so install
 uses the locked package URLs directly. No solver runs, no network
-metadata fetch. This is the fast path for day-to-day use.
+metadata fetch. Packages absent from the lock are removed, and only
+resolved manifest roots remain direct requests in prefix history. This
+is the fast path for day-to-day use.
 
 ## Step 5: Use `--locked` for strict mode
 

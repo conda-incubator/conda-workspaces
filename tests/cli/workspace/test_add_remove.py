@@ -1408,6 +1408,7 @@ def stub_sync(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], dict]]:
         no_install=False,
         force_reinstall=False,
         dry_run=False,
+        prune=False,
         console,
     ) -> None:
         calls.append(
@@ -1417,6 +1418,7 @@ def stub_sync(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], dict]]:
                     "no_install": no_install,
                     "force_reinstall": force_reinstall,
                     "dry_run": dry_run,
+                    "prune": prune,
                 },
             )
         )
@@ -1453,7 +1455,12 @@ def test_default_feature_syncs_all_envs(
     assert len(stub_sync) == 1
     env_names, flags = stub_sync[0]
     assert set(env_names) == {"default", "test"}
-    assert flags == {"no_install": False, "force_reinstall": False, "dry_run": False}
+    assert flags == {
+        "no_install": False,
+        "force_reinstall": False,
+        "dry_run": False,
+        "prune": execute_fn is execute_remove,
+    }
 
 
 @pytest.mark.parametrize(
@@ -1599,7 +1606,10 @@ def test_flags_forwarded_to_sync(
     execute_fn(args)
 
     _, flags = stub_sync[0]
-    assert flags == expected_flags
+    assert flags == {
+        **expected_flags,
+        "prune": execute_fn is execute_remove,
+    }
 
 
 @pytest.mark.parametrize(

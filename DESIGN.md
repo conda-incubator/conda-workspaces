@@ -196,6 +196,16 @@ All declared environments still feed lock generation. A shared helper
 both commands as well as `conda workspace install`, so there is a
 single canonical synchronization pipeline.
 
+On removal, synchronization first clears prefix requests that are no
+longer present in the resolved manifest, then installs the remaining
+dependency closure. A removed direct package can remain installed when
+another dependency still requires it, but it is no longer recorded as
+a direct request. Lock solves use the manifest alone rather than
+inheriting requested specs from an existing prefix. Installation from
+`conda.lock` treats its conda package set as exact, removes packages
+absent from the lock, and records resolved manifest roots rather than
+every locked package as direct requests.
+
 **Mutation locations**: dependency mutation is location-based, not
 resolution-based. `add` and `remove` never choose whichever composed
 declaration currently wins. The normative selector mapping, inheritance

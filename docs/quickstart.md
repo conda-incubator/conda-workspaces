@@ -352,6 +352,15 @@ Remove a dependency:
 conda workspace remove numpy
 ```
 
+Removal clears direct prefix requests that are absent from the resolved
+manifest before installing the remaining dependency closure. A removed
+package stays installed only when another dependency requires it.
+Lock generation does not inherit stale prefix requests, including when
+`--no-install` leaves the existing prefix unchanged. A later
+`conda workspace install` reconciles that prefix to the lock. Conda
+packages added directly to a workspace prefix are removed when they
+are absent from the lock, so declare additions in the manifest.
+
 If you want the old manifest-only behaviour, or to stage a batch of
 edits before running the solver, opt out per command:
 

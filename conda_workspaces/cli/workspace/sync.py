@@ -58,6 +58,7 @@ def sync_environments(
     no_install: bool = False,
     force_reinstall: bool = False,
     dry_run: bool = False,
+    prune: bool = False,
     console: Console,
 ) -> None:
     """Resolve and install the selected environments, then lock the workspace.
@@ -66,7 +67,8 @@ def sync_environments(
     complete canonical lockfile is still regenerated. When *dry_run*
     is true neither the prefixes nor the lockfile are written.
     ``install_environment`` receives *force_reinstall* / *dry_run*
-    verbatim.
+    verbatim. When *prune* is true, requested prefix specs absent from
+    the resolved manifest are removed before installation.
 
     If new files appear under ``$PREFIX/etc/conda/activate.d/`` and the
     caller is inside a ``conda workspace shell`` session
@@ -105,6 +107,7 @@ def sync_environments(
                 resolved,
                 force_reinstall=force_reinstall,
                 dry_run=dry_run,
+                prune=prune,
             )
             if dry_run and force_reinstall:
                 solve_prefixes[name] = solve_prefix

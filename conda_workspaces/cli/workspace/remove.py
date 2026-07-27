@@ -136,6 +136,7 @@ def execute_remove(args: argparse.Namespace, *, console: Console | None = None) 
             no_install=getattr(args, "no_install", False),
             force_reinstall=getattr(args, "force_reinstall", False),
             dry_run=dry_run,
+            prune=True,
             console=console,
         )
     return 0

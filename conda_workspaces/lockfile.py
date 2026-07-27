@@ -47,7 +47,7 @@ import sys
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from conda.models.dist import Dist
 from conda.models.version import VersionSpec
@@ -1092,8 +1092,10 @@ def install_from_lockfile(
 
     Reads the lockfile via :class:`CondaLockLoader`, extracts the
     package list for *env_name* on the current platform, downloads the
-    exact packages, and installs them into the environment prefix —
-    bypassing the solver entirely.
+    exact packages, removes conda packages absent from the lock, and
+    installs them into the environment prefix without a solver.
+    Requested-spec history is reconciled to the resolved manifest
+    roots.
 
     When *dry_run* is true, the lockfile and selected package references
     are validated without creating or changing the target prefix.
@@ -1102,10 +1104,14 @@ def install_from_lockfile(
     not contain the requested environment/platform.
     """
     from conda.base.context import context as conda_context
+    from conda.core.link import PrefixSetup, UnlinkLinkTransaction
+    from conda.core.prefix_data import PrefixData
+    from conda.history import History
     from conda.misc import (
         get_package_records_from_explicit,
         install_explicit_packages,
     )
+    from conda.models.match_spec import MatchSpec
 
     path = lockfile_path(ctx)
     if not path.is_file():
@@ -1114,6 +1120,7 @@ def install_from_lockfile(
     loader = CondaLockLoader(path)
     lock_platform = ctx.platform
     package_platform = ctx.platform
+    resolved: ResolvedEnvironment | None = None
     try:
         from .resolver import resolve_environment
 
@@ -1150,9 +1157,70 @@ def install_from_lockfile(
     )
 
     with override:
-        records = get_package_records_from_explicit(urls)
+        records = cast(
+            "list[PackageRecord]",
+            list(get_package_records_from_explicit(urls)),
+        )
+        requested_specs: list[MatchSpec] | None = None
+        unlocked_requested_names: set[str | None] = set()
+        if resolved is not None:
+            from .envs import _build_pypi_specs
+
+            requested_specs = [
+                MatchSpec(dep.conda_build_form())
+                for dep in resolved.conda_dependencies.values()
+            ]
+            requested_specs.extend(_build_pypi_specs(resolved))
+            for dependency in resolved.pypi_dependencies.values():
+                if dependency.path:
+                    spec = MatchSpec(dependency.name)
+                    requested_specs.append(spec)
+                    unlocked_requested_names.add(spec.name)
+
+        prefix_data = PrefixData(str(install_prefix))
+        if prefix_data.is_environment():
+            locked_names = {record.name for record in records}
+            requested_names = (
+                {spec.name for spec in requested_specs}
+                if requested_specs is not None
+                else None
+            )
+            stale_requests = (
+                tuple(
+                    spec
+                    for name, spec in History(str(install_prefix))
+                    .get_requested_specs_map()
+                    .items()
+                    if name not in requested_names
+                )
+                if requested_names is not None
+                else ()
+            )
+            extras = tuple(
+                record
+                for record in prefix_data.iter_records()
+                if record.name not in locked_names
+                and record.name not in unlocked_requested_names
+            )
+            if extras or stale_requests:
+                UnlinkLinkTransaction(
+                    PrefixSetup(
+                        str(install_prefix),
+                        extras,
+                        (),
+                        stale_requests,
+                        (),
+                        (),
+                    )
+                ).execute()
+
         install_explicit_packages(
-            package_cache_records=list(records),
+            package_cache_records=records,
             prefix=str(install_prefix),
+            requested_specs=(
+                [str(spec) for spec in requested_specs]
+                if requested_specs is not None
+                else None
+            ),
         )
     sys.stdout.flush()
