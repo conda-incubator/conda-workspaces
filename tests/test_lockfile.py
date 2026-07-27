@@ -701,6 +701,51 @@ def test_conda_lock_loader_compose_sanitizes_before_metadata_validation(
     assert "nested-user" not in str(exc_info.value)
 
 
+def test_conda_lock_loader_compose_merges_prefix_and_solver_metadata() -> None:
+    channel = "https://repo.example.test/channel"
+    url = f"{channel}/linux-64/python-3.14.0-0.conda"
+    installed = _FakePkg(
+        "python",
+        url,
+        md5="b" * 32,
+        depends=["python_abi 3.14.* *_cp314"],
+        constrains=["blas 2.308   openblas"],
+        features=("old", "legacy"),
+        track_features=("old-track",),
+        license_family="BSD",
+    )
+    solved = _FakePkg(
+        "python",
+        url,
+        md5="b" * 32,
+        depends=[],
+        constrains=[],
+        features=(),
+        track_features=(),
+    )
+    environments = [
+        _SolvedEnvironment(
+            name=name,
+            platform="linux-64",
+            package_platform="linux-64",
+            config=EnvironmentConfig(channels=(channel,)),
+            explicit_packages=[record],
+        )
+        for name, record in (("default", installed), ("test", solved))
+    ]
+
+    result = CondaLockLoader.compose(environments)
+
+    assert result["packages"] == [
+        {
+            "conda": url,
+            "sha256": "a" * 64,
+            "md5": "b" * 32,
+            "license_family": "BSD",
+        }
+    ]
+
+
 def test_conda_lock_loader_rejects_metadata_conflicts_after_redaction() -> None:
     channel = "https://repo.example.test/private"
     package_path = "/private/linux-64/python-3.12.0-0.conda"
@@ -864,6 +909,19 @@ def test_conda_lock_loader_replace_solutions_preserves_and_canonicalizes(
     channel = "https://conda.anaconda.org/conda-forge"
     python_new = f"{channel}/linux-64/python-3.12.0-h3_0.conda"
     certifi = f"{channel}/noarch/certifi-2026.1-pyhd_0.conda"
+    certifi_record = next(
+        record
+        for record in selective_lock_data["packages"]
+        if record.get("conda") == certifi
+    )
+    certifi_record.update(
+        {
+            "url": certifi_record.pop("conda"),
+            "pypi": "https://files.example.test/stale.whl",
+            "depends": ["python"],
+            "license_family": "Other",
+        }
+    )
     baseline = deepcopy(selective_lock_data)
     updated = _SolvedEnvironment(
         name="default",
@@ -872,7 +930,12 @@ def test_conda_lock_loader_replace_solutions_preserves_and_canonicalizes(
         config=EnvironmentConfig(channels=(channel,)),
         explicit_packages=[
             _FakePkg("python", python_new),
-            _FakePkg("certifi", certifi),
+            _FakePkg(
+                "certifi",
+                certifi,
+                depends=["openssl"],
+                license="ISC",
+            ),
         ],
     )
 
@@ -895,6 +958,17 @@ def test_conda_lock_loader_replace_solutions_preserves_and_canonicalizes(
     assert python_new in referenced_urls
     assert f"{channel}/linux-64/python-3.10.0-h1_0.conda" not in referenced_urls
     assert f"{channel}/noarch/orphan-1.0-0.conda" not in referenced_urls
+    merged_certifi = next(
+        record for record in result["packages"] if record.get("conda") == certifi
+    )
+    assert merged_certifi == {
+        "conda": certifi,
+        "sha256": "a" * 64,
+        "md5": "d" * 32,
+        "depends": ["openssl"],
+        "license": "ISC",
+        "license_family": "Other",
+    }
 
 
 def test_conda_lock_loader_replace_solutions_redacts_legacy_baseline(

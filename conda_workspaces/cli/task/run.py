@@ -31,7 +31,7 @@ def _env_prefix_or_none(
     """Resolve an environment name to its prefix, or return ``None``.
 
     Falls back to ``None`` when no workspace exists or the environment
-    is not defined — so tasks can run in the current shell.
+    is not installed — so tasks can run in the current shell.
     """
     if env_name is None:
         env_name = getattr(args, "environment", None)
@@ -45,7 +45,7 @@ def _env_prefix_or_none(
         manifest_path = getattr(args, "file", None)
         _, config = detect_and_parse(manifest_path)
         ctx = WorkspaceContext(config)
-        if env_name in config.environments:
+        if env_name in config.environments and ctx.env_exists(env_name):
             return ctx.env_prefix(env_name)
     except CondaWorkspacesError:
         pass

@@ -454,16 +454,18 @@ def test_execute_run_saves_cache(tmp_path, fake_shell, monkeypatch):
     assert len(save_calls) == 1
 
 
-def test_execute_run_defaults_to_workspace_env(
-    workspace_task_file, fake_shell, env_prefix_stub, tmp_path
+@pytest.mark.parametrize("installed", [True, False], ids=["installed", "uninstalled"])
+def test_execute_run_defaults_to_installed_workspace_env(
+    workspace_task_file, fake_shell, env_prefix_stub, tmp_path, installed
 ):
-    """When no -e flag is given, tasks run in the workspace default env."""
+    """The default workspace environment is used only when installed."""
     default_prefix = tmp_path / ".conda" / "envs" / "default"
-    env_prefix_stub["default"] = default_prefix
+    if installed:
+        env_prefix_stub["default"] = default_prefix
 
     result = execute_run(_run_args(workspace_task_file, environment=None))
     assert result == 0
-    assert fake_shell.calls[0][3] == default_prefix
+    assert fake_shell.calls[0][3] == (default_prefix if installed else None)
 
 
 def test_execute_run_explicit_env_overrides_default(

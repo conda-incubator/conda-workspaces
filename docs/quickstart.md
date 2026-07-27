@@ -393,6 +393,8 @@ the selected declaration. `update` manages conda dependencies only and
 skips uninstalled environments. Use `--no-install` for a lock-only
 update, including a target that does not match the host.
 
+![dependency management demo](../demos/dependency-management.gif)
+
 Removal clears direct prefix requests that are absent from the resolved
 manifest before installing the remaining dependency closure. A removed
 package stays installed only when another dependency requires it.

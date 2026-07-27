@@ -24,7 +24,7 @@ Enter
 Wait /\$/
 Show
 
-Type "# Workspace targets linux-64 + osx-arm64; a windows feature adds win-64"
+Type "# Workspace targets linux-64 + osx-arm64, with win-64 added by a feature"
 Enter
 Sleep 500ms
 

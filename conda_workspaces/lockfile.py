@@ -732,6 +732,37 @@ class CondaLockLoader(EnvironmentSpecBase):
                 records_by_url.setdefault(url, record)
         return records_by_url
 
+    @staticmethod
+    def merge_package_records(
+        existing: dict[str, Any],
+        update: dict[str, Any],
+        url: str,
+    ) -> dict[str, Any]:
+        """Merge repodata patches with installed-prefix metadata.
+
+        Those sources can disagree on non-integrity metadata for the same
+        package URL. Only conflicting hashes identify an integrity conflict.
+        """
+        conflicts = {
+            key
+            for key in (existing.keys() & update.keys()) & {"sha256", "md5"}
+            if existing[key] != update[key]
+        }
+        if conflicts:
+            raise ValueError(
+                "Conflicting package metadata for URL"
+                f" {redact_url(url)!r}: {', '.join(sorted(conflicts))}"
+            )
+        source_keys = {"conda", "pypi", "url"}
+        merged = {
+            **{key: value for key, value in existing.items() if key not in source_keys},
+            **update,
+        }
+        for key in ("depends", "constrains", "features", "track_features"):
+            if key in update and not update[key]:
+                merged.pop(key, None)
+        return merged
+
     @classmethod
     def package_records_for_env_data(
         cls,
@@ -895,25 +926,11 @@ class CondaLockLoader(EnvironmentSpecBase):
             if existing_record is None:
                 packages_by_url[url] = update_record
                 continue
-            source_keys = {"conda", "pypi", "url"}
-            conflicts = {
-                key
-                for key in (existing_record.keys() & update_record.keys()) - source_keys
-                if existing_record[key] != update_record[key]
-            }
-            if conflicts:
-                raise ValueError(
-                    "Conflicting package metadata for URL"
-                    f" {redact_url(url)!r}: {', '.join(sorted(conflicts))}"
-                )
-            packages_by_url[url] = {
-                **{
-                    key: value
-                    for key, value in existing_record.items()
-                    if key not in source_keys
-                },
-                **update_record,
-            }
+            packages_by_url[url] = cls.merge_package_records(
+                existing_record,
+                update_record,
+                url,
+            )
         packages: list[dict[str, Any]] = []
         seen_urls: set[str] = set()
         for environment in result.get("environments", {}).values():
@@ -1162,7 +1179,16 @@ class CondaLockLoader(EnvironmentSpecBase):
                     "size",
                     "python_site_packages_path",
                 ):
-                    if value := pkg.get(metadata_field, None):
+                    value = pkg.get(metadata_field, None)
+                    if metadata_field == "features" and isinstance(
+                        value, (list, tuple)
+                    ):
+                        value = " ".join(value)
+                    if value is not None and (
+                        value
+                        or metadata_field
+                        in {"depends", "constrains", "features", "track_features"}
+                    ):
                         package_kwargs[metadata_field] = value
                 package_kwargs = cls.redact_data_urls({"packages": [package_kwargs]})[
                     "packages"
@@ -1177,14 +1203,19 @@ class CondaLockLoader(EnvironmentSpecBase):
 
             environments[env_name]["packages"][platform] = platform_refs
 
-        packages = list(
-            cls.package_records_by_url_from_data({"packages": packages}).values()
-        )
+        packages_by_url: dict[str, dict[str, Any]] = {}
+        for package in packages:
+            url = package["conda"]
+            packages_by_url[url] = cls.merge_package_records(
+                packages_by_url.get(url, {}),
+                package,
+                url,
+            )
         return cls.redact_data_urls(
             {
                 "version": LOCKFILE_VERSION,
                 "environments": environments,
-                "packages": packages,
+                "packages": list(packages_by_url.values()),
             }
         )
 

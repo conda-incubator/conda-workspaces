@@ -10,14 +10,15 @@ Animated terminal demos recorded with [VHS](https://github.com/charmbracelet/vhs
 |---|---|
 | `quickstart` | Init a workspace, add deps, install, list envs, run a command |
 | `workspace-quickstart` | Single-command bootstrap with `conda workspace quickstart` |
+| `dependency-management` | Target feature, environment, and platform dependencies, then update safely |
 | `lockfile` | Install, lock, clean, reinstall from lockfile |
-| `export` | Export manifests to environment.yml / environment.json / conda.lock via the plugin hook |
+| `export` | Export environment.yml, conda.toml, pyproject.toml, and conda-lock-v1 formats |
 | `ci-split` | Split locking across a CI matrix and merge fragments with `--merge` |
 | `multi-platform` | Cross-platform locking and the `--platform` flag |
 | `multi-env` | Multiple environments from one manifest |
 | `pixi-compat` | Use an existing pixi.toml with conda-workspaces |
 | `import` | Import environment.yml and anaconda-project.yml into conda.toml |
-| `shell` | Interactive shell and one-shot commands |
+| `shell` | Open an interactive shell in a workspace environment |
 | `archives` | Create and extract workspace archives |
 | `archives-receipt` | Create a workspace archive receipt and verify extraction |
 | `archives-bundle` | Bundle packages for offline/air-gapped deployment |
