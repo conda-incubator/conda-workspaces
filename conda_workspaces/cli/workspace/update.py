@@ -36,6 +36,7 @@ from .dependencies import (
     DependencyLocation,
     dependency_declarations,
     effective_dependency_location,
+    reject_legacy_default_feature,
     workspace_toml_source,
 )
 from .sync import sync_environments
@@ -85,6 +86,7 @@ def execute_update(args: argparse.Namespace, *, console: Console | None = None) 
             f"No workspace dependency tables found in '{manifest_path}'."
         )
 
+    reject_legacy_default_feature(source)
     current = parser.parse_data_with_redacted_errors(document.unwrap(), manifest_path)
     if location.environment is not None:
         current.get_environment(location.environment)

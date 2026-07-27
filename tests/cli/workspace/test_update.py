@@ -149,6 +149,37 @@ isolatedpkg = ">=1,<2"
     return path
 
 
+def test_update_rejects_legacy_default_feature(tmp_path: Path) -> None:
+    path = tmp_path / "conda.toml"
+    path.write_text(
+        """\
+[workspace]
+name = "legacy-default"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[feature.default.dependencies]
+numpy = "*"
+""",
+        encoding="utf-8",
+    )
+    before = path.read_bytes()
+
+    with pytest.raises(
+        CondaWorkspacesError,
+        match=r"legacy \[feature\.default\]",
+    ):
+        execute_update(
+            make_args(
+                _DEFAULTS,
+                manifest_file=path,
+                specs=["numpy"],
+            )
+        )
+
+    assert path.read_bytes() == before
+
+
 def test_update_bare_name_preserves_manifest_bytes(
     layered_manifest: Path,
     update_runtime: SimpleNamespace,

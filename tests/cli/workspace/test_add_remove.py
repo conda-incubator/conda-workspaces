@@ -88,6 +88,47 @@ python = ">=3.10"
     return path
 
 
+@pytest.mark.parametrize(
+    ("execute_fn", "spec"),
+    [(execute_add, "scipy"), (execute_remove, "numpy")],
+    ids=["add", "remove"],
+)
+def test_dependency_mutation_rejects_legacy_default_feature(
+    tmp_path: Path,
+    execute_fn,
+    spec: str,
+) -> None:
+    path = tmp_path / "conda.toml"
+    path.write_text(
+        """\
+[workspace]
+name = "legacy-default"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[feature.default.dependencies]
+numpy = "*"
+""",
+        encoding="utf-8",
+    )
+    before = path.read_bytes()
+
+    with pytest.raises(
+        CondaWorkspacesError,
+        match=r"legacy \[feature\.default\]",
+    ) as exc_info:
+        execute_fn(
+            make_args(
+                _DEFAULTS,
+                manifest_file=path,
+                specs=[spec],
+            )
+        )
+
+    assert path.read_bytes() == before
+    assert exc_info.value.hints[-1].endswith("conda.toml ignores them.")
+
+
 @pytest.mark.parametrize("command", ["add", "remove"])
 def test_dependency_mutation_rejects_existing_embedded_credentials(
     pixi_toml: Path,

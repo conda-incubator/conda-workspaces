@@ -36,12 +36,14 @@ from conda_workspaces.archive import (
     validate_tar_members,
     verify_package_hashes,
 )
+from conda_workspaces.context import WorkspaceContext
 from conda_workspaces.exceptions import (
     ArchiveError,
     ArchiveHashMismatchError,
     ArchivePathTraversalError,
     CondaWorkspacesError,
 )
+from conda_workspaces.manifests import detect_and_parse
 from conda_workspaces.models import ArchiveConfig
 from conda_workspaces.receipts import ArchiveReceipt
 
@@ -1578,6 +1580,29 @@ def test_workspace_archive_create_writes_receipt(
     assert archive.verify().workspace_paths == ("conda.toml", "conda.lock")
 
 
+def test_workspace_archive_build_receipt_uses_legacy_signature(
+    workspace_archive_project: Path,
+) -> None:
+    output = workspace_archive_project / "workspace.tar.gz"
+    archive = WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=output,
+    )
+    _, config = detect_and_parse(workspace_archive_project / "conda.toml")
+
+    receipt = WorkspaceArchive.build_receipt(
+        ctx=WorkspaceContext(config),
+        archive_path=archive.path,
+        archive_config=config.archive,
+        manifest_path=workspace_archive_project / "conda.toml",
+        lockfile_path=workspace_archive_project / "conda.lock",
+        options={"bundle": False, "lock": False},
+    )
+
+    receipt.verify_archive(archive.path)
+    assert receipt.workspace_paths == ("conda.toml", "conda.lock")
+
+
 @pytest.mark.parametrize("dry_run", [False, True], ids=["create", "dry-run"])
 @pytest.mark.parametrize(
     "source",
@@ -2435,7 +2460,7 @@ def test_workspace_archive_receipt_uses_captured_manifest_and_lockfile(
     manifest = workspace_archive_project / "conda.toml"
     lockfile = workspace_archive_project / "conda.lock"
     output = tmp_path / "workspace.tar.gz"
-    original_build = WorkspaceArchive.build_receipt
+    original_build = ArchiveReceipt.build_from_captured
     replaced = False
 
     def replace_inputs_before_receipt(**kwargs) -> ArchiveReceipt:
@@ -2455,8 +2480,8 @@ def test_workspace_archive_receipt_uses_captured_manifest_and_lockfile(
         return original_build(**kwargs)
 
     monkeypatch.setattr(
-        WorkspaceArchive,
-        "build_receipt",
+        ArchiveReceipt,
+        "build_from_captured",
         staticmethod(replace_inputs_before_receipt),
     )
 

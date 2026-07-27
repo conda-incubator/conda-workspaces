@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -555,14 +556,17 @@ numpy = { workspace = true, build = "py*" }
     )
 
 
-def test_parse_rejects_reserved_default_feature_table(tmp_path):
+def test_parse_legacy_default_feature_preserves_v1_replacement_semantics(tmp_path):
     path = tmp_path / "conda.toml"
     path.write_text(
         """\
 [workspace]
-name = "reserved-default"
+name = "legacy-default"
 channels = ["conda-forge"]
 platforms = ["linux-64"]
+
+[dependencies]
+python = "*"
 
 [feature.default.dependencies]
 numpy = "*"
@@ -570,8 +574,19 @@ numpy = "*"
         encoding="utf-8",
     )
 
-    with pytest.raises(WorkspaceParseError, match=r"\[feature\.default\] is reserved"):
-        CondaTomlParser().parse(path)
+    config = CondaTomlParser().parse(path)
+
+    assert set(config.features["default"].conda_dependencies) == {"numpy"}
+
+
+def test_v1_schema_allows_legacy_default_feature() -> None:
+    schema_path = Path(__file__).parents[2] / "schema" / "conda-toml-1.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+
+    assert "propertyNames" not in schema["properties"]["feature"]
+    assert schema["properties"]["feature"]["additionalProperties"] == {
+        "$ref": "#/$defs/feature"
+    }
 
 
 @pytest.mark.parametrize(

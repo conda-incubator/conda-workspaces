@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 0.8.0 — 2026-07-27
+
 ### Added
 
 - Added `conda workspace update SPECS...` to update selected conda
@@ -13,7 +15,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   slices. Use `--no-install` for lock-only updates. Workflows that used
   `conda workspace add PACKAGE` or replaced a declaration with
   `PACKAGE=*` only to permit a newer version should use
-  `conda workspace update PACKAGE` instead. (#128)
+  `conda workspace update PACKAGE` instead. (#128, #144)
 - `conda workspace info --json` now includes an
   `environment_details` snapshot with every environment's feature
   composition, prefix state, channels, per-platform resolved
@@ -25,7 +27,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   `workspace envs --json` now also reports `no_default_feature`.
   Machine consumers that currently call `workspace envs`, then
   `workspace info -e` and `workspace list -e` for each environment can
-  migrate to one `workspace info --json --packages` call. (#127, #151)
+  migrate to one `workspace info --json --packages` call. (#127, #143, #151, #152)
 
 ### Changed
 
@@ -34,20 +36,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   prefixes while regenerating the canonical `conda.lock` for every
   declared environment and platform. Workflows that relied on an
   incomplete canonical lock should use `conda workspace lock -e
-  <environment> --output <fragment>` instead. (#121)
+  <environment> --output <fragment>` instead. (#121, #137)
 - `conda workspace lock` now requires an explicit `--output` with
   `--environment`, `--platform`, or `--skip-unsolvable`. Run an
   unfiltered lock to replace the complete canonical `conda.lock`, or
   pass a fragment path for a partial result. Workflows that
   intentionally replace `conda.lock` with a filtered result must now
-  pass `--output conda.lock`. (#122)
+  pass `--output conda.lock`. (#122, #136)
 - `conda workspace init` and generated `quickstart` workspaces now use
   conda's configured channels. Repeated `-c/--channel` values are
   prepended in command-line order, and `--override-channels` keeps only
   those explicit values. Copy and clone continue preserving the source
   manifest. Users who relied on the implicit conda-forge fallback must
   configure that channel or pass
-  `-c conda-forge --override-channels`. (#129)
+  `-c conda-forge --override-channels`. (#129, #135)
 - The global `conda workspace --file` option now selects the exact
   manifest named by the caller. To use upward auto-discovery, omit the
   option instead of passing a directory. The `export` subcommand keeps
@@ -55,7 +57,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   unrelated export destination can be supplied together. Archive
   installation now requires exactly one valid manifest at the archive
   root. Remove unselected manifests before archiving when using
-  `unarchive --install`. (#120)
+  `unarchive --install`. (#120, #131)
+- Split the feature overview into focused pages for tasks, environments,
+  locking, export, archives, and CI, and refreshed workspace demos for the
+  current CLI, including a new dependency-management recording. (#148, #150)
 
 ### Fixed
 
@@ -66,38 +71,39 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   positional values. Task cache entries now include the selected or current
   prefix, so switching environments produces a cache miss instead of reusing
   another environment's result. Existing cache entries refresh automatically
-  on the next run.
+  on the next run. (#155)
 - `conda workspace install --force-reinstall` now removes and recreates
   prefixes when a satisfiable, frozen, locked, or CI-required lockfile is used.
   The flag no longer forces a re-solve by itself. Workflows that relied on that
-  side effect should combine `--force-reinstall` with `--no-lock`.
+  side effect should combine `--force-reinstall` with `--no-lock`. (#155)
 - Receipt-verified bundles now publish the URL, SHA-256, size, and filename
   metadata that conda needs to recognize bundled packages. Both
   `unarchive --install` and a later `install --locked` now work from an empty
   package cache with conda in offline mode. Earlier releases primed only the
   package archive files. Re-run receipt-verified `unarchive` to add the
   missing cache records. If conda created a conflicting extracted cache entry
-  during a failed offline install, remove that entry and retry.
+  during a failed offline install, remove that entry and retry. (#149)
 - Task execution now falls back to the current shell only when the implicit
   workspace `default` environment is not installed. Explicit `-e`, task
   `default-environment`, and dependency `environment` selectors now fail when
   the selected environment is undefined or uninstalled instead of silently
   running in the wrong environment. Move selectors from nested aliases to
   each executable dependency. A target alias can still provide the default
-  environment fallback for its invocation.
+  environment fallback for its invocation. (#150, #153)
 - Constraint-changing `conda workspace update` operations now accept the
   manifest generation they publish before applying the prepared prefix
-  transaction. Later concurrent manifest changes remain rejected.
+  transaction. Later concurrent manifest changes remain rejected. (#153)
 - Feature-target dependency mutations now keep features and unrelated
   environments with the same name independent when validating a platform.
+  (#153)
 - Linux atomic publication now calls the `renameat2` system call directly when
   the libc wrapper is unavailable, retaining older glibc support without
   weakening no-replace or exchange guarantees. Kernels and filesystems that
   cannot provide those guarantees fail with an explicit unsupported-operation
-  error.
+  error. (#153)
 - Complete lock generation now reconciles non-identity package metadata from
   installed prefixes and fresh solves while still rejecting conflicting
-  package hashes for the same URL.
+  package hashes for the same URL. (#150)
 - `conda workspace quickstart -e <name> <specs>` now creates the named
   environment when needed, records the specs as private dependencies,
   installs only that prefix, and reports the same environment in JSON.
@@ -109,7 +115,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   before writing because adding specs must regenerate `conda.lock`.
   Remove the lock mode while bootstrapping specs, then use
   `conda workspace install --locked` or `--frozen` for later installs.
-  (#126)
+  (#126, #142)
 - `conda workspace remove` now clears direct requested specs that are
   absent from the resolved manifest before installing the remaining
   dependency closure. Packages still required transitively remain
@@ -121,12 +127,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   directly into its prefixes.
   Workspaces affected by 0.7.x can run
   `conda workspace install --force-reinstall` once to rebuild existing
-  prefixes and `conda.lock` from the manifest. (#117)
+  prefixes and `conda.lock` from the manifest. (#117, #141)
 - `conda workspace add` and `remove` now mutate one explicit dependency
   declaration location. With no selector, commands address the default
   feature. `--feature default` is accepted as an explicit equivalent.
-  Raw `[feature.default]` tables are now rejected. Move their contents
-  to the corresponding top-level tables.
+  Legacy `[feature.default]` tables remain readable with their 0.7 replacement
+  semantics, but `add`, `update`, and `remove` require migrating their dependency
+  and setting tables to the corresponding top-level locations first. Review
+  feature-specific channels and platforms manually because they have no exact
+  top-level equivalent. `conda.toml` ignores feature-scoped tasks, so move them
+  only when you intend to activate those commands.
   `--feature` addresses a named feature, `--environment` addresses private
   environment dependencies, and `--platform` nests a target table below
   the selected location. Bare adds preserve existing
@@ -140,7 +150,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   table, such as `--feature test --platform linux-64` or
   `--environment test --platform linux-64`. The broken `tomlkit 0.15.0`
   release is excluded because it can serialize invalid TOML when these
-  commands extend an existing inline table. (#125)
+  commands extend an existing inline table. (#125, #140)
 - `conda workspace add` and `remove` now treat `--environment` as a
   private dependency location below `[environments.<name>]` instead of
   assuming a same-named feature. Composed environments, the `default`
@@ -150,24 +160,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   created by earlier `add -e` commands. Move dependencies intended for
   one environment to `[environments.<environment>.dependencies]`, then
   remove the accidental feature or feature-list entry. Keep genuinely
-  shared declarations in place and manage them with `--feature`. (#123)
+  shared declarations in place and manage them with `--feature`. (#123, #139)
 - `conda workspace add` now writes channel, build, subdir, hash, URL,
   file-name, license, feature, and track-feature MatchSpec fields
   without reducing them to a version string. A bare re-add preserves
   the existing declaration, while an explicit spec replaces it
   completely and unsupported fields fail before the manifest is
   written. Users whose earlier `add` commands lost constraints should
-  rerun the explicit spec to restore them. (#124)
+  rerun the explicit spec to restore them. (#124, #138)
 - Platform-filtered lock commands now reach platforms declared only by
   a feature without requiring feature-restricted environments to
-  support the current host. (#122)
+  support the current host. (#122, #136)
 - Successful `workspace add`, `remove`, `install`, `lock`, `clean`,
   `import`, `archive`, and `unarchive` commands now emit exactly
   `{"success": true}` with `--json`. Human status output from nested
   operations is suppressed so stdout remains one parseable value. The
   standalone `cw --json` entry point now initializes conda's JSON
   reporter too. Scripts that parsed status prose should switch to the
-  `success` field. (#119)
+  `success` field. (#119, #134)
 - `conda workspace --dry-run` now preserves manifests, lockfiles,
   environment prefixes, activation metadata, archives, receipts,
   and extraction targets across quickstart, add, remove, install,
@@ -180,7 +190,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   `packages/`. Replace linked required files and move nested package files
   before using an existing archive. Manifest creation and copy destinations
   must also be regular paths. Replace a linked destination manifest before
-  running `init` or `quickstart`. (#118)
+  running `init` or `quickstart`. (#118, #133)
 
 ### Security
 
@@ -190,6 +200,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   directories below the workspace root. Activation state, activation script
   directories, and activation script destinations also reject symbolic links.
   Replace linked metadata with regular files and directories inside the prefix.
+  (#147)
 - Generated manifests no longer persist channel authentication from Conda
   configuration. Absolute channel origins remain explicit, credential-bearing
   exact package and PyPI source URLs are rejected during manifest mutation or
@@ -201,7 +212,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   authentication, Anaconda
   `/t/<token>/` paths, queries, and fragments from manifests, rotate any exposed
   values, and configure replacement credentials through Conda outside the
-  repository.
+  repository. (#147)
 - Manifest import and export now preserve representable conda channel, build,
   subdir, hash, and direct URL fields instead of reducing them to a version.
   PyPI extras and credential-free named direct URLs also survive manifest
@@ -210,7 +221,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   an output is written instead of silently changing package identity. Replace
   marker-only declarations with target-specific manifest tables, and keep path
   or VCS declarations in the source manifest until the selected exporter can
-  represent them losslessly.
+  represent them losslessly. (#147)
 - Lockfile package URLs are normalized before channel containment checks, so
   plain, encoded, and double-encoded path traversal cannot escape a declared
   channel. Generated and merged lockfiles strip basic authentication, Anaconda
@@ -219,7 +230,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   and rotate exposed values. Lockfile output also refuses symbolic links.
   Replace a linked `conda.lock` or fragment with a regular file before writing
   it. Archive creation rejects a credential-bearing existing lockfile, so
-  regenerate it before packaging the workspace.
+  regenerate it before packaging the workspace. (#147)
 - Workspace archive validation now bounds member count, paths, link targets,
   consecutive extension headers, PAX record count, raw extension metadata, and
   total expanded file and link-fallback size while retaining linear memory.
@@ -236,7 +247,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   snapshot rather than reopening the source path. Extraction targets must now
   be absent, not merely empty, so remove an empty destination before retrying.
   Archive hardlinks are rejected, and Python runtimes without tar extraction
-  filters must be updated to a current supported patch release.
+  filters must be updated to a current supported patch release. (#147)
 - Complete lock solving now succeeds before ordinary sync mutates a selected
   prefix, and that exact solution is installed without a second solve. Pruning
   validates the desired transaction before removal, preserves declared local
@@ -250,7 +261,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   generation it came from. `conda env create --file conda.lock` now rejects
   external package refs because that loader cannot carry a verifiable digest
   into conda's installer. Declare those dependencies in `conda.toml`, regenerate
-  `conda.lock`, then use `conda workspace install`.
+  `conda.lock`, then use `conda workspace install`. (#147)
 - Repository-controlled TOML, YAML, and JSON documents now have explicit byte,
   nesting, collection, and aggregate item limits. Manifest files are limited to
   16 MiB, lockfiles to 128 MiB, and receipts to 64 MiB. Split oversized trusted
@@ -258,13 +269,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   Portable paths and environment names also reject Windows device aliases,
   alternate data stream syntax, trailing dots or spaces, and case-insensitive
   archive collisions on every host. Rename ambiguous entries before moving a
-  workspace or archive between platforms.
+  workspace or archive between platforms. (#147)
 - Manifest, task, export, lockfile, archive, receipt, activation metadata, and
   environment writes now reject symbolic-link destinations and concurrent file
   generation changes. Replace linked outputs with regular workspace-local
   files before retrying. Human-readable task and workspace output renders
   repository-controlled terminal control bytes visibly instead of forwarding
-  them to the terminal. JSON output remains unchanged.
+  them to the terminal. JSON output remains unchanged. (#147)
 - Path and generation checks reject linked destinations and replacements that
   remain visible at mutation boundaries. Conda and conda-pypi still receive
   filesystem paths, so these checks do not sandbox another process running as
@@ -272,7 +283,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   downstream call. Archive operations use descriptor-relative protection when
   the platform provides it. On platforms without those APIs, validation and
   path-based publication checks remain in place, but same-user swap-and-restore
-  races cannot be excluded.
+  races cannot be excluded. (#147)
 
 ## 0.7.0 — 2026-06-14
 

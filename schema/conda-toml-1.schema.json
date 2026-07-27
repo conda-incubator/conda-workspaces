@@ -32,11 +32,6 @@
     "feature": {
       "type": "object",
       "description": "Named features that group dependencies and settings.",
-      "propertyNames": {
-        "not": {
-          "const": "default"
-        }
-      },
       "additionalProperties": {
         "$ref": "#/$defs/feature"
       }

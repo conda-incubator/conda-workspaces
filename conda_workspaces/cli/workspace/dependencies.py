@@ -9,7 +9,7 @@ import tomlkit
 from conda.utils import quote_for_shell
 from tomlkit.items import InlineTable, Table
 
-from ...exceptions import PlatformError
+from ...exceptions import CondaWorkspacesError, PlatformError
 from ...models import Environment, Feature
 from ...resolver import resolve_environment
 
@@ -331,6 +331,35 @@ def workspace_toml_source(
     if create:
         return ensure_child_table(tool, "conda"), ("tool", "conda")
     return None, ()
+
+
+def reject_legacy_default_feature(
+    source: tomlkit.TOMLDocument | Table | InlineTable,
+) -> None:
+    """Require manual migration before mutating a legacy default feature."""
+    features = source.get("feature")
+    if not isinstance(features, (Table, InlineTable)):
+        return
+    if Feature.DEFAULT_NAME not in features:
+        return
+    raise CondaWorkspacesError(
+        "Cannot mutate dependencies while legacy [feature.default] is present.",
+        hints=[
+            (
+                "Move its dependencies, PyPI dependencies, activation, system"
+                " requirements, and target dependency tables to the corresponding"
+                " top-level tables before retrying."
+            ),
+            (
+                "Review feature-specific channels and platforms manually because"
+                " they have no exact top-level equivalent."
+            ),
+            (
+                "Move feature-scoped tasks only for pixi.toml and pyproject.toml."
+                " conda.toml ignores them."
+            ),
+        ],
+    )
 
 
 def dependency_declarations(
