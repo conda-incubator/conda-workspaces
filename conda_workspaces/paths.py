@@ -244,29 +244,12 @@ def read_regular_file_bytes(
     directory_descriptor: int | None = None,
 ) -> bytes:
     """Read one stable no-follow regular file under a byte limit."""
-    return read_regular_file_bytes_with_identity(
+    return read_regular_file_bytes_with_generation(
         path,
         maximum_bytes=maximum_bytes,
         label=label,
         directory_descriptor=directory_descriptor,
     )[0]
-
-
-def read_regular_file_bytes_with_identity(
-    path: Path,
-    *,
-    maximum_bytes: int,
-    label: str,
-    directory_descriptor: int | None = None,
-) -> tuple[bytes, FileIdentity]:
-    """Read one stable no-follow regular file and return its identity."""
-    content, generation = read_regular_file_bytes_with_generation(
-        path,
-        maximum_bytes=maximum_bytes,
-        label=label,
-        directory_descriptor=directory_descriptor,
-    )
-    return content, generation[:2]
 
 
 def read_regular_file_bytes_with_generation(
