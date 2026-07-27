@@ -14,6 +14,7 @@ from ...models import Environment, Feature
 from ...resolver import resolve_environment
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
     from typing import Any
 
@@ -130,6 +131,22 @@ class DependencyLocation:
         if isinstance(current, (tomlkit.TOMLDocument, Table, InlineTable)):
             return current
         return None
+
+    @classmethod
+    def precedence(
+        cls,
+        config: WorkspaceConfig,
+        environment: Environment,
+        platform: str,
+    ) -> Iterator[DependencyLocation]:
+        """Return dependency locations from lowest to highest precedence."""
+        platform_keys = (None, *config.target_platform_keys(platform))
+        for feature in config.resolve_features(environment):
+            feature_name = None if feature.is_default else feature.name
+            for platform_key in platform_keys:
+                yield cls(feature=feature_name, platform=platform_key)
+        for platform_key in platform_keys:
+            yield cls(environment=environment.name, platform=platform_key)
 
     def ensure_table(
         self,
@@ -374,23 +391,8 @@ def effective_dependency_location(
     name: str,
 ) -> DependencyLocation | None:
     """Return the last declaration that wins for one environment and platform."""
-    chain: list[DependencyLocation] = []
-    platform_keys = config.target_platform_keys(platform)
-    for feature in config.resolve_features(environment):
-        feature_name = None if feature.is_default else feature.name
-        chain.append(DependencyLocation(feature=feature_name))
-        chain.extend(
-            DependencyLocation(feature=feature_name, platform=key)
-            for key in platform_keys
-        )
-    chain.append(DependencyLocation(environment=environment.name))
-    chain.extend(
-        DependencyLocation(environment=environment.name, platform=key)
-        for key in platform_keys
-    )
-
     winner = None
-    for location in chain:
+    for location in DependencyLocation.precedence(config, environment, platform):
         table = location.find_table(source)
         if table is not None and name in table.get(dependency_key, {}):
             winner = location

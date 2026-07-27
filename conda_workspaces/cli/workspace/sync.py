@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from conda.common.io import captured
 
+from ...context import isolated_package_cache
 from ...envs import activate_d_scripts, install_environment
 from ...lockfile import (
     generate_lockfile,
@@ -100,104 +101,108 @@ def sync_environments(
             config, name, None if no_install else ctx.platform
         )
 
-    rendered_lockfile = None
-    if update_targets is not None:
-        if not dry_run and publish_lockfile is None:
-            raise ValueError("Selective updates require a lockfile publisher")
-        validate_lockfile_output(ctx, lockfile_path(ctx))
-        if not no_install and not dry_run:
-            with captured():
-                for name in names:
-                    resolved = resolved_all[name]
+    with isolated_package_cache(dry_run):
+        rendered_lockfile = None
+        if update_targets is not None:
+            if not dry_run and publish_lockfile is None:
+                raise ValueError("Selective updates require a lockfile publisher")
+            validate_lockfile_output(ctx, lockfile_path(ctx))
+            with isolated_package_cache(True):
+                if not no_install and not dry_run:
+                    with captured():
+                        for name in names:
+                            resolved = resolved_all[name]
+                            declared = resolved.resolve_platform_name(ctx.platform)
+                            update_names = update_targets.get((name, declared))
+                            if update_names:
+                                install_environment(
+                                    ctx,
+                                    resolved,
+                                    dry_run=True,
+                                    update_names=update_names,
+                                )
+                rendered_lockfile = render_lockfile(
+                    ctx,
+                    resolved_all,
+                    config=config,
+                    baseline_data=baseline_lockfile,
+                    update_targets=update_targets,
+                    dry_run=True,
+                )
+            if not dry_run and publish_lockfile is not None:
+                publish_lockfile(rendered_lockfile)
+
+        solve_prefixes = {}
+
+        if not no_install:
+            progress_action = "Updating" if update_targets is not None else "Installing"
+            if dry_run:
+                completed_action = (
+                    "Would update" if update_targets is not None else "Would install"
+                )
+            else:
+                completed_action = (
+                    "Updated" if update_targets is not None else "Installed"
+                )
+            for i, name in enumerate(names):
+                resolved = resolved_all[name]
+                if i > 0:
+                    console.print()
+                status.message(
+                    console,
+                    progress_action,
+                    "environment",
+                    name,
+                    style="bold blue",
+                    ellipsis=True,
+                )
+                prefix = ctx.env_prefix(name)
+                before = activate_d_scripts(prefix)
+
+                update_names = None
+                if update_targets is not None:
                     declared = resolved.resolve_platform_name(ctx.platform)
                     update_names = update_targets.get((name, declared))
-                    if update_names:
-                        install_environment(
-                            ctx,
-                            resolved,
-                            dry_run=True,
-                            update_names=update_names,
+                    if not update_names:
+                        continue
+                solve_prefix = install_environment(
+                    ctx,
+                    resolved,
+                    force_reinstall=force_reinstall,
+                    dry_run=dry_run,
+                    prune=prune,
+                    update_names=update_names,
+                )
+                if dry_run and force_reinstall:
+                    solve_prefixes[name] = solve_prefix
+                status.message(
+                    console,
+                    completed_action,
+                    "environment",
+                    name,
+                )
+
+                if not dry_run:
+                    new_scripts = activate_d_scripts(prefix) - before
+                    if new_scripts and os.environ.get("CONDA_SPAWN") == "1":
+                        console.print(
+                            "[bold yellow]Note:[/bold yellow] new activation scripts"
+                            " were installed. Exit and re-run"
+                            " [bold]conda workspace shell[/bold] to pick them up."
                         )
-        rendered_lockfile = render_lockfile(
-            ctx,
-            resolved_all,
-            config=config,
-            baseline_data=baseline_lockfile,
-            update_targets=update_targets,
-            dry_run=True,
+
+        console.print()
+        progress = "Resolving" if dry_run else "Updating"
+        console.print(
+            f"[bold blue]{progress}[/bold blue] [bold]conda.lock[/bold][dim]...[/dim]"
         )
-        if not dry_run and publish_lockfile is not None:
-            publish_lockfile(rendered_lockfile)
-
-    solve_prefixes = {}
-
-    if not no_install:
-        progress_action = "Updating" if update_targets is not None else "Installing"
-        if dry_run:
-            completed_action = (
-                "Would update" if update_targets is not None else "Would install"
-            )
-        else:
-            completed_action = "Updated" if update_targets is not None else "Installed"
-        for i, name in enumerate(names):
-            resolved = resolved_all[name]
-            if i > 0:
-                console.print()
-            status.message(
-                console,
-                progress_action,
-                "environment",
-                name,
-                style="bold blue",
-                ellipsis=True,
-            )
-            prefix = ctx.env_prefix(name)
-            before = activate_d_scripts(prefix)
-
-            update_names = None
-            if update_targets is not None:
-                declared = resolved.resolve_platform_name(ctx.platform)
-                update_names = update_targets.get((name, declared))
-                if not update_names:
-                    continue
-            solve_prefix = install_environment(
+        if rendered_lockfile is None:
+            generate_lockfile(
                 ctx,
-                resolved,
-                force_reinstall=force_reinstall,
+                resolved_all,
+                config=config,
                 dry_run=dry_run,
-                prune=prune,
-                update_names=update_names,
+                solve_prefixes=solve_prefixes or None,
             )
-            if dry_run and force_reinstall:
-                solve_prefixes[name] = solve_prefix
-            status.message(
-                console,
-                completed_action,
-                "environment",
-                name,
-            )
-
-            if not dry_run:
-                new_scripts = activate_d_scripts(prefix) - before
-                if new_scripts and os.environ.get("CONDA_SPAWN") == "1":
-                    console.print(
-                        "[bold yellow]Note:[/bold yellow] new activation scripts"
-                        " were installed. Exit and re-run"
-                        " [bold]conda workspace shell[/bold] to pick them up."
-                    )
-
-    console.print()
-    progress = "Resolving" if dry_run else "Updating"
-    console.print(
-        f"[bold blue]{progress}[/bold blue] [bold]conda.lock[/bold][dim]...[/dim]"
-    )
-    if rendered_lockfile is None:
-        generate_lockfile(
-            ctx,
-            resolved_all,
-            config=config,
-            dry_run=dry_run,
-            solve_prefixes=solve_prefixes or None,
-        )
-    action = "Would update" if dry_run else "Updated"
-    console.print(f"[bold cyan]{action}[/bold cyan] [bold]conda.lock[/bold]")
+        action = "Would update" if dry_run else "Updated"
+        console.print(f"[bold cyan]{action}[/bold cyan] [bold]conda.lock[/bold]")

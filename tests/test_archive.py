@@ -26,6 +26,7 @@ from conda_workspaces.archive import (
     parse_relative_archive_path,
     url_to_filename,
     validate_tar_member,
+    validate_tar_members,
     verify_package_hashes,
 )
 from conda_workspaces.exceptions import (
@@ -584,6 +585,25 @@ def test_extract_archive_path_traversal_blocked(
     target = tmp_path / "safe"
     with pytest.raises(ArchivePathTraversalError):
         extract_archive(evil_archive, target)
+
+
+@pytest.mark.parametrize(
+    ("names", "message"),
+    [
+        (["path", "path"], "duplicate member"),
+        (["path", "path/child"], "nested under"),
+        (["path/child", "path"], "conflicts with nested member"),
+    ],
+    ids=["duplicate", "parent-first", "child-first"],
+)
+def test_validate_tar_members_rejects_conflicting_topology(
+    names: list[str],
+    message: str,
+) -> None:
+    members = [tarfile.TarInfo(name) for name in names]
+
+    with pytest.raises(ArchiveError, match=message):
+        validate_tar_members(members)
 
 
 def test_workspace_archive_dry_run_rejects_invalid_member_topology(

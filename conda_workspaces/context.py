@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from threading import RLock
 from typing import TYPE_CHECKING, cast
 
 from .exceptions import EnvironmentNameInvalidError
@@ -20,6 +21,10 @@ if TYPE_CHECKING:
     from conda.models.environment import Environment
 
     from .models import WorkspaceConfig
+
+
+_package_cache_isolated = False
+_package_cache_lock = RLock()
 
 
 @contextmanager
@@ -35,21 +40,34 @@ def isolated_package_cache(enabled: bool) -> Iterator[None]:
         yield
         return
 
-    import shutil
-    import tempfile
-
-    from conda.base.context import context
-
-    configured_caches = context.pkgs_dirs
-    with tempfile.TemporaryDirectory(prefix="conda-workspaces-pkgs-") as cache_dir:
-        scratch_cache = Path(cache_dir)
-        for configured_cache in configured_caches:
-            repodata_cache = Path(configured_cache) / "cache"
-            if repodata_cache.is_dir():
-                shutil.copytree(repodata_cache, scratch_cache / "cache")
-                break
-        with context._override("_pkgs_dirs", (scratch_cache, *configured_caches)):
+    global _package_cache_isolated
+    with _package_cache_lock:
+        if _package_cache_isolated:
             yield
+            return
+
+        import shutil
+        import tempfile
+
+        from conda.base.context import context
+
+        configured_caches = context.pkgs_dirs
+        with tempfile.TemporaryDirectory(prefix="conda-workspaces-pkgs-") as cache_dir:
+            scratch_cache = Path(cache_dir)
+            for configured_cache in configured_caches:
+                repodata_cache = Path(configured_cache) / "cache"
+                if repodata_cache.is_dir():
+                    shutil.copytree(repodata_cache, scratch_cache / "cache")
+                    break
+            _package_cache_isolated = True
+            try:
+                with context._override(
+                    "_pkgs_dirs",
+                    (scratch_cache, *configured_caches),
+                ):
+                    yield
+            finally:
+                _package_cache_isolated = False
 
 
 class WorkspaceContext:

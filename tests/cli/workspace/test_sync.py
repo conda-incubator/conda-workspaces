@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from io import StringIO
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
+from conda.base.context import context as conda_context
 from rich.console import Console
 
 from conda_workspaces.cli.workspace.sync import (
@@ -14,9 +15,6 @@ from conda_workspaces.cli.workspace.sync import (
 )
 from conda_workspaces.exceptions import EnvironmentNotFoundError, PlatformError
 from conda_workspaces.models import Environment, Feature, WorkspaceConfig
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _config(**envs_spec: dict) -> WorkspaceConfig:
@@ -193,6 +191,43 @@ def test_sync_pipeline_respects_flags(
         **flags,
     )
     assert sync_calls == expected_calls
+
+
+def test_sync_dry_run_reuses_package_cache_across_pipeline(
+    captured_console: Console,
+    fake_ctx,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    configured_cache = tmp_path / "configured-pkgs"
+    cache_paths: list[Path] = []
+
+    def record_cache(*args, **kwargs):
+        cache_paths.append(Path(conda_context.pkgs_dirs[0]))
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.install_environment",
+        record_cache,
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.generate_lockfile",
+        record_cache,
+    )
+
+    with conda_context._override("_pkgs_dirs", (str(configured_cache),)):
+        sync_environments(
+            _config(default={}),
+            fake_ctx,
+            ["default"],
+            dry_run=True,
+            console=captured_console,
+        )
+        assert conda_context.pkgs_dirs == (str(configured_cache),)
+
+    assert len(cache_paths) == 2
+    assert cache_paths[0] == cache_paths[1]
+    assert cache_paths[0] != configured_cache
+    assert not cache_paths[0].exists()
 
 
 @pytest.mark.parametrize(

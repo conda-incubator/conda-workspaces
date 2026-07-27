@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from threading import Event, Thread
 from typing import TYPE_CHECKING
 
 import pytest
@@ -14,6 +15,7 @@ from conda_workspaces.context import (
     CondaContext,
     WorkspaceContext,
     build_template_context,
+    isolated_package_cache,
 )
 from conda_workspaces.exceptions import EnvironmentNameInvalidError
 from conda_workspaces.models import (
@@ -43,6 +45,68 @@ def config(tmp_path: Path) -> WorkspaceConfig:
 def test_config_passthrough(config: WorkspaceConfig) -> None:
     ctx = WorkspaceContext(config)
     assert ctx.config is config
+
+
+def test_isolated_package_cache_reuses_nested_scratch(tmp_path: Path) -> None:
+    configured_cache = tmp_path / "configured-pkgs"
+    repodata_cache = configured_cache / "cache"
+    repodata_cache.mkdir(parents=True)
+    (repodata_cache / "cached.json").write_bytes(b"cached")
+
+    with context._override("_pkgs_dirs", (str(configured_cache),)):
+        with isolated_package_cache(True):
+            scratch_cache = Path(context.pkgs_dirs[0])
+            assert scratch_cache != configured_cache
+            assert (scratch_cache / "cache" / "cached.json").read_bytes() == b"cached"
+
+            with isolated_package_cache(True):
+                assert Path(context.pkgs_dirs[0]) == scratch_cache
+
+        assert context.pkgs_dirs == (str(configured_cache),)
+
+    assert not scratch_cache.exists()
+
+
+def test_isolated_package_cache_serializes_threads(tmp_path: Path) -> None:
+    configured_cache = tmp_path / "configured-pkgs"
+    second_attempting = Event()
+    second_entered = Event()
+    release_second = Event()
+    second_scratch: list[Path] = []
+
+    def isolate() -> None:
+        second_attempting.set()
+        with isolated_package_cache(True):
+            second_scratch.append(Path(context.pkgs_dirs[0]))
+            second_entered.set()
+            release_second.wait(timeout=5)
+
+    thread = Thread(target=isolate)
+    with context._override("_pkgs_dirs", (str(configured_cache),)):
+        with isolated_package_cache(True):
+            first_scratch = Path(context.pkgs_dirs[0])
+            thread.start()
+            assert second_attempting.wait(timeout=5)
+            blocked = not second_entered.wait(timeout=0.1)
+            first_preserved = Path(context.pkgs_dirs[0]) == first_scratch
+
+        entered_after_release = second_entered.wait(timeout=5)
+        second_active = (
+            bool(second_scratch) and Path(context.pkgs_dirs[0]) == second_scratch[0]
+        )
+        release_second.set()
+        thread.join(timeout=5)
+        restored = context.pkgs_dirs == (str(configured_cache),)
+
+    assert blocked
+    assert first_preserved
+    assert entered_after_release
+    assert second_active
+    assert not thread.is_alive()
+    assert first_scratch != second_scratch[0]
+    assert not first_scratch.exists()
+    assert not second_scratch[0].exists()
+    assert restored
 
 
 def test_root(config: WorkspaceConfig) -> None:
