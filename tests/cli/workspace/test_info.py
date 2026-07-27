@@ -7,7 +7,7 @@ from io import StringIO
 from typing import TYPE_CHECKING
 
 import pytest
-from conda.exceptions import CondaValueError
+from conda.exceptions import ArgumentError, CondaValueError
 from rich.console import Console
 
 from conda_workspaces.cli.workspace.info import execute_info
@@ -20,7 +20,12 @@ if TYPE_CHECKING:
 
     from tests.conftest import CreateWorkspaceEnv
 
-_DEFAULTS = {"manifest_file": None, "environment": None, "json": False}
+_DEFAULTS = {
+    "manifest_file": None,
+    "environment": None,
+    "json": False,
+    "packages": False,
+}
 
 
 def test_info_workspace_overview(
@@ -114,6 +119,11 @@ def test_info_json_workspace(
     assert data["name"] == "cli-test"
     assert "environments" in data
     assert "channels" in data
+    assert [detail["name"] for detail in data["environment_details"]] == [
+        "default",
+        "test",
+    ]
+    assert all("packages" not in detail for detail in data["environment_details"])
 
 
 def test_info_json_env(
@@ -127,8 +137,179 @@ def test_info_json_env(
     out = rich_console.file.getvalue()
     data = json.loads(out)
     assert data["name"] == "default"
+    assert data["features"] == []
+    assert data["no_default_feature"] is False
     assert "conda_dependencies" in data
     assert "channels" in data
+
+
+@pytest.mark.parametrize(
+    ("filename", "namespace"),
+    [
+        pytest.param("conda.toml", "", id="conda-toml"),
+        pytest.param("pixi.toml", "", id="pixi-toml"),
+        pytest.param("pyproject.toml", "tool.conda", id="pyproject-conda"),
+        pytest.param("pyproject.toml", "tool.pixi", id="pyproject-pixi"),
+    ],
+)
+def test_info_json_environment_details_include_dependency_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rich_console: Console,
+    filename: str,
+    namespace: str,
+) -> None:
+    prefix = f"{namespace}." if namespace else ""
+    content = f"""\
+[{prefix}workspace]
+name = "snapshot"
+channels = ["conda-forge"]
+platforms = [{{ name = "linux-64-cuda", platform = "linux-64" }}]
+
+[{prefix}workspace.dependencies]
+python = ">=3.12"
+
+[{prefix}dependencies]
+python = {{ workspace = true, build = "py*" }}
+shared = ">=1"
+
+[{prefix}target.linux-64.dependencies]
+shared = ">=2"
+
+[{prefix}feature.test.dependencies]
+pytest = ">=8"
+
+[{prefix}feature.test.pypi-dependencies]
+requests = ">=2"
+vcs = {{ git = "https://example.com/repo.git", branch = "main" }}
+
+[{prefix}feature.test.target.linux-64-cuda.dependencies]
+shared = ">=3"
+
+[{prefix}environments.test]
+features = ["test"]
+
+[{prefix}environments.test.dependencies]
+private = ">=1"
+
+[{prefix}environments.test.target.linux-64-cuda.dependencies]
+shared = ">=4"
+
+[{prefix}environments.isolated]
+no-default-feature = true
+
+[{prefix}environments.isolated.dependencies]
+standalone = ">=1"
+"""
+    (tmp_path / filename).write_text(content, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    execute_info(make_args(_DEFAULTS, json=True), console=rich_console)
+
+    data = json.loads(rich_console.file.getvalue())
+    details = {detail["name"]: detail for detail in data["environment_details"]}
+    test = details["test"]
+    assert test["features"] == ["test"]
+    assert test["no_default_feature"] is False
+    assert test["installed"] is False
+    assert test["channels"] == ["conda-forge"]
+    assert test["platforms"] == ["linux-64-cuda"]
+
+    resolution = test["resolutions"][0]
+    assert resolution["platform"] == "linux-64-cuda"
+    assert resolution["subdir"] == "linux-64"
+    conda = resolution["conda_dependencies"]
+    pypi = resolution["pypi_dependencies"]
+    assert conda["python"]["provenance"] == {
+        "table": f"[{prefix}dependencies]",
+        "inherited_from": f"[{prefix}workspace.dependencies]",
+    }
+    assert conda["shared"]["spec"].endswith(">=4")
+    assert conda["shared"]["provenance"]["table"] == (
+        f"[{prefix}environments.test.target.linux-64-cuda.dependencies]"
+    )
+    assert conda["pytest"]["provenance"]["table"] == (
+        f"[{prefix}feature.test.dependencies]"
+    )
+    assert conda["private"]["provenance"]["table"] == (
+        f"[{prefix}environments.test.dependencies]"
+    )
+    assert pypi["requests"]["provenance"]["table"] == (
+        f"[{prefix}feature.test.pypi-dependencies]"
+    )
+    assert pypi["requests"]["spec"] == {"version": ">=2"}
+    assert pypi["vcs"]["spec"] == {
+        "git": "https://example.com/repo.git",
+        "branch": "main",
+    }
+
+    isolated = details["isolated"]
+    assert isolated["features"] == []
+    assert isolated["no_default_feature"] is True
+    isolated_conda = isolated["resolutions"][0]["conda_dependencies"]
+    assert set(isolated_conda) == {"standalone"}
+
+
+def test_info_json_packages_are_opt_in(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rich_console: Console,
+    tmp_workspace_env: CreateWorkspaceEnv,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    tmp_workspace_env(pixi_workspace, "default")
+    packages = [
+        {"name": "numpy", "version": "2.0.0", "build": "py312_0"},
+        {"name": "python", "version": "3.12.0", "build": "h123_0"},
+    ]
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.info.list_installed_packages",
+        lambda ctx, env_name: packages,
+    )
+
+    execute_info(
+        make_args(_DEFAULTS, json=True, packages=True),
+        console=rich_console,
+    )
+
+    data = json.loads(rich_console.file.getvalue())
+    details = {detail["name"]: detail for detail in data["environment_details"]}
+    assert details["default"]["packages"] == packages
+    assert details["test"]["packages"] == []
+
+
+def test_info_text_packages_reports_uninstalled_environments(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rich_console: Console,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+
+    execute_info(make_args(_DEFAULTS, packages=True), console=rich_console)
+
+    out = rich_console.file.getvalue()
+    assert "Packages in default" in out
+    assert "Packages in test" in out
+    assert out.count("(not installed)") == 2
+
+
+def test_info_rejects_packages_for_one_environment(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+
+    with pytest.raises(
+        ArgumentError,
+        match="--packages is only available for the workspace overview",
+    ):
+        execute_info(
+            make_args(
+                _DEFAULTS,
+                environment="default",
+                packages=True,
+            )
+        )
 
 
 @pytest.mark.parametrize(

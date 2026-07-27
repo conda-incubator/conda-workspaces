@@ -3,22 +3,34 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+import tomlkit
+from conda.exceptions import ArgumentError
 from rich.console import Console
 from rich.table import Table
+from tomlkit.items import InlineTable
+from tomlkit.items import Table as TomlTable
 
-from ...envs import get_environment_info
+from ...envs import get_environment_info, list_installed_packages
+from ...exceptions import WorkspaceParseError
 from ...lockfile import lockfile_status
 from ...models import LockfileStatus
 from ...resolver import known_platforms, resolve_all_environments, resolve_environment
 from . import workspace_context_from_args
+from .dependencies import (
+    DependencyLocation,
+    effective_dependency_location,
+    workspace_toml_source,
+)
+from .list import package_table
 
 if TYPE_CHECKING:
     import argparse
 
     from ...context import WorkspaceContext
-    from ...models import WorkspaceConfig
+    from ...models import Environment, WorkspaceConfig
 
 
 def execute_info(args: argparse.Namespace, *, console: Console | None = None) -> int:
@@ -30,10 +42,25 @@ def execute_info(args: argparse.Namespace, *, console: Console | None = None) ->
 
     env_name = getattr(args, "environment", None)
     json_output = getattr(args, "json", False)
+    include_packages = getattr(args, "packages", False)
+    if include_packages and env_name is not None:
+        raise ArgumentError("--packages is only available for the workspace overview.")
 
     if env_name is None:
-        return _show_workspace_info(config, ctx, console, json_output)
-    return _show_env_info(config, ctx, env_name, console, json_output)
+        return _show_workspace_info(
+            config,
+            ctx,
+            console,
+            json_output,
+            include_packages,
+        )
+    return _show_env_info(
+        config,
+        ctx,
+        env_name,
+        console,
+        json_output,
+    )
 
 
 def _show_workspace_info(
@@ -41,6 +68,7 @@ def _show_workspace_info(
     ctx: WorkspaceContext,
     console: Console,
     json_output: bool,
+    include_packages: bool,
 ) -> int:
     """Show workspace-level overview."""
     # Resolving is cheap (no solver, just feature merging) and lets us
@@ -49,7 +77,7 @@ def _show_workspace_info(
     resolved_envs = resolve_all_environments(config)
     known = sorted(known_platforms(config, resolved_envs.values()))
 
-    info = {
+    info: dict[str, object] = {
         "manifest": config.manifest_path,
         "name": config.name or "(unnamed)",
         "version": config.version or "",
@@ -67,6 +95,11 @@ def _show_workspace_info(
         info["lockfile_reason"] = lock.reason
 
     if json_output:
+        info["environment_details"] = _environment_details(
+            config,
+            ctx,
+            include_packages=include_packages,
+        )
         console.print_json(json.dumps(info))
     else:
         table = Table(show_header=False, show_edge=False, pad_edge=False)
@@ -96,6 +129,17 @@ def _show_workspace_info(
             lockfile_label += f" ({lock.reason})"
         table.add_row("Lockfile", lockfile_label)
         console.print(table)
+        if include_packages:
+            for env_name in config.environments:
+                console.print(f"\n[bold]Packages in {env_name}:[/bold]")
+                if not ctx.env_exists(env_name):
+                    console.print("  (not installed)")
+                    continue
+                packages = list_installed_packages(ctx, env_name)
+                if packages:
+                    console.print(package_table(packages))
+                else:
+                    console.print("  (none)")
 
     return 0
 
@@ -111,10 +155,12 @@ def _show_env_info(
     resolved = resolve_environment(config, env_name, ctx.platform)
     install_info = get_environment_info(ctx, env_name)
 
-    info = {
+    info: dict[str, object] = {
         "name": env_name,
         "prefix": str(ctx.env_prefix(env_name)),
         "installed": install_info["exists"],
+        "features": config.environments[env_name].features,
+        "no_default_feature": config.environments[env_name].no_default_feature,
         "channels": [ch.canonical_name for ch in resolved.channels],
         "platforms": resolved.platforms,
         "channel_priority": resolved.channel_priority,
@@ -158,3 +204,128 @@ def _show_env_info(
                 console.print(f"  {spec}")
 
     return 0
+
+
+def _environment_details(
+    config: WorkspaceConfig,
+    ctx: WorkspaceContext,
+    *,
+    include_packages: bool,
+) -> list[dict[str, object]]:
+    """Return complete environment composition for structured workspace info."""
+    manifest_path = Path(config.manifest_path)
+    document = tomlkit.loads(manifest_path.read_text(encoding="utf-8"))
+    source, namespace = workspace_toml_source(
+        document,
+        manifest_path,
+        create=False,
+    )
+    if source is None:
+        raise WorkspaceParseError(
+            manifest_path,
+            "Could not locate the selected workspace tables",
+        )
+
+    details: list[dict[str, object]] = []
+    for env_name, environment in config.environments.items():
+        base = resolve_environment(config, env_name)
+        resolutions = []
+        for platform in base.target_platforms(fallback=ctx.platform):
+            resolved = resolve_environment(config, env_name, platform)
+            resolutions.append(
+                {
+                    "platform": platform,
+                    "subdir": resolved.platform_subdir(platform),
+                    "conda_dependencies": {
+                        name: _dependency_detail(
+                            source,
+                            namespace,
+                            config,
+                            environment,
+                            platform,
+                            "dependencies",
+                            name,
+                            dep.conda_build_form(),
+                        )
+                        for name, dep in resolved.conda_dependencies.items()
+                    },
+                    "pypi_dependencies": {
+                        name: _dependency_detail(
+                            source,
+                            namespace,
+                            config,
+                            environment,
+                            platform,
+                            "pypi-dependencies",
+                            name,
+                            dep.to_toml(),
+                        )
+                        for name, dep in resolved.pypi_dependencies.items()
+                    },
+                }
+            )
+
+        installed = ctx.env_exists(env_name)
+        detail: dict[str, object] = {
+            "name": env_name,
+            "features": environment.features,
+            "no_default_feature": environment.no_default_feature,
+            "prefix": str(ctx.env_prefix(env_name)),
+            "installed": installed,
+            "channels": [channel.canonical_name for channel in base.channels],
+            "platforms": base.platforms,
+            "channel_priority": base.channel_priority,
+            "resolutions": resolutions,
+        }
+        if include_packages:
+            detail["packages"] = (
+                list_installed_packages(ctx, env_name) if installed else []
+            )
+        details.append(detail)
+    return details
+
+
+def _dependency_detail(
+    source: tomlkit.TOMLDocument | TomlTable | InlineTable,
+    namespace: tuple[str, ...],
+    config: WorkspaceConfig,
+    environment: Environment,
+    platform: str,
+    dependency_key: str,
+    name: str,
+    spec: object,
+) -> dict[str, object]:
+    """Return one resolved dependency and its winning manifest declaration."""
+    location = effective_dependency_location(
+        source,
+        config,
+        environment,
+        platform,
+        dependency_key,
+        name,
+    )
+    if location is None:
+        raise WorkspaceParseError(
+            config.manifest_path,
+            f"Could not locate the declaration for dependency '{name}'",
+        )
+
+    provenance = {
+        "table": location.table_name(dependency_key, namespace),
+    }
+    table = location.find_table(source)
+    dependency_table = table.get(dependency_key, {}) if table is not None else {}
+    declaration = dependency_table.get(name)
+    if (
+        dependency_key == "dependencies"
+        and isinstance(declaration, (TomlTable, InlineTable))
+        and declaration.get("workspace") is True
+    ):
+        provenance["inherited_from"] = DependencyLocation().table_name(
+            "dependencies",
+            (*namespace, "workspace"),
+        )
+    return {
+        "spec": spec,
+        "provenance": provenance,
+    }

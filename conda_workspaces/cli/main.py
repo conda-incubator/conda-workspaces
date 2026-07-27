@@ -386,6 +386,12 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Show details for this environment (default: workspace overview).",
     )
+    info_parser.add_argument(
+        "--packages",
+        action="store_true",
+        default=False,
+        help="Include installed package records in the workspace snapshot.",
+    )
 
     add_parser_cmd = sub.add_parser(
         "add",
