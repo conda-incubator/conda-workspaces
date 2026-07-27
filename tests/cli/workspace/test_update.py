@@ -255,6 +255,44 @@ def test_update_explicit_spec_replaces_selected_constraint(
     )
 
 
+def test_update_feature_platform_ignores_same_named_environment(
+    tmp_path: Path,
+    update_runtime: SimpleNamespace,
+) -> None:
+    path = tmp_path / "pixi.toml"
+    path.write_text(
+        """\
+[workspace]
+name = "same-name-update"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[feature.test.dependencies]
+coverage = ">=7"
+
+[environments.test]
+features = []
+""",
+        encoding="utf-8",
+    )
+    before = path.read_bytes()
+
+    with pytest.raises(CondaWorkspacesError, match="not declared directly"):
+        execute_update(
+            make_args(
+                _DEFAULTS,
+                manifest_file=path,
+                specs=["coverage>=8"],
+                feature="test",
+                platform="linux-64",
+                no_install=True,
+            )
+        )
+
+    assert path.read_bytes() == before
+    assert update_runtime.sync_calls == []
+
+
 @pytest.mark.parametrize(
     ("filename", "namespace"),
     [
@@ -731,6 +769,7 @@ def test_update_publishes_manifest_and_lock_under_workspace_guard(
     def record_sync(config, ctx, env_names, **kwargs) -> None:
         assert guard_held
         kwargs["publish_lockfile"]("rendered-lock")
+        kwargs["validate_workspace"]()
         assert guard_held
         events.append("install")
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import errno
 import os
 import secrets
 import stat
@@ -37,6 +38,21 @@ _WINDOWS_RESERVED_STEMS = {
 _LIBC = (
     ctypes.CDLL(None, use_errno=True) if sys.platform in {"darwin", "linux"} else None
 )
+_LINUX_RENAMEAT2_SYSCALLS = {
+    "aarch64": 276,
+    "armv6l": 382,
+    "armv7l": 382,
+    "i386": 353,
+    "i486": 353,
+    "i586": 353,
+    "i686": 353,
+    "loongarch64": 276,
+    "ppc64": 357,
+    "ppc64le": 357,
+    "riscv64": 276,
+    "s390x": 347,
+    "x86_64": 316,
+}
 _ANY_FILE_IDENTITY = object()
 _ANY_FILE_GENERATION = object()
 
@@ -335,6 +351,76 @@ def supports_anchored_directory_operations() -> bool:
     return _SUPPORTS_ANCHORED_DIRECTORY_OPERATIONS
 
 
+def _rename_with_flags(
+    source: str | Path,
+    destination: str | Path,
+    *,
+    flag: int,
+    source_dir_fd: int | None = None,
+    destination_dir_fd: int | None = None,
+) -> None:
+    """Perform a flagged rename across two names with no owning path object."""
+    operation = "atomic name exchange" if flag == 2 else "exclusive rename"
+    if sys.platform not in {"darwin", "linux"}:
+        raise NotImplementedError(f"{operation} is unavailable")
+    assert _LIBC is not None
+    if sys.platform == "linux":
+        current_directory = -100
+        function = getattr(_LIBC, "renameat2", None)
+    elif sys.platform == "darwin":
+        current_directory = -2
+        function = _LIBC.renameatx_np
+    source_descriptor = (
+        source_dir_fd if source_dir_fd is not None else current_directory
+    )
+    destination_descriptor = (
+        destination_dir_fd if destination_dir_fd is not None else current_directory
+    )
+    source_name = os.fsencode(source)
+    destination_name = os.fsencode(destination)
+    if function is None:
+        syscall_number = _LINUX_RENAMEAT2_SYSCALLS.get(os.uname().machine)
+        if syscall_number is None:
+            raise NotImplementedError(
+                f"{operation} is unavailable on this Linux architecture"
+            ) from None
+        result = _LIBC.syscall(
+            ctypes.c_long(syscall_number),
+            ctypes.c_int(source_descriptor),
+            ctypes.c_char_p(source_name),
+            ctypes.c_int(destination_descriptor),
+            ctypes.c_char_p(destination_name),
+            ctypes.c_uint(flag),
+        )
+    else:
+        function.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        function.restype = ctypes.c_int
+        result = function(
+            source_descriptor,
+            source_name,
+            destination_descriptor,
+            destination_name,
+            flag,
+        )
+    if result != 0:
+        error = ctypes.get_errno()
+        if sys.platform == "linux" and error in {
+            errno.EINVAL,
+            errno.ENOSYS,
+            errno.EOPNOTSUPP,
+        }:
+            raise NotImplementedError(
+                f"{operation} is unavailable for these paths"
+            ) from OSError(error, os.strerror(error), destination)
+        raise OSError(error, os.strerror(error), destination)
+
+
 def rename_noreplace(
     source: str | Path,
     destination: str | Path,
@@ -343,41 +429,20 @@ def rename_noreplace(
     destination_dir_fd: int | None = None,
 ) -> None:
     """Rename *source* only when *destination* does not exist."""
-    if sys.platform == "linux":
-        assert _LIBC is not None
-        function = _LIBC.renameat2
-        flag = 1
-        current_directory = -100
-    elif sys.platform == "darwin":
-        assert _LIBC is not None
-        function = _LIBC.renameatx_np
-        flag = 4
-        current_directory = -2
-    else:
+    if sys.platform not in {"darwin", "linux"}:
         if source_dir_fd is not None or destination_dir_fd is not None:
             raise NotImplementedError(
                 "descriptor-relative exclusive rename unavailable"
             )
         os.rename(source, destination)
         return
-    function.argtypes = (
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
+    _rename_with_flags(
+        source,
+        destination,
+        flag=1 if sys.platform == "linux" else 4,
+        source_dir_fd=source_dir_fd,
+        destination_dir_fd=destination_dir_fd,
     )
-    function.restype = ctypes.c_int
-    result = function(
-        source_dir_fd if source_dir_fd is not None else current_directory,
-        os.fsencode(source),
-        destination_dir_fd if destination_dir_fd is not None else current_directory,
-        os.fsencode(destination),
-        flag,
-    )
-    if result != 0:
-        error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error), destination)
 
 
 @contextmanager
@@ -472,32 +537,13 @@ def atomic_binary_writer_at(
         else:
             if initial_generation is None:
                 raise RuntimeError("Existing output has no captured generation")
-            if sys.platform == "linux":
-                assert _LIBC is not None
-                function = _LIBC.renameat2
-            elif sys.platform == "darwin":
-                assert _LIBC is not None
-                function = _LIBC.renameatx_np
-            else:
-                raise NotImplementedError("atomic name exchange unavailable")
-            function.argtypes = (
-                ctypes.c_int,
-                ctypes.c_char_p,
-                ctypes.c_int,
-                ctypes.c_char_p,
-                ctypes.c_uint,
+            _rename_with_flags(
+                temporary_name,
+                name,
+                flag=2,
+                source_dir_fd=directory_descriptor,
+                destination_dir_fd=directory_descriptor,
             )
-            function.restype = ctypes.c_int
-            result = function(
-                directory_descriptor,
-                os.fsencode(temporary_name),
-                directory_descriptor,
-                os.fsencode(name),
-                2,
-            )
-            if result != 0:
-                error = ctypes.get_errno()
-                raise OSError(error, os.strerror(error), name)
             displaced = os.stat(
                 temporary_name,
                 dir_fd=directory_descriptor,

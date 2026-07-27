@@ -11,7 +11,12 @@ from rich.console import Console
 from rich.tree import Tree
 
 from ...cache import is_cached, save_cache
-from ...exceptions import CondaWorkspacesError, TaskExecutionError
+from ...exceptions import (
+    CondaWorkspacesError,
+    EnvironmentNotFoundError,
+    EnvironmentNotInstalledError,
+    TaskExecutionError,
+)
 from ...graph import resolve_execution_order
 from ...manifests import detect_and_parse_tasks
 from ...runner import SubprocessShell
@@ -27,29 +32,41 @@ if TYPE_CHECKING:
 def _env_prefix_or_none(
     args: argparse.Namespace,
     env_name: str | None = None,
+    *,
+    required: bool = False,
 ) -> Path | None:
-    """Resolve an environment name to its prefix, or return ``None``.
+    """Resolve a workspace environment name to its installed prefix.
 
-    Falls back to ``None`` when no workspace exists or the environment
-    is not installed — so tasks can run in the current shell.
+    When *required* is false, an absent workspace or prefix returns ``None``
+    so the implicit default environment can fall back to the current shell.
     """
     if env_name is None:
         env_name = getattr(args, "environment", None)
-    if not env_name:
+    if env_name is None:
         return None
     try:
         from ...context import WorkspaceContext
-        from ...exceptions import CondaWorkspacesError
         from ...manifests import detect_and_parse
 
         manifest_path = getattr(args, "file", None)
         _, config = detect_and_parse(manifest_path)
-        ctx = WorkspaceContext(config)
-        if env_name in config.environments and ctx.env_exists(env_name):
-            return ctx.env_prefix(env_name)
     except CondaWorkspacesError:
-        pass
-    return None
+        if required:
+            raise
+        return None
+
+    if env_name not in config.environments:
+        if required:
+            raise EnvironmentNotFoundError(env_name, list(config.environments))
+        return None
+
+    ctx = WorkspaceContext(config)
+    if not ctx.env_exists(env_name):
+        if required:
+            raise EnvironmentNotInstalledError(env_name)
+        return None
+
+    return ctx.env_prefix(env_name)
 
 
 def _resolve_task_args(task: Task, cli_args: list[str]) -> dict[str, str]:
@@ -131,13 +148,66 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
     quiet = getattr(args, "quiet", False)
     verbose = getattr(args, "verbosity", 0) or 0
     user_env = getattr(args, "environment", None)
-    conda_prefix = _env_prefix_or_none(args)
+    conda_prefix = _env_prefix_or_none(args, required=user_env is not None)
 
     default_env_name = tasks[target_name].default_environment
-    if default_env_name and not user_env:
-        conda_prefix = _env_prefix_or_none(args, default_env_name) or conda_prefix
-    elif not user_env and conda_prefix is None:
+    if default_env_name and user_env is None:
+        conda_prefix = _env_prefix_or_none(args, default_env_name, required=True)
+    elif user_env is None and conda_prefix is None:
         conda_prefix = _env_prefix_or_none(args, "default")
+
+    task_environments: dict[str, str] = {}
+    for owner_name in order:
+        for dependency in tasks[owner_name].depends_on:
+            if dependency.task not in order or dependency.environment is None:
+                continue
+            if tasks[dependency.task].is_alias:
+                raise CondaWorkspacesError(
+                    f"Task '{owner_name}' cannot select environment "
+                    f"'{dependency.environment}' for alias task "
+                    f"'{dependency.task}' because aliases have no command.",
+                    hints=[
+                        (
+                            "Set the environment on each executable dependency of "
+                            f"'{dependency.task}' instead."
+                        )
+                    ],
+                )
+            selected = task_environments.get(dependency.task)
+            if selected is not None and selected != dependency.environment:
+                raise CondaWorkspacesError(
+                    f"Task '{dependency.task}' is selected with conflicting "
+                    f"environments '{selected}' and '{dependency.environment}'."
+                )
+            task_environments[dependency.task] = dependency.environment
+
+    for name in order:
+        if name == target_name:
+            continue
+        default_environment = tasks[name].default_environment
+        if tasks[name].is_alias and default_environment is not None:
+            raise CondaWorkspacesError(
+                f"Alias task '{name}' cannot use default-environment when "
+                "it is another task's dependency because aliases have no "
+                "command.",
+                hints=[
+                    (
+                        "Set default-environment on each executable dependency "
+                        f"of '{name}' instead."
+                    )
+                ],
+            )
+        if (
+            user_env is None
+            and name not in task_environments
+            and default_environment is not None
+        ):
+            task_environments[name] = default_environment
+
+    task_prefixes = {
+        name: _env_prefix_or_none(args, env_name, required=True)
+        for name, env_name in task_environments.items()
+    }
 
     task_args = _resolve_task_args(tasks[target_name], args.task_args)
 
@@ -181,12 +251,6 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
                             task_args=task_args,
                         )
 
-            dep_prefix = conda_prefix
-            if dep_info and dep_info.environment:
-                dep_prefix = (
-                    _env_prefix_or_none(args, dep_info.environment) or conda_prefix
-                )
-
         cmd = task.cmd
         if cmd is None:
             continue
@@ -209,11 +273,7 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
         cwd = Path(getattr(args, "cwd", None) or task.cwd or project_root)
         clean_env = getattr(args, "clean_env", False) or task.clean_env
 
-        task_prefix = (
-            dep_prefix
-            if name != target_name and dep_info and dep_info.environment
-            else conda_prefix
-        )
+        task_prefix = task_prefixes.get(name, conda_prefix)
 
         rendered_inputs = render_list(
             task.inputs, manifest_path=task_file, task_args=current_args
@@ -380,8 +440,9 @@ def _run_adhoc(
         full_cmd = render(full_cmd, manifest_path=task_file)
 
     dry_run = getattr(args, "dry_run", False)
-    conda_prefix = _env_prefix_or_none(args)
-    if conda_prefix is None and not getattr(args, "environment", None):
+    user_env = getattr(args, "environment", None)
+    conda_prefix = _env_prefix_or_none(args, required=user_env is not None)
+    if conda_prefix is None and user_env is None:
         conda_prefix = _env_prefix_or_none(args, "default")
 
     if dry_run:

@@ -226,10 +226,12 @@ class DependencyLocation:
                 )
         elif self.feature is not None:
             available = set()
+            feature_is_used = False
             for name, environment in config.environments.items():
                 if self.feature in environment.features:
+                    feature_is_used = True
                     available.update(resolve_environment(config, name).platforms)
-            if self.feature not in config.environments:
+            if not feature_is_used:
                 prospective = replace(
                     config,
                     features={

@@ -11,7 +11,14 @@ from conda.utils import quote_for_shell
 
 import conda_workspaces.cli.task.run as run_mod
 from conda_workspaces.cli.task.run import _resolve_task_args, execute_run
-from conda_workspaces.exceptions import CondaWorkspacesError, TaskExecutionError
+from conda_workspaces.context import WorkspaceContext
+from conda_workspaces.exceptions import (
+    CondaWorkspacesError,
+    EnvironmentNotFoundError,
+    EnvironmentNotInstalledError,
+    TaskExecutionError,
+    WorkspaceParseError,
+)
 from conda_workspaces.models import Task, TaskArg
 
 
@@ -78,11 +85,13 @@ def env_prefix_stub(monkeypatch):
     """
     prefixes: dict[str, Path] = {}
 
-    def _stub(args, env_name=None):
+    def _stub(args, env_name=None, *, required=False):
         if env_name is None:
             env_name = getattr(args, "environment", None)
-        if env_name and env_name in prefixes:
+        if env_name is not None and env_name in prefixes:
             return prefixes[env_name]
+        if env_name is not None and required:
+            raise EnvironmentNotInstalledError(env_name)
         return None
 
     monkeypatch.setattr(run_mod, "_env_prefix_or_none", _stub)
@@ -187,6 +196,30 @@ def test_execute_run_alias_quiet(tmp_path, capsys, fake_shell):
 
     assert result == 0
     assert capsys.readouterr().out == ""
+
+
+def test_execute_run_target_alias_default_env(
+    workspace_task_file,
+    fake_shell,
+    env_prefix_stub,
+    tmp_path,
+):
+    """A target alias provides the fallback environment for its commands."""
+    workspace_task_file.write_text(
+        '[workspace]\nname = "test"\nchannels = ["conda-forge"]\n'
+        'platforms = ["linux-64"]\n\n'
+        '[tasks]\nsetup = "echo setup"\nlint = "echo lint"\n\n'
+        '[tasks.check]\ndepends-on = ["setup", "lint"]\n'
+        'default-environment = "myenv"\n'
+    )
+    selected_prefix = tmp_path / ".conda" / "envs" / "myenv"
+    env_prefix_stub["myenv"] = selected_prefix
+
+    assert execute_run(_run_args(workspace_task_file, task_name="check")) == 0
+    assert [(call[0], call[3]) for call in fake_shell.calls] == [
+        ("echo lint", selected_prefix),
+        ("echo setup", selected_prefix),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -479,3 +512,203 @@ def test_execute_run_explicit_env_overrides_default(
     result = execute_run(_run_args(workspace_task_file, environment="myenv"))
     assert result == 0
     assert fake_shell.calls[0][3] == test_prefix
+
+
+@pytest.mark.parametrize(
+    ("workspace", "env_name", "error", "message"),
+    [
+        (True, "missing", EnvironmentNotFoundError, "Environment 'missing'"),
+        (True, "myenv", EnvironmentNotInstalledError, "Environment 'myenv'"),
+        (False, "myenv", WorkspaceParseError, r"No \[workspace\] table found"),
+    ],
+    ids=["undefined", "uninstalled", "tasks-only"],
+)
+@pytest.mark.parametrize(
+    "selector",
+    [
+        "cli-task",
+        "cli-adhoc",
+        "task-default",
+        "dependency",
+        "transitive-dependency",
+        "transitive-task-default",
+    ],
+    ids=[
+        "cli-task",
+        "cli-adhoc",
+        "task-default",
+        "dependency",
+        "transitive-dependency",
+        "transitive-task-default",
+    ],
+)
+def test_execute_run_rejects_unavailable_selected_env(
+    tmp_path,
+    fake_shell,
+    monkeypatch,
+    selector,
+    workspace,
+    env_name,
+    error,
+    message,
+):
+    """Explicit environment selectors never fall back to the current shell."""
+    if selector == "transitive-task-default":
+        task_body = (
+            f'[tasks.setup]\ncmd = "echo setup"\ndefault-environment = "{env_name}"\n\n'
+            '[tasks.build]\ncmd = "echo build"\ndepends-on = ["setup"]\n\n'
+            '[tasks.greet]\ncmd = "echo hello"\ndepends-on = ["build"]\n'
+        )
+        overrides = {}
+    elif selector == "transitive-dependency":
+        task_body = (
+            '[tasks]\nsetup = "echo setup"\n\n'
+            '[tasks.build]\ncmd = "echo build"\n'
+            f'depends-on = [{{ task = "setup", environment = "{env_name}" }}]\n\n'
+            '[tasks.greet]\ncmd = "echo hello"\ndepends-on = ["build"]\n'
+        )
+        overrides = {}
+    elif selector == "dependency":
+        task_body = (
+            '[tasks]\nsetup = "echo setup"\n\n'
+            '[tasks.greet]\ncmd = "echo hello"\n'
+            f'depends-on = [{{ task = "setup", environment = "{env_name}" }}]\n'
+        )
+        overrides = {}
+    elif selector == "task-default":
+        task_body = (
+            f'[tasks.greet]\ncmd = "echo hello"\ndefault-environment = "{env_name}"\n'
+        )
+        overrides = {}
+    elif selector == "cli-task":
+        task_body = '[tasks]\ngreet = "echo hello"\n'
+        overrides = {"environment": env_name}
+    else:
+        task_body = '[tasks]\ngreet = "echo hello"\n'
+        overrides = {"environment": env_name, "task_name": "echo goodbye"}
+
+    task_file = tmp_path / "conda.toml"
+    workspace_body = (
+        '[workspace]\nname = "test"\nchannels = ["conda-forge"]\n'
+        'platforms = ["linux-64"]\n\n[environments]\nmyenv = []\n\n'
+        if workspace
+        else ""
+    )
+    task_file.write_text(f"{workspace_body}{task_body}")
+    monkeypatch.setattr(WorkspaceContext, "env_exists", lambda self, name: False)
+
+    with pytest.raises(error, match=message):
+        execute_run(_run_args(task_file, **overrides))
+
+    assert fake_shell.calls == []
+
+
+@pytest.mark.parametrize(
+    "environment_declaration",
+    [
+        'depends-on = [{ task = "setup", environment = "myenv" }]',
+        'depends-on = ["setup"]',
+    ],
+    ids=["dependency-edge", "task-default"],
+)
+def test_execute_run_uses_transitive_dependency_selected_env(
+    workspace_task_file,
+    fake_shell,
+    env_prefix_stub,
+    tmp_path,
+    environment_declaration,
+):
+    """A transitive dependency uses its explicitly selected environment."""
+    task_default = (
+        '\ndefault-environment = "myenv"'
+        if environment_declaration == 'depends-on = ["setup"]'
+        else ""
+    )
+    workspace_task_file.write_text(
+        '[workspace]\nname = "test"\nchannels = ["conda-forge"]\n'
+        'platforms = ["linux-64"]\n\n'
+        f'[tasks.setup]\ncmd = "echo setup"{task_default}\n\n'
+        '[tasks.build]\ncmd = "echo build"\n'
+        f"{environment_declaration}\n\n"
+        '[tasks.greet]\ncmd = "echo hello"\ndepends-on = ["build"]\n'
+    )
+    selected_prefix = tmp_path / ".conda" / "envs" / "myenv"
+    env_prefix_stub["myenv"] = selected_prefix
+
+    result = execute_run(_run_args(workspace_task_file))
+
+    assert result == 0
+    assert [(call[0], call[3]) for call in fake_shell.calls] == [
+        ("echo setup", selected_prefix),
+        ("echo build", None),
+        ("echo hello", None),
+    ]
+
+
+def test_execute_run_rejects_conflicting_shared_dependency_envs(
+    workspace_task_file,
+    fake_shell,
+):
+    """A shared task cannot execute once in two selected environments."""
+    workspace_task_file.write_text(
+        '[workspace]\nname = "test"\nchannels = ["conda-forge"]\n'
+        'platforms = ["linux-64"]\n\n'
+        "[environments]\npy310 = []\npy311 = []\n\n"
+        '[tasks]\nsetup = "echo setup"\n\n'
+        '[tasks.build]\ncmd = "echo build"\n'
+        'depends-on = [{ task = "setup", environment = "py310" }]\n\n'
+        '[tasks.lint]\ncmd = "echo lint"\n'
+        'depends-on = [{ task = "setup", environment = "py311" }]\n\n'
+        '[tasks.greet]\ncmd = "echo hello"\ndepends-on = ["build", "lint"]\n'
+    )
+
+    with pytest.raises(
+        CondaWorkspacesError,
+        match="conflicting environments 'py310' and 'py311'",
+    ):
+        execute_run(_run_args(workspace_task_file))
+
+    assert fake_shell.calls == []
+
+
+@pytest.mark.parametrize(
+    ("alias_definition", "dependency", "message"),
+    [
+        (
+            'depends-on = ["setup"]',
+            '{ task = "check", environment = "myenv" }',
+            "cannot select environment 'myenv' for alias task 'check'",
+        ),
+        (
+            'depends-on = ["setup"]\ndefault-environment = "myenv"',
+            '"check"',
+            "Alias task 'check' cannot use default-environment",
+        ),
+    ],
+    ids=["dependency-edge", "nested-default"],
+)
+@pytest.mark.parametrize("environment", [None, "myenv"], ids=["implicit", "cli"])
+def test_execute_run_rejects_environment_selector_on_dependency_alias(
+    tmp_path,
+    fake_shell,
+    env_prefix_stub,
+    alias_definition,
+    dependency,
+    message,
+    environment,
+):
+    """An alias selector cannot silently choose a shell for its commands."""
+    task_file = tmp_path / "conda.toml"
+    task_file.write_text(
+        '[workspace]\nname = "test"\nchannels = ["conda-forge"]\n'
+        'platforms = ["linux-64"]\n\n[environments]\nmyenv = []\n\n'
+        '[tasks]\nsetup = "echo setup"\n\n'
+        f"[tasks.check]\n{alias_definition}\n\n"
+        f'[tasks.greet]\ncmd = "echo hello"\ndepends-on = [{dependency}]\n'
+    )
+    env_prefix_stub["myenv"] = tmp_path / ".conda" / "envs" / "myenv"
+
+    with pytest.raises(CondaWorkspacesError, match=message):
+        execute_run(_run_args(task_file, environment=environment))
+
+    assert fake_shell.calls == []

@@ -200,6 +200,19 @@ cmd = "pytest"
 default-environment = "py38-compat"
 ```
 
+Explicit environment selectors must name an installed workspace environment.
+This includes `-e <env>`, `default-environment`, and the `environment` field on
+a task dependency. A missing or uninstalled selected environment reports an
+error instead of silently running the command in the current shell. Tasks-only
+manifests do not define workspace environments, so these selectors require a
+workspace table.
+
+Aliases have no command to run in an environment. When an alias is another
+task's dependency, put `environment` or `default-environment` on each
+executable task inside the alias instead. Environment selectors on nested
+aliases are rejected rather than silently falling back to another shell. A
+target alias can still use `default-environment` as its invocation fallback.
+
 ## User-level tasks
 
 Define tasks in `~/.config/conda/tasks.toml` to make them available in

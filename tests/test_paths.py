@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 import sys
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 
 import pytest
 
@@ -361,6 +363,79 @@ def test_atomic_write_text_does_not_follow_raced_parent(
     assert replaced is True
     assert not (outside / "nested").exists()
     assert not (displaced / "nested" / "output.txt").exists()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux renameat2 syscall")
+@pytest.mark.parametrize(
+    ("flag", "exchange"),
+    [(1, False), (2, True)],
+    ids=["noreplace", "exchange"],
+)
+def test_linux_flagged_rename_uses_syscall_without_libc_wrapper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    flag: int,
+    exchange: bool,
+) -> None:
+    assert paths_mod._LIBC is not None
+
+    source = tmp_path / "source.txt"
+    destination = tmp_path / "destination.txt"
+    source.write_text("source", encoding="utf-8")
+    if exchange:
+        destination.write_text("destination", encoding="utf-8")
+    monkeypatch.setattr(
+        paths_mod,
+        "_LIBC",
+        SimpleNamespace(syscall=paths_mod._LIBC.syscall),
+    )
+
+    paths_mod._rename_with_flags(source, destination, flag=flag)
+
+    assert destination.read_text(encoding="utf-8") == "source"
+    if exchange:
+        assert source.read_text(encoding="utf-8") == "destination"
+    else:
+        assert not source.exists()
+
+
+@pytest.mark.parametrize(
+    "error_number",
+    [errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP],
+    ids=["filesystem", "kernel", "operation"],
+)
+@pytest.mark.parametrize(
+    ("flag", "message"),
+    [
+        (1, "exclusive rename"),
+        (2, "atomic name exchange"),
+    ],
+    ids=["noreplace", "exchange"],
+)
+def test_linux_flagged_rename_reports_unavailable_support(
+    monkeypatch: pytest.MonkeyPatch,
+    error_number: int,
+    flag: int,
+    message: str,
+) -> None:
+    monkeypatch.setattr(paths_mod, "_LIBC", SimpleNamespace(syscall=lambda *args: -1))
+    monkeypatch.setattr(paths_mod.ctypes, "get_errno", lambda: error_number)
+    monkeypatch.setattr(paths_mod.sys, "platform", "linux")
+    monkeypatch.setattr(
+        paths_mod.os,
+        "uname",
+        lambda: SimpleNamespace(machine="x86_64"),
+        raising=False,
+    )
+
+    with pytest.raises(
+        NotImplementedError,
+        match=rf"{message} is unavailable for these paths",
+    ) as exc_info:
+        paths_mod._rename_with_flags("source", "destination", flag=flag)
+
+    assert isinstance(exc_info.value.__cause__, OSError)
+    assert exc_info.value.__cause__.errno == error_number
 
 
 def test_atomic_write_text_does_not_overwrite_raced_new_target(

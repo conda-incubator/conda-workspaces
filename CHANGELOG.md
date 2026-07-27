@@ -66,9 +66,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   package archive files. Re-run receipt-verified `unarchive` to add the
   missing cache records. If conda created a conflicting extracted cache entry
   during a failed offline install, remove that entry and retry.
-- Task execution now uses a workspace environment only when its prefix is
-  installed. Tasks otherwise run in the current shell instead of attempting
-  to activate a nonexistent prefix.
+- Task execution now falls back to the current shell only when the implicit
+  workspace `default` environment is not installed. Explicit `-e`, task
+  `default-environment`, and dependency `environment` selectors now fail when
+  the selected environment is undefined or uninstalled instead of silently
+  running in the wrong environment. Move selectors from nested aliases to
+  each executable dependency. A target alias can still provide the default
+  environment fallback for its invocation.
+- Constraint-changing `conda workspace update` operations now accept the
+  manifest generation they publish before applying the prepared prefix
+  transaction. Later concurrent manifest changes remain rejected.
+- Feature-target dependency mutations now keep features and unrelated
+  environments with the same name independent when validating a platform.
+- Linux atomic publication now calls the `renameat2` system call directly when
+  the libc wrapper is unavailable, retaining older glibc support without
+  weakening no-replace or exchange guarantees. Kernels and filesystems that
+  cannot provide those guarantees fail with an explicit unsupported-operation
+  error.
 - Complete lock generation now reconciles non-identity package metadata from
   installed prefixes and fresh solves while still rejecting conflicting
   package hashes for the same URL.
