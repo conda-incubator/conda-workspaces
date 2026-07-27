@@ -22,7 +22,7 @@ Type "# Initialize a new workspace"
 Enter
 Sleep 500ms
 
-Type@80ms "conda workspace init --name my-project"
+Type@80ms "conda workspace init --name my-project -c conda-forge"
 Enter
 Wait /\$/
 Sleep 1s

@@ -177,15 +177,16 @@ clean = "{% if conda.is_win %}rd /s /q build{% else %}rm -rf build/{% endif %}"
 
 :::{versionchanged} 0.4.0
 When a task is defined in a manifest that also declares workspace
-environments, `conda task run` now falls back to the workspace's
-`default` environment instead of whatever conda environment happens
-to be active. Tasks without a workspace (tasks-only manifests)
-still use the current conda environment. `-e <env>` and a task's
-`default-environment` key continue to take precedence.
+environments, `conda task run` now falls back to the workspace's `default`
+environment instead of whatever conda environment happens to be active. Tasks
+without a workspace (tasks-only manifests) still use the current conda
+environment. `-e <env>` and a task's `default-environment` key continue to take
+precedence.
 :::
 
 Tasks defined alongside workspace environments run in the workspace's
-`default` environment. Override with `-e <env>`:
+`default` environment when it is installed. If that environment is not
+installed, the task runs in the current shell. Override with `-e <env>`:
 
 ```bash
 conda task run test -e myenv

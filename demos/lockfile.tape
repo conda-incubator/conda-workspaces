@@ -24,7 +24,7 @@ Enter
 Wait /\$/
 Show
 
-Type "# Install and solve for the current platform"
+Type "# Install the host environment and lock every declared platform"
 Enter
 Sleep 500ms
 
@@ -33,7 +33,7 @@ Enter
 Wait /\$/
 Sleep 2s
 
-Type "# Lock every platform declared in conda.toml — one (env, platform) per line"
+Type "# An explicit lock refresh also covers every declared platform"
 Enter
 Sleep 500ms
 

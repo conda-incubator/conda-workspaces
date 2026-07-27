@@ -18,11 +18,11 @@ Enter
 Wait /\$/
 Show
 
-Type "# One command: init + add + install + shell"
+Type "# One command: init + add + install, without opening a shell"
 Enter
 Sleep 500ms
 
-Type@80ms `conda workspace quickstart --no-shell --name demo "python=3.12" "numpy>=2"`
+Type@80ms `conda workspace quickstart --no-shell --name demo -c conda-forge "python=3.12" "numpy>=2"`
 Enter
 Wait /\$/
 Sleep 3s
@@ -44,7 +44,7 @@ Type "rm -rf /tmp/ws-json && mkdir -p /tmp/ws-json && cd /tmp/ws-json"
 Enter
 Wait /\$/
 
-Type@80ms `conda workspace quickstart --json --name scripted "python=3.12"`
+Type@80ms `conda workspace quickstart --json --name scripted -c conda-forge "python=3.12"`
 Enter
 Wait /\$/
 Sleep 3s

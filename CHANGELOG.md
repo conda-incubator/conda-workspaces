@@ -63,6 +63,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   package archive files. Re-run receipt-verified `unarchive` to add the
   missing cache records. If conda created a conflicting extracted cache entry
   during a failed offline install, remove that entry and retry.
+- Task execution now uses a workspace environment only when its prefix is
+  installed. Tasks otherwise run in the current shell instead of attempting
+  to activate a nonexistent prefix.
+- Complete lock generation now reconciles non-identity package metadata from
+  installed prefixes and fresh solves while still rejecting conflicting
+  package hashes for the same URL.
 - `conda workspace quickstart -e <name> <specs>` now creates the named
   environment when needed, records the specs as private dependencies,
   installs only that prefix, and reports the same environment in JSON.

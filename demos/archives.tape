@@ -13,7 +13,7 @@ Wait /\$/
 Type `FIXTURES=$(pwd)/demos/fixtures`
 Enter
 Wait /\$/
-Type "rm -rf /tmp/archives-demo && mkdir -p /tmp/archives-demo && cd /tmp/archives-demo"
+Type "rm -rf /tmp/archives-demo /tmp/restored && mkdir -p /tmp/archives-demo && cd /tmp/archives-demo"
 Enter
 Wait /\$/
 Type `cp "$FIXTURES/archives.toml" conda.toml`
