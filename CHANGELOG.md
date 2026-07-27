@@ -18,11 +18,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   `environment_details` snapshot with every environment's feature
   composition, prefix state, channels, per-platform resolved
   dependencies, and exact manifest declaration provenance.
+  Provenance now includes structured `environment`, `feature`, and
+  `platform` selectors. Consumers should use `provenance.location`
+  instead of parsing the human-readable `provenance.table` value.
   `--packages` adds installed package records to the same response.
   `workspace envs --json` now also reports `no_default_feature`.
   Machine consumers that currently call `workspace envs`, then
   `workspace info -e` and `workspace list -e` for each environment can
-  migrate to one `workspace info --json --packages` call. (#127)
+  migrate to one `workspace info --json --packages` call. (#127, #151)
 
 ### Changed
 

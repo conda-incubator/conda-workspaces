@@ -35,16 +35,32 @@ winning manifest table:
   "spec": "python >=3.12 py*",
   "provenance": {
     "table": "[environments.test.dependencies]",
+    "location": {
+      "environment": "test",
+      "feature": null,
+      "platform": null
+    },
     "inherited_from": "[workspace.dependencies]"
   }
 }
 ```
 
+Use `provenance.location` to build the `--environment`, `--feature`, and
+`--platform` selectors accepted by `workspace remove` and, for conda
+dependencies, `workspace update`. PyPI removals also need `--pypi`, identified
+by the containing `pypi_dependencies` collection. `environment` and `feature`
+are mutually exclusive, and all three fields are `null` for a top-level default
+declaration. `platform` is the manifest target key accepted by `--platform`,
+including a rich workspace platform name rather than only its resolved conda
+subdir. `table` remains the human-readable manifest location and should not be
+parsed as a machine contract.
+
 `inherited_from` appears only when the winning conda declaration uses
-`{ workspace = true }`. Rich platform entries report both the declared
-platform name and its conda subdir. PyPI specs use their
-manifest-compatible structured form so Git selectors and editable
-paths remain available to consumers.
+`{ workspace = true }`. In that case, `location` still identifies the
+declaration selected for mutation. Rich platform entries report both the
+declared platform name and its conda subdir. PyPI specs use their
+manifest-compatible structured form so Git selectors and editable paths remain
+available to consumers.
 
 Pass `--packages` to include each installed prefix's package records:
 

@@ -351,6 +351,11 @@ def _dependency_detail(
 
     provenance = {
         "table": location.table_name(dependency_key, namespace),
+        "location": {
+            "environment": location.environment,
+            "feature": location.feature,
+            "platform": location.platform,
+        },
     }
     table = location.find_table(source)
     dependency_table = table.get(dependency_key, {}) if table is not None else {}
