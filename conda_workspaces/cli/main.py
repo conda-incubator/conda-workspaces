@@ -399,16 +399,17 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         nargs="+",
         help="Package specs to add (e.g. 'numpy>=1.24').",
     )
-    add_parser_cmd.add_argument(
+    add_location = add_parser_cmd.add_mutually_exclusive_group()
+    add_location.add_argument(
         "-e",
         "--environment",
         default=None,
-        help="Target environment (adds to its feature instead of default).",
+        help="Target dependencies declared directly on an environment.",
     )
-    add_parser_cmd.add_argument(
+    add_location.add_argument(
         "--feature",
         default=None,
-        help="Target feature directly (overrides --environment).",
+        help="Target a shared feature.",
     )
     add_parser_cmd.add_argument(
         "--pypi",
@@ -450,16 +451,17 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         nargs="+",
         help="Package names to remove.",
     )
-    rm_parser.add_argument(
+    remove_location = rm_parser.add_mutually_exclusive_group()
+    remove_location.add_argument(
         "-e",
         "--environment",
         default=None,
-        help="Target environment.",
+        help="Target dependencies declared directly on an environment.",
     )
-    rm_parser.add_argument(
+    remove_location.add_argument(
         "--feature",
         default=None,
-        help="Target feature directly.",
+        help="Target a shared feature.",
     )
     rm_parser.add_argument(
         "--pypi",

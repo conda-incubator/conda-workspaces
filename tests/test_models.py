@@ -189,10 +189,12 @@ def test_config_resolve_features_no_default():
 
 def test_config_merged_conda_dependencies(sample_config):
     env = sample_config.environments["test"]
+    env.conda_dependencies["coverage"] = MatchSpec("coverage >=7")
     merged = sample_config.merged_conda_dependencies(env)
     assert "python" in merged  # from default
     assert "numpy" in merged  # from default
     assert "pytest" in merged  # from test feature
+    assert "coverage" in merged  # from the environment
 
 
 def test_config_merged_channels(sample_config):
@@ -263,12 +265,20 @@ def test_config_merged_pypi_deps_with_target():
     )
     config = WorkspaceConfig(
         features={"default": default_feat},
-        environments={"default": Environment(name="default")},
+        environments={
+            "default": Environment(
+                name="default",
+                pypi_dependencies={
+                    "httpx": PyPIDependency(name="httpx", spec=">=0.28")
+                },
+            )
+        },
     )
     env = config.environments["default"]
     merged = config.merged_pypi_dependencies(env, platform="linux-64")
     assert "requests" in merged
     assert "uvloop" in merged
+    assert "httpx" in merged
 
 
 @pytest.mark.parametrize(

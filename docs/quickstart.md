@@ -105,7 +105,7 @@ If you prefer to wire the commands together yourself, start from
 ```bash
 conda workspace init --name my-project
 conda workspace add "python>=3.12" "numpy>=2"
-conda workspace add -e test "pytest>=8.0"
+conda workspace add --feature test "pytest>=8.0"
 conda workspace envs
 ```
 
@@ -317,6 +317,20 @@ that feature are installed or updated):
 ```bash
 conda workspace add --feature test pytest
 ```
+
+Add a dependency directly to one environment without changing its
+shared features:
+
+```bash
+conda workspace add --environment test coverage
+```
+
+`--feature` and `--environment` are mutually exclusive. Environment
+dependencies are written below `[environments.<name>]`, and only that
+prefix is installed. Removing with `--environment` removes only a
+private declaration. If the dependency comes from a shared feature,
+the command leaves the manifest unchanged and identifies the required
+`--feature` selector.
 
 Add a PyPI dependency:
 

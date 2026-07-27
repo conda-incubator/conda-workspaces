@@ -169,6 +169,22 @@ def test_workspace_parser_args(
     assert getattr(parsed, expected_attr) == expected_value
 
 
+@pytest.mark.parametrize("subcmd", ["add", "remove"])
+def test_workspace_mutation_locations_are_mutually_exclusive(subcmd: str) -> None:
+    parser = generate_workspace_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                subcmd,
+                "--feature",
+                "test",
+                "--environment",
+                "qa",
+                "numpy",
+            ]
+        )
+
+
 def test_workspace_parser_separates_manifest_and_export_paths() -> None:
     parser = generate_workspace_parser()
 

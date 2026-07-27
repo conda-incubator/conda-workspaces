@@ -389,6 +389,20 @@ def test_parse_environment_no_default_feature(tmp_path):
     assert env.no_default_feature is True
 
 
+def test_parse_environment_dependencies(tmp_path):
+    env = parse_environment(
+        "qa",
+        {
+            "dependencies": {"coverage": ">=7"},
+            "pypi-dependencies": {"pytest-plugin": ">=1"},
+        },
+        tmp_path / "conda.toml",
+    )
+
+    assert env.conda_dependencies == {"coverage": MatchSpec("coverage >=7")}
+    assert env.pypi_dependencies["pytest-plugin"].spec == ">=1"
+
+
 @pytest.mark.parametrize(
     "platform, dep_key, attr, pkg",
     [

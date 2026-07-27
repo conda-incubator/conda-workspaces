@@ -29,15 +29,17 @@ if TYPE_CHECKING:
 def affected_environments(
     config: WorkspaceConfig,
     target_feature: str | None,
+    *,
+    target_environment: str | None = None,
 ) -> list[str]:
-    """Return environment names whose composition includes *target_feature*.
+    """Return environment names affected by one explicit mutation location.
 
-    When *target_feature* is ``None`` or ``"default"`` the default feature
-    was touched, so every environment that does not set
-    ``no-default-feature = true`` is affected.  Otherwise, every
-    environment whose ``features`` list contains *target_feature* is
-    affected.
+    An environment-local mutation affects only that environment. A default
+    or named feature mutation affects every environment that composes it.
     """
+    if target_environment is not None:
+        return [target_environment] if target_environment in config.environments else []
+
     names: list[str] = []
     for name, env in config.environments.items():
         if target_feature in (None, "default"):

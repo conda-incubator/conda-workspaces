@@ -8,7 +8,9 @@ import tomlkit
 from rich.console import Console
 
 from ...context import WorkspaceContext
+from ...exceptions import CondaWorkspacesError
 from ...manifests import detect_workspace_file, find_parser
+from ...models import Feature
 from . import workspace_manifest_path_from_args
 from .sync import affected_environments, sync_environments
 
@@ -26,8 +28,9 @@ def execute_remove(args: argparse.Namespace, *, console: Console | None = None) 
     specs = args.specs
     is_pypi = getattr(args, "pypi", False)
     feature = getattr(args, "feature", None)
+    if feature == Feature.DEFAULT_NAME:
+        feature = None
     environment = getattr(args, "environment", None)
-    target_feature = feature or environment
     dry_run = getattr(args, "dry_run", False)
 
     text = manifest_path.read_text(encoding="utf-8")
@@ -42,8 +45,52 @@ def execute_remove(args: argparse.Namespace, *, console: Console | None = None) 
             source = conda
         else:
             source = tool.get("pixi")
+    if environment and source is not None:
+        current = find_parser(manifest_path).parse_data(doc.unwrap(), manifest_path)
+        env = current.get_environment(environment)
+        local = env.pypi_dependencies if is_pypi else env.conda_dependencies
+        for name in specs:
+            if name in local:
+                continue
+            inherited_from = [
+                inherited_feature
+                for inherited_feature in current.resolve_features(env)
+                if name
+                in (
+                    inherited_feature.pypi_dependencies
+                    if is_pypi
+                    else inherited_feature.conda_dependencies
+                )
+            ]
+            if inherited_from:
+                source_names = ", ".join(
+                    "the default feature"
+                    if inherited_feature.is_default
+                    else f"feature '{inherited_feature.name}'"
+                    for inherited_feature in inherited_from
+                )
+                pypi = "--pypi " if is_pypi else ""
+                commands = [
+                    (
+                        f"conda workspace remove {pypi}{name}"
+                        if inherited_feature.is_default
+                        else (
+                            "conda workspace remove "
+                            f"{pypi}--feature {inherited_feature.name} {name}"
+                        )
+                    )
+                    for inherited_feature in inherited_from
+                ]
+                raise CondaWorkspacesError(
+                    f"Dependency '{name}' is not declared directly on"
+                    f" environment '{environment}'.",
+                    hints=[
+                        f"It is inherited from {source_names}.",
+                        *[f"Run '{command}'." for command in commands],
+                    ],
+                )
     removed = (
-        _remove_from_toml(source, specs, dep_key, target_feature)
+        _remove_from_toml(source, specs, dep_key, feature, environment)
         if source is not None
         else []
     )
@@ -53,7 +100,12 @@ def execute_remove(args: argparse.Namespace, *, console: Console | None = None) 
         if not dry_run:
             manifest_path.write_text(tomlkit.dumps(doc), encoding="utf-8")
         label = "PyPI" if is_pypi else "conda"
-        location = f"feature '{target_feature}'" if target_feature else "default"
+        if environment:
+            location = f"environment '{environment}'"
+        elif feature:
+            location = f"feature '{feature}'"
+        else:
+            location = "default"
         n = len(removed)
         noun = "dependency" if n == 1 else "dependencies"
         action = "Would remove" if dry_run else "Removed"
@@ -73,7 +125,11 @@ def execute_remove(args: argparse.Namespace, *, console: Console | None = None) 
         return 0
 
     ctx = WorkspaceContext(config)
-    env_names = affected_environments(config, target_feature)
+    env_names = affected_environments(
+        config,
+        feature,
+        target_environment=environment,
+    )
     if env_names:
         console.print()
         sync_environments(
@@ -93,11 +149,16 @@ def _remove_from_toml(
     specs: list[str],
     dep_key: str,
     feature: str | None,
+    environment: str | None,
 ) -> list[str]:
     """Remove deps from a pixi.toml or conda.toml document."""
     if feature:
         feat_table = doc.get("feature", {})
         target = feat_table.get(feature, {})
+    elif environment:
+        envs = doc.get("environments", {})
+        definition = envs.get(environment, {})
+        target = {} if isinstance(definition, list) else definition
     else:
         target = doc
 

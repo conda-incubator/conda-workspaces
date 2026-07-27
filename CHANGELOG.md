@@ -38,6 +38,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- `conda workspace add` and `remove` now treat `--environment` as a
+  private dependency location below `[environments.<name>]` instead of
+  assuming a same-named feature. Composed environments, the `default`
+  environment, and `no-default-feature` environments now retain their
+  intended feature composition, while `--feature` remains the selector
+  for shared declarations. Review any `[feature.<environment>]` tables
+  created by earlier `add -e` commands. Move dependencies intended for
+  one environment to `[environments.<environment>.dependencies]`, then
+  remove the accidental feature or feature-list entry. Keep genuinely
+  shared declarations in place and manage them with `--feature`. (#123)
 - `conda workspace add` now writes channel, build, subdir, hash, URL,
   file-name, license, feature, and track-feature MatchSpec fields
   without reducing them to a version string. A bare re-add preserves

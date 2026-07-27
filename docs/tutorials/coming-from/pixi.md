@@ -46,7 +46,7 @@ workspace and task definitions.
 | `pixi install --locked` | `conda workspace install --locked` (validates lockfile freshness) |
 | `pixi install --frozen` | `conda workspace install --frozen` (installs from lockfile as-is) |
 | `pixi add python` | `conda workspace add python` (installs by default, like pixi) |
-| `pixi add --feature test pytest` | `conda workspace add -e test pytest` or `conda workspace add --feature test pytest` |
+| `pixi add --feature test pytest` | `conda workspace add --feature test pytest` |
 | `pixi add --pypi requests` | `conda workspace add --pypi requests` |
 | `pixi add --no-install foo` | `conda workspace add --no-install foo` |
 | `pixi remove numpy` | `conda workspace remove numpy` (uninstalls by default, like pixi) |

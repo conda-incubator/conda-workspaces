@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, cast
 
 import tomlkit
 
-from ..manifests.toml import CondaTomlParser
+from ..manifests.toml import CondaTomlParser, WorkspaceDependencyResolver
 from ..models import Feature
 
 if TYPE_CHECKING:
@@ -40,16 +40,26 @@ def config_to_toml(
 
     default_feature = config.features.get(Feature.DEFAULT_NAME)
     if default_feature and default_feature.conda_dependencies:
-        deps: dict[str, str] = {}
-        for name, ms in default_feature.conda_dependencies.items():
-            deps[name] = str(ms.version) if ms.version else "*"
-        doc.add("dependencies", tomlkit.item(deps))
+        doc.add(
+            "dependencies",
+            tomlkit.item(
+                {
+                    name: WorkspaceDependencyResolver.match_spec_to_toml(spec)
+                    for name, spec in default_feature.conda_dependencies.items()
+                }
+            ),
+        )
 
     if default_feature and default_feature.pypi_dependencies:
-        pypi: dict[str, str] = {}
-        for name, dep in default_feature.pypi_dependencies.items():
-            pypi[name] = dep.spec if dep.spec else "*"
-        doc.add("pypi-dependencies", tomlkit.item(pypi))
+        doc.add(
+            "pypi-dependencies",
+            tomlkit.item(
+                {
+                    name: dependency.to_toml()
+                    for name, dependency in default_feature.pypi_dependencies.items()
+                }
+            ),
+        )
 
     if default_feature and (
         default_feature.activation_scripts or default_feature.activation_env
@@ -78,13 +88,36 @@ def config_to_toml(
     if config.environments:
         envs = tomlkit.table()
         for env_name, env in config.environments.items():
-            if env.is_default and not env.features:
-                envs.add(env_name, [])
+            if env.conda_dependencies or env.pypi_dependencies:
+                env_table = tomlkit.table()
+                if env.features:
+                    env_table.add("features", env.features)
+                if env.no_default_feature:
+                    env_table.add("no-default-feature", True)
+                if env.conda_dependencies:
+                    env_table.add(
+                        "dependencies",
+                        {
+                            name: WorkspaceDependencyResolver.match_spec_to_toml(spec)
+                            for name, spec in env.conda_dependencies.items()
+                        },
+                    )
+                if env.pypi_dependencies:
+                    env_table.add(
+                        "pypi-dependencies",
+                        {
+                            name: dependency.to_toml()
+                            for name, dependency in env.pypi_dependencies.items()
+                        },
+                    )
+                envs.add(env_name, env_table)
             elif env.no_default_feature:
                 envs.add(
                     env_name,
                     {"features": env.features, "no-default-feature": True},
                 )
+            elif env.is_default and not env.features:
+                envs.add(env_name, [])
             elif env.features:
                 envs.add(env_name, {"features": env.features})
             else:
@@ -110,16 +143,22 @@ def _add_feature(doc: tomlkit.TOMLDocument, feature: Feature) -> None:
     feat_tbl = tomlkit.table(is_super_table=True)
 
     if feature.conda_dependencies:
-        deps: dict[str, str] = {}
-        for name, ms in feature.conda_dependencies.items():
-            deps[name] = str(ms.version) if ms.version else "*"
-        feat_tbl.add("dependencies", deps)
+        feat_tbl.add(
+            "dependencies",
+            {
+                name: WorkspaceDependencyResolver.match_spec_to_toml(spec)
+                for name, spec in feature.conda_dependencies.items()
+            },
+        )
 
     if feature.pypi_dependencies:
-        pypi: dict[str, str] = {}
-        for name, dep in feature.pypi_dependencies.items():
-            pypi[name] = dep.spec if dep.spec else "*"
-        feat_tbl.add("pypi-dependencies", pypi)
+        feat_tbl.add(
+            "pypi-dependencies",
+            {
+                name: dependency.to_toml()
+                for name, dependency in feature.pypi_dependencies.items()
+            },
+        )
 
     if feature.channels:
         feat_tbl.add("channels", [ch.canonical_name for ch in feature.channels])

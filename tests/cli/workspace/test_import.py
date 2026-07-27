@@ -478,6 +478,84 @@ def test_pixi_tasks_preserved(tmp_path: Path) -> None:
     assert "build" in doc["tasks"]
 
 
+@pytest.mark.parametrize(
+    ("filename", "prefix"),
+    [
+        ("pixi.toml", ""),
+        ("pyproject.toml", "tool.conda."),
+    ],
+    ids=["pixi", "pyproject"],
+)
+def test_import_preserves_environment_local_dependencies(
+    tmp_path: Path,
+    filename: str,
+    prefix: str,
+) -> None:
+    project = '[project]\nname = "import-test"\n\n' if prefix else ""
+    path = tmp_path / filename
+    path.write_text(
+        f"""{project}[{prefix}workspace]
+name = "import-test"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[{prefix}pypi-dependencies]
+root-package = {{ git = "https://example.com/root.git", branch = "main" }}
+
+[{prefix}feature.shared.pypi-dependencies]
+feature-package = {{ git = "https://example.com/feature.git", tag = "v1.0" }}
+
+[{prefix}environments.default]
+no-default-feature = true
+
+[{prefix}environments.qa.dependencies]
+coverage = {{ version = ">=7", channel = "conda-forge" }}
+
+[{prefix}environments.qa.pypi-dependencies]
+pytest-plugin = {{ version = ">=1", extras = ["reports"] }}
+branch-package = {{ git = "https://example.com/branch.git", branch = "main" }}
+tag-package = {{ git = "https://example.com/tag.git", tag = "v1.0" }}
+rev-package = {{ git = "https://example.com/rev.git", rev = "abc123" }}
+""",
+        encoding="utf-8",
+    )
+
+    doc = find_importer(path).convert(path)
+
+    assert doc["pypi-dependencies"]["root-package"].unwrap() == {
+        "git": "https://example.com/root.git",
+        "branch": "main",
+    }
+    assert doc["feature"]["shared"]["pypi-dependencies"][
+        "feature-package"
+    ].unwrap() == {
+        "git": "https://example.com/feature.git",
+        "tag": "v1.0",
+    }
+    assert doc["environments"]["default"]["no-default-feature"] is True
+    environment = doc["environments"]["qa"]
+    assert environment["dependencies"]["coverage"].unwrap() == {
+        "version": ">=7",
+        "channel": "conda-forge",
+    }
+    assert environment["pypi-dependencies"]["pytest-plugin"].unwrap() == {
+        "version": ">=1",
+        "extras": ["reports"],
+    }
+    assert environment["pypi-dependencies"]["branch-package"].unwrap() == {
+        "git": "https://example.com/branch.git",
+        "branch": "main",
+    }
+    assert environment["pypi-dependencies"]["tag-package"].unwrap() == {
+        "git": "https://example.com/tag.git",
+        "tag": "v1.0",
+    }
+    assert environment["pypi-dependencies"]["rev-package"].unwrap() == {
+        "git": "https://example.com/rev.git",
+        "rev": "abc123",
+    }
+
+
 def test_execute_import_writes_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
