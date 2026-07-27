@@ -38,6 +38,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- `conda workspace add` now writes channel, build, subdir, hash, URL,
+  file-name, license, feature, and track-feature MatchSpec fields
+  without reducing them to a version string. A bare re-add preserves
+  the existing declaration, while an explicit spec replaces it
+  completely and unsupported fields fail before the manifest is
+  written. Users whose earlier `add` commands lost constraints should
+  rerun the explicit spec to restore them. (#124)
 - Platform-filtered lock commands now reach platforms declared only by
   a feature without requiring feature-restricted environments to
   support the current host. (#122)
