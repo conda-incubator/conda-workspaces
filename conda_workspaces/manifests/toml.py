@@ -442,7 +442,7 @@ def parse_environment(
         return Environment(name=name, features=raw)
     if isinstance(raw, dict):
         resolver = resolver or WorkspaceDependencyResolver(path=path)
-        return Environment(
+        environment = Environment(
             name=name,
             features=list(raw.get("features", [])),
             no_default_feature=raw.get("no-default-feature", False),
@@ -452,6 +452,13 @@ def parse_environment(
             ),
             pypi_dependencies=parse_pypi_dependencies(raw.get("pypi-dependencies", {})),
         )
+        parse_target_overrides(
+            raw.get("target", {}),
+            environment,
+            resolver,
+            table_path=f"environments.{name}.target",
+        )
+        return environment
     raise WorkspaceParseError(
         path,
         f"Invalid environment definition for '{name}': "
@@ -461,29 +468,31 @@ def parse_environment(
 
 def parse_target_overrides(
     target_data: dict[str, Any],
-    feature: Feature,
+    owner: Feature | Environment,
     resolver: WorkspaceDependencyResolver | None = None,
+    *,
+    table_path: str = "target",
 ) -> None:
-    """Parse ``[target.<platform>]`` dep overrides into a feature."""
+    """Parse target dependency overrides into a feature or environment."""
     resolver = resolver or WorkspaceDependencyResolver()
     for platform, tdata in target_data.items():
         if "system-requirements" in tdata:
             resolver.error(
-                f"[target.{platform}.system-requirements] is not supported; "
-                "use rich [workspace].platforms entries or "
+                f"[{table_path}.{platform}.system-requirements] is not supported. "
+                "Use rich [workspace].platforms entries or "
                 "[feature.<name>.system-requirements]."
             )
 
         conda = resolver.parse_dependency_table(
             tdata.get("dependencies", {}),
-            table_name=f"[target.{platform}.dependencies]",
+            table_name=f"[{table_path}.{platform}.dependencies]",
         )
         if conda:
-            feature.target_conda_dependencies[platform] = conda
+            owner.target_conda_dependencies[platform] = conda
 
         pypi = parse_pypi_dependencies(tdata.get("pypi-dependencies", {}))
         if pypi:
-            feature.target_pypi_dependencies[platform] = pypi
+            owner.target_pypi_dependencies[platform] = pypi
 
 
 def parse_feature(
@@ -523,7 +532,13 @@ def parse_feature(
         feature.activation_scripts = list(activation.get("scripts", []))
         feature.activation_env = dict(activation.get("env", {}))
 
-    parse_target_overrides(feat_data.get("target", {}), feature, resolver)
+    table_path = "target" if feature.is_default else f"feature.{name}.target"
+    parse_target_overrides(
+        feat_data.get("target", {}),
+        feature,
+        resolver,
+        table_path=table_path,
+    )
     return feature
 
 
@@ -551,7 +566,13 @@ def parse_features_and_envs(
         resolver,
     )
 
-    for feat_name, feat_data in source.get("feature", {}).items():
+    feature_data = source.get("feature", {})
+    if Feature.DEFAULT_NAME in feature_data:
+        resolver.error(
+            "[feature.default] is reserved. Declare default feature content"
+            " in top-level tables."
+        )
+    for feat_name, feat_data in feature_data.items():
         config.features[feat_name] = parse_feature(
             feat_name,
             feat_data,

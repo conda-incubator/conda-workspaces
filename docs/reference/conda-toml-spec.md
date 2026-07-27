@@ -286,6 +286,12 @@ coverage = "*"
 
 [environments.test.pypi-dependencies]
 pytest-plugin = ">=1"
+
+[environments.test.target.win-64.dependencies]
+pywin32 = "*"
+
+[environments.test.target.win-64.pypi-dependencies]
+colorama = ">=0.4"
 ```
 
 | Field | Type | Description |
@@ -295,6 +301,7 @@ pytest-plugin = ">=1"
 | `no-default-feature` | boolean | If `true`, exclude the default feature from this environment.  Default: `false`. |
 | `dependencies` | conda deps | Conda dependencies private to this environment. |
 | `pypi-dependencies` | PyPI deps | PyPI dependencies private to this environment. |
+| `target` | table of `[target.<platform>]` | Per-platform private dependency overrides for this environment. |
 
 When `[environments]` is omitted entirely, a single implicit
 environment named `default` is used, composed from the default feature
@@ -302,7 +309,8 @@ only.
 
 Environment-local dependencies are merged after shared features. They
 therefore affect only that environment and override a same-named
-dependency contributed by a feature.
+dependency contributed by a feature. An environment's matching target
+dependencies are merged after its unqualified private dependencies.
 
 ### `[tasks]`
 
@@ -341,18 +349,62 @@ as a `[tasks]` entry.
 
 When a tool resolves an environment named `<env>`:
 
-1. Start with the default feature (top-level `[dependencies]`,
-   `[pypi-dependencies]`, `[activation]`, `[system-requirements]`,
-   `[target]`) unless the environment sets `no-default-feature = true`.
-2. Merge in each named feature listed in `features`, in order.  Later
-   features override earlier ones for conflicting keys. Lists are
-   concatenated and de-duplicated.
-3. Apply `[target.<platform>]` overrides for the host's platform.
-4. Merge dependencies declared directly on the environment.
+1. Unless the environment sets `no-default-feature = true`, merge the
+   default feature's top-level declarations and then its matching
+   `[target.<platform>]` overrides.
+2. Merge each named feature listed in `features`, in order. For each
+   feature, merge its unqualified declarations and then its matching
+   `[feature.<name>.target.<platform>]` overrides. Later features
+   override earlier ones for conflicting keys. Lists are concatenated
+   and de-duplicated.
+3. Merge dependencies declared directly on the environment.
+4. Merge matching
+   `[environments.<env>.target.<platform>]` dependencies.
 
 Channel order is preserved.  Duplicate dependency names within the
 same stack (conda or PyPI) are an error and the tool MUST surface them
 to the user.
+
+(dependency-mutation-rules)=
+
+## Dependency mutation rules
+
+`conda workspace add` and `conda workspace remove` address one
+declaration location. They MUST NOT search the composed environment and
+choose the effective winning declaration.
+
+| Selectors | Conda declaration table |
+|---|---|
+| none | `[dependencies]` |
+| `--platform P` | `[target.P.dependencies]` |
+| `--feature F` | `[feature.F.dependencies]` |
+| `--feature F --platform P` | `[feature.F.target.P.dependencies]` |
+| `--environment E` | `[environments.E.dependencies]` |
+| `--environment E --platform P` | `[environments.E.target.P.dependencies]` |
+
+`--feature default` is equivalent to using no location selector. A raw
+`[feature.default]` table is reserved and invalid. Default feature
+content belongs in the corresponding top-level tables.
+`--pypi` selects the corresponding `pypi-dependencies` table.
+`--feature` and `--environment` are mutually exclusive. `--platform`
+composes with either selector. `P` MUST identify a declared platform
+name or the backing conda subdir of a declared rich platform when
+adding. Remove also accepts the exact key of an existing target table
+so stale declarations can be deleted after a platform is removed.
+
+A bare add MUST preserve an existing `{ workspace = true }` marker at
+the selected location. An explicit spec replaces only that selected
+marker. Removing a marker removes membership from the selected table.
+Neither operation changes the shared `[workspace.dependencies]` entry.
+Target declarations change only when `--platform` selects them.
+
+After an add, the command reports any later declaration that still
+overrides the added value and gives the selector for that location. A
+remove where a requested package is absent from the selected location
+but declared elsewhere MUST fail before writing and list exact commands
+for all matching locations. The complete removal request is preflighted
+as one operation, so one wrong-location package prevents every removal
+in that request.
 
 ## Lockfile relationship
 
@@ -422,6 +474,7 @@ The same tables are accepted under `[tool.conda.<name>]` inside a
 | `[target.<platform>]` | `[tool.conda.target.<platform>]` |
 | `[feature.<name>]` | `[tool.conda.feature.<name>]` |
 | `[environments]` | `[tool.conda.environments]` |
+| `[environments.<name>.target.<platform>]` | `[tool.conda.environments.<name>.target.<platform>]` |
 | `[tasks]` | `[tool.conda.tasks]` |
 
 When both `conda.toml` and `pyproject.toml` exist in the same

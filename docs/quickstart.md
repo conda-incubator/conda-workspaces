@@ -309,7 +309,9 @@ declaration. An explicit MatchSpec replaces the whole declaration, and
 rich fields such as `channel` or `build` are written as an inline
 table. Use an explicit wildcard such as `numpy=*` to clear prior
 constraints. Unsupported MatchSpec fields fail before the manifest is
-written.
+written. If the existing entry is `{ workspace = true }`, a bare add
+keeps that marker. An explicit spec replaces only that membership entry
+and leaves `[workspace.dependencies]` unchanged.
 
 Add to a specific feature (only prefixes for environments composing
 that feature are installed or updated):
@@ -327,10 +329,16 @@ conda workspace add --environment test coverage
 
 `--feature` and `--environment` are mutually exclusive. Environment
 dependencies are written below `[environments.<name>]`, and only that
-prefix is installed. Removing with `--environment` removes only a
-private declaration. If the dependency comes from a shared feature,
-the command leaves the manifest unchanged and identifies the required
-`--feature` selector.
+prefix is installed. `--platform` composes with either selector and
+addresses a target table below the selected location. The complete
+mapping is in the {ref}`dependency mutation rules <dependency-mutation-rules>`.
+For example:
+
+```bash
+conda workspace add --platform osx-arm64 llvm-openmp
+conda workspace add --feature test --platform win-64 "pytest<9"
+conda workspace add --environment test --platform win-64 pywin32
+```
 
 Add a PyPI dependency:
 

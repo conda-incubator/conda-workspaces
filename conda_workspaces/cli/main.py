@@ -412,6 +412,11 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         help="Target a shared feature.",
     )
     add_parser_cmd.add_argument(
+        "--platform",
+        default=None,
+        help="Target a platform table below the selected dependency location.",
+    )
+    add_parser_cmd.add_argument(
         "--pypi",
         action="store_true",
         default=False,
@@ -462,6 +467,11 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         "--feature",
         default=None,
         help="Target a shared feature.",
+    )
+    rm_parser.add_argument(
+        "--platform",
+        default=None,
+        help="Target a platform table below the selected dependency location.",
     )
     rm_parser.add_argument(
         "--pypi",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -395,12 +396,97 @@ def test_parse_environment_dependencies(tmp_path):
         {
             "dependencies": {"coverage": ">=7"},
             "pypi-dependencies": {"pytest-plugin": ">=1"},
+            "target": {
+                "linux-64": {
+                    "dependencies": {"gcc": ">=12"},
+                    "pypi-dependencies": {"uvloop": ">=0.21"},
+                }
+            },
         },
         tmp_path / "conda.toml",
     )
 
     assert env.conda_dependencies == {"coverage": MatchSpec("coverage >=7")}
     assert env.pypi_dependencies["pytest-plugin"].spec == ">=1"
+    assert env.target_conda_dependencies["linux-64"] == {"gcc": MatchSpec("gcc >=12")}
+    assert env.target_pypi_dependencies["linux-64"]["uvloop"].spec == ">=0.21"
+
+
+def test_parse_environment_target_workspace_dependency(tmp_path):
+    path = tmp_path / "conda.toml"
+    path.write_text(
+        """\
+[workspace]
+name = "environment-target"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[workspace.dependencies]
+numpy = { version = ">=2", channel = "conda-forge" }
+
+[environments.qa.target.linux-64.dependencies]
+numpy = { workspace = true, build = "py*" }
+""",
+        encoding="utf-8",
+    )
+
+    environment = CondaTomlParser().parse(path).environments["qa"]
+    dependency = environment.target_conda_dependencies["linux-64"]["numpy"]
+    assert str(dependency.version) == ">=2"
+    assert dependency.get_raw_value("build") == "py*"
+    assert dependency.get_raw_value("channel") == (
+        "https://conda.anaconda.org/conda-forge"
+    )
+
+
+def test_parse_rejects_reserved_default_feature_table(tmp_path):
+    path = tmp_path / "conda.toml"
+    path.write_text(
+        """\
+[workspace]
+name = "reserved-default"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[feature.default.dependencies]
+numpy = "*"
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WorkspaceParseError, match=r"\[feature\.default\] is reserved"):
+        CondaTomlParser().parse(path)
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        "target.linux-64.dependencies",
+        "feature.build.target.linux-64.dependencies",
+        "environments.qa.target.linux-64.dependencies",
+    ],
+    ids=["default", "feature", "environment"],
+)
+def test_parse_target_dependency_error_uses_full_table_path(tmp_path, table):
+    path = tmp_path / "conda.toml"
+    path.write_text(
+        f"""\
+[workspace]
+name = "target-path"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[workspace.dependencies]
+numpy = ">=2"
+
+[{table}]
+numpy = {{ workspace = false }}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WorkspaceParseError, match=re.escape(f"[{table}].numpy")):
+        CondaTomlParser().parse(path)
 
 
 @pytest.mark.parametrize(

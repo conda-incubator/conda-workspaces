@@ -51,7 +51,7 @@ shortcuts `cw` and `ct` are also available as aliases.
 | `[environments]` | `Environment` dataclass | Including `no-default-feature` |
 | `[activation]` | `activation_scripts`, `activation_env` | Scripts copied to activate.d/, env vars set via PrefixData |
 | `[system-requirements]` | Virtual package constraints | Added as `__glibc >=X`, `__cuda >=Y` specs during solving |
-| `[target.<platform>]` | `target_conda_dependencies` | Per-platform overrides |
+| Base, feature, and environment `[target.<platform>]` tables | Owner-specific target dependency maps | Per-platform overrides at each composition layer |
 | `channel-priority` | Mapped to conda setting | `strict` / `flexible` / `disabled` |
 | Inline tables `{version = "...", build = "..."}` | Parsed via tomlkit | Dict-form deps |
 | `pixi add` / `pixi remove` | `conda workspace add` / `conda workspace remove` | Solves and installs by default. `--no-install` / `--no-lockfile-update` opt-outs |
@@ -195,6 +195,12 @@ All declared environments still feed lock generation. A shared helper
 `sync_environments` in `conda_workspaces/cli/workspace/sync.py` backs
 both commands as well as `conda workspace install`, so there is a
 single canonical synchronization pipeline.
+
+**Mutation locations**: dependency mutation is location-based, not
+resolution-based. `add` and `remove` never choose whichever composed
+declaration currently wins. The normative selector mapping, inheritance
+behavior, and wrong-location diagnostics are defined in the
+[dependency mutation rules](docs/reference/conda-toml-spec.md#dependency-mutation-rules).
 
 **Shell re-spawn hint**: `conda-spawn` sources activation scripts once at
 spawn time, so packages that ship `etc/conda/activate.d/*.sh` hooks need

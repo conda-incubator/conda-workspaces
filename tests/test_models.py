@@ -242,16 +242,29 @@ def test_config_merged_conda_deps_with_target():
         name="default",
         conda_dependencies={"python": MatchSpec("python >=3.10")},
         target_conda_dependencies={
-            "linux-64": {"gcc": MatchSpec("gcc >=12")},
+            "linux-64": {
+                "gcc": MatchSpec("gcc >=12"),
+                "python": MatchSpec("python >=3.11"),
+            },
+        },
+    )
+    environment = Environment(
+        name="default",
+        conda_dependencies={"python": MatchSpec("python >=3.12")},
+        target_conda_dependencies={
+            "linux-64": {"python": MatchSpec("python >=3.13")},
+            "linux-64-cuda": {"python": MatchSpec("python >=3.14")},
         },
     )
     config = WorkspaceConfig(
+        platforms=["linux-64-cuda"],
+        platform_subdirs={"linux-64-cuda": "linux-64"},
         features={"default": default_feat},
-        environments={"default": Environment(name="default")},
+        environments={"default": environment},
     )
     env = config.environments["default"]
-    merged = config.merged_conda_dependencies(env, platform="linux-64")
-    assert "python" in merged
+    merged = config.merged_conda_dependencies(env, platform="linux-64-cuda")
+    assert str(merged["python"].version) == ">=3.14"
     assert "gcc" in merged
 
 
@@ -264,19 +277,36 @@ def test_config_merged_pypi_deps_with_target():
         },
     )
     config = WorkspaceConfig(
+        platforms=["linux-64-cuda"],
+        platform_subdirs={"linux-64-cuda": "linux-64"},
         features={"default": default_feat},
         environments={
             "default": Environment(
                 name="default",
                 pypi_dependencies={
-                    "httpx": PyPIDependency(name="httpx", spec=">=0.28")
+                    "httpx": PyPIDependency(name="httpx", spec=">=0.28"),
+                    "requests": PyPIDependency(name="requests", spec=">=2.29"),
+                },
+                target_pypi_dependencies={
+                    "linux-64": {
+                        "requests": PyPIDependency(
+                            name="requests",
+                            spec=">=2.30",
+                        )
+                    },
+                    "linux-64-cuda": {
+                        "requests": PyPIDependency(
+                            name="requests",
+                            spec=">=2.31",
+                        )
+                    },
                 },
             )
         },
     )
     env = config.environments["default"]
-    merged = config.merged_pypi_dependencies(env, platform="linux-64")
-    assert "requests" in merged
+    merged = config.merged_pypi_dependencies(env, platform="linux-64-cuda")
+    assert merged["requests"].spec == ">=2.31"
     assert "uvloop" in merged
     assert "httpx" in merged
 
