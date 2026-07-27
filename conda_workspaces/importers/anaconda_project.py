@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 import tomlkit
 from conda.utils import quote_for_shell
 
+from ..exceptions import ManifestImportError
+from ..models import redact_url_text
 from .base import ManifestImporter
 
 if TYPE_CHECKING:
@@ -30,7 +32,10 @@ class AnacondaProjectImporter(ManifestImporter):
 
         ws = tomlkit.table()
         ws.add("name", ap.get("name", path.parent.name))
-        ws.add("channels", ap.get("channels", ["conda-forge"]))
+        ws.add(
+            "channels",
+            self.redact_channels(ap.get("channels", ["conda-forge"])),
+        )
         ws.add("platforms", ap.get("platforms", ["linux-64", "osx-arm64"]))
         doc.add("workspace", ws)
 
@@ -53,7 +58,7 @@ class AnacondaProjectImporter(ManifestImporter):
         if base_pypi:
             doc.add("pypi-dependencies", tomlkit.item(base_pypi))
 
-        features: dict[str, dict[str, str]] = {}
+        features: dict[str, dict[str, object]] = {}
         environments: dict[str, Any] = {"default": []}
 
         for env_name, spec in env_specs.items():
@@ -79,8 +84,22 @@ class AnacondaProjectImporter(ManifestImporter):
             url = dl_spec if isinstance(dl_spec, str) else dl_spec.get("url", "")
             if url:
                 filename = dl_name.lower().replace("_", "-")
+                original_url = str(url)
+                safe_url = redact_url_text(original_url)
+                if safe_url != original_url:
+                    raise ManifestImportError(
+                        path,
+                        f"download '{dl_name}' contains a URL that cannot be"
+                        " imported safely",
+                    )
                 tasks[f"download-{filename}"] = {
-                    "cmd": quote_for_shell("curl", "-fsSL", "-o", filename, str(url)),
+                    "cmd": quote_for_shell(
+                        "curl",
+                        "-fsSL",
+                        "-o",
+                        filename,
+                        safe_url,
+                    ),
                     "description": f"Download {dl_name}",
                 }
 

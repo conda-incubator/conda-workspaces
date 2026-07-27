@@ -13,10 +13,8 @@ import logging
 from typing import TYPE_CHECKING
 
 import tomlkit
-from conda.base.constants import KNOWN_SUBDIRS
-from conda.exceptions import InvalidMatchSpec
 
-from ..exceptions import TaskParseError, WorkspaceParseError
+from ..exceptions import WorkspaceParseError
 from ..models import (
     ArchiveConfig,
     Channel,
@@ -24,8 +22,15 @@ from ..models import (
     Feature,
     MatchSpec,
     PyPIDependency,
+    normalize_url_scheme,
+    redact_channel_name,
 )
-from .base import ManifestParser
+from .base import (
+    MATCH_SPEC_FIELD_ALIASES,
+    MATCH_SPEC_TOML_FIELDS,
+    ManifestParser,
+    match_spec_to_toml,
+)
 from .normalize import parse_tasks_and_targets
 
 if TYPE_CHECKING:
@@ -54,7 +59,8 @@ class CondaTomlParser(ManifestParser):
         return path.name in self.filenames
 
     def has_workspace(self, path: Path) -> bool:
-        return "workspace" in self.read_toml(str(path))
+        data = self.load_toml(path)
+        return "workspace" in data
 
     def parse_data(self, data: dict[str, Any], path: Path) -> WorkspaceConfig:
         """Parse already-loaded conda.toml data."""
@@ -68,13 +74,11 @@ class CondaTomlParser(ManifestParser):
         return config
 
     def has_tasks(self, path: Path) -> bool:
-        return bool(self.read_toml(str(path)).get("tasks"))
+        data = self.load_toml(path)
+        return bool(data.get("tasks"))
 
-    def parse_tasks(self, path: Path) -> dict[str, Task]:
-        try:
-            data = tomlkit.loads(path.read_text(encoding="utf-8")).unwrap()
-        except Exception as exc:
-            raise TaskParseError(str(path), str(exc)) from exc
+    def parse_tasks_data(self, data: dict[str, Any]) -> dict[str, Task]:
+        """Parse conda tasks from an already loaded manifest mapping."""
         return parse_tasks_and_targets(data)
 
 
@@ -147,16 +151,16 @@ def parse_channels(raw: list[Any]) -> list[Channel]:
     channels: list[Channel] = []
     for item in raw:
         if isinstance(item, str):
-            channels.append(Channel(item))
+            channels.append(Channel(normalize_url_scheme(item)))
         elif isinstance(item, dict):
             if "priority" in item:
                 log.debug(
                     "Channel priority is not supported by conda; "
                     "ignoring priority=%s for channel '%s'",
                     item["priority"],
-                    item["channel"],
+                    redact_channel_name(str(item["channel"])),
                 )
-            channels.append(Channel(item["channel"]))
+            channels.append(Channel(normalize_url_scheme(item["channel"])))
     return channels
 
 
@@ -168,25 +172,7 @@ class WorkspaceDependencyResolver:
     downstream code only sees concrete ``MatchSpec`` objects.
     """
 
-    spec_field_aliases: ClassVar[dict[str, str]] = {
-        "version": "version",
-        "build": "build",
-        "build-number": "build_number",
-        "build_number": "build_number",
-        "channel": "channel",
-        "subdir": "subdir",
-        "md5": "md5",
-        "sha256": "sha256",
-        "url": "url",
-        "fn": "fn",
-        "file-name": "fn",
-        "license": "license",
-        "license-family": "license_family",
-        "license_family": "license_family",
-        "features": "features",
-        "track-features": "track_features",
-        "track_features": "track_features",
-    }
+    spec_field_aliases: ClassVar[dict[str, str]] = MATCH_SPEC_FIELD_ALIASES
     source_spec_fields: ClassVar[set[str]] = {
         "branch",
         "extras",
@@ -197,10 +183,7 @@ class WorkspaceDependencyResolver:
         "subdirectory",
         "tag",
     }
-    toml_spec_fields: ClassVar[dict[str, str]] = {
-        field: "file-name" if field == "fn" else field.replace("_", "-")
-        for field in dict.fromkeys(spec_field_aliases.values())
-    }
+    toml_spec_fields: ClassVar[dict[str, str]] = MATCH_SPEC_TOML_FIELDS
 
     def __init__(
         self,
@@ -234,63 +217,7 @@ class WorkspaceDependencyResolver:
             )
         return deps
 
-    @classmethod
-    def match_spec_to_toml(cls, spec: MatchSpec) -> str | InlineTable:
-        """Return the lossless TOML value for a conda *spec*."""
-        unsupported = [
-            field
-            for field in MatchSpec.FIELD_NAMES
-            if field not in cls.toml_spec_fields
-            and field != "name"
-            and spec.get_raw_value(field) is not None
-        ]
-        if spec.optional is not False:
-            unsupported.append("optional")
-        if spec.target is not None:
-            unsupported.append("target")
-        if unsupported:
-            fields = ", ".join(unsupported)
-            raise InvalidMatchSpec(
-                spec,
-                f"field(s) cannot be represented in a workspace manifest: {fields}",
-            )
-
-        subdir = spec.get_raw_value("subdir")
-        if subdir is not None and subdir not in KNOWN_SUBDIRS:
-            raise InvalidMatchSpec(
-                spec,
-                f"subdir '{subdir}' is not a known conda platform",
-            )
-
-        fields: dict[str, Any] = {}
-        for field, key in cls.toml_spec_fields.items():
-            value = spec.get_raw_value(field)
-            if value is None:
-                continue
-            if field == "channel":
-                channel = Channel(value)
-                value = next(
-                    candidate
-                    for candidate in (
-                        channel.canonical_name,
-                        channel.name,
-                        str(channel),
-                    )
-                    if candidate and Channel(candidate) == channel
-                )
-            elif field == "build_number":
-                value = str(value)
-            elif isinstance(value, frozenset):
-                value = sorted(value)
-            fields[key] = value
-
-        if not fields:
-            return "*"
-        if list(fields) == ["version"]:
-            return fields["version"]
-        table = tomlkit.inline_table()
-        table.update(fields)
-        return table
+    match_spec_to_toml = staticmethod(match_spec_to_toml)
 
     def parse_dependency(
         self,
@@ -355,7 +282,11 @@ class WorkspaceDependencyResolver:
         if not isinstance(spec, dict):
             return {"version": str(spec)}
 
-        unsupported = set(spec) - set(self.spec_field_aliases) - {"workspace"}
+        unsupported = {
+            str(key)
+            for key in spec
+            if key not in self.spec_field_aliases and key != "workspace"
+        }
         if strict_unsupported and unsupported:
             fields = ", ".join(sorted(unsupported))
             self.error(
@@ -371,6 +302,8 @@ class WorkspaceDependencyResolver:
                 continue
             if isinstance(value, list):
                 value = tuple(value)
+            if key == "channel" and isinstance(value, str):
+                value = normalize_url_scheme(value)
             fields[key] = value
         return fields
 
@@ -378,7 +311,7 @@ class WorkspaceDependencyResolver:
         """Reject pixi source-package fields when inheritance would consume them."""
         if not isinstance(spec, dict):
             return
-        unsupported = sorted(set(spec) & self.source_spec_fields)
+        unsupported = sorted(str(key) for key in spec if key in self.source_spec_fields)
         if not unsupported:
             return
         fields = ", ".join(unsupported)
@@ -423,6 +356,12 @@ def parse_pypi_dependencies(raw: dict[str, Any]) -> dict[str, PyPIDependency]:
             )
         else:
             deps[name] = PyPIDependency(name=name, spec=str(spec))
+        if deps[name].redacted().spec != deps[name].spec:
+            raise ValueError(
+                f"PyPI dependency '{name}' has a credential-bearing URL in its"
+                " version field. Move the URL to a direct source field without"
+                " embedded authentication, queries, or fragments."
+            )
     return deps
 
 

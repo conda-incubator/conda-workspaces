@@ -73,11 +73,42 @@ def _add_workspace_channel_options(parser: argparse.ArgumentParser) -> None:
 def _handle_error(exc: CondaError) -> int:
     """Render a CondaError with Rich and return its exit code.
 
-    In JSON or debug mode, re-raises so conda's own handler takes over
-    (preserving tracebacks and structured JSON output).
+    In debug mode, re-raises the original error for its traceback. In JSON
+    mode, raises a credential-redacted ``CondaError`` for conda's structured
+    renderer.
     """
-    if conda_context.json or conda_context.debug:
+    if conda_context.debug:
         raise exc
+    if conda_context.json:
+        from ..models import redact_url_text
+
+        def redact_value(value: object) -> object:
+            if isinstance(value, str):
+                return redact_url_text(value)
+            if isinstance(value, Path):
+                return redact_url_text(str(value))
+            if isinstance(value, dict):
+                return {
+                    redact_value(key): redact_value(item) for key, item in value.items()
+                }
+            if isinstance(value, list):
+                return [redact_value(item) for item in value]
+            if isinstance(value, tuple):
+                return tuple(redact_value(item) for item in value)
+            if isinstance(value, set):
+                return {redact_value(item) for item in value}
+            if value is None or isinstance(value, int | float | bool):
+                return value
+            return redact_url_text(str(value))
+
+        message = redact_url_text(str(exc))
+        for name, value in vars(exc).items():
+            setattr(exc, name, redact_value(value))
+        exc.message = message
+        exc._kwargs = {}
+        exc._caused_by = None
+        exc.args = (message,)
+        raise exc from None
 
     from rich.console import Console
 
@@ -849,6 +880,8 @@ def execute_workspace(args: argparse.Namespace) -> int:
                 result = _dispatch_workspace(args, subcmd)
             except DryRunExit:
                 result = 0
+            except CondaError as exc:
+                result = _handle_error(exc)
         if result != 0:
             sys.stderr.write(captured.getvalue())
             return result

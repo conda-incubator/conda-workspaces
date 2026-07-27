@@ -6,13 +6,13 @@ from pathlib import Path
 
 import pytest
 
+import conda_workspaces.manifests.base as manifest_base
 from conda_workspaces.exceptions import (
     NoTaskFileError,
     WorkspaceNotFoundError,
     WorkspaceParseError,
 )
 from conda_workspaces.manifests import (
-    cached_parse,
     detect_and_parse,
     detect_and_parse_tasks,
     detect_task_file,
@@ -109,10 +109,26 @@ def test_find_parser_unknown():
 
 
 def test_detect_and_parse(sample_pixi_toml):
-    cached_parse.cache_clear()
     path, config = detect_and_parse(sample_pixi_toml.parent)
     assert path == sample_pixi_toml
     assert config.name == "test-project"
+
+
+def test_detect_and_parse_reads_current_manifest_text(sample_pixi_toml):
+    _, first = detect_and_parse(sample_pixi_toml)
+    sample_pixi_toml.write_text(
+        sample_pixi_toml.read_text(encoding="utf-8").replace(
+            'name = "test-project"',
+            'name = "replacement"',
+        ),
+        encoding="utf-8",
+    )
+
+    _, second = detect_and_parse(sample_pixi_toml)
+
+    assert first.name == "test-project"
+    assert second.name == "replacement"
+    assert first._manifest_text != second._manifest_text
 
 
 def test_detect_and_parse_exact_file_ignores_search_priority(tmp_path):
@@ -150,6 +166,100 @@ def test_detect_skips_file_without_workspace(tmp_path):
     path = tmp_path / "pixi.toml"
     path.write_text('[dependencies]\npython = ">=3.10"\n', encoding="utf-8")
     with pytest.raises(WorkspaceNotFoundError):
+        detect_workspace_file(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["conda.toml", "pixi.toml", "pyproject.toml"],
+    ids=["conda", "pixi", "pyproject"],
+)
+def test_detect_fails_closed_for_malformed_child_manifest(
+    tmp_path: Path,
+    filename: str,
+) -> None:
+    outer = tmp_path / "outer"
+    child = outer / "child"
+    child.mkdir(parents=True)
+    outer_manifest = outer / "conda.toml"
+    outer_manifest.write_text(
+        '[workspace]\nname = "outer"\nchannels = []\nplatforms = []\n',
+        encoding="utf-8",
+    )
+    malformed = child / filename
+    malformed.write_text("[workspace", encoding="utf-8")
+
+    with pytest.raises(WorkspaceParseError) as exc_info:
+        detect_workspace_file(child)
+
+    assert exc_info.value.path == malformed
+
+
+def test_detect_reject_symlinks_skips_irrelevant_candidate(tmp_path: Path) -> None:
+    outer = tmp_path / "outer"
+    child = outer / "child"
+    child.mkdir(parents=True)
+    outer_manifest = outer / "conda.toml"
+    outer_manifest.write_text(
+        '[workspace]\nname = "outer"\nchannels = []\nplatforms = []\n',
+        encoding="utf-8",
+    )
+    irrelevant = child / "irrelevant.toml"
+    irrelevant.write_text("[tool.ruff]\nline-length = 88\n", encoding="utf-8")
+    candidate = child / "conda.toml"
+    try:
+        candidate.symlink_to(irrelevant)
+    except OSError as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
+
+    assert detect_workspace_file(child, reject_symlinks=True) == outer_manifest
+
+
+def test_detect_reject_symlinks_rejects_selected_candidate(tmp_path: Path) -> None:
+    source = tmp_path / "source.toml"
+    source.write_text(
+        '[workspace]\nname = "linked"\nchannels = []\nplatforms = []\n',
+        encoding="utf-8",
+    )
+    candidate = tmp_path / "conda.toml"
+    try:
+        candidate.symlink_to(source)
+    except OSError as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
+
+    with pytest.raises(WorkspaceParseError, match="symbolic links"):
+        detect_workspace_file(tmp_path, reject_symlinks=True)
+
+
+@pytest.mark.parametrize(
+    ("boundary", "match"),
+    [
+        ("bytes", "maximum size"),
+        ("depth", "nesting depth"),
+        ("collection", "collection"),
+    ],
+    ids=["bytes", "depth", "collection"],
+)
+def test_manifest_detection_enforces_resource_limits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+    match: str,
+) -> None:
+    manifest = tmp_path / "conda.toml"
+    manifest.write_text(
+        '[workspace]\nname = "limited"\nchannels = []\nplatforms = []\n'
+        "nested = [[[1]]]\n",
+        encoding="utf-8",
+    )
+    if boundary == "bytes":
+        monkeypatch.setattr(manifest_base, "MAX_MANIFEST_BYTES", 16)
+    elif boundary == "depth":
+        monkeypatch.setattr(manifest_base, "MAX_MANIFEST_DEPTH", 2)
+    else:
+        monkeypatch.setattr(manifest_base, "MAX_MANIFEST_COLLECTION_ITEMS", 3)
+
+    with pytest.raises(WorkspaceParseError, match=match):
         detect_workspace_file(tmp_path)
 
 

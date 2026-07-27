@@ -9,8 +9,8 @@ from conda.exceptions import CondaSystemExit, DryRunExit
 from conda.reporters import confirm_yn
 from rich.console import Console
 
-from ...envs import clean_all, list_installed_environments, remove_environment
-from ...exceptions import EnvironmentNotFoundError
+from ...envs import remove_environment
+from ...exceptions import CondaWorkspacesError, EnvironmentNotFoundError
 from .. import status
 from . import workspace_context_from_args
 
@@ -34,30 +34,68 @@ def execute_clean(args: argparse.Namespace, *, console: Console | None = None) -
                     env_name, list(config.environments.keys())
                 )
 
-            if not ctx.env_exists(env_name):
+            envs_identity = ctx.envs_dir_identity()
+            prefix_identity = next(
+                (
+                    identity
+                    for prefix, identity in ctx.iter_installed_prefixes()
+                    if prefix.name == env_name
+                ),
+                None,
+            )
+            if ctx.envs_dir_identity() != envs_identity:
+                raise CondaWorkspacesError(
+                    "Workspace environments directory changed while it was inspected."
+                )
+            if prefix_identity is None:
                 console.print(
-                    f"[bold]{env_name}[/bold] environment is not installed."
+                    f"[bold]{status.escape_for_console(env_name)}[/bold]"
+                    " environment is not installed."
                     " Run 'conda workspace install"
-                    f" -e {env_name}' to create it."
+                    f" -e {status.escape_for_console(env_name)}' to create it."
                 )
                 return 0
+            if envs_identity is None:
+                raise CondaWorkspacesError(
+                    "Workspace environments directory changed while it was inspected."
+                )
 
             installed = [env_name]
             if not dry_run:
-                confirm_yn(f"Remove {env_name} environment?")
-                remove_environment(ctx, env_name)
+                confirm_yn(f"Remove {status.escape_for_console(env_name)} environment?")
+                remove_environment(
+                    ctx,
+                    env_name,
+                    expected_envs_identity=envs_identity,
+                    expected_prefix_identity=prefix_identity,
+                )
         else:
-            installed = list_installed_environments(ctx)
-            if not installed:
+            envs_identity = ctx.envs_dir_identity()
+            prefixes = sorted(
+                ctx.iter_installed_prefixes(),
+                key=lambda item: item[0].name,
+            )
+            if ctx.envs_dir_identity() != envs_identity:
+                raise CondaWorkspacesError(
+                    "Workspace environments directory changed while it was inspected."
+                )
+            if not prefixes:
                 console.print(
                     "No environments installed."
                     " Run 'conda workspace install' to create them."
                 )
                 return 0
+            if envs_identity is None:
+                raise CondaWorkspacesError(
+                    "Workspace environments directory changed while it was inspected."
+                )
+            installed = [prefix.name for prefix, _ in prefixes]
 
             if not dry_run:
                 if not conda_context.always_yes:
-                    names = ", ".join(installed)
+                    names = ", ".join(
+                        status.escape_for_console(name) for name in installed
+                    )
                     confirm_yn(f"Remove {names} environments?")
 
                 for i, name in enumerate(installed):
@@ -71,7 +109,13 @@ def execute_clean(args: argparse.Namespace, *, console: Console | None = None) -
                         style="bold blue",
                         ellipsis=True,
                     )
-                clean_all(ctx)
+                for prefix, prefix_identity in prefixes:
+                    remove_environment(
+                        ctx,
+                        prefix.name,
+                        expected_envs_identity=envs_identity,
+                        expected_prefix_identity=prefix_identity,
+                    )
 
         for i, name in enumerate(installed):
             if i > 0:

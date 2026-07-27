@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
@@ -13,15 +14,26 @@ from .archive import (
     url_to_filename,
 )
 from .exceptions import ArchiveError, ArchiveHashMismatchError
-from .lockfile import load_lockfile_data
-from .paths import has_absolute_path_syntax
+from .lockfile import MAX_LOCKFILE_BYTES, load_lockfile_data, load_lockfile_path
+from .manifests.base import MAX_MANIFEST_BYTES
+from .models import has_url_credentials, redact_url_text
+from .parsing import read_limited_text, validate_document_limits
+from .paths import (
+    atomic_write_text,
+    has_absolute_path_syntax,
+    read_regular_file_bytes,
+    regular_file_generation,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from pathlib import Path
-    from typing import Any
+    from typing import Any, Final
 
     from .models import ArchiveConfig
+    from .paths import FileGeneration
+
+_CURRENT_RECEIPT_GENERATION = object()
 
 IN_TOTO_STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
 ARCHIVE_RECEIPT_PREDICATE_TYPE = (
@@ -29,6 +41,10 @@ ARCHIVE_RECEIPT_PREDICATE_TYPE = (
     "workspace-archive-receipt-1.schema.json"
 )
 ARCHIVE_RECEIPT_FORMAT_VERSION = 1
+MAX_RECEIPT_BYTES: Final = 64 * 1024**2
+MAX_RECEIPT_DEPTH: Final = 128
+MAX_RECEIPT_COLLECTION_ITEMS: Final = 100_000
+MAX_RECEIPT_ITEMS: Final = 1_000_000
 
 PACKAGE_RECORD_FIELDS = (
     "name",
@@ -78,20 +94,54 @@ class ArchiveReceipt:
                 hints=["Run 'conda workspace lock' first."],
             )
 
+        manifest_name = cls.archive_name(root, manifest_path)
+        lockfile_name = cls.archive_name(root, lockfile_path)
+        lockfile_content = read_regular_file_bytes(
+            lockfile_path,
+            maximum_bytes=MAX_LOCKFILE_BYTES,
+            label="Workspace lockfile",
+        )
+        return cls.build_from_captured(
+            archive_name=archive_path.name,
+            archive_sha256=file_sha256(archive_path),
+            manifest_name=manifest_name,
+            manifest_sha256=file_sha256(manifest_path),
+            lockfile_name=lockfile_name,
+            lockfile_sha256=hashlib.sha256(lockfile_content).hexdigest(),
+            lockfile_data=load_lockfile_data(lockfile_content),
+            archive_config=archive_config,
+            environment_prefixes=environment_prefixes,
+            options=options,
+        )
+
+    @classmethod
+    def build_from_captured(
+        cls,
+        *,
+        archive_name: str,
+        archive_sha256: str,
+        manifest_name: str,
+        manifest_sha256: str,
+        lockfile_name: str,
+        lockfile_sha256: str,
+        lockfile_data: object,
+        archive_config: ArchiveConfig,
+        environment_prefixes: Mapping[str, str | Path],
+        options: dict[str, object],
+    ) -> ArchiveReceipt:
+        """Build a receipt from the exact inputs captured for an archive."""
         archive_options = dict(options)
         archive_options.setdefault("include", list(archive_config.include))
         archive_options.setdefault("exclude", list(archive_config.exclude))
         archive_options.setdefault("compressionLevel", archive_config.compression_level)
 
-        manifest_name = cls.archive_name(root, manifest_path)
-        lockfile_name = cls.archive_name(root, lockfile_path)
         receipt = cls(
             {
                 "_type": IN_TOTO_STATEMENT_TYPE,
                 "subject": [
-                    cls.file_subject(archive_path.name, archive_path),
-                    cls.file_subject(manifest_name, manifest_path),
-                    cls.file_subject(lockfile_name, lockfile_path),
+                    cls.digest_subject(archive_name, archive_sha256),
+                    cls.digest_subject(manifest_name, manifest_sha256),
+                    cls.digest_subject(lockfile_name, lockfile_sha256),
                 ],
                 "predicateType": ARCHIVE_RECEIPT_PREDICATE_TYPE,
                 "predicate": {
@@ -103,8 +153,8 @@ class ArchiveReceipt:
                         "manifest": manifest_name,
                         "lockfile": lockfile_name,
                     },
-                    "environments": ReceiptInventory.from_lockfile(
-                        lockfile_path,
+                    "environments": ReceiptInventory.from_lockfile_data(
+                        lockfile_data,
                         environment_prefixes=environment_prefixes,
                     ).data,
                 },
@@ -127,16 +177,32 @@ class ArchiveReceipt:
 
         try:
             data = json.loads(
-                path.read_text(encoding="utf-8"),
+                read_limited_text(
+                    path,
+                    maximum_bytes=MAX_RECEIPT_BYTES,
+                    label="Receipt JSON",
+                ),
                 object_pairs_hook=unique_object,
             )
         except OSError as exc:
             raise ArchiveError(f"Receipt not found: {path}") from exc
         except json.JSONDecodeError as exc:
             raise ArchiveError(f"Invalid receipt JSON: {path}") from exc
+        except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+            raise ArchiveError(f"Invalid receipt: {exc}") from exc
 
         if not isinstance(data, dict):
             raise ArchiveError("Invalid receipt: expected a JSON object.")
+        try:
+            validate_document_limits(
+                data,
+                label="Receipt JSON",
+                maximum_depth=MAX_RECEIPT_DEPTH,
+                maximum_collection_items=MAX_RECEIPT_COLLECTION_ITEMS,
+                maximum_items=MAX_RECEIPT_ITEMS,
+            )
+        except ValueError as exc:
+            raise ArchiveError(f"Invalid receipt: {exc}") from exc
 
         receipt = cls(cast("dict[str, Any]", data))
         receipt.validate()
@@ -158,19 +224,39 @@ class ArchiveReceipt:
     @staticmethod
     def file_subject(name: str, path: Path) -> dict[str, object]:
         """Return an in-toto subject for a file."""
-        return {"name": name, "digest": {"sha256": file_sha256(path)}}
+        return ArchiveReceipt.digest_subject(name, file_sha256(path))
 
-    def write(self, path: Path) -> Path:
+    @staticmethod
+    def digest_subject(name: str, sha256: str) -> dict[str, object]:
+        """Return an in-toto subject for an already captured SHA-256 digest."""
+        return {"name": name, "digest": {"sha256": sha256}}
+
+    def write(
+        self,
+        path: Path,
+        *,
+        expected_generation: FileGeneration | None | object = (
+            _CURRENT_RECEIPT_GENERATION
+        ),
+    ) -> Path:
         """Write the receipt as stable JSON."""
+        if path.is_symlink():
+            raise ArchiveError("Receipt output cannot be a symbolic link.")
+        if expected_generation is _CURRENT_RECEIPT_GENERATION:
+            expected_generation = regular_file_generation(path)
         self.validate()
         if path.is_symlink():
             raise ArchiveError("Receipt output cannot be a symbolic link.")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(self.statement, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
+        atomic_write_text(
+            path,
+            self.serialized_text(),
+            expected_generation=expected_generation,
         )
         return path
+
+    def serialized_text(self) -> str:
+        """Return the stable JSON representation written for this receipt."""
+        return json.dumps(self.statement, indent=2, sort_keys=True) + "\n"
 
     def validate(self) -> None:
         """Validate only the receipt fields used by integrity verification."""
@@ -341,16 +427,56 @@ class ArchiveReceipt:
 
     def verify_subject_file(self, name: str, path: Path) -> None:
         """Verify *path* against the named receipt subject."""
+        display_name = self.subject_display_name(name)
+        try:
+            actual = file_sha256(path)
+        except (OSError, ArchiveError) as exc:
+            raise ArchiveError(
+                f"Receipt subject file cannot be read: {display_name}"
+            ) from exc
+        self.verify_subject_digest(name, actual)
+
+    def verified_subject_bytes(
+        self,
+        name: str,
+        path: Path,
+        *,
+        maximum_bytes: int,
+        label: str,
+    ) -> bytes:
+        """Capture and verify one bounded subject file without reopening it."""
+        display_name = self.subject_display_name(name)
+        try:
+            content = read_regular_file_bytes(
+                path,
+                maximum_bytes=maximum_bytes,
+                label=label,
+            )
+        except ValueError as exc:
+            raise ArchiveError(
+                f"Receipt subject file cannot be read: {display_name}"
+            ) from exc
+        self.verify_subject_digest(name, hashlib.sha256(content).hexdigest())
+        return content
+
+    def verify_subject_digest(self, name: str, actual: str) -> None:
+        """Verify an already captured digest against the named receipt subject."""
+        display_name = self.subject_display_name(name)
         try:
             expected = self.subject_digests[name]
         except KeyError:
-            raise ArchiveError(f"Receipt subject not found: {name}") from None
-        try:
-            actual = file_sha256(path)
-        except OSError as exc:
-            raise ArchiveError(f"Receipt subject file cannot be read: {name}") from exc
+            raise ArchiveError(f"Receipt subject not found: {display_name}") from None
         if actual != expected:
-            raise ArchiveHashMismatchError(name, expected=expected, actual=actual)
+            raise ArchiveHashMismatchError(
+                display_name,
+                expected=expected,
+                actual=actual,
+            )
+
+    @staticmethod
+    def subject_display_name(name: str) -> str:
+        """Return a receipt subject name safe to include in diagnostics."""
+        return "<redacted-path>" if has_url_credentials(name) else redact_url_text(name)
 
     def verify_archive(self, archive_path: Path) -> None:
         """Verify the archive digest before extraction."""
@@ -375,12 +501,26 @@ class ArchiveReceipt:
             "workspace lockfile",
         )
 
-        self.verify_subject_file(manifest_name, manifest_path)
-        self.verify_subject_file(lockfile_name, lockfile_path)
+        self.verified_subject_bytes(
+            manifest_name,
+            manifest_path,
+            maximum_bytes=MAX_MANIFEST_BYTES,
+            label="Workspace manifest",
+        )
+        lockfile_content = self.verified_subject_bytes(
+            lockfile_name,
+            lockfile_path,
+            maximum_bytes=MAX_LOCKFILE_BYTES,
+            label="Workspace lockfile",
+        )
 
         expected = self.inventory
-        actual = ReceiptInventory.from_lockfile(
-            lockfile_path,
+        try:
+            lockfile_data = load_lockfile_data(lockfile_content)
+        except (UnicodeDecodeError, ValueError, RecursionError):
+            raise ArchiveError("Invalid extracted workspace lockfile.") from None
+        actual = ReceiptInventory.from_lockfile_data(
+            lockfile_data,
             environment_prefixes=expected.environment_names(),
         )
         expected.compare(actual, require_sha256=require_sha256)
@@ -400,7 +540,7 @@ class ReceiptInventory:
         environment_prefixes: Mapping[str, str | Path] | None = None,
     ) -> ReceiptInventory:
         """Return receipt-ready package inventory from ``conda.lock``."""
-        data = load_lockfile_data(lockfile_path.read_bytes())
+        data = load_lockfile_path(lockfile_path)
         return cls.from_lockfile_data(
             data,
             environment_prefixes=environment_prefixes,
@@ -420,6 +560,7 @@ class ReceiptInventory:
         lockfile_envs = data.get("environments") or {}
         if not isinstance(lockfile_envs, dict):
             raise ArchiveError("Invalid lockfile: environments must be a mapping.")
+        lockfile_envs = cast("dict[str, object]", lockfile_envs)
         packages_by_url = cls.packages_by_url(data.get("packages", []) or [])
         env_names = list(environment_prefixes or lockfile_envs)
 
@@ -434,6 +575,7 @@ class ReceiptInventory:
                 raise ArchiveError(
                     "Invalid lockfile: environment packages must be a mapping."
                 )
+            platform_packages = cast("dict[str, object]", platform_packages)
             packages_by_identity: dict[str, dict[str, object]] = {}
             for platform in sorted(platform_packages):
                 refs = platform_packages[platform] or []
@@ -457,7 +599,7 @@ class ReceiptInventory:
                     if existing != package.data:
                         raise ArchiveError(
                             "Duplicate package record for environment"
-                            f" '{env_name}': {package.identity}"
+                            f" '{env_name}': {redact_url_text(package.identity)}"
                         )
 
             env: dict[str, object] = {
@@ -489,7 +631,9 @@ class ReceiptInventory:
             if not url:
                 continue
             if url in result:
-                raise ArchiveError(f"Duplicate package URL in lockfile: {url}")
+                raise ArchiveError(
+                    f"Duplicate package URL in lockfile: {redact_url_text(url)}"
+                )
             result[url] = record_data
         return result
 
@@ -528,12 +672,13 @@ class ReceiptInventory:
             found = self.index_packages(actual_envs[env_name], env_name)
             if missing := sorted(set(expected) - set(found)):
                 raise ArchiveError(
-                    f"Missing package record for environment '{env_name}': {missing[0]}"
+                    f"Missing package record for environment '{env_name}':"
+                    f" {redact_url_text(missing[0])}"
                 )
             if unexpected := sorted(set(found) - set(expected)):
                 raise ArchiveError(
                     f"Unexpected package record for environment"
-                    f" '{env_name}': {unexpected[0]}"
+                    f" '{env_name}': {redact_url_text(unexpected[0])}"
                 )
             for identity in sorted(expected):
                 if require_sha256 and (
@@ -541,13 +686,13 @@ class ReceiptInventory:
                     or not found[identity].get("sha256")
                 ):
                     raise ArchiveError(
-                        f"Package record '{identity}' in environment"
+                        f"Package record '{redact_url_text(identity)}' in environment"
                         f" '{env_name}' lacks sha256."
                     )
                 if expected[identity] != found[identity]:
                     raise ArchiveError(
                         f"Package record mismatch for environment"
-                        f" '{env_name}': {identity}"
+                        f" '{env_name}': {redact_url_text(identity)}"
                     )
 
     @staticmethod
@@ -575,7 +720,8 @@ class ReceiptInventory:
                 )
             if identity in result:
                 raise ArchiveError(
-                    f"Duplicate package record for environment '{env_name}': {identity}"
+                    f"Duplicate package record for environment '{env_name}':"
+                    f" {redact_url_text(identity)}"
                 )
             result[identity] = record.data
         return result
@@ -612,6 +758,8 @@ class ReceiptPackageRecord:
                     )
             elif not isinstance(field_value, str):
                 raise ArchiveError(f"Invalid receipt: package {field} is malformed.")
+            elif field in {"channel", "url"}:
+                record[field] = redact_url_text(field_value)
         for field, length in (("sha256", 64), ("md5", 32)):
             if field in record:
                 cls.hex_digest(str(record[field]), length, field)
@@ -638,7 +786,7 @@ class ReceiptPackageRecord:
         }
         url = cls.package_url(record) or fallback_url
         if url:
-            result["url"] = cls.redact_url(url)
+            result["url"] = redact_url_text(url)
             result.setdefault("fn", url_to_filename(url))
         if "subdir" not in result and url and isinstance(result.get("fn"), str):
             subdir = cls.url_subdir(str(result["url"]), str(result["fn"]))
@@ -649,7 +797,7 @@ class ReceiptPackageRecord:
 
         channel = result.get("channel")
         if isinstance(channel, str) and channel:
-            result["channel"] = cls.redact_url(channel)
+            result["channel"] = redact_url_text(channel)
         elif url and isinstance(result.get("fn"), str):
             result["channel"] = cls.channel_url(
                 str(result["url"]),
@@ -663,16 +811,6 @@ class ReceiptPackageRecord:
         """Return a lockfile package URL."""
         value = record.get("conda") or record.get("url")
         return value if isinstance(value, str) else ""
-
-    @staticmethod
-    def redact_url(url: str) -> str:
-        """Return *url* without credentials, tokens, query, or fragment."""
-        from conda.common.url import remove_auth, split_anaconda_token
-
-        redacted, _ = split_anaconda_token(url)
-        redacted = remove_auth(redacted)
-        parts = urlsplit(redacted)
-        return parts._replace(query="", fragment="").geturl()
 
     @staticmethod
     def channel_url(url: str, subdir: str, filename: str) -> str:

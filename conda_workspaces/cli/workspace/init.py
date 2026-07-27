@@ -10,6 +10,7 @@ from conda.exceptions import CondaValueError
 from rich.console import Console
 
 from ...manifests.base import ManifestParser
+from ...models import redact_channel_name
 from .. import status
 from . import workspace_manifest_path_from_args
 
@@ -19,7 +20,7 @@ if TYPE_CHECKING:
 
 def resolve_init_channels() -> list[str]:
     """Return conda's resolved channel order for a new workspace."""
-    channels = list(conda_context.channels)
+    channels = [redact_channel_name(channel) for channel in conda_context.channels]
     if not channels:
         raise CondaValueError(
             "No channels are configured. Pass -c/--channel or configure one with"

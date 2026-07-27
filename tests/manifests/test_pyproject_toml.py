@@ -32,18 +32,9 @@ def test_has_workspace(parser, sample_pyproject_toml):
     assert parser.has_workspace(sample_pyproject_toml)
 
 
-@pytest.mark.parametrize(
-    "content",
-    [
-        pytest.param('[project]\nname = "foo"\n', id="no-pixi-table"),
-        pytest.param(None, id="missing-file"),
-        pytest.param("{{invalid toml", id="bad-toml"),
-    ],
-)
-def test_has_workspace_false(parser, tmp_path, content):
+def test_has_workspace_false(parser, tmp_path):
     path = tmp_path / "pyproject.toml"
-    if content is not None:
-        path.write_text(content, encoding="utf-8")
+    path.write_text('[project]\nname = "foo"\n', encoding="utf-8")
     assert not parser.has_workspace(path)
 
 

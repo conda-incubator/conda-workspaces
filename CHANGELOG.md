@@ -140,6 +140,98 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   must also be regular paths. Replace a linked destination manifest before
   running `init` or `quickstart`. (#118)
 
+### Security
+
+- Workspace environment cleanup now rejects a symbolic-link environment
+  directory or one that resolves outside the workspace before enumerating or
+  deleting prefixes. Replace linked `.conda` or `.conda/envs` paths with real
+  directories below the workspace root. Activation state, activation script
+  directories, and activation script destinations also reject symbolic links.
+  Replace linked metadata with regular files and directories inside the prefix.
+- Generated manifests no longer persist channel authentication from Conda
+  configuration. Absolute channel origins remain explicit, credential-bearing
+  exact package and PyPI source URLs are rejected during manifest mutation or
+  import, and workspace information redacts PyPI dependency credentials.
+  Relative `t/<token>/<channel>` values are resolved to a credential-free
+  channel URL, and scheme-relative `//host/path` channels become explicit
+  HTTPS URLs. Every dependency mutation and archive creation rejects credentials
+  that remain elsewhere in the manifest. Existing users should remove embedded
+  authentication, Anaconda
+  `/t/<token>/` paths, queries, and fragments from manifests, rotate any exposed
+  values, and configure replacement credentials through Conda outside the
+  repository.
+- Manifest import and export now preserve representable conda channel, build,
+  subdir, hash, and direct URL fields instead of reducing them to a version.
+  PyPI extras and credential-free named direct URLs also survive manifest
+  export. PyPI environment markers, unparseable requirement lines, and path or
+  VCS sources that cross conda's environment exporter interface now fail before
+  an output is written instead of silently changing package identity. Replace
+  marker-only declarations with target-specific manifest tables, and keep path
+  or VCS declarations in the source manifest until the selected exporter can
+  represent them losslessly.
+- Lockfile package URLs are normalized before channel containment checks, so
+  plain, encoded, and double-encoded path traversal cannot escape a declared
+  channel. Generated and merged lockfiles strip basic authentication, Anaconda
+  token paths, queries, and fragments from channel and package URLs, including
+  slices retained by selective updates. Regenerate credential-bearing lockfiles
+  and rotate exposed values. Lockfile output also refuses symbolic links.
+  Replace a linked `conda.lock` or fragment with a regular file before writing
+  it. Archive creation rejects a credential-bearing existing lockfile, so
+  regenerate it before packaging the workspace.
+- Workspace archive validation now bounds member count, paths, link targets,
+  consecutive extension headers, PAX record count, raw extension metadata, and
+  total expanded file and link-fallback size while retaining linear memory.
+  Unsupported member types and GNU sparse members are rejected before their
+  payloads are traversed. Receipt digests are checked before archive inspection,
+  and creation rejects a linked repository manifest before reading it. Repack
+  sparse or metadata-heavy archive inputs as ordinary bounded members. Bundle
+  and receipt lock inputs are read under the publication guard, receipt writes
+  are atomic, and a receipt failure removes a new archive output while keeping
+  any canonical lockfile that was already published successfully.
+  Package cache priming rehashes the bytes it publishes and refuses raced source
+  or destination symbolic links. Archive output is published atomically, and
+  receipt verification, inspection, and extraction consume one immutable
+  snapshot rather than reopening the source path. Extraction targets must now
+  be absent, not merely empty, so remove an empty destination before retrying.
+  Archive hardlinks are rejected, and Python runtimes without tar extraction
+  filters must be updated to a current supported patch release.
+- Complete lock solving now succeeds before ordinary sync mutates a selected
+  prefix, and that exact solution is installed without a second solve. Pruning
+  validates the desired transaction before removal, preserves declared local
+  path dependencies, and reports rebuild failures. Add, remove, selective
+  update, ordinary install, canonical lock generation and merge, and archive
+  creation now share one workspace guard. Retry an interrupted publisher after
+  any concurrent manifest edit. Frozen and locked multi-environment installs
+  consume one in-memory lock snapshot so their prefixes cannot mix generations.
+  Locked installs preflight every requested environment before mutating any
+  prefix, and publication binds parsed configuration to the exact manifest
+  generation it came from. `conda env create --file conda.lock` now rejects
+  external package refs because that loader cannot carry a verifiable digest
+  into conda's installer. Declare those dependencies in `conda.toml`, regenerate
+  `conda.lock`, then use `conda workspace install`.
+- Repository-controlled TOML, YAML, and JSON documents now have explicit byte,
+  nesting, collection, and aggregate item limits. Manifest files are limited to
+  16 MiB, lockfiles to 128 MiB, and receipts to 64 MiB. Split oversized trusted
+  inputs and reduce deeply nested or very large collections before retrying.
+  Portable paths and environment names also reject Windows device aliases,
+  alternate data stream syntax, trailing dots or spaces, and case-insensitive
+  archive collisions on every host. Rename ambiguous entries before moving a
+  workspace or archive between platforms.
+- Manifest, task, export, lockfile, archive, receipt, activation metadata, and
+  environment writes now reject symbolic-link destinations and concurrent file
+  generation changes. Replace linked outputs with regular workspace-local
+  files before retrying. Human-readable task and workspace output renders
+  repository-controlled terminal control bytes visibly instead of forwarding
+  them to the terminal. JSON output remains unchanged.
+- Path and generation checks reject linked destinations and replacements that
+  remain visible at mutation boundaries. Conda and conda-pypi still receive
+  filesystem paths, so these checks do not sandbox another process running as
+  the same operating-system user that swaps and restores a prefix during one
+  downstream call. Archive operations use descriptor-relative protection when
+  the platform provides it. On platforms without those APIs, validation and
+  path-based publication checks remain in place, but same-user swap-and-restore
+  races cannot be excluded.
+
 ## 0.7.0 — 2026-06-14
 
 ### Added

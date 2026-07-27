@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+from io import StringIO
+
 import pytest
 from conda.exceptions import CondaError
 from rich.console import Console
 
-from conda_workspaces.cli.status import _class_name_to_label, print_error
+from conda_workspaces.cli import status
+from conda_workspaces.cli.status import (
+    _class_name_to_label,
+    _format,
+    print_error,
+)
 from conda_workspaces.exceptions import (
     EnvironmentNotFoundError,
     SolveError,
@@ -166,16 +173,12 @@ def test_print_error_multi_error_dedup(capsys):
     ids=["basic", "style", "ellipsis", "detail", "suffix"],
 )
 def test_format(verb, noun, name, kwargs, expected):
-    from conda_workspaces.cli.status import _format
-
     result = _format(verb, noun, name, **kwargs)
     for substring in expected:
         assert substring in result
 
 
 def test_format_verb_name_noun_order():
-    from conda_workspaces.cli.status import _format
-
     result = _format("Installed", "environment", "default")
     idx_verb = result.find("Installed")
     idx_name = result.find("default")
@@ -184,14 +187,8 @@ def test_format_verb_name_noun_order():
 
 
 def test_message_prints_to_console():
-    from io import StringIO
-
-    from rich.console import Console as RichConsole
-
-    from conda_workspaces.cli import status
-
     buf = StringIO()
-    console = RichConsole(file=buf, highlight=False, force_terminal=False)
+    console = Console(file=buf, highlight=False, force_terminal=False)
     status.message(console, "Installed", "environment", "default")
     output = buf.getvalue()
     assert "Installed" in output
@@ -200,14 +197,8 @@ def test_message_prints_to_console():
 
 
 def test_message_default_style_applied():
-    from io import StringIO
-
-    from rich.console import Console as RichConsole
-
-    from conda_workspaces.cli import status
-
     buf = StringIO()
-    console = RichConsole(
+    console = Console(
         file=buf,
         highlight=False,
         force_terminal=True,
@@ -217,3 +208,46 @@ def test_message_default_style_applied():
     output = buf.getvalue()
     assert "\x1b[" in output
     assert "Installed" in output
+
+
+def test_status_output_does_not_emit_untrusted_terminal_controls():
+    payload = "task\x1b[2J\x1b]8;;https://example.invalid\x1b\\"
+    buf = StringIO()
+    console = Console(
+        file=buf,
+        highlight=False,
+        force_terminal=True,
+        color_system="truecolor",
+    )
+
+    status.message(console, "Running", "task", payload, detail=payload)
+    print_error(console, CondaError(payload))
+
+    output = buf.getvalue()
+    assert "\x1b[2J" not in output
+    assert "\x1b]8;;https://example.invalid" not in output
+    assert r"\x1b[2J" in output
+
+
+@pytest.mark.parametrize("structured", [False, True], ids=["generic", "structured"])
+def test_print_error_redacts_url_credentials(structured: bool) -> None:
+    secret = "https://user:LEAKME@packages.example.test/private"
+    if structured:
+
+        class StructuredError(Exception):
+            error_message = f"failed to load {secret}"
+            hints = [f"retry with {secret}"]
+
+        error: Exception = StructuredError()
+    else:
+        error = ValueError(f"failed to load {secret}")
+    buffer = StringIO()
+
+    print_error(
+        Console(file=buffer, highlight=False, force_terminal=False),
+        error,
+    )
+
+    output = buffer.getvalue()
+    assert "LEAKME" not in output
+    assert "user" not in output

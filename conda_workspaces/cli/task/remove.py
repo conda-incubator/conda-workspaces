@@ -17,7 +17,10 @@ def execute_remove(args: argparse.Namespace, *, console: Console | None = None) 
     if console is None:
         console = Console(highlight=False)
     file_path = getattr(args, "file", None)
-    task_file, _, _ = detect_and_parse_tasks(file_path=file_path)
+    task_file, _, _ = detect_and_parse_tasks(
+        file_path=file_path,
+        reject_symlinks=True,
+    )
 
     parser = find_parser(task_file)
 

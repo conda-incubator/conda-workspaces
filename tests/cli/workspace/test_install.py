@@ -7,14 +7,25 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from conda_workspaces.cli.workspace.install import execute_install
-from conda_workspaces.exceptions import LockfileNotFoundError, LockfileStaleError
+from conda_workspaces.cli.workspace import workspace_context_from_args
+from conda_workspaces.cli.workspace.install import (
+    execute_install,
+    install_from_lockfile_all,
+)
+from conda_workspaces.exceptions import (
+    CondaWorkspacesError,
+    LockfileNotFoundError,
+    LockfileStaleError,
+)
 from conda_workspaces.models import LockfileStatus
 
 from ..conftest import make_args
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
+
+    from rich.console import Console
 
 _DEFAULTS = {
     "manifest_file": None,
@@ -25,14 +36,105 @@ _DEFAULTS = {
     "frozen": False,
     "no_lock": False,
 }
+_RENDERED_LOCK = """\
+version: 1
+environments: {}
+packages: []
+"""
 
 
 def _stub_lockfile(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stub generate_lockfile to a no-op for tests that don't care about it."""
+    """Stub lock rendering and writing for tests that don't inspect them."""
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sync.generate_lockfile",
-        lambda ctx, resolved_envs, **kwargs: None,
+        "conda_workspaces.cli.workspace.sync.render_lockfile",
+        lambda ctx, resolved_envs, **kwargs: _RENDERED_LOCK,
     )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.write_lockfile",
+        lambda ctx, content: None,
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.publication.atomic_write_text_at",
+        lambda directory_descriptor, name, content, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.publication.atomic_write_text",
+        lambda path, content, **kwargs: None,
+    )
+
+
+@pytest.fixture
+def write_stub_lockfile() -> Callable[[Path], None]:
+    """Return a writer for minimal lockfiles used with replaced installers."""
+
+    def write(workspace: Path) -> None:
+        (workspace / "conda.lock").write_text(_RENDERED_LOCK, encoding="utf-8")
+
+    return write
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+@pytest.mark.parametrize("boundary", ["leaf", "parent"], ids=["leaf", "parent"])
+def test_install_rejects_symlinked_manifest(
+    pixi_workspace: Path,
+    dry_run: bool,
+    boundary: str,
+) -> None:
+    if boundary == "leaf":
+        linked_boundary = pixi_workspace / "linked.toml"
+        linked_boundary.symlink_to(pixi_workspace / "pixi.toml")
+        linked_manifest = linked_boundary
+    else:
+        linked_boundary = pixi_workspace / "linked-parent"
+        linked_boundary.symlink_to(pixi_workspace, target_is_directory=True)
+        linked_manifest = linked_boundary / "pixi.toml"
+
+    with pytest.raises(
+        (CondaWorkspacesError, NotADirectoryError),
+        match="symlink|symbolic link",
+    ):
+        execute_install(
+            make_args(
+                _DEFAULTS,
+                manifest_file=linked_manifest,
+                dry_run=dry_run,
+            )
+        )
+
+    assert linked_boundary.is_symlink()
+
+
+@pytest.mark.parametrize(
+    ("dry_run", "expected_error"),
+    [
+        pytest.param(False, CondaWorkspacesError, id="install"),
+        pytest.param(True, LockfileNotFoundError, id="dry-run"),
+    ],
+)
+def test_install_frozen_rejects_symlinked_lockfile(
+    pixi_workspace: Path,
+    tmp_path: Path,
+    dry_run: bool,
+    expected_error: type[Exception],
+) -> None:
+    lockfile = pixi_workspace / "conda.lock"
+    lockfile.unlink(missing_ok=True)
+    outside = tmp_path / "outside.lock"
+    outside.write_text(_RENDERED_LOCK, encoding="utf-8")
+    lockfile.symlink_to(outside)
+
+    with pytest.raises(expected_error):
+        execute_install(
+            make_args(
+                _DEFAULTS,
+                manifest_file=pixi_workspace / "pixi.toml",
+                frozen=True,
+                dry_run=dry_run,
+            )
+        )
+
+    assert lockfile.is_symlink()
+    assert outside.read_text(encoding="utf-8") == _RENDERED_LOCK
 
 
 @pytest.mark.parametrize(
@@ -50,31 +152,40 @@ def test_install_envs(
     env_arg: str | None,
     expected_installed: set[str],
     output_fragment: str,
+    replace_lockfile_install_plan,
+    replace_publication_writer,
 ) -> None:
     monkeypatch.chdir(pixi_workspace)
     monkeypatch.delenv("CI", raising=False)
 
     calls: list[str] = []
+    events: list[str] = []
 
-    def fake_install(
-        ctx,
-        resolved,
-        *,
-        force_reinstall=False,
-        dry_run=False,
-        prune=False,
-        update_names=None,
-    ):
-        calls.append(resolved.name)
+    def fake_install(phase, ctx, name, kwargs):
+        calls.append(name)
+        action = "preflight" if phase == "prepare" else "install"
+        events.append(f"{action}-{name}")
 
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sync.install_environment", fake_install
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.sync",
+        fake_install,
     )
 
     lock_calls: list[dict] = []
+    write_calls: list[str] = []
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sync.generate_lockfile",
-        lambda ctx, resolved_envs, **kwargs: lock_calls.append(resolved_envs),
+        "conda_workspaces.cli.workspace.sync.render_lockfile",
+        lambda ctx, resolved_envs, **kwargs: (
+            lock_calls.append(resolved_envs),
+            events.append("render"),
+            _RENDERED_LOCK,
+        )[-1],
+    )
+    replace_publication_writer(
+        lambda path, content, write: (
+            write_calls.append(content),
+            events.append("write"),
+        ),
     )
 
     args = make_args(_DEFAULTS, environment=env_arg)
@@ -84,6 +195,12 @@ def test_install_envs(
     assert output_fragment in capsys.readouterr().out
     assert len(lock_calls) == 1
     assert set(lock_calls[0]) == {"default", "test"}
+    assert write_calls == [_RENDERED_LOCK]
+    assert events[0] == "render"
+    expected_order = [env_arg] if env_arg else ["default", "test"]
+    preflights = [f"preflight-{name}" for name in expected_order]
+    installs = [f"install-{name}" for name in expected_order]
+    assert events == ["render", *preflights, "write", *installs]
 
 
 @pytest.mark.parametrize(
@@ -100,26 +217,22 @@ def test_install_flags_forwarded(
     monkeypatch: pytest.MonkeyPatch,
     force: bool,
     dry_run: bool,
+    replace_lockfile_install_plan,
 ) -> None:
     monkeypatch.chdir(pixi_workspace)
     monkeypatch.delenv("CI", raising=False)
     _stub_lockfile(monkeypatch)
 
-    recorded: list[tuple[bool, bool]] = []
+    installed: list[tuple[str, bool]] = []
+    removed: list[str] = []
 
-    def fake_install(
-        ctx,
-        resolved,
-        *,
-        force_reinstall=False,
-        dry_run=False,
-        prune=False,
-        update_names=None,
-    ):
-        recorded.append((force_reinstall, dry_run))
-
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.sync",
+        lambda phase, ctx, name, kwargs: installed.append((name, phase == "prepare")),
+    )
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sync.install_environment", fake_install
+        "conda_workspaces.cli.workspace.sync.remove_environment",
+        lambda ctx, name, **kwargs: removed.append(name),
     )
 
     args = make_args(
@@ -129,27 +242,33 @@ def test_install_flags_forwarded(
         dry_run=dry_run,
     )
     execute_install(args)
-    assert recorded[0] == (force, dry_run)
+    if dry_run:
+        assert installed == [("default", True)]
+        assert removed == []
+    else:
+        assert installed == [("default", True), ("default", False)]
+        assert removed == (["default"] if force else [])
 
 
 def test_install_dry_run_previews_lockfile(
     pixi_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
+    replace_lockfile_install_plan,
 ) -> None:
     monkeypatch.chdir(pixi_workspace)
     monkeypatch.delenv("CI", raising=False)
 
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sync.install_environment",
-        lambda ctx, resolved, **kw: None,
-    )
-
     lock_calls: list[tuple[dict, bool]] = []
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sync.generate_lockfile",
-        lambda ctx, resolved_envs, **kwargs: lock_calls.append(
-            (resolved_envs, kwargs["dry_run"])
-        ),
+        "conda_workspaces.cli.workspace.sync.render_lockfile",
+        lambda ctx, resolved_envs, **kwargs: (
+            lock_calls.append((resolved_envs, kwargs["dry_run"])),
+            _RENDERED_LOCK,
+        )[-1],
+    )
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.sync",
+        lambda *_args: None,
     )
 
     args = make_args(_DEFAULTS, environment="default", dry_run=True)
@@ -171,16 +290,19 @@ def test_install_frozen(
     pixi_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    write_stub_lockfile: Callable[[Path], None],
     env_arg: str | None,
     expected_names: set[str],
     output_fragment: str,
+    replace_lockfile_install_plan,
 ) -> None:
     monkeypatch.chdir(pixi_workspace)
+    write_stub_lockfile(pixi_workspace)
 
     locked_calls: list[str] = []
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.install_from_lockfile",
-        lambda ctx, name, **kwargs: locked_calls.append(name),
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.install",
+        lambda phase, ctx, name, kwargs: locked_calls.append(name),
     )
 
     args = make_args(_DEFAULTS, environment=env_arg, frozen=True)
@@ -188,6 +310,156 @@ def test_install_frozen(
     assert result == 0
     assert set(locked_calls) == expected_names
     assert output_fragment in capsys.readouterr().out
+
+
+def test_install_frozen_uses_one_lock_snapshot_for_all_environments(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    write_stub_lockfile: Callable[[Path], None],
+    replace_lockfile_install_plan,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    write_stub_lockfile(pixi_workspace)
+    lockfile = pixi_workspace / "conda.lock"
+    snapshots: list[tuple[str, bool, dict]] = []
+
+    def record_install(phase, ctx, name, kwargs) -> None:
+        snapshots.append((name, phase == "prepare", kwargs["lockfile_data"]))
+        if len(snapshots) == 1:
+            lockfile.write_text(
+                "version: 1\nenvironments:\n  changed: {}\npackages: []\n",
+                encoding="utf-8",
+            )
+
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.install",
+        record_install,
+    )
+
+    assert execute_install(make_args(_DEFAULTS, frozen=True)) == 0
+    assert [(name, dry_run) for name, dry_run, _ in snapshots] == [
+        ("default", True),
+        ("test", True),
+        ("default", False),
+        ("test", False),
+    ]
+    assert all(data is snapshots[0][2] for _, _, data in snapshots)
+    assert snapshots[0][2]["environments"] == {}
+
+
+def test_install_prevalidates_all_environments_before_mutation(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    write_stub_lockfile: Callable[[Path], None],
+    replace_lockfile_install_plan,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    write_stub_lockfile(pixi_workspace)
+    calls: list[tuple[str, bool]] = []
+
+    def reject_second_preview(phase, ctx, name, kwargs) -> None:
+        preparing = phase == "prepare"
+        calls.append((name, preparing))
+        if name == "test" and preparing:
+            raise CondaWorkspacesError("invalid test environment")
+
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.install",
+        reject_second_preview,
+    )
+
+    with pytest.raises(CondaWorkspacesError, match="invalid test environment"):
+        execute_install(make_args(_DEFAULTS, frozen=True))
+
+    assert calls == [("default", True), ("test", True)]
+
+
+def test_install_fetches_every_environment_before_mutation(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    platforms = ("linux-64", "osx-arm64", "win-64")
+    package_tables = "".join(f"      {platform}: []\n" for platform in platforms)
+    (pixi_workspace / "conda.lock").write_text(
+        "version: 1\n"
+        "environments:\n"
+        "  default:\n"
+        "    channels: []\n"
+        "    packages:\n"
+        f"{package_tables}"
+        "  test:\n"
+        "    channels: []\n"
+        "    packages:\n"
+        f"{package_tables}"
+        "packages: []\n",
+        encoding="utf-8",
+    )
+    fetches: list[int] = []
+
+    def fetch_records(urls):
+        fetches.append(len(list(urls)))
+        if len(fetches) == 2:
+            raise RuntimeError("test package fetch failed")
+        return []
+
+    mutations: list[str] = []
+    monkeypatch.setattr(
+        "conda.misc.get_package_records_from_explicit",
+        fetch_records,
+    )
+    monkeypatch.setattr(
+        "conda.misc.install_explicit_packages",
+        lambda **kwargs: mutations.append(kwargs["prefix"]),
+    )
+
+    with pytest.raises(RuntimeError, match="test package fetch failed"):
+        execute_install(make_args(_DEFAULTS, frozen=True))
+
+    assert fetches == [0, 0]
+    assert mutations == []
+    assert not (pixi_workspace / ".pixi" / "envs" / "default").exists()
+
+
+def test_install_revalidates_guard_after_lock_snapshot(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rich_console: Console,
+    write_stub_lockfile: Callable[[Path], None],
+    replace_lockfile_install_plan,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    write_stub_lockfile(pixi_workspace)
+
+    config, ctx = workspace_context_from_args(make_args(_DEFAULTS))
+    changed = [False]
+    original_read = (pixi_workspace / "conda.lock").read_bytes()
+
+    def read_and_replace_generation(*args, **kwargs):
+        changed[0] = True
+        return original_read
+
+    def validate_workspace() -> None:
+        if changed[0]:
+            raise CondaWorkspacesError("workspace root changed")
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.read_regular_file_bytes",
+        read_and_replace_generation,
+    )
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.install",
+        lambda *args, **kwargs: pytest.fail("used an unguarded lock snapshot"),
+    )
+
+    with pytest.raises(CondaWorkspacesError, match="workspace root changed"):
+        install_from_lockfile_all(
+            ctx,
+            config,
+            None,
+            console=rich_console,
+            validate_workspace=validate_workspace,
+        )
 
 
 @pytest.mark.parametrize(
@@ -199,21 +471,28 @@ def test_install_lockfile_paths_forward_dry_run(
     pixi_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    write_stub_lockfile: Callable[[Path], None],
     mode: str,
+    replace_lockfile_install_plan,
 ) -> None:
     monkeypatch.chdir(pixi_workspace)
     monkeypatch.delenv("CI", raising=False)
+    write_stub_lockfile(pixi_workspace)
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.install.lockfile_status",
         lambda ctx, config: LockfileStatus(status=LockfileStatus.UP_TO_DATE),
     )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.check_lockfile_satisfiability",
+        lambda config, data, platform: LockfileStatus(status=LockfileStatus.UP_TO_DATE),
+    )
     calls: list[tuple[str, bool]] = []
 
-    def record_install(ctx, name, *, dry_run=False, **kwargs) -> None:
-        calls.append((name, dry_run))
+    def record_install(phase, ctx, name, kwargs) -> None:
+        calls.append((name, phase == "prepare"))
 
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.install_from_lockfile",
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.install",
         record_install,
     )
     kwargs = {mode: True} if mode != "current" else {}
@@ -254,29 +533,40 @@ def test_install_locked_validates_freshness(
 def test_install_default_uses_lockfile_when_satisfiable(
     pixi_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
+    write_stub_lockfile: Callable[[Path], None],
+    replace_lockfile_install_plan,
 ) -> None:
     """Default install uses lockfile when it satisfies the manifest."""
     monkeypatch.chdir(pixi_workspace)
+    write_stub_lockfile(pixi_workspace)
 
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.install.lockfile_status",
         lambda ctx, config: LockfileStatus(status=LockfileStatus.UP_TO_DATE),
     )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.check_lockfile_satisfiability",
+        lambda config, data, platform: LockfileStatus(status=LockfileStatus.UP_TO_DATE),
+    )
 
     locked_calls: list[str] = []
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.install_from_lockfile",
-        lambda ctx, name, **kwargs: locked_calls.append(name),
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.install",
+        lambda phase, ctx, name, kwargs: locked_calls.append(name),
     )
 
     sync_calls: list[str] = []
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sync.install_environment",
-        lambda ctx, resolved, **kw: sync_calls.append(resolved.name),
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.sync",
+        lambda phase, ctx, name, kwargs: sync_calls.append(name),
     )
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sync.generate_lockfile",
-        lambda ctx, resolved_envs, **kwargs: None,
+        "conda_workspaces.cli.workspace.sync.render_lockfile",
+        lambda ctx, resolved_envs, **kwargs: _RENDERED_LOCK,
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.write_lockfile",
+        lambda ctx, content: None,
     )
 
     args = make_args(_DEFAULTS)
@@ -289,6 +579,7 @@ def test_install_default_uses_lockfile_when_satisfiable(
 def test_install_default_solves_when_not_satisfiable(
     pixi_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
+    replace_lockfile_install_plan,
 ) -> None:
     """Default install falls back to solve when lockfile is not satisfiable."""
     monkeypatch.chdir(pixi_workspace)
@@ -302,19 +593,23 @@ def test_install_default_solves_when_not_satisfiable(
     )
 
     locked_calls: list[str] = []
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.install_from_lockfile",
-        lambda ctx, name, **kwargs: locked_calls.append(name),
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.install",
+        lambda phase, ctx, name, kwargs: locked_calls.append(name),
     )
 
     sync_calls: list[str] = []
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sync.install_environment",
-        lambda ctx, resolved, **kw: sync_calls.append(resolved.name),
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.sync",
+        lambda phase, ctx, name, kwargs: sync_calls.append(name),
     )
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sync.generate_lockfile",
-        lambda ctx, resolved_envs, **kwargs: None,
+        "conda_workspaces.cli.workspace.sync.render_lockfile",
+        lambda ctx, resolved_envs, **kwargs: _RENDERED_LOCK,
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.write_lockfile",
+        lambda ctx, content: None,
     )
 
     args = make_args(_DEFAULTS)
@@ -324,29 +619,123 @@ def test_install_default_solves_when_not_satisfiable(
     assert len(sync_calls) > 0
 
 
+def test_install_lockfile_reason_does_not_emit_terminal_controls(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rich_console: Console,
+    replace_lockfile_install_plan,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    monkeypatch.delenv("CI", raising=False)
+    reason = "[bold]\x1b]52;c;QUJD\x07\x9b31m"
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.lockfile_status",
+        lambda ctx, config: LockfileStatus(
+            status=LockfileStatus.OUT_OF_DATE,
+            reason=reason,
+        ),
+    )
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.sync",
+        lambda phase, ctx, name, kwargs: None,
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.render_lockfile",
+        lambda ctx, resolved_envs, **kwargs: _RENDERED_LOCK,
+    )
+
+    result = execute_install(
+        make_args(_DEFAULTS, dry_run=True),
+        console=rich_console,
+    )
+
+    assert result == 0
+    output = rich_console.file.getvalue()
+    assert "\x1b" not in output
+    assert "\x07" not in output
+    assert "\x9b" not in output
+    assert r"\x1b" in output
+    assert r"\x07" in output
+    assert r"\x9b" in output
+    assert "[bold]" in output
+
+
 def test_install_no_lock_forces_solve(
     pixi_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
+    replace_lockfile_install_plan,
+    replace_publication_writer,
 ) -> None:
     """--no-lock forces a full solve even when lockfile is satisfiable."""
     monkeypatch.chdir(pixi_workspace)
 
     sync_calls: list[str] = []
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sync.install_environment",
-        lambda ctx, resolved, **kw: sync_calls.append(resolved.name),
+    events: list[str] = []
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.sync",
+        lambda phase, ctx, name, kwargs: (
+            sync_calls.append(name),
+            events.append(f"{'preflight' if phase == 'prepare' else 'install'}-{name}"),
+        ),
     )
     lock_calls: list[dict] = []
+    write_calls: list[str] = []
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sync.generate_lockfile",
-        lambda ctx, resolved_envs, **kwargs: lock_calls.append(resolved_envs),
+        "conda_workspaces.cli.workspace.sync.render_lockfile",
+        lambda ctx, resolved_envs, **kwargs: (
+            lock_calls.append(resolved_envs),
+            events.append("render"),
+            _RENDERED_LOCK,
+        )[-1],
+    )
+    replace_publication_writer(
+        lambda path, content, write: (
+            write_calls.append(content),
+            events.append("write"),
+        ),
     )
 
     args = make_args(_DEFAULTS, environment="test", no_lock=True)
     result = execute_install(args)
     assert result == 0
-    assert sync_calls == ["test"]
+    assert sync_calls == ["test", "test"]
     assert set(lock_calls[0]) == {"default", "test"}
+    assert write_calls == [_RENDERED_LOCK]
+    assert events == ["render", "preflight-test", "write", "install-test"]
+
+
+def test_install_rejects_manifest_changed_during_lock_render(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replace_lockfile_install_plan,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    monkeypatch.delenv("CI", raising=False)
+    manifest = pixi_workspace / "pixi.toml"
+    lockfile = pixi_workspace / "conda.lock"
+    installs: list[tuple[str, bool]] = []
+
+    def render_and_change_manifest(*args: object, **kwargs: object) -> str:
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8") + "\n# concurrent change\n",
+            encoding="utf-8",
+        )
+        return _RENDERED_LOCK
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.render_lockfile",
+        render_and_change_manifest,
+    )
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.sync",
+        lambda phase, ctx, name, kwargs: installs.append((name, phase == "prepare")),
+    )
+
+    with pytest.raises(CondaWorkspacesError, match="manifest changed"):
+        execute_install(make_args(_DEFAULTS, environment="default"))
+
+    assert not lockfile.exists()
+    assert installs == [("default", True)]
 
 
 @pytest.mark.parametrize(
@@ -364,6 +753,7 @@ def test_install_ci_mode(
     satisfiable: bool | None,
     expected_error: type[Exception] | None,
     expected_locked: bool,
+    replace_lockfile_install_plan,
 ) -> None:
     monkeypatch.chdir(pixi_workspace)
     monkeypatch.setenv("CI", "true")
@@ -382,11 +772,20 @@ def test_install_ci_mode(
         "conda_workspaces.cli.workspace.install.lockfile_status",
         fake_lockfile_status,
     )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.check_lockfile_satisfiability",
+        lambda config, data, platform: LockfileStatus(
+            status=(
+                LockfileStatus.UP_TO_DATE if satisfiable else LockfileStatus.OUT_OF_DATE
+            ),
+            reason=None if satisfiable else "dep missing",
+        ),
+    )
 
     locked_calls: list[str] = []
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.install_from_lockfile",
-        lambda ctx, name, **kwargs: locked_calls.append(name),
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.install",
+        lambda phase, ctx, name, kwargs: locked_calls.append(name),
     )
 
     args = make_args(_DEFAULTS)

@@ -201,6 +201,11 @@ conda env create --file conda.toml -n myenv    # solve and create from manifest
 conda env create --file conda.lock -n myenv    # install exact lockfile contents
 ```
 
+The `conda.lock` loader used by `conda env create` rejects external package
+references because that interface cannot carry their verified artifacts into
+conda's installer. Declare external dependencies in `conda.toml`, regenerate
+`conda.lock`, then use `conda workspace install`.
+
 The companion [conda-lockfiles](https://github.com/conda/conda-lockfiles)
 plugin (installed as a dependency) adds the same `conda env create`
 support for other lockfile formats. If you still have `conda-lock.yml`

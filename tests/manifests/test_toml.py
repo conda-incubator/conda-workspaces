@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 import pytest
+from conda.exceptions import InvalidMatchSpec
 
 from conda_workspaces.exceptions import WorkspaceParseError
 from conda_workspaces.manifests.toml import (
@@ -33,38 +34,23 @@ def test_can_handle(filename, expected):
     assert parser.can_handle(Path(filename)) is expected
 
 
-@pytest.mark.parametrize(
-    "write_file, expected",
-    [
-        (True, True),
-        (False, False),
-    ],
-    ids=["file-exists", "file-missing"],
-)
-def test_has_workspace(tmp_path, write_file, expected):
+def test_has_workspace(tmp_path):
     path = tmp_path / "conda.toml"
-    if write_file:
-        path.write_text(
-            '[workspace]\nname = "my-workspace"\nchannels'
-            ' = ["conda-forge"]\nplatforms = ["linux-64"]\n',
-            encoding="utf-8",
-        )
+    path.write_text(
+        '[workspace]\nname = "my-workspace"\nchannels'
+        ' = ["conda-forge"]\nplatforms = ["linux-64"]\n',
+        encoding="utf-8",
+    )
     parser = CondaTomlParser()
-    assert parser.has_workspace(path) is expected
+    assert parser.has_workspace(path)
 
 
-@pytest.mark.parametrize(
-    "content",
-    [
-        '[dependencies]\npython = ">=3.10"\n',
-        "[invalid\n",
-    ],
-    ids=["no-workspace-key", "invalid-toml"],
-)
-def test_has_workspace_returns_false(tmp_path, content):
-    """Files without a valid [workspace] table should return False."""
+def test_has_workspace_returns_false_without_workspace(tmp_path):
     path = tmp_path / "conda.toml"
-    path.write_text(content, encoding="utf-8")
+    path.write_text(
+        '[dependencies]\npython = ">=3.10"\n',
+        encoding="utf-8",
+    )
     parser = CondaTomlParser()
     assert parser.has_workspace(path) is False
 
@@ -88,6 +74,27 @@ python = ">=3.10"
     assert config.manifest_path == str(path)
     default = config.features["default"]
     assert "python" in default.conda_dependencies
+
+
+def test_parse_error_redacts_malformed_dependency_credentials(tmp_path: Path) -> None:
+    path = tmp_path / "conda.toml"
+    path.write_text(
+        """\
+[workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+python = "https://user:LEAKME@example.test/["
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WorkspaceParseError) as error:
+        CondaTomlParser().parse(path)
+
+    assert "user" not in str(error.value)
+    assert "LEAKME" not in str(error.value)
 
 
 def test_parse_rejects_project_table(tmp_path):
@@ -190,6 +197,115 @@ def test_parse_conda_deps(raw, expected_name):
     deps = WorkspaceDependencyResolver().parse_dependency_table(raw)
     assert expected_name in deps
     assert isinstance(deps[expected_name], MatchSpec)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://user:password@packages.example.test/pkg-1.0-0.conda",
+        "https://packages.example.test/t/secret/pkg-1.0-0.conda",
+        "https://packages.example.test/%74/SENSITIVE-VALUE/pkg-1.0-0.conda",
+        "https://packages.example.test/t%2FSENSITIVE-VALUE/pkg-1.0-0.conda",
+        "https://packages.example.test/t%252FSENSITIVE-VALUE/pkg-1.0-0.conda",
+        "HTTPS://user:SENSITIVE-VALUE@packages.example.test/pkg-1.0-0.conda",
+        "https://packages.example.test/pkg-1.0-0.conda?token=secret",
+        "https://packages.example.test/pkg-1.0-0.conda#secret",
+    ],
+    ids=[
+        "basic-auth",
+        "anaconda-token",
+        "encoded-token-segment",
+        "encoded-token-separator",
+        "double-encoded-token-separator",
+        "uppercase-basic-auth",
+        "query",
+        "fragment",
+    ],
+)
+@pytest.mark.parametrize("field", ["url", "build"], ids=["url", "build"])
+def test_match_spec_to_toml_rejects_credential_bearing_fields(
+    url: str,
+    field: str,
+) -> None:
+    spec = MatchSpec(name="pkg", **{field: url})
+
+    with pytest.raises(
+        InvalidMatchSpec,
+        match="Configure authentication outside the manifest",
+    ) as error:
+        WorkspaceDependencyResolver.match_spec_to_toml(spec)
+
+    assert url not in str(error.value)
+    assert "SENSITIVE-VALUE" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        pytest.param(
+            MatchSpec("https://conda.anaconda.org/private::pkg"),
+            id="prefix",
+        ),
+        pytest.param(
+            MatchSpec(
+                "pkg[channel='https://conda.anaconda.org/private']",
+            ),
+            id="quoted-bracket",
+        ),
+        pytest.param(
+            MatchSpec(
+                "pkg[channel=https://conda.anaconda.org/private]",
+            ),
+            id="unquoted-bracket",
+        ),
+        pytest.param(
+            MatchSpec(
+                name="pkg",
+                channel="https://conda.anaconda.org/private",
+            ),
+            id="programmatic",
+        ),
+        pytest.param(
+            MatchSpec("t/SENSITIVE-VALUE/private::pkg"),
+            id="relative-token-prefix",
+        ),
+        pytest.param(
+            MatchSpec("pkg[channel='t/SENSITIVE-VALUE/private']"),
+            id="relative-token-bracket",
+        ),
+    ],
+)
+def test_match_spec_to_toml_normalizes_channel_url(spec: MatchSpec) -> None:
+    value = WorkspaceDependencyResolver.match_spec_to_toml(spec)
+
+    assert value["channel"] == "https://conda.anaconda.org/private"
+
+
+def test_match_spec_to_toml_redacts_uppercase_channel_credentials() -> None:
+    spec = MatchSpec("HTTPS://user:password@repo.example.test/t/secret/private::pkg")
+
+    value = WorkspaceDependencyResolver.match_spec_to_toml(spec)
+
+    assert value["channel"] == "HTTPS://repo.example.test/private"
+
+
+def test_match_spec_to_toml_error_redacts_relative_channel_token() -> None:
+    spec = MatchSpec("t/SENSITIVE-VALUE/private::pkg[subdir='custom-64']")
+
+    with pytest.raises(InvalidMatchSpec) as error:
+        WorkspaceDependencyResolver.match_spec_to_toml(spec)
+
+    assert "SENSITIVE-VALUE" not in str(error.value)
+
+
+def test_parse_channels_debug_log_redacts_relative_channel_token(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level("DEBUG"):
+        parse_channels([{"channel": "t/SENSITIVE-VALUE/private", "priority": 1}])
+
+    assert "SENSITIVE-VALUE" not in caplog.text
+    assert "https://conda.anaconda.org/private" in caplog.text
 
 
 @pytest.mark.parametrize(

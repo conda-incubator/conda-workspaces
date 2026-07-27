@@ -10,18 +10,24 @@ environment for the canonical ``conda.lock``. The same logic backs
 from __future__ import annotations
 
 import os
+import tempfile
+from contextlib import nullcontext
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from conda.common.io import captured
 
 from ...context import isolated_package_cache
-from ...envs import activate_d_scripts, install_environment
+from ...envs import activate_d_scripts, install_environment, remove_environment
 from ...lockfile import (
-    generate_lockfile,
+    LockfileInstallPlan,
+    load_lockfile_data,
     lockfile_path,
     render_lockfile,
     validate_lockfile_output,
+    write_lockfile,
 )
+from ...paths import regular_file_generation
 from ...resolver import resolve_all_environments, resolve_environment
 from .. import status
 
@@ -71,16 +77,17 @@ def sync_environments(
     baseline_lockfile: dict[str, Any] | None = None,
     update_targets: dict[tuple[str, str], set[str]] | None = None,
     publish_lockfile: Callable[[str], None] | None = None,
+    validate_workspace: Callable[[], None] | None = None,
     console: Console,
 ) -> None:
-    """Resolve and install the selected environments, then lock the workspace.
+    """Resolve and lock the desired state before installing selected environments.
 
     When *no_install* is true the prefixes are not touched but the
     complete canonical lockfile is still regenerated. When *dry_run*
     is true neither the prefixes nor the lockfile are written.
-    ``install_environment`` receives *force_reinstall* / *dry_run*
-    verbatim. When *prune* is true, requested prefix specs absent from
-    the resolved manifest are removed before installation.
+    The rendered lock solution is also used for dry-run validation. When
+    *prune* is true, prefix packages and requested specs absent from the
+    resolved manifest are removed during execution.
     *update_targets* selects constrained roots for a frozen-installed
     prefix solve and overlays the same environment/platform slices onto
     *baseline_lockfile*. After every solve succeeds, *publish_lockfile*
@@ -94,6 +101,12 @@ def sync_environments(
     names = list(env_names)
     if not names and not update_targets:
         return
+
+    output_generation = None
+    if not dry_run and publish_lockfile is None:
+        output_path = lockfile_path(ctx)
+        validate_lockfile_output(ctx, output_path)
+        output_generation = regular_file_generation(output_path)
 
     resolved_all = resolve_all_environments(config)
     for name in names:
@@ -129,10 +142,57 @@ def sync_environments(
                     update_targets=update_targets,
                     dry_run=True,
                 )
-            if not dry_run and publish_lockfile is not None:
-                publish_lockfile(rendered_lockfile)
+        else:
+            validate_lockfile_output(ctx, lockfile_path(ctx))
+            solve_prefix_context = (
+                tempfile.TemporaryDirectory(prefix="conda-workspaces-force-")
+                if force_reinstall
+                else nullcontext(None)
+            )
+            with solve_prefix_context as solve_root:
+                solve_prefixes = (
+                    {name: Path(solve_root) / name for name in names}
+                    if solve_root is not None
+                    else None
+                )
+                rendered_lockfile = render_lockfile(
+                    ctx,
+                    resolved_all,
+                    config=config,
+                    solve_prefixes=solve_prefixes,
+                    dry_run=dry_run,
+                )
 
-        solve_prefixes = {}
+        assert rendered_lockfile is not None
+        rendered_lockfile_data = load_lockfile_data(rendered_lockfile.encode("utf-8"))
+        install_plans = {}
+        if not no_install:
+            for name in names:
+                update_names = None
+                if update_targets is not None:
+                    resolved = resolved_all[name]
+                    declared = resolved.resolve_platform_name(ctx.platform)
+                    update_names = update_targets.get((name, declared))
+                    if not update_names:
+                        continue
+                install_plans[name] = LockfileInstallPlan.prepare(
+                    ctx,
+                    name,
+                    lockfile_data=rendered_lockfile_data,
+                    update_names=update_names,
+                    prune=prune,
+                    replace_existing=force_reinstall,
+                    validate_workspace=validate_workspace,
+                )
+        if not dry_run:
+            if publish_lockfile is not None:
+                publish_lockfile(rendered_lockfile)
+            else:
+                write_lockfile(
+                    ctx,
+                    rendered_lockfile,
+                    expected_generation=output_generation,
+                )
 
         if not no_install:
             progress_action = "Updating" if update_targets is not None else "Installing"
@@ -165,16 +225,18 @@ def sync_environments(
                     update_names = update_targets.get((name, declared))
                     if not update_names:
                         continue
-                solve_prefix = install_environment(
-                    ctx,
-                    resolved,
-                    force_reinstall=force_reinstall,
-                    dry_run=dry_run,
-                    prune=prune,
-                    update_names=update_names,
-                )
-                if dry_run and force_reinstall:
-                    solve_prefixes[name] = solve_prefix
+                if force_reinstall and not dry_run:
+                    remove_environment(
+                        ctx,
+                        name,
+                        expected_prefix_identity=getattr(
+                            install_plans[name],
+                            "preflight_prefix_identity",
+                            None,
+                        ),
+                    )
+                if not dry_run:
+                    install_plans[name].execute()
                 status.message(
                     console,
                     completed_action,
@@ -196,13 +258,5 @@ def sync_environments(
         console.print(
             f"[bold blue]{progress}[/bold blue] [bold]conda.lock[/bold][dim]...[/dim]"
         )
-        if rendered_lockfile is None:
-            generate_lockfile(
-                ctx,
-                resolved_all,
-                config=config,
-                dry_run=dry_run,
-                solve_prefixes=solve_prefixes or None,
-            )
         action = "Would update" if dry_run else "Updated"
         console.print(f"[bold cyan]{action}[/bold cyan] [bold]conda.lock[/bold]")

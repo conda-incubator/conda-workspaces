@@ -264,6 +264,71 @@ def test_init_channels_follow_conda_configuration(
 
 
 @pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        (
+            "https://user:password@packages.example.test/team/channel",
+            "https://packages.example.test/team/channel",
+        ),
+        (
+            "https://packages.example.test/t/secret/team/channel",
+            "https://packages.example.test/team/channel",
+        ),
+        (
+            "https://packages.example.test/%74/secret/team/channel",
+            "https://packages.example.test/team/channel",
+        ),
+        (
+            "https://packages.example.test/t%252Fsecret/team/channel",
+            "https://packages.example.test/team/channel",
+        ),
+        (
+            "HTTPS://user:password@packages.example.test/team/channel",
+            "HTTPS://packages.example.test/team/channel",
+        ),
+        (
+            "https://packages.example.test/team/channel?token=secret#metadata",
+            "https://packages.example.test/team/channel",
+        ),
+        (
+            "t/SENSITIVE-VALUE/private",
+            "https://conda.anaconda.org/private",
+        ),
+        (
+            "https://conda.anaconda.org/conda-forge",
+            "https://conda.anaconda.org/conda-forge",
+        ),
+        ("file:///srv/conda/channel", "file:///srv/conda/channel"),
+    ],
+    ids=[
+        "basic-auth",
+        "anaconda-token",
+        "encoded-token-segment",
+        "double-encoded-token-separator",
+        "uppercase-basic-auth",
+        "query-fragment",
+        "relative-token",
+        "absolute",
+        "file",
+    ],
+)
+def test_init_redacts_channel_credentials_without_changing_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configure_conda_channels: Callable[..., None],
+    configured: str,
+    expected: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    configure_conda_channels([configured])
+
+    execute_init(make_args(_DEFAULTS, manifest_format="conda", name="secure"))
+
+    doc = tomlkit.loads((tmp_path / "conda.toml").read_text(encoding="utf-8"))
+    assert doc["workspace"]["channels"] == [expected]
+
+
+@pytest.mark.parametrize(
     ("configured", "override_channels", "expected_error", "message"),
     [
         ([], False, CondaValueError, "No channels are configured"),

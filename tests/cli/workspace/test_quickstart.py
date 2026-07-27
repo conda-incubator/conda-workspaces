@@ -14,6 +14,7 @@ from rich.console import Console
 from conda_workspaces.cli.workspace import quickstart as quickstart_module
 from conda_workspaces.cli.workspace.quickstart import execute_quickstart
 from conda_workspaces.exceptions import (
+    CondaWorkspacesError,
     EnvironmentNameInvalidError,
     LockfileNotFoundError,
     LockfileStaleError,
@@ -289,7 +290,8 @@ def test_quickstart_specs_install_selected_environment(
     monkeypatch.chdir(tmp_path)
 
     def fake_sync(config, ctx, env_names, **kwargs):  # type: ignore[no-untyped-def]
-        del config, kwargs
+        del config
+        kwargs["publish_lockfile"]("version: 1\nenvironments: {}\npackages: []\n")
         for name in env_names:
             ctx.env_prefix(name).mkdir(parents=True)
 
@@ -407,6 +409,31 @@ def test_quickstart_dry_run_validates_staged_manifest(
         'channels = ["Staging", "Second", "defaults", "Internal"]' in staged_contents[0]
     )
     assert not (tmp_path / "conda.toml").exists()
+
+
+def test_quickstart_dry_run_redacts_configured_channel_credentials(
+    orchestrated: dict,
+    configure_conda_channels: Callable[..., None],
+) -> None:
+    configured = (
+        "https://user:password@packages.example.test/t/secret/team/channel"
+        "?token=secret#metadata"
+    )
+    configure_conda_channels([configured])
+    staged_contents: list[str] = []
+
+    def inspect_manifest(ns, *, console):  # type: ignore[no-untyped-def]
+        del console
+        staged_contents.append(ns.manifest_file.read_text(encoding="utf-8"))
+
+    orchestrated["runners"]["install"]._effect = inspect_manifest
+
+    assert orchestrated["run"](dry_run=True) == 0
+    assert len(staged_contents) == 1
+    assert "user:password" not in staged_contents[0]
+    assert "/t/secret/" not in staged_contents[0]
+    assert "token=secret" not in staged_contents[0]
+    assert "https://packages.example.test/team/channel" in staged_contents[0]
 
 
 def test_quickstart_dry_run_with_copy_reports_but_does_not_write(
@@ -542,7 +569,10 @@ def test_quickstart_dry_run_validates_requested_prefix(
     blocked_prefix.write_bytes(b"blocked")
     before = snapshot_tree(tmp_path)
 
-    with pytest.raises(FileExistsError, match="not a directory"):
+    with pytest.raises(
+        CondaWorkspacesError,
+        match="Environment prefix is not a regular directory",
+    ):
         execute_quickstart(
             make_args(_DEFAULTS, dry_run=True, no_shell=True, specs=specs),
             console=Console(file=StringIO(), force_terminal=False),

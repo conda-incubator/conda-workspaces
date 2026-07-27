@@ -12,11 +12,12 @@ from typing import TYPE_CHECKING, cast
 import tomlkit
 
 from ..manifests.toml import CondaTomlParser, WorkspaceDependencyResolver
-from ..models import Feature
+from ..models import Feature, redact_channel_name, redact_channel_url
 
 if TYPE_CHECKING:
     from typing import Any
 
+    from conda.models.channel import Channel
     from conda.models.match_spec import MatchSpec
     from tomlkit.items import Table
 
@@ -37,7 +38,13 @@ def config_to_toml(
     if config.name:
         ws.add("name", config.name)
     if config.channels:
-        ws.add("channels", [ch.canonical_name for ch in config.channels])
+        ws.add(
+            "channels",
+            _channels_to_toml(
+                config.channels,
+                source.get("workspace", {}).get("channels"),
+            ),
+        )
     if config.platforms:
         ws.add("platforms", config.platforms_for_toml())
     if config.channel_priority:
@@ -69,7 +76,7 @@ def config_to_toml(
             "pypi-dependencies",
             tomlkit.item(
                 {
-                    name: dependency.to_toml()
+                    name: dependency.to_manifest_toml()
                     for name, dependency in default_feature.pypi_dependencies.items()
                 }
             ),
@@ -130,7 +137,7 @@ def config_to_toml(
                     env_table.add(
                         "pypi-dependencies",
                         {
-                            name: dependency.to_toml()
+                            name: dependency.to_manifest_toml()
                             for name, dependency in env.pypi_dependencies.items()
                         },
                     )
@@ -175,8 +182,38 @@ def _conda_dependencies_to_toml(
         if isinstance(raw, dict) and raw.get("workspace") is True:
             result[name] = raw
         else:
-            result[name] = WorkspaceDependencyResolver.match_spec_to_toml(spec)
+            value = WorkspaceDependencyResolver.match_spec_to_toml(spec)
+            if (
+                isinstance(raw, dict)
+                and isinstance(raw.get("channel"), str)
+                and not isinstance(value, str)
+            ):
+                value["channel"] = redact_channel_name(raw["channel"])
+            result[name] = value
     return result
+
+
+def _channels_to_toml(
+    channels: list[Channel],
+    source: object = None,
+) -> list[str]:
+    """Keep source channel identity when Conda discards authenticated origins."""
+    source_values: list[str] = []
+    if isinstance(source, list):
+        for item in source:
+            if isinstance(item, str):
+                source_values.append(item)
+            elif isinstance(item, dict):
+                value = cast("dict[str, object]", item).get("channel")
+                if isinstance(value, str):
+                    source_values.append(value)
+
+    return [
+        redact_channel_name(source_values[index])
+        if index < len(source_values)
+        else redact_channel_url(channel)
+        for index, channel in enumerate(channels)
+    ]
 
 
 def _add_feature(
@@ -204,13 +241,16 @@ def _add_feature(
         feat_tbl.add(
             "pypi-dependencies",
             {
-                name: dependency.to_toml()
+                name: dependency.to_manifest_toml()
                 for name, dependency in feature.pypi_dependencies.items()
             },
         )
 
     if feature.channels:
-        feat_tbl.add("channels", [ch.canonical_name for ch in feature.channels])
+        feat_tbl.add(
+            "channels",
+            _channels_to_toml(feature.channels, source.get("channels")),
+        )
 
     if feature.platforms:
         feat_tbl.add("platforms", list(feature.platforms))
@@ -260,7 +300,7 @@ def _add_target_overrides(
             plat_tbl.add(
                 "pypi-dependencies",
                 {
-                    name: dependency.to_toml()
+                    name: dependency.to_manifest_toml()
                     for name, dependency in pypi_dependencies.items()
                 },
             )

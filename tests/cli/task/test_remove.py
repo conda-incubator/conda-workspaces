@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 from conda_workspaces.cli.task.remove import execute_remove
-from conda_workspaces.exceptions import TaskNotFoundError
+from conda_workspaces.exceptions import TaskNotFoundError, WorkspaceParseError
 from conda_workspaces.manifests.toml import CondaTomlParser
 
 
@@ -48,3 +48,45 @@ def test_remove_dry_run(sample_yaml, capsys):
 
     tasks = CondaTomlParser().parse_tasks(sample_yaml)
     assert "lint" in tasks
+
+
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [
+        ("conda.toml", '[tasks]\nlint = "ruff check"\n'),
+        ("pixi.toml", '[tasks]\nlint = "ruff check"\n'),
+        (
+            "pyproject.toml",
+            '[tool.conda.tasks]\nlint = "ruff check"\n',
+        ),
+    ],
+    ids=["conda", "pixi", "pyproject"],
+)
+@pytest.mark.parametrize("boundary", ["leaf", "parent"], ids=["leaf", "parent"])
+def test_remove_task_rejects_symlinked_manifest(
+    tmp_path: Path,
+    filename: str,
+    content: str,
+    boundary: str,
+) -> None:
+    outside = tmp_path / "outside" / filename
+    outside.parent.mkdir()
+    outside.write_text(content, encoding="utf-8")
+    if boundary == "leaf":
+        linked_boundary = tmp_path / filename
+        linked_boundary.symlink_to(outside)
+        manifest = linked_boundary
+    else:
+        linked_boundary = tmp_path / "linked-parent"
+        linked_boundary.symlink_to(outside.parent, target_is_directory=True)
+        manifest = linked_boundary / filename
+    before = outside.read_bytes()
+
+    with pytest.raises(
+        (WorkspaceParseError, NotADirectoryError),
+        match="symbolic link",
+    ):
+        execute_remove(_remove_args(manifest, "lint"))
+
+    assert outside.read_bytes() == before
+    assert linked_boundary.is_symlink()

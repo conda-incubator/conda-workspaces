@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING
 from conda.base.context import context
 from conda.plugins.types import EnvironmentSpecBase
 
+from .models import redact_channel_name
+
 if TYPE_CHECKING:
     from typing import ClassVar, Final
 
@@ -55,9 +57,9 @@ class CondaWorkspaceSpec(EnvironmentSpecBase):
         if not self.path.exists():
             return False
         try:
-            import tomlkit
+            from .manifests.base import ManifestParser
 
-            data = tomlkit.loads(self.path.read_text(encoding="utf-8"))
+            data = ManifestParser.load_toml(self.path)
             return "workspace" in data
         except Exception:
             return False
@@ -75,7 +77,7 @@ class CondaWorkspaceSpec(EnvironmentSpecBase):
         resolved = resolve_environment(config, "default", context.subdir)
 
         env_config = EnvironmentConfig(
-            channels=tuple(ch.canonical_name for ch in resolved.channels),
+            channels=tuple(redact_channel_name(ch) for ch in resolved.channels),
         )
 
         requested: list[MatchSpec] = list(resolved.conda_dependencies.values())

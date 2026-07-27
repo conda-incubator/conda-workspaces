@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from rich.console import Console
 
-from conda_workspaces.cli.workspace.list import execute_list
+from conda_workspaces.cli.workspace.list import execute_list, package_table
 from conda_workspaces.exceptions import (
     EnvironmentNotFoundError,
     EnvironmentNotInstalledError,
@@ -18,8 +20,6 @@ from conda_workspaces.exceptions import (
 from ..conftest import make_args
 
 if TYPE_CHECKING:
-    from rich.console import Console
-
     from tests.conftest import CreateWorkspaceEnv
 
 _DEFAULTS = {
@@ -226,3 +226,25 @@ def test_list_packages_empty(
     result = execute_list(args, console=rich_console)
     assert result == 0
     assert "No packages in" in rich_console.file.getvalue()
+
+
+def test_package_table_does_not_emit_record_terminal_controls() -> None:
+    payload = "spoof\x1b[2J\x1b]8;;https://example.invalid\x1b\\"
+    console = Console(file=StringIO(), force_terminal=True)
+
+    console.print(
+        package_table(
+            [
+                {
+                    "name": payload,
+                    "version": payload,
+                    "build": payload,
+                }
+            ]
+        )
+    )
+
+    output = console.file.getvalue()
+    assert "\x1b[2J" not in output
+    assert "\x1b]8;;https://example.invalid" not in output
+    assert r"\x1b[2J" in output

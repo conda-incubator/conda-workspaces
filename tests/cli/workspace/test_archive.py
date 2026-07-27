@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import tarfile
 from io import StringIO
@@ -23,7 +24,11 @@ from conda_workspaces.archive import (
     runtime_prefix_relative_path,
     scan_prefix_references,
 )
-from conda_workspaces.cli.workspace.archive import execute_archive, execute_unarchive
+from conda_workspaces.cli.workspace.archive import (
+    execute_archive,
+    execute_unarchive,
+    warn_staging_prefix_references,
+)
 from conda_workspaces.exceptions import ArchiveError
 from conda_workspaces.models import ArchiveConfig
 from conda_workspaces.receipts import ArchiveReceipt
@@ -88,6 +93,12 @@ def test_is_absolute_runtime_prefix(prefix: str, expected: bool) -> None:
 )
 def test_runtime_prefix_relative_path(prefix: str, expected: Path) -> None:
     assert runtime_prefix_relative_path(prefix) == expected
+
+
+@pytest.mark.parametrize("prefix", ["/../escape", r"C:\..\escape"])
+def test_runtime_prefix_relative_path_rejects_traversal(prefix: str) -> None:
+    with pytest.raises(ValueError, match="contains traversal"):
+        runtime_prefix_relative_path(prefix)
 
 
 @pytest.mark.parametrize(
@@ -661,8 +672,8 @@ def test_execute_unarchive_receipt_detects_tampered_archive(
 @pytest.mark.parametrize("dry_run", [False, True], ids=["extract", "dry-run"])
 @pytest.mark.parametrize(
     "target_setup",
-    ["non-empty", "file-target", "symlink-target"],
-    ids=["non-empty", "file-target", "symlink-target"],
+    ["empty", "non-empty", "file-target", "symlink-target"],
+    ids=["empty", "non-empty", "file-target", "symlink-target"],
 )
 def test_execute_unarchive_rejects_existing_target(
     archive_workspace: Path,
@@ -888,6 +899,7 @@ def test_execute_unarchive_install_explicit_prefix(
     archive_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    replace_lockfile_install_plan,
 ) -> None:
     platform = context.subdir
     (archive_workspace / "conda.toml").write_text(
@@ -912,18 +924,18 @@ platforms = ["{platform}"]
     args_a = make_args(_ARCHIVE_DEFAULTS, output=archive)
     execute_archive(args_a, console=console)
 
-    install_calls: list[tuple[object, str, dict[str, object]]] = []
+    install_calls: list[tuple[str, object, str, dict[str, object]]] = []
 
-    def fake_install_from_lockfile(ctx, name, **kwargs):
-        install_calls.append((ctx, name, kwargs))
+    def fake_install_from_lockfile(phase, ctx, name, kwargs):
+        install_calls.append((phase, ctx, name, kwargs))
 
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.install.install_from_lockfile",
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.install",
         fake_install_from_lockfile,
     )
 
     target = tmp_path / "extracted"
-    prefix = "/opt/runtime"
+    prefix = str(tmp_path / "runtime")
     args_u = make_args(
         _UNARCHIVE_DEFAULTS,
         archive_path=archive,
@@ -935,16 +947,26 @@ platforms = ["{platform}"]
     result = execute_unarchive(args_u, console=console)
 
     assert result == 0
-    assert len(install_calls) == 1
-    install_ctx, environment, install_kwargs = install_calls[0]
+    assert len(install_calls) == 2
+    preview_phase, preview_ctx, preview_environment, preview_kwargs = install_calls[0]
+    install_phase, install_ctx, environment, install_kwargs = install_calls[1]
+    assert preview_ctx is install_ctx
+    assert preview_environment == environment == "default"
+    assert preview_phase == "prepare"
+    assert install_phase == "execute"
+    assert preview_kwargs["lockfile_data"] is install_kwargs["lockfile_data"]
     assert install_ctx.root == target
     assert Path(install_ctx.config.manifest_path) == target / "conda.toml"
-    assert environment == "default"
     expected_override = None if str(Path(prefix)) == prefix else prefix
+    lockfile_data = install_kwargs.pop("lockfile_data")
+    assert lockfile_data["version"] == 1
+    assert lockfile_data["environments"]["default"]["packages"][platform] == []
+    validate_workspace = install_kwargs.pop("validate_workspace")
+    assert callable(validate_workspace)
+    validate_workspace()
     assert install_kwargs == {
         "prefix": Path(prefix),
         "target_prefix_override": expected_override,
-        "dry_run": False,
     }
 
 
@@ -1045,6 +1067,28 @@ def test_execute_unarchive_install_under_dest_warns_on_staging_prefix_reference(
     assert str(dest / "opt" / "runtime") in output
     assert "/opt/runtime" in output
     assert "bin/tool" in output.replace("\\", "/")
+
+
+def test_staging_prefix_warning_escapes_terminal_controls(tmp_path: Path) -> None:
+    install_prefix = tmp_path / "prefix\x1b]52;c;PREFIX\x07"
+    matched = install_prefix / "bad\x1b]52;c;MATCH\x07.txt"
+    stream = StringIO()
+
+    warn_staging_prefix_references(
+        Console(file=stream, width=200, highlight=False),
+        install_prefix=install_prefix,
+        runtime_prefix="/opt/runtime\x1b]52;c;RUNTIME\x07",
+        matches=(matched,),
+    )
+
+    output = stream.getvalue()
+    assert "\x1b" not in output
+    assert "\x07" not in output
+    assert "]52;c;PREFIX" in output
+    assert "]52;c;MATCH" in output
+    assert "]52;c;RUNTIME" in output
+    assert r"\x1b" in output
+    assert r"\x07" in output
 
 
 def test_execute_unarchive_install_under_dest_without_staging_prefix_reference(
@@ -1181,3 +1225,54 @@ def test_execute_unarchive_prefix_must_be_absolute(
     )
     with pytest.raises(ArchiveError, match="--prefix must be an absolute path"):
         execute_unarchive(args_u, console=console)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows syntax is host-native on Windows")
+def test_execute_unarchive_prefix_must_use_host_syntax_without_dest(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "test.tar.gz"
+    console = Console(file=StringIO(), width=200, highlight=False)
+    execute_archive(make_args(_ARCHIVE_DEFAULTS, output=archive), console=console)
+
+    args = make_args(
+        _UNARCHIVE_DEFAULTS,
+        archive_path=archive,
+        target=tmp_path / "extracted",
+        install=True,
+        environment="runtime",
+        prefix=r"C:\vela\runtime",
+    )
+    with pytest.raises(ArchiveError, match="host platform's absolute path syntax"):
+        execute_unarchive(args, console=console)
+
+
+@pytest.mark.parametrize("prefix", ["/../escape", r"C:\..\escape"])
+def test_execute_unarchive_dest_rejects_prefix_traversal(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    prefix: str,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "test.tar.gz"
+    console = Console(file=StringIO(), width=200, highlight=False)
+    execute_archive(make_args(_ARCHIVE_DEFAULTS, output=archive), console=console)
+
+    dest = tmp_path / "rootfs"
+    args = make_args(
+        _UNARCHIVE_DEFAULTS,
+        archive_path=archive,
+        target=tmp_path / "extracted",
+        install=True,
+        environment="runtime",
+        prefix=prefix,
+        dest=dest,
+    )
+    with pytest.raises(ArchiveError, match="must not contain"):
+        execute_unarchive(args, console=console)
+
+    assert not dest.exists()

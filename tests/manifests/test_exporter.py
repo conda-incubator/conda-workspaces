@@ -19,6 +19,7 @@ import tomlkit
 from conda.models.environment import Environment
 from conda.models.environment import EnvironmentConfig as CondaEnvConfig
 from conda.models.match_spec import MatchSpec
+from conda.models.records import PackageRecord
 
 from conda_workspaces.manifests.base import ManifestParser
 from conda_workspaces.manifests.pixi_toml import PixiTomlParser
@@ -100,6 +101,220 @@ def test_export_single_platform_round_trips(
     assert resolved.conda_dependencies["python"] == MatchSpec("python=3.12")
     assert resolved.conda_dependencies["numpy"] == MatchSpec("numpy >=1.20")
     assert set(resolved.pypi_dependencies) == {"requests", "pandas"}
+
+
+@pytest.mark.parametrize(
+    "format_name",
+    ["conda-toml", "pixi-toml", "pyproject-toml"],
+)
+def test_export_redacts_channel_credentials(
+    format_name: str,
+    parsers: dict[str, ManifestParser],
+) -> None:
+    env = make_env(
+        "linux-64",
+        channels=(
+            "HTTPS://user:password@packages.test/t/secret/private?token=secret#metadata",
+            "t/relative-secret/private",
+        ),
+    )
+
+    output = parsers[format_name].export([env])
+
+    assert "user" not in output
+    assert "password" not in output
+    assert "secret" not in output
+    assert "HTTPS://packages.test/private" in output
+    assert "https://conda.anaconda.org/private" in output
+
+
+@pytest.mark.parametrize(
+    "format_name",
+    ["conda-toml", "pixi-toml", "pyproject-toml"],
+)
+def test_export_makes_scheme_relative_channel_identity_explicit(
+    format_name: str,
+    parsers: dict[str, ManifestParser],
+    tmp_path: Path,
+) -> None:
+    parser = parsers[format_name]
+    output = parser.export(
+        [
+            make_env(
+                "linux-64",
+                channels=("//packages.example.test/team/channel",),
+            )
+        ]
+    )
+
+    assert "https://packages.example.test/team/channel" in output
+    assert '"//packages.example.test/team/channel"' not in output
+
+    _, config = write_and_parse(parser, output, tmp_path)
+
+    assert [channel.canonical_name for channel in config.channels] == [
+        "https://packages.example.test/team/channel"
+    ]
+
+
+@pytest.mark.parametrize(
+    "format_name",
+    ["conda-toml", "pixi-toml", "pyproject-toml"],
+)
+def test_export_preserves_conda_source_identity(
+    format_name: str,
+    parsers: dict[str, ManifestParser],
+    tmp_path: Path,
+) -> None:
+    url = "https://repo.example.test/linux-64/pkg-1.0-py312_0.conda"
+    digest = "a" * 64
+    direct = MatchSpec(MatchSpec(url), sha256=digest)
+    env = make_env(
+        "linux-64",
+        conda_specs=("conda-forge::python=3.12",),
+    )
+    env.requested_packages.append(direct)
+
+    output = parsers[format_name].export([env])
+    _, config = write_and_parse(parsers[format_name], output, tmp_path)
+    resolved = resolve_environment(config, "default", "linux-64")
+
+    python = resolved.conda_dependencies["python"]
+    package = resolved.conda_dependencies["pkg"]
+    assert str(python.get_raw_value("channel")) == (
+        "https://conda.anaconda.org/conda-forge"
+    )
+    assert package.get_raw_value("url") == url
+    assert package.get_raw_value("sha256") == digest
+    assert package.get_raw_value("subdir") == "linux-64"
+    assert str(package.version) == "1.0"
+    assert str(package.get_raw_value("build")) == "py312_0"
+
+
+@pytest.mark.parametrize(
+    "format_name",
+    ["conda-toml", "pixi-toml", "pyproject-toml"],
+)
+def test_export_keeps_platform_specific_conda_sources_separate(
+    format_name: str,
+    parsers: dict[str, ManifestParser],
+    tmp_path: Path,
+) -> None:
+    urls = {
+        "linux-64": "https://linux.example.test/linux-64/pkg-1.0-py_0.conda",
+        "osx-arm64": "https://mac.example.test/osx-arm64/pkg-1.0-py_0.conda",
+    }
+    envs = [make_env(platform, conda_specs=(url,)) for platform, url in urls.items()]
+
+    output = parsers[format_name].export(envs)
+    _, config = write_and_parse(parsers[format_name], output, tmp_path)
+
+    for platform, url in urls.items():
+        resolved = resolve_environment(config, "default", platform)
+        assert resolved.conda_dependencies["pkg"].get_raw_value("url") == url
+
+
+@pytest.mark.parametrize(
+    "format_name",
+    ["conda-toml", "pixi-toml", "pyproject-toml"],
+)
+def test_export_preserves_named_pypi_direct_urls_and_extras(
+    format_name: str,
+    parsers: dict[str, ManifestParser],
+    tmp_path: Path,
+) -> None:
+    url = "https://files.example.test/foo-1.0-py3-none-any.whl"
+    env = make_env(
+        "linux-64",
+        pypi_specs=(f"foo[extra] @ {url}",),
+    )
+
+    output = parsers[format_name].export([env])
+    _, config = write_and_parse(parsers[format_name], output, tmp_path)
+    dependency = resolve_environment(
+        config,
+        "default",
+        "linux-64",
+    ).pypi_dependencies["foo"]
+
+    assert dependency.url == url
+    assert dependency.extras == ("extra",)
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        ("foo>=1; python_version < '3.13'", "environment marker"),
+        ("https://files.example.test/foo.whl", "invalid PyPI dependency"),
+        ("-e ./foo", "invalid PyPI dependency"),
+    ],
+    ids=["marker", "bare-url", "editable"],
+)
+def test_export_rejects_unrepresentable_pypi_dependencies(
+    raw: str,
+    message: str,
+    parsers: dict[str, ManifestParser],
+) -> None:
+    env = make_env("linux-64", pypi_specs=(raw,))
+
+    with pytest.raises(ValueError, match=message):
+        parsers["conda-toml"].export([env])
+
+
+def test_export_rejects_pypi_credentials_without_echoing_them(
+    parsers: dict[str, ManifestParser],
+) -> None:
+    env = make_env(
+        "linux-64",
+        pypi_specs=("foo @ https://user:SENSITIVE@files.example.test/foo.whl",),
+    )
+
+    with pytest.raises(ValueError) as caught:
+        parsers["conda-toml"].export([env])
+
+    assert "SENSITIVE" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "format_name",
+    ["conda-toml", "pixi-toml", "pyproject-toml"],
+)
+def test_export_uses_exact_explicit_package_when_roots_are_absent(
+    format_name: str,
+    parsers: dict[str, ManifestParser],
+    tmp_path: Path,
+) -> None:
+    url = "https://repo.example.test/linux-64/pkg-1.0-py312_0.conda"
+    digest = "b" * 64
+    env = Environment(
+        name="default",
+        platform="linux-64",
+        config=CondaEnvConfig(channels=("conda-forge",)),
+        explicit_packages=[
+            PackageRecord(
+                name="pkg",
+                version="1.0",
+                build="py312_0",
+                build_number=0,
+                channel="https://repo.example.test",
+                subdir="linux-64",
+                fn="pkg-1.0-py312_0.conda",
+                url=url,
+                sha256=digest,
+            )
+        ],
+    )
+
+    output = parsers[format_name].export([env])
+    _, config = write_and_parse(parsers[format_name], output, tmp_path)
+    package = resolve_environment(
+        config,
+        "default",
+        "linux-64",
+    ).conda_dependencies["pkg"]
+
+    assert package.get_raw_value("url") == url
+    assert package.get_raw_value("sha256") == digest
 
 
 @pytest.mark.parametrize(

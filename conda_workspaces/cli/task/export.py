@@ -10,6 +10,7 @@ from rich.console import Console
 
 from ...manifests import detect_and_parse_tasks
 from ...manifests.toml import tasks_to_toml
+from ...paths import atomic_write_text, regular_file_generation
 
 if TYPE_CHECKING:
     import argparse
@@ -21,10 +22,14 @@ def execute_export(args: argparse.Namespace, *, console: Console | None = None) 
     if console is None:
         console = Console(highlight=False)
     file_path = getattr(args, "file", None)
+    output: Path | None = getattr(args, "output", None)
+    if output is not None:
+        if output.is_symlink():
+            raise ValueError(f"Output path cannot be a symbolic link: {output}")
+        output_generation = regular_file_generation(output)
     task_file, tasks, _ = detect_and_parse_tasks(file_path=file_path)
 
     quiet = getattr(args, "quiet", False)
-    output: Path | None = getattr(args, "output", None)
 
     text = tasks_to_toml(tasks)
 
@@ -35,7 +40,11 @@ def execute_export(args: argparse.Namespace, *, console: Console | None = None) 
         except (CondaSystemExit, DryRunExit):
             return 0
 
-        output.write_text(text, encoding="utf-8")
+        atomic_write_text(
+            output,
+            text,
+            expected_generation=output_generation,
+        )
         n = len(tasks)
         if not quiet:
             noun = "task" if n == 1 else "tasks"

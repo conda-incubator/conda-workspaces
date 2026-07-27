@@ -32,17 +32,9 @@ def test_has_workspace(parser, sample_pixi_toml):
     assert parser.has_workspace(sample_pixi_toml)
 
 
-@pytest.mark.parametrize(
-    "content",
-    [
-        pytest.param(None, id="missing-file"),
-        pytest.param("{{invalid toml", id="bad-toml"),
-    ],
-)
-def test_has_workspace_false(parser, tmp_path, content):
+def test_has_workspace_false(parser, tmp_path):
     path = tmp_path / "pixi.toml"
-    if content is not None:
-        path.write_text(content, encoding="utf-8")
+    path.write_text('[dependencies]\npython = ">=3.10"\n', encoding="utf-8")
     assert not parser.has_workspace(path)
 
 

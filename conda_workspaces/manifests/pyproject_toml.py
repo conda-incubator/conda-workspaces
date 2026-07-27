@@ -16,10 +16,10 @@ import tomlkit
 from ..exceptions import (
     ManifestExistsError,
     TaskNotFoundError,
-    TaskParseError,
     WorkspaceParseError,
 )
 from ..models import WorkspaceConfig
+from ..paths import atomic_write_text
 from .base import ManifestParser
 from .normalize import parse_feature_tasks, parse_tasks_and_targets
 from .toml import (
@@ -80,9 +80,10 @@ class PyprojectTomlParser(ManifestParser):
             raise ManifestExistsError(path)
         existed = path.exists()
         if existed:
-            doc = tomlkit.loads(path.read_text(encoding="utf-8"))
+            doc, generation = self.load_toml_with_generation(path)
         else:
             doc = tomlkit.document()
+            generation = None
 
         tool = doc.setdefault("tool", tomlkit.table())
         if "conda" in tool:
@@ -99,7 +100,11 @@ class PyprojectTomlParser(ManifestParser):
         conda.add("dependencies", tomlkit.table())
         tool.add("conda", conda)
 
-        path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+        atomic_write_text(
+            path,
+            tomlkit.dumps(doc),
+            expected_generation=generation,
+        )
         return path, "Updated" if existed else "Created"
 
     def export(self, envs: Iterable[Environment]) -> str:
@@ -136,12 +141,16 @@ class PyprojectTomlParser(ManifestParser):
         ``[tool.pixi]`` content is preserved untouched — users who
         mix both tools stay functional.
         """
+        return self.merge_export_text(self.read_manifest_text(existing_path), exported)
+
+    def merge_export_text(self, existing: str, exported: str) -> str:
+        """Splice an export into one already captured pyproject generation."""
         exported_doc = tomlkit.loads(exported)
         exported_conda = exported_doc.get("tool", {}).get("conda")
         if exported_conda is None:
             return exported
 
-        doc = tomlkit.loads(existing_path.read_text(encoding="utf-8"))
+        doc = self.parse_toml_text(existing)
         tool = doc.setdefault("tool", tomlkit.table())
         if "conda" in tool:
             del tool["conda"]
@@ -149,7 +158,8 @@ class PyprojectTomlParser(ManifestParser):
         return tomlkit.dumps(doc)
 
     def has_workspace(self, path: Path) -> bool:
-        tool = self.read_toml(str(path)).get("tool", {})
+        data = self.load_toml(path)
+        tool = data.get("tool", {})
         return bool(
             tool.get("conda", {}).get("workspace")
             or tool.get("pixi", {}).get("workspace")
@@ -202,17 +212,14 @@ class PyprojectTomlParser(ManifestParser):
         return config
 
     def has_tasks(self, path: Path) -> bool:
-        tool = self.read_toml(str(path)).get("tool", {})
+        data = self.load_toml(path)
+        tool = data.get("tool", {})
         return bool(
             tool.get("conda", {}).get("tasks") or tool.get("pixi", {}).get("tasks")
         )
 
-    def parse_tasks(self, path: Path) -> dict[str, Task]:
-        try:
-            data = tomlkit.loads(path.read_text(encoding="utf-8")).unwrap()
-        except Exception as exc:
-            raise TaskParseError(str(path), str(exc)) from exc
-
+    def parse_tasks_data(self, data: dict[str, Any]) -> dict[str, Task]:
+        """Parse embedded tasks from an already loaded manifest mapping."""
         tool = data.get("tool", {})
         source = tool.get("conda", {}) or tool.get("pixi", {})
 
@@ -238,17 +245,22 @@ class PyprojectTomlParser(ManifestParser):
 
     def add_task(self, path: Path, name: str, task: Task) -> None:
         if path.exists():
-            doc = tomlkit.loads(path.read_text(encoding="utf-8"))
+            doc, generation = self.load_toml_with_generation(path)
         else:
             doc = tomlkit.document()
+            generation = None
 
         parent = self.tool_section_for_tasks(doc)
         tasks_section = parent.setdefault("tasks", tomlkit.table())
         tasks_section[name] = self.task_to_toml_inline(task)
-        path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+        atomic_write_text(
+            path,
+            tomlkit.dumps(doc),
+            expected_generation=generation,
+        )
 
     def remove_task(self, path: Path, name: str) -> None:
-        doc = tomlkit.loads(path.read_text(encoding="utf-8"))
+        doc, generation = self.load_toml_with_generation(path)
         tool = doc.get("tool", {})
         available: list[str] = []
         for sec_name in ("conda", "pixi"):
@@ -262,6 +274,10 @@ class PyprojectTomlParser(ManifestParser):
             if name in tasks_tbl:
                 del tasks_tbl[name]
                 self.remove_target_overrides(sec, name)
-                path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+                atomic_write_text(
+                    path,
+                    tomlkit.dumps(doc),
+                    expected_generation=generation,
+                )
                 return
         raise TaskNotFoundError(name, sorted(set(available)))

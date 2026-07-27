@@ -45,6 +45,52 @@ def test_info_workspace_overview(
     assert "conda-forge" in out
 
 
+def test_info_explicit_manifest_allows_symlinked_parent(
+    pixi_workspace: Path,
+    tmp_path: Path,
+    rich_console: Console,
+) -> None:
+    linked_workspace = tmp_path / "linked-workspace"
+    linked_workspace.symlink_to(pixi_workspace, target_is_directory=True)
+
+    result = execute_info(
+        make_args(
+            _DEFAULTS,
+            manifest_file=linked_workspace / "pixi.toml",
+        ),
+        console=rich_console,
+    )
+
+    assert result == 0
+    assert "default" in rich_console.file.getvalue()
+
+
+def test_info_does_not_emit_manifest_terminal_controls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = "spoof\x1b[2J\x1b]8;;https://example.invalid\x1b\\"
+    manifest = tmp_path / "conda.toml"
+    manifest.write_text(
+        "[workspace]\n"
+        f"name = {json.dumps(payload)}\n"
+        f"description = {json.dumps(payload)}\n"
+        'channels = ["conda-forge"]\n'
+        'platforms = ["linux-64"]\n',
+        encoding="utf-8",
+    )
+    console = Console(file=StringIO(), force_terminal=True)
+    monkeypatch.chdir(tmp_path)
+
+    result = execute_info(make_args(_DEFAULTS), console=console)
+
+    assert result == 0
+    output = console.file.getvalue()
+    assert "\x1b[2J" not in output
+    assert "\x1b]8;;https://example.invalid" not in output
+    assert r"\x1b[2J" in output
+
+
 @pytest.mark.parametrize(
     "selector",
     ["directory", "missing"],
@@ -390,6 +436,111 @@ requests = ">=2.28"
     out = rich_console.file.getvalue()
     assert "PyPI dependencies" in out
     assert "requests" in out
+
+
+def test_info_json_redacts_pypi_dependency_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = tmp_path / "conda.toml"
+    manifest.write_text(
+        """\
+[workspace]
+name = "private-pypi"
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-arm64", "win-64"]
+
+[pypi-dependencies]
+vcs = { git = "HTTPS://user:password@example.test/team/repo.git?token=secret#main" }
+artifact = { url = "https://p.example/t%252Fsecret/pkg.whl?x=secret#hash" }
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    env_console = Console(file=StringIO(), width=200, highlight=False)
+    execute_info(
+        make_args(_DEFAULTS, environment="default", json=True),
+        console=env_console,
+    )
+    env_data = json.loads(env_console.file.getvalue())
+    assert env_data["pypi_dependencies"] == {
+        "artifact": "artifact @ https://p.example/pkg.whl",
+        "vcs": "vcs @ git+HTTPS://example.test/team/repo.git",
+    }
+
+    workspace_console = Console(file=StringIO(), width=200, highlight=False)
+    execute_info(
+        make_args(_DEFAULTS, json=True),
+        console=workspace_console,
+    )
+    resolution = workspace_console.file.getvalue()
+    workspace_data = json.loads(resolution)
+    pypi = workspace_data["environment_details"][0]["resolutions"][0][
+        "pypi_dependencies"
+    ]
+    assert pypi["artifact"]["spec"] == {"url": "https://p.example/pkg.whl"}
+    assert pypi["vcs"]["spec"] == {"git": "HTTPS://example.test/team/repo.git"}
+    assert "password" in manifest.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("environment", [None, "default"], ids=["workspace", "env"])
+def test_info_json_redacts_credentials_in_arbitrary_match_spec_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    environment: str | None,
+) -> None:
+    manifest = tmp_path / "conda.toml"
+    manifest.write_text(
+        """\
+[workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-arm64", "win-64"]
+
+[dependencies]
+python = { build = "https://user:LEAKME@example.test/build" }
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    console = Console(file=StringIO(), width=200, highlight=False)
+
+    execute_info(
+        make_args(_DEFAULTS, environment=environment, json=True),
+        console=console,
+    )
+
+    output = console.file.getvalue()
+    assert "LEAKME" not in output
+    assert "user" not in output
+
+
+def test_info_json_redacts_relative_channel_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = tmp_path / "conda.toml"
+    manifest.write_text(
+        """\
+[workspace]
+channels = ["t/SENSITIVE-VALUE/private"]
+platforms = ["linux-64", "osx-arm64", "win-64"]
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    for environment in (None, "default"):
+        console = Console(file=StringIO(), width=200, highlight=False)
+        execute_info(
+            make_args(_DEFAULTS, environment=environment, json=True),
+            console=console,
+        )
+        output = console.file.getvalue()
+        data = json.loads(output)
+
+        assert "SENSITIVE-VALUE" not in output
+        assert data["channels"] == ["https://conda.anaconda.org/private"]
 
 
 @pytest.mark.parametrize(

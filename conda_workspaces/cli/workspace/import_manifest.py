@@ -11,7 +11,10 @@ from conda.reporters import confirm_yn
 from rich.console import Console
 from rich.syntax import Syntax
 
+from ...exceptions import ManifestImportError
 from ...importers import find_importer
+from ...manifests.toml import CondaTomlParser
+from ...paths import atomic_write_text, regular_file_generation
 from .. import status
 
 if TYPE_CHECKING:
@@ -31,6 +34,9 @@ def execute_import(args: argparse.Namespace, *, console: Console | None = None) 
     quiet = getattr(args, "quiet", False)
     dry_run = getattr(args, "dry_run", False)
     output: Path = getattr(args, "output", None) or Path("conda.toml")
+    if output.is_symlink():
+        raise ManifestImportError(output, "output cannot be a symbolic link")
+    output_generation = regular_file_generation(output)
 
     importer = find_importer(source)
     if not quiet:
@@ -45,7 +51,11 @@ def execute_import(args: argparse.Namespace, *, console: Console | None = None) 
 
     doc = importer.convert(source)
     text = tomlkit.dumps(doc)
-
+    CondaTomlParser().validate_no_url_credentials(
+        doc.unwrap(),
+        output,
+        content=text,
+    )
     if not quiet:
         status.message(
             console,
@@ -67,7 +77,11 @@ def execute_import(args: argparse.Namespace, *, console: Console | None = None) 
         except (CondaSystemExit, DryRunExit):
             return 0
 
-    output.write_text(text, encoding="utf-8")
+    atomic_write_text(
+        output,
+        text,
+        expected_generation=output_generation,
+    )
     if not quiet:
         parent = str(output.parent)
         status.message(

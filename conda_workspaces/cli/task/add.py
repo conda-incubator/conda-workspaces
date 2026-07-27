@@ -7,9 +7,11 @@ from typing import TYPE_CHECKING
 
 from rich.console import Console
 
+from ...exceptions import WorkspaceParseError
 from ...manifests import detect_task_file, find_parser
 from ...manifests.toml import CondaTomlParser
 from ...models import Task, TaskDependency
+from ...paths import validate_path_parent
 
 if TYPE_CHECKING:
     import argparse
@@ -21,9 +23,17 @@ def execute_add(args: argparse.Namespace, *, console: Console | None = None) -> 
         console = Console(highlight=False)
     file_path = getattr(args, "file", None)
     if file_path is None:
-        file_path = detect_task_file()
+        file_path = detect_task_file(reject_symlinks=True)
         if file_path is None:
             file_path = Path.cwd() / "conda.toml"
+    elif file_path.is_symlink():
+        raise WorkspaceParseError(
+            file_path,
+            "symbolic links are not supported for this operation",
+        )
+    else:
+        file_path = file_path.absolute()
+        validate_path_parent(file_path)
 
     try:
         parser = find_parser(file_path)

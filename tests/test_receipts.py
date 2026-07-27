@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import TYPE_CHECKING
 
 import pytest
 
+import conda_workspaces.receipts as receipts_module
 from conda_workspaces.archive import create_archive, extract_archive
 from conda_workspaces.exceptions import ArchiveError
 from conda_workspaces.models import ArchiveConfig
@@ -103,6 +105,74 @@ def test_archive_receipt_roundtrip(receipt_workspace: Path, tmp_path: Path) -> N
     assert "/t/token/" not in json.dumps(loaded.statement)
 
 
+@pytest.mark.parametrize("mutation", ["replace", "rewrite"])
+def test_archive_receipt_rejects_changed_validated_output_generation(
+    receipt_workspace: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    archive_path = tmp_path / "workspace.tar.gz"
+    create_archive(receipt_workspace, archive_path, ArchiveConfig())
+    receipt_path = ArchiveReceipt.default_path(archive_path)
+    receipt_path.write_text("existing receipt", encoding="utf-8")
+    concurrent_content = "concurrent receipt generation"
+    receipt = build_receipt(receipt_workspace, archive_path)
+    original_atomic_write_text = receipts_module.atomic_write_text
+
+    def mutate_before_write(path: Path, content: str, **kwargs) -> None:
+        if mutation == "replace":
+            replacement = receipt_path.with_name("replacement.receipt.json")
+            replacement.write_text(concurrent_content, encoding="utf-8")
+            replacement.replace(receipt_path)
+        else:
+            receipt_path.write_text(concurrent_content, encoding="utf-8")
+        original_atomic_write_text(path, content, **kwargs)
+
+    monkeypatch.setattr(
+        receipts_module,
+        "atomic_write_text",
+        mutate_before_write,
+    )
+
+    with pytest.raises(ValueError, match="changed before writing"):
+        receipt.write(receipt_path)
+
+    assert receipt_path.read_text(encoding="utf-8") == concurrent_content
+
+
+@pytest.mark.parametrize("mutation", ["replace", "rewrite"])
+def test_archive_receipt_captures_output_generation_before_validation(
+    receipt_workspace: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    archive_path = tmp_path / "workspace.tar.gz"
+    create_archive(receipt_workspace, archive_path, ArchiveConfig())
+    receipt_path = ArchiveReceipt.default_path(archive_path)
+    receipt_path.write_text("existing receipt", encoding="utf-8")
+    concurrent_content = "concurrent receipt generation"
+    receipt = build_receipt(receipt_workspace, archive_path)
+    original_validate = ArchiveReceipt.validate
+
+    def mutate_during_validation(self: ArchiveReceipt) -> None:
+        original_validate(self)
+        if mutation == "replace":
+            replacement = receipt_path.with_name("replacement.receipt.json")
+            replacement.write_text(concurrent_content, encoding="utf-8")
+            replacement.replace(receipt_path)
+        else:
+            receipt_path.write_text(concurrent_content, encoding="utf-8")
+
+    monkeypatch.setattr(ArchiveReceipt, "validate", mutate_during_validation)
+
+    with pytest.raises(ValueError, match="changed before writing"):
+        receipt.write(receipt_path)
+
+    assert receipt_path.read_text(encoding="utf-8") == concurrent_content
+
+
 def test_archive_receipt_deduplicates_noarch_packages_across_platforms(
     receipt_workspace: Path,
     tmp_path: Path,
@@ -174,6 +244,68 @@ def test_archive_receipt_load_rejects_invalid_json(
     receipt_path.write_text(content, encoding="utf-8")
 
     with pytest.raises(ArchiveError, match=match):
+        ArchiveReceipt.load(receipt_path)
+
+
+def test_archive_receipt_rejects_size_before_json_parsing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt_path = tmp_path / "receipt.json"
+    receipt_path.write_text('{"value": 1}', encoding="utf-8")
+    calls: list[str] = []
+    monkeypatch.setattr(receipts_module, "MAX_RECEIPT_BYTES", 4)
+    monkeypatch.setattr(
+        receipts_module.json,
+        "loads",
+        lambda content, **kwargs: calls.append(content),
+    )
+
+    with pytest.raises(ArchiveError, match="maximum size"):
+        ArchiveReceipt.load(receipt_path)
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("content", "boundary", "match"),
+    [
+        ('{"outer":{"inner":{}}}', "depth", "nesting depth"),
+        ('{"first":1,"second":2}', "collection", "collection"),
+    ],
+    ids=["depth", "collection"],
+)
+def test_archive_receipt_load_enforces_shape_limits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    content: str,
+    boundary: str,
+    match: str,
+) -> None:
+    receipt_path = tmp_path / "receipt.json"
+    receipt_path.write_text(content, encoding="utf-8")
+    if boundary == "depth":
+        monkeypatch.setattr(receipts_module, "MAX_RECEIPT_DEPTH", 1)
+    else:
+        monkeypatch.setattr(receipts_module, "MAX_RECEIPT_COLLECTION_ITEMS", 1)
+
+    with pytest.raises(ArchiveError, match=match):
+        ArchiveReceipt.load(receipt_path)
+
+
+def test_archive_receipt_load_wraps_decoder_recursion_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt_path = tmp_path / "receipt.json"
+    receipt_path.write_text("{}", encoding="utf-8")
+
+    def fail_decode(*args, **kwargs):
+        raise RecursionError("nested input")
+
+    monkeypatch.setattr(receipts_module.json, "loads", fail_decode)
+
+    with pytest.raises(ArchiveError, match="Invalid receipt"):
         ArchiveReceipt.load(receipt_path)
 
 
@@ -283,6 +415,106 @@ def test_archive_receipt_detects_invalid_extracted_lockfile(
         receipt.verify_extracted(target)
 
 
+def test_archive_receipt_inventory_uses_verified_lockfile_bytes(
+    receipt_workspace: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_path = tmp_path / "workspace.tar.gz"
+    create_archive(receipt_workspace, archive_path, ArchiveConfig())
+    receipt = build_receipt(receipt_workspace, archive_path)
+    target = tmp_path / "extracted"
+    extract_archive(archive_path, target)
+    lockfile_path = target / "conda.lock"
+    replacement = "version: 1\nenvironments:\n  attacker: {}\npackages: []\n"
+    original_verify = ArchiveReceipt.verify_subject_digest
+
+    def replace_lockfile_after_digest(
+        self: ArchiveReceipt,
+        name: str,
+        actual: str,
+    ) -> None:
+        original_verify(self, name, actual)
+        if name == "conda.lock":
+            lockfile_path.write_text(replacement, encoding="utf-8")
+
+    monkeypatch.setattr(
+        ArchiveReceipt,
+        "verify_subject_digest",
+        replace_lockfile_after_digest,
+    )
+
+    receipt.verify_extracted(target)
+
+    assert lockfile_path.read_text(encoding="utf-8") == replacement
+
+
+def test_archive_receipt_build_binds_one_lockfile_generation(
+    receipt_workspace: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_path = tmp_path / "workspace.tar.gz"
+    create_archive(receipt_workspace, archive_path, ArchiveConfig())
+    lockfile_path = receipt_workspace / "conda.lock"
+    captured = lockfile_path.read_bytes()
+    replacement = b"version: 1\nenvironments:\n  attacker: {}\npackages: []\n"
+    original_read = receipts_module.read_regular_file_bytes
+    lockfile_reads = 0
+
+    def replace_lockfile_after_capture(
+        path: Path,
+        *,
+        maximum_bytes: int,
+        label: str,
+        directory_descriptor: int | None = None,
+    ) -> bytes:
+        nonlocal lockfile_reads
+        content = original_read(
+            path,
+            maximum_bytes=maximum_bytes,
+            label=label,
+            directory_descriptor=directory_descriptor,
+        )
+        if path == lockfile_path:
+            lockfile_reads += 1
+            lockfile_path.write_bytes(replacement)
+        return content
+
+    monkeypatch.setattr(
+        receipts_module,
+        "read_regular_file_bytes",
+        replace_lockfile_after_capture,
+    )
+
+    receipt = build_receipt(receipt_workspace, archive_path)
+
+    assert lockfile_reads == 1
+    assert receipt.subject_digests["conda.lock"] == hashlib.sha256(captured).hexdigest()
+    assert set(receipt.inventory.environment_names()) == {"default"}
+    assert lockfile_path.read_bytes() == replacement
+
+
+def test_archive_receipt_subject_errors_redact_token_paths(
+    receipt_workspace: Path,
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "workspace.tar.gz"
+    create_archive(receipt_workspace, archive_path, ArchiveConfig())
+    statement = copied_statement(build_receipt(receipt_workspace, archive_path))
+    token_path = "t/SENSITIVE-RECEIPT-TOKEN/conda.lock"
+    statement["predicate"]["workspace"]["lockfile"] = token_path
+    statement["subject"][2]["name"] = token_path
+    target = tmp_path / "extracted"
+    extract_archive(archive_path, target)
+
+    with pytest.raises(ArchiveError) as exc_info:
+        ArchiveReceipt(statement).verify_extracted(target)
+
+    assert "SENSITIVE-RECEIPT-TOKEN" not in str(exc_info.value)
+    assert "<redacted-path>" in str(exc_info.value)
+
+
 @pytest.mark.parametrize(
     ("packages", "match"),
     [
@@ -346,6 +578,49 @@ def test_receipt_inventory_compare_rejects_duplicate_package_identity() -> None:
         ReceiptInventory([env]).compare(ReceiptInventory([env]))
 
 
+@pytest.mark.parametrize(
+    "mode",
+    ["missing", "unexpected", "mismatch", "sha256", "duplicate"],
+    ids=["missing", "unexpected", "mismatch", "sha256", "duplicate"],
+)
+def test_receipt_inventory_errors_redact_package_identity(mode: str) -> None:
+    identity = (
+        "https://user:password@packages.test/t/TOKENVALUE/private/pkg.conda"
+        "?key=query-secret#fragment-secret"
+    )
+    expected_packages: list[dict[str, object]] = [{"url": identity}]
+    actual_packages: list[dict[str, object]] = [{"url": identity}]
+    require_sha256 = False
+
+    if mode == "missing":
+        actual_packages = []
+    elif mode == "unexpected":
+        expected_packages = []
+    elif mode == "mismatch":
+        actual_packages[0]["name"] = "different"
+    elif mode == "sha256":
+        require_sha256 = True
+    else:
+        expected_packages.append({"url": identity})
+
+    expected = ReceiptInventory([{"name": "default", "packages": expected_packages}])
+    actual = ReceiptInventory([{"name": "default", "packages": actual_packages}])
+
+    with pytest.raises(ArchiveError) as exc_info:
+        expected.compare(actual, require_sha256=require_sha256)
+
+    message = str(exc_info.value)
+    assert "https://packages.test/private/pkg.conda" in message
+    for secret in (
+        "user",
+        "password",
+        "TOKENVALUE",
+        "query-secret",
+        "fragment-secret",
+    ):
+        assert secret not in message
+
+
 def test_receipt_package_record_identity_fallbacks() -> None:
     assert ReceiptPackageRecord({"fn": "pkg-1.0-h0.conda"}).identity == (
         "pkg-1.0-h0.conda"
@@ -361,3 +636,33 @@ def test_receipt_package_record_identity_fallbacks() -> None:
         ).identity
         == "pkg|1.0|h0|https://conda.anaconda.org/conda-forge/"
     )
+
+
+def test_receipt_package_record_redacts_encoded_channel_token() -> None:
+    package = ReceiptPackageRecord.from_record(
+        {
+            "url": "https://packages.example.test/t%252FSENSITIVE-VALUE/linux-64/pkg-1-0.conda",
+            "channel": "HTTPS://user:SENSITIVE-VALUE@packages.example.test/private",
+        }
+    )
+
+    assert package.data["url"] == (
+        "https://packages.example.test/linux-64/pkg-1-0.conda"
+    )
+    assert package.data["channel"] == "HTTPS://packages.example.test/private"
+
+
+def test_receipt_package_record_redacts_relative_tokens() -> None:
+    package = ReceiptPackageRecord.from_record(
+        {
+            "url": "t/INFO-LEAK/private/linux-64/pkg-1-0.conda",
+            "channel": "t/CHANNEL-LEAK/private",
+        },
+        platform="linux-64",
+    )
+
+    serialized = json.dumps(package.data)
+    assert "INFO-LEAK" not in serialized
+    assert "CHANNEL-LEAK" not in serialized
+    assert package.data["url"] == "<redacted-url-value>"
+    assert package.data["channel"] == "<redacted-url-value>"

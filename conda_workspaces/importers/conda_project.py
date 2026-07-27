@@ -34,8 +34,8 @@ class CondaProjectImporter(ManifestImporter):
         ws.add("name", cp.get("name", project_dir.name))
 
         env_specs = cp.get("environments", {})
-        base_deps: dict[str, str] = {}
-        base_pypi: dict[str, str] = {}
+        base_deps: dict[str, object] = {}
+        base_pypi: dict[str, object] = {}
         channels: list[str] = ["conda-forge"]
         platforms: list[str] = [conda_context.subdir]
 
@@ -51,7 +51,7 @@ class CondaProjectImporter(ManifestImporter):
                 if env_data.get("platforms"):
                     platforms = env_data["platforms"]
 
-        ws.add("channels", channels)
+        ws.add("channels", self.redact_channels(channels))
         ws.add("platforms", platforms)
         doc.add("workspace", ws)
 
@@ -60,13 +60,13 @@ class CondaProjectImporter(ManifestImporter):
         if base_pypi:
             doc.add("pypi-dependencies", tomlkit.item(base_pypi))
 
-        features: dict[str, dict[str, str]] = {}
+        features: dict[str, dict[str, object]] = {}
         environments: dict[str, Any] = {"default": []}
 
         for env_name, env_files in env_specs.items():
             if env_name == "default":
                 continue
-            env_deps: dict[str, str] = {}
+            env_deps: dict[str, object] = {}
             for env_file in env_files:
                 env_path = self.environment_file_path(path, env_file)
                 if env_path.exists():
@@ -122,8 +122,10 @@ class CondaProjectImporter(ManifestImporter):
                 manifest_path,
                 f"environment file '{env_file}' escapes the project directory.",
                 hints=[
-                    "Keep conda-project environment files inside the project"
-                    " directory and reference them with relative paths.",
+                    (
+                        "Keep conda-project environment files inside the project"
+                        " directory and reference them with relative paths."
+                    ),
                 ],
             ) from None
 
@@ -135,7 +137,9 @@ class CondaProjectImporter(ManifestImporter):
                 manifest_path,
                 f"environment file '{env_file}' escapes the project directory.",
                 hints=[
-                    "Keep conda-project environment files inside the project"
-                    " directory and avoid symlinks that point outside it.",
+                    (
+                        "Keep conda-project environment files inside the project"
+                        " directory and avoid symlinks that point outside it."
+                    ),
                 ],
             ) from exc

@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import pytest
 import tomlkit
+from conda.base.context import reset_context
 from conda.exceptions import InvalidMatchSpec
+from conda.models.channel import Channel
 from conda.utils import quote_for_shell
 from conda_lockfiles.load_yaml import load_yaml
 
+import conda_workspaces.publication as publication_mod
 from conda_workspaces.cli.workspace.add import execute_add
 from conda_workspaces.cli.workspace.dependencies import DependencyLocation
 from conda_workspaces.cli.workspace.remove import execute_remove
@@ -82,6 +86,54 @@ python = ">=3.10"
     path.write_text(content, encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     return path
+
+
+@pytest.mark.parametrize("command", ["add", "remove"])
+def test_dependency_mutation_rejects_existing_embedded_credentials(
+    pixi_toml: Path,
+    command: str,
+) -> None:
+    pixi_toml.write_text(
+        pixi_toml.read_text(encoding="utf-8").replace(
+            'channels = ["conda-forge"]',
+            'channels = ["https://user:secret@repo.example/conda"]',
+        ),
+        encoding="utf-8",
+    )
+    before = pixi_toml.read_bytes()
+    args = make_args(
+        _DEFAULTS,
+        specs=["numpy"] if command == "add" else ["python"],
+    )
+
+    with pytest.raises(CondaWorkspacesError, match="embedded URL credentials"):
+        (execute_add if command == "add" else execute_remove)(args)
+
+    assert pixi_toml.read_bytes() == before
+
+
+@pytest.mark.parametrize("command", ["add", "remove"])
+def test_dependency_mutation_redacts_malformed_manifest_credentials(
+    pixi_toml: Path,
+    command: str,
+) -> None:
+    pixi_toml.write_text(
+        pixi_toml.read_text(encoding="utf-8")
+        + '\nmalformed = "https://user:LEAKME@example.test/[\n',
+        encoding="utf-8",
+    )
+    before = pixi_toml.read_bytes()
+    args = make_args(
+        _DEFAULTS,
+        specs=["numpy"] if command == "add" else ["python"],
+    )
+
+    with pytest.raises(CondaWorkspacesError) as caught:
+        (execute_add if command == "add" else execute_remove)(args)
+
+    assert "LEAKME" not in str(caught.value)
+    assert "user" not in str(caught.value)
+    assert pixi_toml.read_bytes() == before
 
 
 @pytest.mark.parametrize(
@@ -165,6 +217,33 @@ def test_add_preserves_conda_matchspec_fields(
 
     doc = tomlkit.loads(pixi_toml.read_text(encoding="utf-8"))
     assert doc["dependencies"]["numpy"].unwrap() == expected
+
+
+def test_add_preserves_absolute_channel_url_across_alias_changes(
+    pixi_toml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channel_url = "https://conda.anaconda.org/private/label/dev"
+    try:
+        with monkeypatch.context() as environment:
+            environment.setenv("CONDA_CHANNEL_ALIAS", "https://conda.anaconda.org")
+            reset_context()
+
+            args = make_args(
+                _DEFAULTS,
+                manifest_file=pixi_toml,
+                specs=[f"{channel_url}::private-package"],
+            )
+            assert execute_add(args) == 0
+            document = tomlkit.loads(pixi_toml.read_text(encoding="utf-8"))
+            written = document["dependencies"]["private-package"]["channel"]
+            assert written == channel_url
+
+            environment.setenv("CONDA_CHANNEL_ALIAS", "https://mirror.example.test")
+            reset_context()
+            assert Channel(written).base_url == channel_url
+    finally:
+        reset_context()
 
 
 @pytest.mark.parametrize(
@@ -1409,6 +1488,7 @@ def stub_sync(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], dict]]:
         force_reinstall=False,
         dry_run=False,
         prune=False,
+        publish_lockfile=None,
         console,
     ) -> None:
         calls.append(
@@ -1422,6 +1502,8 @@ def stub_sync(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], dict]]:
                 },
             )
         )
+        if publish_lockfile is not None and not dry_run:
+            publish_lockfile("rendered-lock")
 
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.add.sync_environments", fake_sync
@@ -1657,6 +1739,184 @@ def test_dependency_dry_run_uses_prospective_config_without_writes(
     config, dry_run = synced[0]
     assert (dependency in config.features["default"].conda_dependencies) is present
     assert dry_run is True
+
+
+@pytest.mark.parametrize(
+    ("execute_fn", "module", "spec", "dependency", "present"),
+    [
+        (execute_add, "add", "numpy", "numpy", True),
+        (execute_remove, "remove", "python", "python", False),
+    ],
+    ids=["add", "remove"],
+)
+def test_dependency_mutation_holds_publication_guard_through_sync(
+    sync_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    execute_fn,
+    module: str,
+    spec: str,
+    dependency: str,
+    present: bool,
+) -> None:
+    events: list[str] = []
+    guard_held = False
+
+    @contextmanager
+    def record_guard(stream):
+        nonlocal guard_held
+        events.append("enter")
+        guard_held = True
+        try:
+            yield
+        finally:
+            guard_held = False
+            events.append("exit")
+
+    def record_sync(config, ctx, env_names, **kwargs) -> None:
+        assert guard_held
+        kwargs["publish_lockfile"]("rendered-lock")
+        document = tomlkit.loads(sync_workspace.read_text(encoding="utf-8"))
+        assert (dependency in document["dependencies"]) is present
+        events.append("sync")
+
+    monkeypatch.setattr(publication_mod, "lock", record_guard)
+    monkeypatch.setattr(
+        f"conda_workspaces.cli.workspace.{module}.sync_environments",
+        record_sync,
+    )
+
+    assert (
+        execute_fn(
+            make_args(
+                _DEFAULTS,
+                manifest_file=sync_workspace,
+                specs=[spec],
+                no_lockfile_update=False,
+            )
+        )
+        == 0
+    )
+
+    assert events == ["enter", "sync", "exit"]
+
+
+@pytest.mark.parametrize(
+    ("execute_fn", "module", "spec"),
+    [
+        (execute_add, "add", "numpy"),
+        (execute_remove, "remove", "python"),
+    ],
+    ids=["add", "remove"],
+)
+def test_dependency_mutation_keeps_manifest_when_sync_fails_before_publication(
+    sync_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    execute_fn,
+    module: str,
+    spec: str,
+) -> None:
+    before = sync_workspace.read_bytes()
+
+    def fail_sync(*args, **kwargs) -> None:
+        raise RuntimeError("lock solve failed")
+
+    monkeypatch.setattr(
+        f"conda_workspaces.cli.workspace.{module}.sync_environments",
+        fail_sync,
+    )
+
+    with pytest.raises(RuntimeError, match="lock solve failed"):
+        execute_fn(
+            make_args(
+                _DEFAULTS,
+                manifest_file=sync_workspace,
+                specs=[spec],
+                no_lockfile_update=False,
+            )
+        )
+
+    assert sync_workspace.read_bytes() == before
+    assert not sync_workspace.with_name("conda.lock").exists()
+
+
+@pytest.mark.parametrize(
+    ("execute_fn", "module", "spec"),
+    [
+        (execute_add, "add", "numpy"),
+        (execute_remove, "remove", "python"),
+    ],
+    ids=["add", "remove"],
+)
+def test_dependency_mutation_rejects_manifest_changed_before_publication(
+    sync_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    execute_fn,
+    module: str,
+    spec: str,
+) -> None:
+    concurrent_text = sync_workspace.read_text(encoding="utf-8") + "\n# concurrent\n"
+
+    def edit_manifest(*args, **kwargs) -> list[str]:
+        sync_workspace.write_text(concurrent_text, encoding="utf-8")
+        return []
+
+    monkeypatch.setattr(
+        f"conda_workspaces.cli.workspace.{module}.affected_environments",
+        edit_manifest,
+    )
+
+    with pytest.raises(CondaWorkspacesError, match="manifest changed"):
+        execute_fn(
+            make_args(
+                _DEFAULTS,
+                manifest_file=sync_workspace,
+                specs=[spec],
+            )
+        )
+
+    assert sync_workspace.read_text(encoding="utf-8") == concurrent_text
+    assert not sync_workspace.with_name("conda.lock").exists()
+
+
+@pytest.mark.parametrize(
+    ("execute_fn", "spec"),
+    [(execute_add, "numpy"), (execute_remove, "python")],
+    ids=["add", "remove"],
+)
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+@pytest.mark.parametrize("boundary", ["leaf", "parent"], ids=["leaf", "parent"])
+def test_dependency_mutation_rejects_symlinked_manifest(
+    sync_workspace: Path,
+    execute_fn,
+    spec: str,
+    dry_run: bool,
+    boundary: str,
+) -> None:
+    before = sync_workspace.read_bytes()
+    if boundary == "leaf":
+        linked_boundary = sync_workspace.with_name("linked.toml")
+        linked_boundary.symlink_to(sync_workspace)
+        linked_manifest = linked_boundary
+    else:
+        linked_boundary = sync_workspace.with_name("linked-parent")
+        linked_boundary.symlink_to(sync_workspace.parent, target_is_directory=True)
+        linked_manifest = linked_boundary / sync_workspace.name
+
+    with pytest.raises(
+        (CondaWorkspacesError, NotADirectoryError),
+        match="symlink|symbolic link",
+    ):
+        execute_fn(
+            make_args(
+                _DEFAULTS,
+                manifest_file=linked_manifest,
+                specs=[spec],
+                dry_run=dry_run,
+            )
+        )
+
+    assert sync_workspace.read_bytes() == before
+    assert linked_boundary.is_symlink()
 
 
 def test_remove_no_match_skips_sync(

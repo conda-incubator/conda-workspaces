@@ -47,12 +47,19 @@ python = ">=3.10"
 default = []
 """
 
+_RENDERED_LOCK = """\
+version: 1
+environments: {}
+packages: []
+"""
+
 
 def test_workspace_install_dry_run(
     conda_toml,
     conda_cli: CondaCLIFixture,
     monkeypatch: pytest.MonkeyPatch,
     snapshot_tree: SnapshotTree,
+    replace_lockfile_install_plan,
 ):
     """Workspace install with --dry-run parses manifest and emits status."""
     monkeypatch.delenv("CI", raising=False)
@@ -60,26 +67,17 @@ def test_workspace_install_dry_run(
 
     install_calls = []
 
-    def fake_install(
-        ctx,
-        resolved,
-        *,
-        force_reinstall=False,
-        dry_run=False,
-        prune=False,
-        update_names=None,
-    ):
-        install_calls.append(
-            {"env": resolved.name, "dry_run": dry_run, "force": force_reinstall}
-        )
+    def fake_install(phase, ctx, name, kwargs):  # type: ignore[no-untyped-def]
+        del ctx, kwargs
+        install_calls.append({"env": name, "dry_run": phase == "prepare"})
 
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sync.install_environment",
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.sync",
         fake_install,
     )
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sync.generate_lockfile",
-        lambda ctx, envs, **kwargs: None,
+        "conda_workspaces.cli.workspace.sync.render_lockfile",
+        lambda ctx, envs, **kwargs: _RENDERED_LOCK,
     )
 
     before = snapshot_tree(manifest.parent)
@@ -250,19 +248,20 @@ def test_rich_output_contains_status(
     monkeypatch: pytest.MonkeyPatch,
     scenario: str,
     expected_verbs: list[str],
+    replace_lockfile_install_plan,
 ):
     """Rich output contains verb-based status messages."""
     monkeypatch.delenv("CI", raising=False)
     if scenario == "install":
         conda_toml(WORKSPACE_TOML)
 
-        monkeypatch.setattr(
-            "conda_workspaces.cli.workspace.sync.install_environment",
-            lambda *args, **kwargs: None,
+        replace_lockfile_install_plan(
+            "conda_workspaces.cli.workspace.sync",
+            lambda *_args: None,
         )
         monkeypatch.setattr(
-            "conda_workspaces.cli.workspace.sync.generate_lockfile",
-            lambda ctx, envs, **kwargs: None,
+            "conda_workspaces.cli.workspace.sync.render_lockfile",
+            lambda ctx, envs, **kwargs: _RENDERED_LOCK,
         )
 
         stdout, _, _ = conda_cli("workspace", "install", "--dry-run")
@@ -309,6 +308,7 @@ def test_workspace_install_resolves_pypi_deps(
     conda_toml,
     conda_cli: CondaCLIFixture,
     monkeypatch: pytest.MonkeyPatch,
+    replace_lockfile_install_plan,
 ):
     """PyPI dependencies are translated via conda-pypi and reach the solver."""
     monkeypatch.delenv("CI", raising=False)
@@ -326,24 +326,18 @@ def test_workspace_install_resolves_pypi_deps(
 
     resolved_envs = []
 
-    def capture_install(
-        ctx,
-        resolved,
-        *,
-        force_reinstall=False,
-        dry_run=False,
-        prune=False,
-        update_names=None,
-    ):
-        resolved_envs.append(resolved)
+    def capture_render(ctx, environments, **kwargs):  # type: ignore[no-untyped-def]
+        del ctx, kwargs
+        resolved_envs.extend(environments.values())
+        return _RENDERED_LOCK
 
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sync.install_environment",
-        capture_install,
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.sync",
+        lambda *_args: None,
     )
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sync.generate_lockfile",
-        lambda ctx, envs, **kwargs: None,
+        "conda_workspaces.cli.workspace.sync.render_lockfile",
+        capture_render,
     )
 
     stdout, stderr, exit_code = conda_cli("workspace", "install", "--dry-run")
@@ -383,6 +377,7 @@ def test_workspace_install_resolves_editable_deps(
     conda_cli: CondaCLIFixture,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    replace_lockfile_install_plan,
 ):
     """Editable PyPI path deps are parsed and available in the resolved env."""
     monkeypatch.delenv("CI", raising=False)
@@ -400,24 +395,18 @@ def test_workspace_install_resolves_editable_deps(
 
     resolved_envs = []
 
-    def capture_install(
-        ctx,
-        resolved,
-        *,
-        force_reinstall=False,
-        dry_run=False,
-        prune=False,
-        update_names=None,
-    ):
-        resolved_envs.append(resolved)
+    def capture_render(ctx, environments, **kwargs):  # type: ignore[no-untyped-def]
+        del ctx, kwargs
+        resolved_envs.extend(environments.values())
+        return _RENDERED_LOCK
 
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sync.install_environment",
-        capture_install,
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.sync",
+        lambda *_args: None,
     )
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sync.generate_lockfile",
-        lambda ctx, envs, **kwargs: None,
+        "conda_workspaces.cli.workspace.sync.render_lockfile",
+        capture_render,
     )
 
     stdout, stderr, exit_code = conda_cli("workspace", "install", "--dry-run")

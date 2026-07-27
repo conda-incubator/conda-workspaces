@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ...manifests import detect_and_parse_tasks
+from .. import status
 
 if TYPE_CHECKING:
     import argparse
@@ -47,17 +48,20 @@ def execute_list(args: argparse.Namespace, *, console: Console | None = None) ->
         console.print(
             json.dumps({"tasks": data, "file": str(task_file)}, indent=2),
             highlight=False,
+            markup=False,
             soft_wrap=True,
         )
         return 0
 
     if not visible_tasks:
         console.print(
-            f"No tasks defined in {task_file}. Add tasks with 'conda task add'."
+            "No tasks defined in "
+            f"{status.escape_for_console(task_file)}. "
+            "Add tasks with 'conda task add'."
         )
         return 0
 
-    console.print(f"[dim]{task_file}[/dim]")
+    console.print(f"[dim]{status.escape_for_console(task_file)}[/dim]")
 
     has_cmds = any(t.cmd for t in visible_tasks.values())
     has_deps = any(t.depends_on for t in visible_tasks.values())
@@ -75,14 +79,17 @@ def execute_list(args: argparse.Namespace, *, console: Console | None = None) ->
             cmd_col = "(alias)"
         elif task.cmd is not None:
             cmd = task.cmd if isinstance(task.cmd, str) else " ".join(task.cmd)
-            cmd_col = task.description or cmd
+            cmd_col = status.escape_for_console(task.description or cmd)
 
         deps_col = ""
         if task.depends_on:
             dep_names = ", ".join(d.task for d in task.depends_on)
-            deps_col = f"← {dep_names}"
+            deps_col = f"← {status.escape_for_console(dep_names)}"
 
-        label = f"{name} [dim](user)[/dim]" if name in user_only_names else name
+        safe_name = status.escape_for_console(name)
+        label = (
+            f"{safe_name} [dim](user)[/dim]" if name in user_only_names else safe_name
+        )
         row: list[str] = [label]
         if has_cmds:
             row.append(cmd_col)

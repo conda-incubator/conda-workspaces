@@ -94,7 +94,7 @@ Workspace metadata.
 | `channels` | array of *channel* | **yes** | Conda channels in priority order. |
 | `platforms` | array of *platform* | **yes** | Platforms the workspace targets.  Used to drive multi-platform solves. |
 | `channel-priority` | string | no | One of `"strict"`, `"flexible"`, `"disabled"`.  Maps to conda's solver setting. |
-| `envs-dir` | string | no | Where per-env prefixes live, relative to the workspace root.  Default: `.conda/envs`. |
+| `envs-dir` | string | no | Where per-env prefixes live, relative to and contained by the workspace root. Symbolic-link directories are rejected. Default: `.conda/envs`. |
 | `dependencies` | conda deps | no | Root-level dependency pool used by `{ workspace = true }` entries in dependency tables. |
 | `archive` | table | no | Archive filters and compression settings. See `[workspace.archive]`. |
 
@@ -104,6 +104,14 @@ A *channel* is either:
   (`"https://my.channel/label/dev"`), or
 - an inline table `{ channel = "<name-or-url>" }`.  Other keys (e.g.
   `priority`) are reserved and currently ignored by this version.
+
+Channel URLs should not contain credentials, Anaconda `/t/<token>/` path
+segments, queries, or fragments. Generated manifests remove those values from
+inherited channels while preserving an absolute URL's origin and path. Configure
+channel authentication through Conda outside the workspace manifest. A relative
+`t/<token>/<channel>` value is serialized as a credential-free absolute channel
+URL. A scheme-relative `//host/path` value is normalized to an explicit HTTPS
+URL.
 
 A *platform* is either a conda subdir string from the closed enum
 defined in the [JSON schema][schema] under `$defs.platform` (e.g.
@@ -194,7 +202,7 @@ A detailed conda dependency accepts:
 | `channel` | string | Channel name or URL for this package. |
 | `subdir` | platform | Platform/subdir constraint. |
 | `md5` / `sha256` | string | Exact package hash. |
-| `url` | string | Exact package URL. |
+| `url` | string | Exact credential-free package URL. Mutation and import commands reject embedded authentication, Anaconda token paths, queries, and fragments. |
 | `file-name` | string | Exact package filename. |
 | `license` / `license-family` | string | License constraints. |
 | `features` / `track-features` | array of strings | Feature constraints. |
@@ -306,6 +314,10 @@ colorama = ">=0.4"
 When `[environments]` is omitted entirely, a single implicit
 environment named `default` is used, composed from the default feature
 only.
+
+Environment names must be one portable path segment. Windows device aliases,
+alternate data stream syntax, trailing dots or spaces, and path separators are
+rejected on every host so a workspace remains safe to move between platforms.
 
 Environment-local dependencies are merged after shared features. They
 therefore affect only that environment and override a same-named

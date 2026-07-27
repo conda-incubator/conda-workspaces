@@ -51,8 +51,10 @@ def test_plugin_metadata_is_module_level() -> None:
     [
         (
             "conda.toml",
-            '[workspace]\nname = "test"\nchannels = ["conda-forge"]\n'
-            'platforms = ["linux-64"]\n',
+            (
+                '[workspace]\nname = "test"\nchannels = ["conda-forge"]\n'
+                'platforms = ["linux-64"]\n'
+            ),
             True,
         ),
         ("pixi.toml", '[workspace]\nname = "x"\n', False),
@@ -90,6 +92,21 @@ def test_conda_workspace_spec_env_returns_environment(tmp_path: Path) -> None:
     assert len(env.requested_packages) == 1
     assert env.requested_packages[0].name == "python"
     assert "conda-forge" in env.config.channels
+
+
+def test_conda_workspace_spec_env_redacts_relative_channel_token(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "conda.toml"
+    path.write_text(
+        '[workspace]\nchannels = ["t/SENSITIVE-VALUE/private"]\n'
+        'platforms = ["linux-64"]\n',
+        encoding="utf-8",
+    )
+
+    env = CondaWorkspaceSpec(path).env
+
+    assert env.config.channels == ("https://conda.anaconda.org/private",)
 
 
 def test_conda_workspace_spec_env_pypi_deps_as_external(tmp_path: Path) -> None:

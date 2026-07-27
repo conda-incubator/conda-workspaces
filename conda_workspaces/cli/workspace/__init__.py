@@ -8,6 +8,7 @@ from conda.exceptions import CondaValueError
 
 from ...context import WorkspaceContext
 from ...manifests import detect_and_parse
+from ...paths import validate_path_parent
 
 if TYPE_CHECKING:
     import argparse
@@ -16,18 +17,29 @@ if TYPE_CHECKING:
     from ...models import WorkspaceConfig
 
 
-def workspace_manifest_path_from_args(args: argparse.Namespace) -> Path | None:
+def workspace_manifest_path_from_args(
+    args: argparse.Namespace,
+    *,
+    for_mutation: bool = False,
+) -> Path | None:
     """Return the exact manifest selected by the global ``--file`` option."""
     path = args.manifest_file
     if path is not None and not path.is_file():
         raise CondaValueError(
             f"--file must name an existing workspace manifest file: {path}"
         )
-    return path.resolve() if path is not None else None
+    if path is None:
+        return None
+    path = path.absolute()
+    if for_mutation:
+        validate_path_parent(path)
+    return path
 
 
 def workspace_context_from_args(
     args: argparse.Namespace,
+    *,
+    for_mutation: bool = False,
 ) -> tuple[WorkspaceConfig, WorkspaceContext]:
     """Parse the workspace manifest and build a context from CLI *args*.
 
@@ -35,7 +47,9 @@ def workspace_context_from_args(
     previews may parse a staged file while validating paths at
     ``validation_manifest_path``.
     """
-    _, config = detect_and_parse(workspace_manifest_path_from_args(args))
+    _, config = detect_and_parse(
+        workspace_manifest_path_from_args(args, for_mutation=for_mutation)
+    )
     validation_manifest_path = getattr(args, "validation_manifest_path", None)
     if validation_manifest_path is not None:
         config.root = str(validation_manifest_path.parent)
