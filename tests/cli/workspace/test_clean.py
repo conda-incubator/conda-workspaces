@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
     from tests.conftest import CreateWorkspaceEnv
 
-_DEFAULTS = {"file": None, "environment": None}
+_DEFAULTS = {"manifest_file": None, "environment": None}
 
 
 def _stub_confirm_and_unregister(monkeypatch: pytest.MonkeyPatch) -> None:

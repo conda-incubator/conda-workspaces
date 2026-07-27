@@ -151,6 +151,17 @@ def test_workspace_parser_args(
     assert getattr(parsed, expected_attr) == expected_value
 
 
+def test_workspace_parser_separates_manifest_and_export_paths() -> None:
+    parser = generate_workspace_parser()
+
+    parsed = parser.parse_args(
+        ["--file", "pixi.toml", "export", "--file", "../environment.yml"]
+    )
+
+    assert parsed.manifest_file == Path("pixi.toml")
+    assert parsed.output == Path("../environment.yml")
+
+
 @pytest.mark.parametrize(
     "subcmd, module_attr, func_name",
     [

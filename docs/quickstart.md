@@ -199,11 +199,15 @@ This creates project-local conda environments under `.conda/envs/` for
 each environment defined in your manifest. A `conda.lock` file is
 generated automatically after solving.
 
-You can point to a specific manifest with `--file` / `-f`:
+You can select an exact manifest with the global `--file` / `-f`
+option:
 
 ```bash
 conda workspace --file path/to/conda.toml install
 ```
+
+The path must name a manifest file. Omit the option to auto-detect a
+manifest by searching the current directory and its parents.
 
 To recreate environments from scratch, use `--force-reinstall`:
 

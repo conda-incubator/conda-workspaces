@@ -4,13 +4,26 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from conda.exceptions import CondaValueError
+
 from ...context import WorkspaceContext
 from ...manifests import detect_and_parse
 
 if TYPE_CHECKING:
     import argparse
+    from pathlib import Path
 
     from ...models import WorkspaceConfig
+
+
+def workspace_manifest_path_from_args(args: argparse.Namespace) -> Path | None:
+    """Return the exact manifest selected by the global ``--file`` option."""
+    path = args.manifest_file
+    if path is not None and not path.is_file():
+        raise CondaValueError(
+            f"--file must name an existing workspace manifest file: {path}"
+        )
+    return path.resolve() if path is not None else None
 
 
 def workspace_context_from_args(
@@ -20,6 +33,5 @@ def workspace_context_from_args(
 
     Uses ``--file`` / ``-f`` when provided, otherwise auto-detects.
     """
-    manifest_path = getattr(args, "file", None)
-    _, config = detect_and_parse(manifest_path)
+    _, config = detect_and_parse(workspace_manifest_path_from_args(args))
     return config, WorkspaceContext(config)

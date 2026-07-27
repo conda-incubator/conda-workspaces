@@ -13,7 +13,7 @@ from conda_workspaces.exceptions import EnvironmentNotFoundError, PlatformError
 from ..conftest import make_args
 
 _DEFAULTS = {
-    "file": None,
+    "manifest_file": None,
     "environment": None,
     "platform": None,
     "skip_unsolvable": False,

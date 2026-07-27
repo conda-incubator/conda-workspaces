@@ -21,13 +21,13 @@ from ..exceptions import (
     WorkspaceNotFoundError,
     WorkspaceParseError,
 )
+from .base import ManifestParser
 from .pixi_toml import PixiTomlParser
 from .pyproject_toml import PyprojectTomlParser
 from .toml import CondaTomlParser
 
 if TYPE_CHECKING:
     from ..models import Task, WorkspaceConfig
-    from .base import ManifestParser
 
 _PARSERS: list[ManifestParser] = [
     CondaTomlParser(),
@@ -110,13 +110,13 @@ def cached_parse(path_str: str) -> WorkspaceConfig:
 
 
 def detect_and_parse(
-    start_dir: str | Path | None = None,
+    source: str | Path | None = None,
 ) -> tuple[Path, WorkspaceConfig]:
-    """Detect the workspace manifest and parse it.
+    """Resolve *source* to a workspace manifest and parse it.
 
     Returns ``(manifest_path, workspace_config)``.
     """
-    path = detect_workspace_file(start_dir)
+    path = ManifestParser.resolve_source(Path(source or Path.cwd()))
     config = cached_parse(str(path))
     return path, config
 

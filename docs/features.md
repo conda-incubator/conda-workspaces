@@ -649,11 +649,15 @@ overlapping `(environment, platform)` pairs. On success the merged
 is mutually exclusive with `--environment`, `--platform`,
 `--skip-unsolvable`, and `--output`.
 
-You can also point to a specific manifest with `--file` / `-f`:
+You can also select an exact manifest with the global `--file` / `-f`
+option:
 
 ```bash
 conda workspace --file path/to/conda.toml install
 ```
+
+The path must name a manifest file. Omit the option to auto-detect a
+manifest by searching the current directory and its parents.
 
 ## Export
 
@@ -704,7 +708,14 @@ conda workspace export --from-lockfile --file environment.yml
 
 # Mirror ``conda export`` semantics on an installed prefix
 conda workspace export --from-prefix --no-builds --from-history
+
+# Select pixi.toml as the exact source and write somewhere else
+conda workspace --file path/to/pixi.toml export \
+    --file ../exports/environment.yml
 ```
+
+The global `--file` before `export` selects the source manifest. The
+subcommand's `--file` selects the export destination.
 
 Three sources feed the exporter:
 
@@ -751,9 +762,9 @@ survive untouched (any stale `[tool.conda]` is replaced).
 `conda.toml` and `pixi.toml` keep the default overwrite semantics
 of every other conda exporter.
 
-When `--file` is not passed, the format is inferred from the
-basename (`conda.toml` → `conda-toml`, `pixi.toml` → `pixi-toml`,
-`pyproject.toml` → `pyproject-toml`, `environment.yml` /
+When the export `--file` is passed without `--format`, the format is
+inferred from the output basename (`conda.toml` → `conda-toml`,
+`pixi.toml` → `pixi-toml`, `pyproject.toml` → `pyproject-toml`, `environment.yml` /
 `environment.yaml` → `environment-yaml`, `environment.json` →
 `environment-json`, `conda.lock` → `conda-workspaces-lock-v1`).
 See [Format aliases](reference/format-aliases.md) for the full

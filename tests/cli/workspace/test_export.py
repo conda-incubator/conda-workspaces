@@ -29,7 +29,8 @@ if TYPE_CHECKING:
 
 
 _DEFAULTS = {
-    "file": None,
+    "manifest_file": None,
+    "output": None,
     "environment": "default",
     "format": None,
     "export_platforms": None,
@@ -153,7 +154,7 @@ def test_export_declared_source_writes_yaml(
     output = pixi_workspace / "environment.yaml"
 
     result = execute_export(
-        make_args(_DEFAULTS, file=output, export_platforms=["linux-64"]),
+        make_args(_DEFAULTS, output=output, export_platforms=["linux-64"]),
         console=export_console,
     )
 
@@ -177,7 +178,7 @@ def test_export_declared_source_writes_json(
     result = execute_export(
         make_args(
             _DEFAULTS,
-            file=output,
+            output=output,
             format="environment-json",
             export_platforms=["linux-64"],
         ),
@@ -187,6 +188,40 @@ def test_export_declared_source_writes_json(
     assert result == 0
     data = json_module.loads(output.read_text(encoding="utf-8"))
     assert "dependencies" in data
+
+
+def test_export_uses_exact_manifest_and_separate_output(
+    tmp_path: Path,
+    export_console: Console,
+) -> None:
+    manifest = (
+        '[workspace]\nname = "{name}"\nchannels = ["conda-forge"]\n'
+        'platforms = ["linux-64"]\n\n[dependencies]\n{name} = "*"\n'
+    )
+    (tmp_path / "conda.toml").write_text(
+        manifest.format(name="conda-only"),
+        encoding="utf-8",
+    )
+    pixi = tmp_path / "pixi.toml"
+    pixi.write_text(
+        manifest.format(name="pixi-only"),
+        encoding="utf-8",
+    )
+    output = tmp_path / "exports" / "environment.yml"
+
+    execute_export(
+        make_args(
+            _DEFAULTS,
+            manifest_file=pixi,
+            output=output,
+            export_platforms=["linux-64"],
+        ),
+        console=export_console,
+    )
+
+    data = yaml_loads(output.read_text(encoding="utf-8"))
+    assert "pixi-only" in data["dependencies"]
+    assert "conda-only" not in data["dependencies"]
 
 
 def test_export_filename_detection_picks_exporter(
@@ -199,7 +234,7 @@ def test_export_filename_detection_picks_exporter(
     output = pixi_workspace / "environment.json"
 
     execute_export(
-        make_args(_DEFAULTS, file=output, export_platforms=["linux-64"]),
+        make_args(_DEFAULTS, output=output, export_platforms=["linux-64"]),
         console=export_console,
     )
 
@@ -218,7 +253,7 @@ def test_export_dry_run_writes_nothing(
     result = execute_export(
         make_args(
             _DEFAULTS,
-            file=output,
+            output=output,
             dry_run=True,
             export_platforms=["linux-64"],
         ),
@@ -242,7 +277,7 @@ def test_export_json_flag_emits_structured_result(
     execute_export(
         make_args(
             _DEFAULTS,
-            file=output,
+            output=output,
             json=True,
             export_platforms=["linux-64"],
         ),
@@ -286,7 +321,7 @@ def test_export_workspace_lock_multiplatform(
     result = execute_export(
         make_args(
             _DEFAULTS,
-            file=output,
+            output=output,
             format="conda-workspaces-lock-v1",
             export_platforms=["linux-64", "osx-arm64"],
         ),
@@ -321,7 +356,7 @@ platforms = [
     result = execute_export(
         make_args(
             _DEFAULTS,
-            file=output,
+            output=output,
             format="conda-workspaces-lock-v1",
             export_platforms=["linux-64-cuda"],
         ),
@@ -429,7 +464,7 @@ def test_export_manifest_format_plugin_hook(
     result = execute_export(
         make_args(
             _DEFAULTS,
-            file=output,
+            output=output,
             format=format_name,
             export_platforms=["linux-64", "osx-arm64"],
         ),
@@ -482,7 +517,7 @@ line-length = 120
     result = execute_export(
         make_args(
             _DEFAULTS,
-            file=pyproject,
+            output=pyproject,
             format="pyproject-toml",
             export_platforms=["linux-64"],
         ),

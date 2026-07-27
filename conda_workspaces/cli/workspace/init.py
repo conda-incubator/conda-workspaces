@@ -10,6 +10,7 @@ from rich.console import Console
 
 from ...manifests.base import ManifestParser
 from .. import status
+from . import workspace_manifest_path_from_args
 
 if TYPE_CHECKING:
     import argparse
@@ -33,7 +34,8 @@ def execute_init(args: argparse.Namespace, *, console: Console | None = None) ->
     name = args.name or Path.cwd().name
     channels = args.channels or ["conda-forge"]
     platforms = args.platforms or [conda_context.subdir]
-    base_dir = Path(args.file).parent if args.file else Path.cwd()
+    manifest_path = workspace_manifest_path_from_args(args)
+    base_dir = manifest_path.parent if manifest_path else Path.cwd()
 
     parser = ManifestParser.for_format_alias(args.manifest_format)
     path, verb = parser.write_workspace_stub(base_dir, name, channels, platforms)

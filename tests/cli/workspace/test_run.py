@@ -21,7 +21,7 @@ def test_run_no_command_raises(pixi_workspace, monkeypatch, tmp_workspace_env):
     tmp_workspace_env(pixi_workspace, "default")
 
     args = argparse.Namespace(
-        file=None,
+        manifest_file=None,
         environment="default",
         cmd=[],
     )
@@ -44,7 +44,7 @@ def test_run_env_error_raises(pixi_workspace, monkeypatch, env_name, expected_ex
     monkeypatch.chdir(pixi_workspace)
 
     args = argparse.Namespace(
-        file=None,
+        manifest_file=None,
         environment=env_name,
         cmd=["echo", "hi"],
     )
@@ -71,7 +71,7 @@ def test_run_strips_double_dash(pixi_workspace, monkeypatch, tmp_workspace_env):
     )
 
     args = argparse.Namespace(
-        file=None,
+        manifest_file=None,
         environment="default",
         cmd=["--", "echo", "hello"],
     )
@@ -96,7 +96,7 @@ def test_run_returns_nonzero_on_failure(pixi_workspace, monkeypatch, tmp_workspa
     )
 
     args = argparse.Namespace(
-        file=None,
+        manifest_file=None,
         environment="default",
         cmd=["false"],
     )

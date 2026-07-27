@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
     from tests.conftest import CreateWorkspaceEnv
 
-_DEFAULTS = {"file": None, "environment": "default"}
+_DEFAULTS = {"manifest_file": None, "environment": "default"}
 
 
 def test_activate_prints_command(

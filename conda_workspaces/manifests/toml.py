@@ -58,6 +58,8 @@ class CondaTomlParser(ManifestParser):
         # Import inline to avoid circular dependency (pixi_toml imports toml).
         from .pixi_toml import PixiTomlParser
 
+        if not self.has_workspace(path):
+            raise WorkspaceParseError(path, "No [workspace] table found")
         pixi_parser = PixiTomlParser()
         try:
             config = pixi_parser.parse(path)

@@ -89,6 +89,14 @@ python = ">=3.10"
     assert "python" in default.conda_dependencies
 
 
+def test_parse_rejects_project_table(tmp_path):
+    path = tmp_path / "conda.toml"
+    path.write_text('[project]\nname = "pixi-only"\n', encoding="utf-8")
+
+    with pytest.raises(WorkspaceParseError, match=r"No \[workspace\] table found"):
+        CondaTomlParser().parse(path)
+
+
 @pytest.mark.parametrize(
     "table, feature_name, platform, expected_build",
     [

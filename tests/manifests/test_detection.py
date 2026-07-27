@@ -115,6 +115,24 @@ def test_detect_and_parse(sample_pixi_toml):
     assert config.name == "test-project"
 
 
+def test_detect_and_parse_exact_file_ignores_search_priority(tmp_path):
+    manifest = (
+        '[workspace]\nname = "{name}"\nchannels = ["conda-forge"]\n'
+        'platforms = ["linux-64"]\n'
+    )
+    (tmp_path / "conda.toml").write_text(
+        manifest.format(name="conda"),
+        encoding="utf-8",
+    )
+    pixi = tmp_path / "pixi.toml"
+    pixi.write_text(manifest.format(name="pixi"), encoding="utf-8")
+
+    path, config = detect_and_parse(pixi)
+
+    assert path == pixi.resolve()
+    assert config.name == "pixi"
+
+
 def test_detect_and_parse_not_found(tmp_path):
     with pytest.raises(WorkspaceNotFoundError):
         detect_and_parse(tmp_path)

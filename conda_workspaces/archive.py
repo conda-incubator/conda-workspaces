@@ -28,6 +28,7 @@ from .exceptions import (
     ArchiveHashMismatchError,
     ArchivePathTraversalError,
 )
+from .manifests import find_parser
 from .paths import has_absolute_path_syntax, is_path_segment, parse_relative_posix_path
 
 if TYPE_CHECKING:
@@ -518,6 +519,7 @@ class WorkspaceArchive:
             elif str(install_prefix) != final_prefix:
                 runtime_prefix = final_prefix
 
+        self.resolve_extracted_manifest(extract_result.target)
         handler = install_handler or self.install_from_lockfile
         return_code = handler(
             extract_result.target,
@@ -555,6 +557,33 @@ class WorkspaceArchive:
         )
 
     @staticmethod
+    def resolve_extracted_manifest(workspace: Path) -> Path:
+        """Return the sole valid workspace manifest at an extracted archive root."""
+        candidates = []
+        for filename in MANIFEST_FILENAMES:
+            path = workspace / filename
+            if path.is_file() and find_parser(path).has_workspace(path):
+                candidates.append(path)
+
+        if not candidates:
+            raise ArchiveError(
+                "Cannot install from archive: no valid workspace manifest"
+                " was found at the archive root."
+            )
+        if len(candidates) > 1:
+            raise ArchiveError(
+                "Cannot install from archive: multiple workspace manifests"
+                " were found at the archive root.",
+                hints=[
+                    (
+                        "Keep only the selected manifest in the archive before using"
+                        " --install."
+                    ),
+                ],
+            )
+        return candidates[0]
+
+    @staticmethod
     def install_from_lockfile(
         workspace: Path,
         environment: str | None,
@@ -566,7 +595,9 @@ class WorkspaceArchive:
         from .lockfile import install_from_lockfile
         from .manifests import detect_and_parse
 
-        _, config = detect_and_parse(workspace)
+        _, config = detect_and_parse(
+            WorkspaceArchive.resolve_extracted_manifest(workspace)
+        )
         ctx = WorkspaceContext(config)
         if environment is not None:
             install_from_lockfile(

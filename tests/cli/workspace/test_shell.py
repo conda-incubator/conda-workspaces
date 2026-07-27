@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
     from tests.conftest import CreateWorkspaceEnv
 
-_DEFAULTS = {"file": None, "environment": "default", "cmd": []}
+_DEFAULTS = {"manifest_file": None, "environment": "default", "cmd": []}
 
 
 @pytest.mark.parametrize(
