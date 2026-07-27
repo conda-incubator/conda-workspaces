@@ -10,6 +10,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import importlib
+import json
 import os
 import posixpath
 import shutil
@@ -25,7 +26,12 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, cast
 from urllib.parse import urlsplit
 
+from conda import CondaError
 from conda.base.context import context as conda_context
+from conda.common.path import strip_pkg_extension
+from conda.core.package_cache_data import PackageCacheData
+from conda.models.match_spec import MatchSpec
+from conda.models.records import PackageRecord
 from conda_lockfiles.load_yaml import load_yaml
 
 from .exceptions import (
@@ -48,6 +54,7 @@ from .models import (
 from .paths import (
     anchored_directory,
     atomic_binary_writer,
+    atomic_write_text,
     has_absolute_path_syntax,
     is_path_segment,
     output_paths_collide,
@@ -114,6 +121,9 @@ MAX_ARCHIVE_EXPANDED_BYTES: Final = 100 * 1024**3
 
 MAX_ARCHIVE_RAW_BYTES: Final = 100 * 1024**3
 """Maximum byte size accepted for one compressed or uncompressed archive."""
+
+MAX_PACKAGE_CACHE_RECORD_BYTES: Final = 16 * 1024**2
+"""Maximum byte size accepted from one conda package cache record."""
 
 FileGeneration = tuple[int, int, int, int, int, int]
 """Stable identity and mutation-sensitive metadata for one regular file."""
@@ -1061,6 +1071,136 @@ class WorkspaceArchive:
         receipt.verify_archive(self.require_existing_archive())
         return receipt
 
+    @staticmethod
+    def package_cache_record(
+        package: Path,
+        receipt_record: dict[str, object],
+    ) -> str:
+        """Render the conda cache record for one verified bundled package."""
+        filename = receipt_record.get("fn")
+        url = receipt_record.get("url")
+        sha256 = receipt_record.get("sha256")
+        if (
+            filename != package.name
+            or not isinstance(url, str)
+            or not isinstance(sha256, str)
+        ):
+            raise ArchiveError(f"Receipt lacks cache metadata for '{package.name}'.")
+        md5 = receipt_record.get("md5")
+        checksums = {"sha256": sha256}
+        if isinstance(md5, str):
+            checksums["md5"] = md5
+        try:
+            spec = MatchSpec(url, **checksums)
+            name = spec.get_exact_value("name")
+            version = spec.get_exact_value("version")
+            build = spec.get_exact_value("build")
+            subdir = spec.get_exact_value("subdir")
+            if not all(
+                isinstance(value, str) and value
+                for value in (name, version, build, subdir)
+            ):
+                raise ValueError("package URL does not identify an exact package")
+            channel = receipt_record.get("channel")
+            if not isinstance(channel, str) or not channel:
+                raise ValueError("package receipt does not identify a channel")
+            build_number = receipt_record.get("build_number", 0)
+            if isinstance(build_number, bool) or not isinstance(
+                build_number,
+                (int, str),
+            ):
+                raise ValueError("package receipt has an invalid build number")
+            record = PackageRecord.from_objects(
+                {
+                    "name": name,
+                    "version": version,
+                    "build": build,
+                    "build_number": int(build_number),
+                    "channel": channel,
+                    "subdir": subdir,
+                    "fn": filename,
+                    "url": url,
+                    "sha256": sha256,
+                    "size": package.lstat().st_size,
+                    "depends": (),
+                    "constrains": (),
+                    **({"md5": md5} if isinstance(md5, str) else {}),
+                }
+            )
+        except (CondaError, OSError, TypeError, ValueError) as exc:
+            raise ArchiveError(
+                f"Receipt cache metadata is invalid for '{package.name}'."
+            ) from exc
+        return json.dumps(record.dump(), indent=2, sort_keys=True) + "\n"
+
+    @staticmethod
+    def package_cache_record_matches(
+        package: Path,
+        receipt_record: dict[str, object],
+        extracted: Path,
+    ) -> bool:
+        """Return whether an existing extracted cache entry matches the receipt."""
+        info_path = extracted / "info"
+        record_path = extracted / "info" / "repodata_record.json"
+        if (
+            extracted.is_symlink()
+            or not extracted.is_dir()
+            or info_path.is_symlink()
+            or not info_path.is_dir()
+            or record_path.is_symlink()
+            or not record_path.is_file()
+        ):
+            return False
+        try:
+            with anchored_directory(info_path) as info_descriptor:
+                content = read_regular_file_bytes(
+                    record_path,
+                    maximum_bytes=MAX_PACKAGE_CACHE_RECORD_BYTES,
+                    label="Package cache record",
+                    directory_descriptor=info_descriptor,
+                )
+            record = json.loads(content)
+        except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+            return False
+        return bool(
+            isinstance(record, dict)
+            and record.get("fn") == package.name
+            and record.get("url") == receipt_record.get("url")
+            and record.get("sha256") == receipt_record.get("sha256")
+            and record.get("size") == package.lstat().st_size
+        )
+
+    @classmethod
+    def publish_package_cache_record(
+        cls,
+        package: Path,
+        receipt_record: dict[str, object],
+        cache_path: Path,
+    ) -> None:
+        """Publish one fetched package record without replacing extracted content."""
+        extracted_name, _ = strip_pkg_extension(package.name)
+        extracted = cache_path / extracted_name
+        if extracted.exists() or extracted.is_symlink():
+            if cls.package_cache_record_matches(package, receipt_record, extracted):
+                return
+            raise ArchiveError(
+                f"Package cache entry conflicts with '{package.name}'.",
+                hints=[
+                    f"Remove the cache entry at {extracted} and retry.",
+                ],
+            )
+        record_path = extracted / "info" / "repodata_record.json"
+        try:
+            atomic_write_text(
+                record_path,
+                cls.package_cache_record(package, receipt_record),
+                expected_generation=None,
+            )
+        except (OSError, ValueError) as exc:
+            raise ArchiveError(
+                f"Package cache record cannot be published safely: {record_path}"
+            ) from exc
+
     def extract(
         self,
         *,
@@ -1088,6 +1228,7 @@ class WorkspaceArchive:
         package_cache: str | Path | None,
         dry_run: bool,
         validate_workspace: Callable[[Path, ArchiveReceipt | None], None] | None = None,
+        validate_install: Callable[[], None] | None = None,
     ) -> WorkspaceArchiveExtractResult:
         """Stage, validate, and optionally promote an archive workspace."""
         requested_target = (
@@ -1155,6 +1296,9 @@ class WorkspaceArchive:
                 info["has_packages"] and prime_cache and receipt is None
             )
             cache_plan: list[tuple[str, Path, str]] = []
+            cache_packages: list[tuple[Path, dict[str, object]]] = []
+            cache_records: list[tuple[Path, Path, dict[str, object]]] = []
+            cache_path = None
             if info["has_packages"] and prime_cache and receipt is not None:
                 if package_cache is None:
                     cache_path = Path(conda_context.pkgs_dirs[0])
@@ -1173,7 +1317,7 @@ class WorkspaceArchive:
                     for path in (staged / "packages").glob(f"*{suffix}")
                 )
                 verify_package_hashes(packages, staged / "conda.lock")
-                receipt_hashes: dict[str, str] = {}
+                receipt_records: dict[str, dict[str, object]] = {}
                 for environment in receipt.inventory.data:
                     records = environment.get("packages")
                     if not isinstance(records, list):
@@ -1184,26 +1328,44 @@ class WorkspaceArchive:
                         record = cast("dict[str, object]", item)
                         filename = record.get("fn")
                         digest = record.get("sha256")
-                        if not isinstance(filename, str) or not isinstance(digest, str):
+                        url = record.get("url")
+                        if (
+                            not isinstance(filename, str)
+                            or not isinstance(digest, str)
+                            or not isinstance(url, str)
+                        ):
                             continue
-                        previous = receipt_hashes.setdefault(filename, digest)
-                        if previous != digest:
+                        previous = receipt_records.setdefault(filename, record)
+                        if previous != record:
                             raise ArchiveError(
-                                "Receipt contains conflicting package hashes for"
+                                "Receipt contains conflicting package records for"
                                 f" '{filename}'."
                             )
+                cache_entry_names: dict[str, str] = {}
                 for package in packages:
+                    extracted_name, _ = strip_pkg_extension(package.name)
+                    previous_name = cache_entry_names.setdefault(
+                        extracted_name,
+                        package.name,
+                    )
+                    if previous_name != package.name:
+                        raise ArchiveError(
+                            "Bundled packages share the same extracted cache entry:"
+                            f" '{previous_name}' and '{package.name}'."
+                        )
                     destination = cache_path / package.name
                     if destination.is_symlink():
                         raise ArchiveError(
                             "Package cache destinations cannot be symbolic links."
                         )
                     validate_file_output(destination)
-                    expected = receipt_hashes.get(package.name)
-                    if expected is None:
+                    receipt_record = receipt_records.get(package.name)
+                    if receipt_record is None:
                         raise ArchiveError(
-                            f"Receipt lacks a SHA256 digest for '{package.name}'."
+                            f"Receipt lacks cache metadata for '{package.name}'."
                         )
+                    cache_packages.append((package, receipt_record))
+                    expected = cast("str", receipt_record["sha256"])
                     if destination.exists():
                         actual = file_sha256(destination)
                         if actual != expected:
@@ -1212,14 +1374,59 @@ class WorkspaceArchive:
                                 expected=expected,
                                 actual=actual,
                             )
-                        continue
-                    cache_plan.append((package.name, destination, expected))
+                    else:
+                        cache_plan.append((package.name, destination, expected))
+                    extracted = cache_path / extracted_name
+                    if extracted.exists() or extracted.is_symlink():
+                        if not self.package_cache_record_matches(
+                            package,
+                            receipt_record,
+                            extracted,
+                        ):
+                            raise ArchiveError(
+                                f"Package cache entry conflicts with '{package.name}'.",
+                                hints=[
+                                    f"Remove the cache entry at {extracted} and retry.",
+                                ],
+                            )
+                    else:
+                        cache_records.append((package, destination, receipt_record))
 
             if validate_workspace is not None:
                 validate_workspace(staged, receipt)
 
-            primed_packages = len(cache_plan)
+            primed_packages = len(
+                {name for name, _, _ in cache_plan}
+                | {package.name for package, _, _ in cache_records}
+            )
             if dry_run:
+                if validate_install is not None:
+                    if cache_packages:
+                        preview_cache = Path(temporary) / "package-cache"
+                        preview_cache.mkdir()
+                        (preview_cache / "urls.txt").write_text("", encoding="utf-8")
+                        for package, receipt_record in cache_packages:
+                            preview_package = preview_cache / package.name
+                            try:
+                                os.link(package, preview_package)
+                            except OSError:
+                                shutil.copy2(package, preview_package)
+                            self.publish_package_cache_record(
+                                preview_package,
+                                receipt_record,
+                                preview_cache,
+                            )
+                        PackageCacheData.clear()
+                        try:
+                            with conda_context._override(
+                                "_pkgs_dirs",
+                                (str(preview_cache),),
+                            ):
+                                validate_install()
+                        finally:
+                            PackageCacheData.clear()
+                    else:
+                        validate_install()
                 extracted = target_path
             else:
                 for name, destination, expected in cache_plan:
@@ -1256,6 +1463,73 @@ class WorkspaceArchive:
                             "Package cache destination cannot be published safely:"
                             f" {destination}"
                         ) from exc
+
+                cache_generations: dict[Path, FileGeneration] = {}
+                if cache_path is not None:
+                    for package, receipt_record in cache_packages:
+                        destination = cache_path / package.name
+                        expected = cast("str", receipt_record["sha256"])
+                        actual, generation = file_sha256_with_generation(destination)
+                        if actual != expected:
+                            raise ArchiveHashMismatchError(
+                                package.name,
+                                expected=expected,
+                                actual=actual,
+                            )
+                        cache_generations[destination] = generation
+
+                    try:
+                        marker = cache_path / "urls.txt"
+                        try:
+                            if regular_file_generation(marker) is None:
+                                atomic_write_text(
+                                    marker,
+                                    "",
+                                    expected_generation=None,
+                                )
+                        except (OSError, ValueError) as exc:
+                            raise ArchiveError(
+                                "Package cache cannot be initialized safely:"
+                                f" {cache_path}"
+                            ) from exc
+                        for _, destination, receipt_record in cache_records:
+                            self.publish_package_cache_record(
+                                destination,
+                                receipt_record,
+                                cache_path,
+                            )
+                    finally:
+                        PackageCacheData.clear()
+
+                if validate_install is not None:
+                    if cache_path is None:
+                        validate_install()
+                    else:
+                        try:
+                            with conda_context._override(
+                                "_pkgs_dirs",
+                                (str(cache_path),),
+                            ):
+                                validate_install()
+                        finally:
+                            PackageCacheData.clear()
+
+                if cache_path is not None:
+                    for package, receipt_record in cache_packages:
+                        destination = cache_path / package.name
+                        expected = cast("str", receipt_record["sha256"])
+                        actual, generation = file_sha256_with_generation(destination)
+                        if actual != expected:
+                            raise ArchiveHashMismatchError(
+                                package.name,
+                                expected=expected,
+                                actual=actual,
+                            )
+                        if generation != cache_generations[destination]:
+                            raise ArchiveError(
+                                "Package cache archive changed during validation:"
+                                f" {destination}"
+                            )
 
                 staged_generation = staged.lstat()
                 with (
@@ -1415,12 +1689,16 @@ class WorkspaceArchive:
         if install_prefix is not None:
             validate_directory_output(install_prefix)
 
+        prepared_install: tuple[WorkspaceContext, list[str]] | None = None
+
         def validate_workspace(
             workspace: Path,
             receipt: ArchiveReceipt | None,
         ) -> None:
+            nonlocal prepared_install
+
             from .context import WorkspaceContext
-            from .lockfile import install_from_lockfile, lockfile_status
+            from .lockfile import lockfile_status
             from .manifests import detect_and_parse
 
             manifest_path = self.resolve_extracted_manifest(workspace)
@@ -1462,6 +1740,15 @@ class WorkspaceArchive:
             )
             for name in names:
                 config.get_environment(name)
+            prepared_install = ctx, names
+
+        def validate_install() -> None:
+            from .lockfile import install_from_lockfile
+
+            if prepared_install is None:
+                raise RuntimeError("Archive install was not validated")
+            ctx, names = prepared_install
+            for name in names:
                 install_from_lockfile(
                     ctx,
                     name,
@@ -1479,18 +1766,32 @@ class WorkspaceArchive:
             package_cache=package_cache,
             dry_run=dry_run,
             validate_workspace=validate_workspace,
+            validate_install=validate_install,
         )
 
         if dry_run:
             return_code = 0
         else:
             handler = install_handler or self.install_from_lockfile
-            return_code = handler(
-                extract_result.target,
-                environment,
-                install_prefix,
-                runtime_prefix,
+            cache_override = (
+                conda_context._override(
+                    "_pkgs_dirs",
+                    (str(Path(package_cache)),),
+                )
+                if package_cache is not None
+                else nullcontext()
             )
+            PackageCacheData.clear()
+            try:
+                with cache_override:
+                    return_code = handler(
+                        extract_result.target,
+                        environment,
+                        install_prefix,
+                        runtime_prefix,
+                    )
+            finally:
+                PackageCacheData.clear()
 
         prefix_matches: tuple[Path, ...] = ()
         prefix_matches_truncated = False

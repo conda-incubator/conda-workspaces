@@ -714,8 +714,8 @@ def test_execute_unarchive_rejects_existing_target(
 
 @pytest.mark.parametrize(
     ("already_cached", "expected_count"),
-    [(False, 1), (True, 0)],
-    ids=["uncached", "cached"],
+    [(False, 1), (True, 1)],
+    ids=["uncached", "archive-only"],
 )
 def test_execute_unarchive_dry_run_reports_prospective_cache_count(
     bundled_cli_archive: Path,

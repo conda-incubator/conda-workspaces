@@ -56,6 +56,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Receipt-verified bundles now publish the URL, SHA-256, size, and filename
+  metadata that conda needs to recognize bundled packages. Both
+  `unarchive --install` and a later `install --locked` now work from an empty
+  package cache with conda in offline mode. Earlier releases primed only the
+  package archive files. Re-run receipt-verified `unarchive` to add the
+  missing cache records. If conda created a conflicting extracted cache entry
+  during a failed offline install, remove that entry and retry.
 - `conda workspace quickstart -e <name> <specs>` now creates the named
   environment when needed, records the specs as private dependencies,
   installs only that prefix, and reports the same environment in JSON.
