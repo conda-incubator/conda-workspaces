@@ -421,7 +421,6 @@ def test_force_dry_run_validates_rendered_lock_without_removal(
     monkeypatch: pytest.MonkeyPatch,
     replace_lockfile_install_plan,
 ) -> None:
-    remove_calls: list[str] = []
     install_calls: list[dict[str, object]] = []
     lock_calls: list[tuple[dict, dict[str, object]]] = []
 
@@ -432,10 +431,6 @@ def test_force_dry_run_validates_rendered_lock_without_removal(
     replace_lockfile_install_plan(
         "conda_workspaces.cli.workspace.sync",
         fake_install,
-    )
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sync.remove_environment",
-        lambda ctx, name, **kwargs: remove_calls.append(name),
     )
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.sync.render_lockfile",
@@ -454,7 +449,6 @@ def test_force_dry_run_validates_rendered_lock_without_removal(
         console=captured_console,
     )
 
-    assert remove_calls == []
     assert install_calls == [
         {
             "lockfile_data": {
@@ -475,6 +469,55 @@ def test_force_dry_run_validates_rendered_lock_without_removal(
     assert set(solve_prefixes) == {"test"}
     assert solve_prefixes["test"].name == "test"
     assert not solve_prefixes["test"].exists()
+
+
+@pytest.mark.parametrize(
+    "prefix_identity",
+    [(7, 11), None],
+    ids=["existing-prefix", "absent-prefix"],
+)
+def test_force_reinstall_only_removes_preflight_prefix(
+    captured_console: Console,
+    fake_ctx,
+    monkeypatch: pytest.MonkeyPatch,
+    prefix_identity: tuple[int, int] | None,
+    replace_lockfile_install_plan,
+) -> None:
+    events: list[tuple[str, object]] = []
+
+    def record_install(phase, ctx, name, kwargs) -> None:
+        if phase == "prepare":
+            events.append(("prepare", kwargs["replace_existing"]))
+        elif phase == "remove":
+            events.append(("remove", kwargs["expected_prefix_identity"]))
+        else:
+            events.append(("execute", None))
+
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.sync",
+        record_install,
+        preflight_prefix_identity=prefix_identity,
+    )
+    monkeypatch.setattr(
+        sync_module,
+        "render_lockfile",
+        lambda *args, **kwargs: _RENDERED_LOCK,
+    )
+
+    sync_environments(
+        _config(default={}),
+        fake_ctx,
+        ["default"],
+        force_reinstall=True,
+        publish_lockfile=lambda content: events.append(("publish", content)),
+        console=captured_console,
+    )
+
+    expected = [("prepare", True), ("publish", _RENDERED_LOCK)]
+    if prefix_identity is not None:
+        expected.append(("remove", prefix_identity))
+    expected.append(("execute", None))
+    assert events == expected
 
 
 def test_sync_selective_update_threads_host_and_lock_targets(

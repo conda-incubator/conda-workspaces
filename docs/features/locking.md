@@ -126,6 +126,11 @@ Use `--no-lock` to force a full solve even when the lockfile is
 satisfiable, for example to pick up channel updates without editing
 the manifest.
 
+`--force-reinstall` controls prefix replacement independently of lockfile
+selection. It recreates prefixes when using a satisfiable lockfile,
+`--locked`, `--frozen`, or CI strict mode. Combine it with `--no-lock` when
+both a fresh solve and prefix recreation are required.
+
 ## Lock freshness indicator
 
 `conda workspace info` shows the lockfile status:

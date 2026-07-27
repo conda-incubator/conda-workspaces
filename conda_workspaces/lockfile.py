@@ -1822,6 +1822,27 @@ class LockfileInstallPlan:
         if self.validate_workspace is not None:
             self.validate_workspace()
 
+    def remove_preflight_prefix(self, ctx: WorkspaceContext) -> None:
+        """Remove the managed prefix generation inspected during preflight."""
+        identity = self.preflight_prefix_identity
+        if identity is None:
+            return
+
+        self.validate_workspace_generation()
+        managed_prefix = canonicalize_system_path_alias(ctx.env_prefix(self.env_name))
+        if self.prefix != managed_prefix:
+            raise CondaWorkspacesError(
+                "Cannot replace an explicit prefix through a workspace install."
+            )
+
+        from .envs import remove_environment
+
+        remove_environment(
+            ctx,
+            self.env_name,
+            expected_prefix_identity=identity,
+        )
+
     @staticmethod
     def prefix_identity(path: Path) -> tuple[int, int] | None:
         """Return one regular directory generation without following links."""
@@ -1984,7 +2005,7 @@ class LockfileInstallPlan:
                     if record.name not in locked_names
                     and record.name not in unlocked_requested_names
                 )
-                if prune and (extras or stale_requests):
+                if prune and not replace_existing and (extras or stale_requests):
                     prune_setup = PrefixSetup(
                         str(install_prefix),
                         extras,
@@ -2208,12 +2229,18 @@ def install_from_lockfile(
     solving and installation cannot diverge. *update_names* suppresses
     rebuilding unrelated local path dependencies during selective updates.
     When *prune* is false, packages and requested specs absent from the lock
-    are preserved. *replace_existing* prepares for a caller that removes the
-    old prefix before executing the plan.
+    are preserved. *replace_existing* removes the exact managed prefix
+    generation inspected during preparation before recreating it. A dry run
+    only prepares that replacement. It cannot be combined with *prefix*.
 
     Raises ``LockfileNotFoundError`` if the lockfile is missing or does
     not contain the requested environment/platform.
     """
+    if replace_existing and prefix is not None:
+        raise CondaWorkspacesError(
+            "Prefix replacement cannot be combined with an explicit prefix."
+        )
+
     plan = LockfileInstallPlan.prepare(
         ctx,
         env_name,
@@ -2227,5 +2254,7 @@ def install_from_lockfile(
     )
 
     if not dry_run:
+        if replace_existing:
+            plan.remove_preflight_prefix(ctx)
         plan.execute()
     return plan

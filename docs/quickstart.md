@@ -236,11 +236,16 @@ conda workspace --file path/to/conda.toml install
 The path must name a manifest file. Omit the option to auto-detect a
 manifest by searching the current directory and its parents.
 
-To recreate environments from scratch, use `--force-reinstall`:
+To recreate environments from scratch, use `--force-reinstall`. This also
+recreates prefixes when installation uses `--locked`, `--frozen`, or CI strict
+mode:
 
 ```bash
 conda workspace install --force-reinstall
 ```
+
+The flag does not force a new solve. Combine it with `--no-lock` when both a
+fresh solve and prefix recreation are required.
 
 To preview a workspace change without writing it, pass `--dry-run`:
 

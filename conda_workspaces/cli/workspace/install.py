@@ -66,7 +66,7 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
     use_lockfile = frozen
     if not frozen:
         strict = locked or (ctx.is_ci and not no_lock)
-        if strict or (not no_lock and not force):
+        if strict or not no_lock:
             lock = lockfile_status(ctx, config)
             if strict:
                 if lock.status == LockfileStatus.MISSING:
@@ -100,6 +100,7 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
                 prefix=prefix,
                 target_prefix_override=target_prefix_override,
                 dry_run=dry_run,
+                force_reinstall=force,
                 validate_current=not frozen,
                 validate_workspace=validate_workspace,
                 read_lockfile=read_lockfile,
@@ -130,6 +131,7 @@ def install_from_lockfile_all(
     prefix: Path | None = None,
     target_prefix_override: str | Path | None = None,
     dry_run: bool = False,
+    force_reinstall: bool = False,
     validate_current: bool = False,
     validate_workspace: Callable[[], None] | None = None,
     read_lockfile: Callable[[], bytes] | None = None,
@@ -139,6 +141,10 @@ def install_from_lockfile_all(
         raise CondaWorkspacesError(
             "Explicit prefix installation requires an environment name.",
             hints=["Pass -e/--environment with --prefix."],
+        )
+    if force_reinstall and prefix is not None:
+        raise CondaWorkspacesError(
+            "Force reinstall cannot be combined with an explicit prefix."
         )
 
     env_names = [env_name] if env_name else list(config.environments)
@@ -177,6 +183,7 @@ def install_from_lockfile_all(
                     prefix=prefix,
                     target_prefix_override=target_prefix_override,
                     lockfile_data=lockfile_data,
+                    replace_existing=force_reinstall,
                     validate_workspace=validate_workspace,
                 )
             )
@@ -192,6 +199,8 @@ def install_from_lockfile_all(
                 ellipsis=True,
             )
             if not dry_run:
+                if force_reinstall:
+                    plan.remove_preflight_prefix(ctx)
                 plan.execute()
             status.message(
                 console,

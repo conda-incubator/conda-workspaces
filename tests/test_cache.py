@@ -148,25 +148,37 @@ def test_save_and_check(tmp_path, cmd):
 
 
 @pytest.mark.parametrize(
-    ("save_cmd", "save_env", "check_cmd", "check_env", "mutate"),
+    (
+        "save_cmd",
+        "save_env",
+        "save_prefix",
+        "check_cmd",
+        "check_env",
+        "check_prefix",
+        "mutate",
+    ),
     [
-        ("make", {}, "make", {}, "input"),
-        ("make", {}, "make all", {}, None),
+        ("make", {}, None, "make", {}, None, "input"),
+        ("make", {}, None, "make all", {}, None, None),
         (
             ["python", "-m", "pytest"],
             {},
+            None,
             ["python", "-m", "pytest", "tests/unit"],
             {},
             None,
+            None,
         ),
-        ("make", {"CC": "gcc"}, "make", {"CC": "clang"}, None),
-        ("make", {}, "make", {}, "delete_output"),
+        ("make", {"CC": "gcc"}, None, "make", {"CC": "clang"}, None, None),
+        ("make", {}, "env-a", "make", {}, "env-b", None),
+        ("make", {}, None, "make", {}, None, "delete_output"),
     ],
     ids=[
         "input-change",
         "cmd-change",
         "argv-cmd-change",
         "env-change",
+        "prefix-change",
         "missing-output",
     ],
 )
@@ -174,8 +186,10 @@ def test_cache_invalidation(
     tmp_path,
     save_cmd,
     save_env,
+    save_prefix,
     check_cmd,
     check_env,
+    check_prefix,
     mutate,
 ):
     src = tmp_path / "main.py"
@@ -195,6 +209,7 @@ def test_cache_invalidation(
         ["main.py"],
         outputs,
         tmp_path,
+        conda_prefix=tmp_path / save_prefix if save_prefix is not None else None,
     )
 
     if mutate == "input":
@@ -210,4 +225,5 @@ def test_cache_invalidation(
         ["main.py"],
         outputs,
         tmp_path,
+        conda_prefix=tmp_path / check_prefix if check_prefix is not None else None,
     )

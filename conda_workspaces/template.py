@@ -29,6 +29,7 @@ def render(
     manifest_path: Path | None = None,
     task_args: dict[str, str] | None = None,
     extra_context: dict[str, object] | None = None,
+    target_prefix: Path | None = None,
 ) -> str:
     """Render a Jinja2 template string with the conda-workspaces template context.
 
@@ -39,7 +40,11 @@ def render(
         return template_str
 
     env = _get_jinja_env()
-    ctx = build_template_context(manifest_path=manifest_path, task_args=task_args)
+    ctx = build_template_context(
+        manifest_path=manifest_path,
+        task_args=task_args,
+        target_prefix=target_prefix,
+    )
     if extra_context:
         ctx.update(extra_context)
     tpl = env.from_string(template_str)
@@ -50,6 +55,7 @@ def render_command(
     template_str: str,
     manifest_path: Path | None = None,
     task_args: dict[str, str] | None = None,
+    target_prefix: Path | None = None,
 ) -> str:
     """Render a shell command template with task arguments shell-quoted.
 
@@ -62,13 +68,27 @@ def render_command(
         if task_args
         else None
     )
-    return render(template_str, manifest_path=manifest_path, task_args=quoted_args)
+    return render(
+        template_str,
+        manifest_path=manifest_path,
+        task_args=quoted_args,
+        target_prefix=target_prefix,
+    )
 
 
 def render_list(
     items: list[str],
     manifest_path: Path | None = None,
     task_args: dict[str, str] | None = None,
+    target_prefix: Path | None = None,
 ) -> list[str]:
     """Render each string in *items* through the template engine."""
-    return [render(s, manifest_path=manifest_path, task_args=task_args) for s in items]
+    return [
+        render(
+            item,
+            manifest_path=manifest_path,
+            task_args=task_args,
+            target_prefix=target_prefix,
+        )
+        for item in items
+    ]
