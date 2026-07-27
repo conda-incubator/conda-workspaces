@@ -63,81 +63,49 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
     )
     read_lockfile = publication.read_lockfile_bytes if publication is not None else None
 
-    if frozen:
-        publication_guard = (
-            publication.guard() if publication is not None else nullcontext()
-        )
-        with publication_guard:
-            return install_from_lockfile_all(
-                ctx,
-                config,
-                env_name,
-                console=console,
-                prefix=prefix,
-                target_prefix_override=target_prefix_override,
-                dry_run=dry_run,
-                validate_workspace=validate_workspace,
-                read_lockfile=read_lockfile,
-            )
-
-    strict = locked or (ctx.is_ci and not no_lock)
-    if strict:
-        lock = lockfile_status(ctx, config)
-        if lock.status == LockfileStatus.MISSING:
-            raise LockfileNotFoundError("(all)", lockfile_path(ctx))
-        if lock.status == LockfileStatus.OUT_OF_DATE:
-            raise LockfileStaleError(
-                Path(config.manifest_path),
-                lockfile_path(ctx),
-                reason=lock.reason,
-            )
-        publication_guard = (
-            publication.guard() if publication is not None else nullcontext()
-        )
-        with publication_guard:
-            return install_from_lockfile_all(
-                ctx,
-                config,
-                env_name,
-                console=console,
-                prefix=prefix,
-                target_prefix_override=target_prefix_override,
-                dry_run=dry_run,
-                validate_current=True,
-                validate_workspace=validate_workspace,
-                read_lockfile=read_lockfile,
-            )
-
-    if not no_lock and not force:
-        lock = lockfile_status(ctx, config)
-        if lock.status == LockfileStatus.UP_TO_DATE:
-            publication_guard = (
-                publication.guard() if publication is not None else nullcontext()
-            )
-            with publication_guard:
-                return install_from_lockfile_all(
-                    ctx,
-                    config,
-                    env_name,
-                    console=console,
-                    prefix=prefix,
-                    target_prefix_override=target_prefix_override,
-                    dry_run=dry_run,
-                    validate_current=True,
-                    validate_workspace=validate_workspace,
-                    read_lockfile=read_lockfile,
+    use_lockfile = frozen
+    if not frozen:
+        strict = locked or (ctx.is_ci and not no_lock)
+        if strict or (not no_lock and not force):
+            lock = lockfile_status(ctx, config)
+            if strict:
+                if lock.status == LockfileStatus.MISSING:
+                    raise LockfileNotFoundError("(all)", lockfile_path(ctx))
+                if lock.status == LockfileStatus.OUT_OF_DATE:
+                    raise LockfileStaleError(
+                        Path(config.manifest_path),
+                        lockfile_path(ctx),
+                        reason=lock.reason,
+                    )
+                use_lockfile = True
+            elif lock.status == LockfileStatus.UP_TO_DATE:
+                use_lockfile = True
+            elif lock.status == LockfileStatus.OUT_OF_DATE:
+                console.print(
+                    f"[bold yellow]Lockfile out of date[/bold yellow]:"
+                    f" {status.escape_for_console(lock.reason)}."
+                    " Re-solving environments."
                 )
-        if lock.status == LockfileStatus.OUT_OF_DATE:
-            console.print(
-                f"[bold yellow]Lockfile out of date[/bold yellow]:"
-                f" {status.escape_for_console(lock.reason)}. Re-solving environments."
-            )
 
-    env_names = [env_name] if env_name else list(config.environments.keys())
     publication_guard = (
         publication.guard() if publication is not None else nullcontext()
     )
     with publication_guard:
+        if use_lockfile:
+            return install_from_lockfile_all(
+                ctx,
+                config,
+                env_name,
+                console=console,
+                prefix=prefix,
+                target_prefix_override=target_prefix_override,
+                dry_run=dry_run,
+                validate_current=not frozen,
+                validate_workspace=validate_workspace,
+                read_lockfile=read_lockfile,
+            )
+
+        env_names = [env_name] if env_name else list(config.environments.keys())
         sync_environments(
             config,
             ctx,
