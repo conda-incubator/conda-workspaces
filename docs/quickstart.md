@@ -367,6 +367,28 @@ Remove a dependency:
 conda workspace remove numpy
 ```
 
+Update one or more declared conda roots without replacing their
+manifest constraints:
+
+```bash
+conda workspace update numpy scipy
+```
+
+Like `add` and `remove`, `update` addresses one exact declaration
+location. Use `--feature`, `--environment`, and `--platform` for named
+feature, private environment, and target-specific declarations:
+
+```bash
+conda workspace update --feature test pytest
+conda workspace update --environment test coverage
+conda workspace update --platform win-64 pywin32 --no-install
+```
+
+Bare names preserve existing constraints. Explicit MatchSpecs replace
+the selected declaration. `update` manages conda dependencies only and
+skips uninstalled environments. Use `--no-install` for a lock-only
+update, including a target that does not match the host.
+
 Removal clears direct prefix requests that are absent from the resolved
 manifest before installing the remaining dependency closure. A removed
 package stays installed only when another dependency requires it.

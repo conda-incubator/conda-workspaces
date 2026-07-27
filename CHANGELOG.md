@@ -8,6 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Added `conda workspace update SPECS...` to update selected conda
+  roots while preserving existing constraints and unrelated lockfile
+  slices. Use `--no-install` for lock-only updates. Workflows that used
+  `conda workspace add PACKAGE` or replaced a declaration with
+  `PACKAGE=*` only to permit a newer version should use
+  `conda workspace update PACKAGE` instead. (#128)
 - `conda workspace info --json` now includes an
   `environment_details` snapshot with every environment's feature
   composition, prefix state, channels, per-platform resolved

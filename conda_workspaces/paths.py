@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import stat
+import tempfile
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING
 
@@ -104,6 +107,37 @@ def validate_file_output(path: Path) -> None:
         return
     if path.exists() and not path.is_file():
         raise IsADirectoryError(f"Output path is not a file: {path}")
+
+
+def atomic_write_text(path: Path, content: str, *, encoding: str = "utf-8") -> None:
+    """Replace a text file atomically while preserving valid symlink targets."""
+    validate_file_output(path)
+    target = path.resolve(strict=False) if path.is_symlink() else path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_name = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding=encoding,
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temp_name = stream.name
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else 0o644
+        os.chmod(temp_name, mode)
+        os.replace(temp_name, target)
+        temp_name = None
+    finally:
+        if temp_name is not None:
+            try:
+                os.unlink(temp_name)
+            except FileNotFoundError:
+                pass
 
 
 def validate_directory_output(path: Path) -> None:

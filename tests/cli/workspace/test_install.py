@@ -63,6 +63,7 @@ def test_install_envs(
         force_reinstall=False,
         dry_run=False,
         prune=False,
+        update_names=None,
     ):
         calls.append(resolved.name)
 
@@ -113,6 +114,7 @@ def test_install_flags_forwarded(
         force_reinstall=False,
         dry_run=False,
         prune=False,
+        update_names=None,
     ):
         recorded.append((force_reinstall, dry_run))
 

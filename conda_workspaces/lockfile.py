@@ -44,13 +44,14 @@ from __future__ import annotations
 
 import io
 import sys
+import tempfile
 from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from conda.models.dist import Dist
-from conda.models.version import VersionSpec
 from conda.plugins.types import EnvironmentSpecBase
 
 from .context import isolated_package_cache
@@ -60,11 +61,13 @@ from .exceptions import (
     LockfileIntegrityError,
     LockfileMergeError,
     LockfileNotFoundError,
+    LockfileStaleError,
     PlatformError,
     SolveError,
 )
 from .models import LockfileStatus
 from .paths import (
+    atomic_write_text,
     output_paths_collide,
     validate_directory_output,
     validate_file_output,
@@ -76,6 +79,7 @@ if TYPE_CHECKING:
 
     from conda.common.path import PathType
     from conda.models.environment import Environment, EnvironmentConfig
+    from conda.models.match_spec import MatchSpec
     from conda.models.records import PackageRecord
 
     from .context import WorkspaceContext
@@ -256,23 +260,24 @@ def check_lockfile_satisfiability(
             continue
         package_platform = config.platform_subdir(current_lock_platform)
 
-        records_by_url = CondaLockLoader.package_records_by_url_from_data(lockfile_data)
         try:
             channel_urls = CondaLockLoader.channel_urls_for_env_data(
                 lock_env,
                 package_platform,
             )
+            records = CondaLockLoader.package_records_for_env_data(
+                lockfile_data,
+                env_name,
+                current_lock_platform,
+                package_platform=package_platform,
+            )
         except ValueError as exc:
             return LockfileStatus(status=_stale, reason=str(exc))
 
-        locked_versions: dict[str, list[str]] = {}
-        for ref in platform_refs:
-            if not isinstance(ref, dict):
-                continue
-            url = ref.get("conda", "")
-            if not url:
-                continue
-            if not isinstance(url, str):
+        records_by_name = {}
+        for record in records:
+            url = record.url
+            if not isinstance(url, str) or not url:
                 return LockfileStatus(
                     status=_stale,
                     reason=(
@@ -289,30 +294,65 @@ def check_lockfile_satisfiability(
                         "channel"
                     ),
                 )
-            record = records_by_url.get(url)
-            if record is None:
+            if record.name in records_by_name:
                 return LockfileStatus(
                     status=_stale,
                     reason=(
-                        f"Package URL '{url}' in environment '{env_name}' "
-                        "has no top-level package record"
+                        f"Environment '{env_name}' contains more than one "
+                        f"'{record.name}' package on '{current_lock_platform}'"
                     ),
                 )
-            try:
-                CondaLockLoader.digest_fragment_for_record(record, url)
-            except ValueError as exc:
-                return LockfileStatus(status=_stale, reason=str(exc))
-            dist = Dist(url)
-            locked_versions.setdefault(dist.name, []).append(dist.version)
+            records_by_name[record.name] = record
 
-        manifest_deps = config.merged_conda_dependencies(
-            env_obj,
+        from conda.base.context import context as conda_context
+        from conda.models.match_spec import MatchSpec
+
+        from .envs import _apply_system_requirements, _build_pypi_specs
+
+        target_resolved = resolve_environment(
+            config,
+            env_name,
             current_lock_platform,
         )
+        requested_specs = [
+            *target_resolved.conda_dependencies.values(),
+            *_build_pypi_specs(target_resolved),
+        ]
+        _apply_system_requirements(target_resolved, requested_specs)
+        dependencies = [
+            (record, MatchSpec(dependency))
+            for record in records
+            for dependency in record.depends
+        ]
+        constraints = [
+            (record, MatchSpec(constraint))
+            for record in records
+            for constraint in record.constrains
+        ]
+        virtual_names = {
+            spec.name
+            for spec in (
+                *requested_specs,
+                *(spec for _, spec in dependencies),
+                *(spec for _, spec in constraints),
+            )
+            if spec.name and spec.name.startswith("__")
+        }
+        candidates = list(records)
+        if virtual_names:
+            with (
+                target_resolved.scoped_virtual_packages(package_platform),
+                conda_context._override("_subdir", package_platform),
+            ):
+                candidates.extend(
+                    conda_context.plugin_manager.get_virtual_package_records()
+                )
+        candidates_by_name = {record.name: record for record in candidates}
 
-        for dep_name, spec in manifest_deps.items():
-            versions = locked_versions.get(dep_name)
-            if not versions:
+        for spec in requested_specs:
+            dep_name = spec.name
+            record = candidates_by_name.get(dep_name)
+            if record is None:
                 return LockfileStatus(
                     status=_stale,
                     reason=(
@@ -322,14 +362,38 @@ def check_lockfile_satisfiability(
                         f"'{current_lock_platform}'"
                     ),
                 )
-            if not any(VersionSpec(spec.version).match(v) for v in versions):
+            if not spec.match(record):
                 return LockfileStatus(
                     status=_stale,
                     reason=(
                         f"Dependency '{dep_name}' in environment "
-                        f"'{env_name}' requires '{spec}' but no "
-                        f"locked package on '{current_lock_platform}' "
-                        f"satisfies it"
+                        f"'{env_name}' requires '{spec}' but locked package "
+                        f"'{record.dist_str()}' on '{current_lock_platform}' "
+                        "does not satisfy it"
+                    ),
+                )
+
+        for record, spec in dependencies:
+            if not any(spec.match(candidate) for candidate in candidates):
+                return LockfileStatus(
+                    status=_stale,
+                    reason=(
+                        f"Package '{record.dist_str()}' in environment "
+                        f"'{env_name}' requires '{spec}', which is missing "
+                        f"on '{current_lock_platform}'"
+                    ),
+                )
+
+        for record, spec in constraints:
+            candidate = candidates_by_name.get(spec.name)
+            if candidate is not None and not spec.match(candidate):
+                return LockfileStatus(
+                    status=_stale,
+                    reason=(
+                        f"Package '{record.dist_str()}' in environment "
+                        f"'{env_name}' constrains '{spec}', but "
+                        f"'{candidate.dist_str()}' does not satisfy it on "
+                        f"'{current_lock_platform}'"
                     ),
                 )
 
@@ -501,6 +565,138 @@ class CondaLockLoader(EnvironmentSpecBase):
             if isinstance(url, str) and url:
                 records_by_url.setdefault(url, record)
         return records_by_url
+
+    @classmethod
+    def package_records_for_env_data(
+        cls,
+        data: dict[str, Any],
+        name: str,
+        platform: str,
+        *,
+        package_platform: str | None = None,
+    ) -> list[PackageRecord]:
+        """Reconstruct package records for one lockfile environment slice.
+
+        This path uses the metadata already embedded in ``conda.lock``. It
+        deliberately avoids :meth:`env_for`, whose generic rattler-lock
+        conversion may fetch package archives to fill missing metadata.
+        """
+        from conda.models.records import PackageRecord
+
+        environments = data.get("environments", {})
+        env_data = environments.get(name)
+        if not isinstance(env_data, dict):
+            raise ValueError(f"Environment {name!r} is missing from the lockfile")
+        refs = env_data.get("packages", {}).get(platform)
+        if refs is None:
+            raise ValueError(
+                f"Environment {name!r} does not include platform {platform!r}"
+            )
+
+        records_by_url = cls.package_records_by_url_from_data(data)
+        records: list[PackageRecord] = []
+        for ref in refs:
+            if not isinstance(ref, dict) or "conda" not in ref:
+                continue
+            url = ref["conda"]
+            if not isinstance(url, str) or not url:
+                raise ValueError(
+                    f"Environment {name!r} has an invalid package reference"
+                )
+            metadata = records_by_url.get(url)
+            if metadata is None:
+                raise ValueError(f"Package URL {url!r} has no top-level record")
+            cls.digest_fragment_for_record(metadata, url)
+            dist = Dist(url)
+            records.append(
+                PackageRecord.from_objects(
+                    metadata,
+                    name=dist.name,
+                    version=dist.version,
+                    build=dist.build_string,
+                    build_number=dist.build_number,
+                    channel=dist.channel,
+                    subdir=dist.subdir or package_platform or platform,
+                    fn=dist.to_filename(),
+                    url=url,
+                )
+            )
+        return records
+
+    @classmethod
+    def seed_prefix_from_data(
+        cls,
+        data: dict[str, Any],
+        name: str,
+        platform: str,
+        prefix: Path,
+        requested_specs: Iterable[MatchSpec],
+        *,
+        package_platform: str | None = None,
+    ) -> list[PackageRecord]:
+        """Create a metadata-only prefix from one canonical lockfile slice."""
+        from conda.core.prefix_data import PrefixData
+        from conda.history import History
+        from conda.models.records import PrefixRecord
+
+        records = cls.package_records_for_env_data(
+            data,
+            name,
+            platform,
+            package_platform=package_platform,
+        )
+        (prefix / "conda-meta").mkdir(parents=True)
+        prefix_data = PrefixData(str(prefix))
+        for record in records:
+            prefix_data.insert(PrefixRecord.from_objects(record))
+        history = History(str(prefix))
+        history.write_changes(set(), {record.dist_str() for record in records})
+        history.write_specs(update_specs=tuple(requested_specs))
+        return records
+
+    @classmethod
+    def replace_solutions(
+        cls,
+        baseline: dict[str, Any],
+        envs: Iterable[_SolvedEnvironment],
+    ) -> dict[str, Any]:
+        """Replace solved environment slices and canonicalize package records."""
+        result = deepcopy(baseline)
+        updates = cls.compose(envs)
+        for name, update in updates["environments"].items():
+            if name not in result.get("environments", {}):
+                raise ValueError(f"Environment {name!r} is missing from the lockfile")
+            result_env = result["environments"][name]
+            result_env["channels"] = update["channels"]
+            for platform, refs in update["packages"].items():
+                if platform not in result_env.get("packages", {}):
+                    raise ValueError(
+                        f"Environment {name!r} does not include platform {platform!r}"
+                    )
+                result_env["packages"][platform] = refs
+
+        packages_by_url = {
+            record.get("conda") or record.get("url") or record.get("pypi"): record
+            for record in (
+                *(baseline.get("packages") or []),
+                *(updates.get("packages") or []),
+            )
+            if record.get("conda") or record.get("url") or record.get("pypi")
+        }
+        packages: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
+        for environment in result.get("environments", {}).values():
+            for platform in sorted(environment.get("packages", {})):
+                for ref in environment["packages"][platform]:
+                    url = ref.get("conda") or ref.get("url") or ref.get("pypi")
+                    if not url or url in seen_urls:
+                        continue
+                    record = packages_by_url.get(url)
+                    if record is not None:
+                        packages.append(record)
+                        seen_urls.add(url)
+        result["packages"] = packages
+        return result
 
     def channel_urls_for(
         self,
@@ -699,6 +895,8 @@ def render_lockfile(
     skip_unsolvable: bool = False,
     on_skip: Callable[[str, str, SolveError], None] | None = None,
     solve_prefixes: Mapping[str, str | Path] | None = None,
+    baseline_data: dict[str, Any] | None = None,
+    update_targets: Mapping[tuple[str, str], set[str]] | None = None,
     dry_run: bool = False,
 ) -> str:
     """Solve workspace environments and serialize ``conda.lock`` content.
@@ -727,6 +925,7 @@ def render_lockfile(
     Returns the serialized lockfile without writing it. When *dry_run* is
     true, solver package-cache writes use disposable storage.
     """
+    from conda.common.serialize.yaml import dumps as yaml_dumps
     from conda.models.environment import EnvironmentConfig
 
     from .export import multiplatform_export
@@ -736,10 +935,19 @@ def render_lockfile(
     envs: list[_SolvedEnvironment] = []
     failures: list[SolveError] = []
 
+    if update_targets is not None and baseline_data is None:
+        raise ValueError("Selective lock updates require baseline lockfile data")
+    baseline = {} if baseline_data is None else baseline_data
+
+    solved_targets: set[tuple[str, str]] = set()
     with isolated_package_cache(dry_run):
         for name, resolved in resolved_envs.items():
             declared = sorted(set(resolved.platforms or [host_platform]))
-            if platforms is None:
+            if update_targets is not None:
+                targets = [
+                    target for target in declared if update_targets.get((name, target))
+                ]
+            elif platforms is None:
                 targets = declared
             else:
                 targets = []
@@ -763,17 +971,61 @@ def render_lockfile(
                 package_platform = target_resolved.platform_subdir(target)
                 channels = tuple(str(ch) for ch in target_resolved.channels)
                 try:
-                    solve_prefix = (
-                        solve_prefixes.get(name, ctx.env_prefix(target_resolved.name))
-                        if solve_prefixes is not None
-                        else ctx.env_prefix(target_resolved.name)
-                    )
-                    records = target_resolved.solve_for_platform(
-                        package_platform,
-                        prefix=solve_prefix,
-                    )
+                    if update_targets is not None:
+                        solved_targets.add((name, target))
+                        update_names = update_targets[(name, target)]
+                        requested_specs = list(
+                            target_resolved.conda_dependencies.values()
+                        )
+                        from .envs import _build_pypi_specs
+
+                        requested_specs.extend(_build_pypi_specs(target_resolved))
+                        with tempfile.TemporaryDirectory(
+                            prefix="conda-workspaces-lock-update-"
+                        ) as temp_dir:
+                            prefix = Path(temp_dir)
+                            try:
+                                records = CondaLockLoader.seed_prefix_from_data(
+                                    baseline,
+                                    name,
+                                    target,
+                                    prefix,
+                                    requested_specs,
+                                    package_platform=package_platform,
+                                )
+                            except ValueError as exc:
+                                raise LockfileIntegrityError(
+                                    lockfile_path(ctx),
+                                    str(exc),
+                                ) from exc
+                            installed_names = {record.name for record in records}
+                            missing = update_names - installed_names
+                            if missing:
+                                names = ", ".join(sorted(missing))
+                                raise LockfileIntegrityError(
+                                    lockfile_path(ctx),
+                                    f"environment {name!r} on {target!r} is missing"
+                                    f" requested roots: {names}",
+                                )
+                            records = target_resolved.solve_for_platform(
+                                package_platform,
+                                prefix=prefix,
+                                update_names=update_names,
+                            )
+                    else:
+                        solve_prefix = (
+                            solve_prefixes.get(
+                                name, ctx.env_prefix(target_resolved.name)
+                            )
+                            if solve_prefixes is not None
+                            else ctx.env_prefix(target_resolved.name)
+                        )
+                        records = target_resolved.solve_for_platform(
+                            package_platform,
+                            prefix=solve_prefix,
+                        )
                 except SolveError as exc:
-                    if not skip_unsolvable:
+                    if update_targets is not None or not skip_unsolvable:
                         raise
                     failures.append(exc)
                     if on_skip is not None:
@@ -788,6 +1040,32 @@ def render_lockfile(
                         explicit_packages=records,
                     )
                 )
+
+    if update_targets is not None:
+        missing_targets = {
+            target for target, names in update_targets.items() if names
+        } - solved_targets
+        if missing_targets:
+            targets = ", ".join(
+                f"{name}/{platform}" for name, platform in sorted(missing_targets)
+            )
+            raise ValueError(f"Selective lock targets are not declared: {targets}")
+        updated = CondaLockLoader.replace_solutions(baseline, envs)
+        if config is not None:
+            declared_platforms = {
+                platform
+                for resolved in resolved_envs.values()
+                for platform in (resolved.platforms or [host_platform])
+            }
+            for platform in declared_platforms:
+                status = check_lockfile_satisfiability(config, updated, platform)
+                if status.status != LockfileStatus.UP_TO_DATE:
+                    raise LockfileStaleError(
+                        config.manifest_path,
+                        lockfile_path(ctx),
+                        reason=status.reason,
+                    )
+        return yaml_dumps(updated)
 
     if failures and not envs:
         raise AllTargetsUnsolvableError(failures)
@@ -831,8 +1109,19 @@ def generate_lockfile(
     )
     if dry_run:
         return path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    return write_lockfile(ctx, content, output_path=path)
+
+
+def write_lockfile(
+    ctx: WorkspaceContext,
+    content: str,
+    *,
+    output_path: Path | None = None,
+) -> Path:
+    """Validate and write already-rendered canonical lockfile content."""
+    path = output_path if output_path is not None else lockfile_path(ctx)
+    validate_lockfile_output(ctx, path)
+    atomic_write_text(path, content)
     return path
 
 
@@ -1166,10 +1455,7 @@ def install_from_lockfile(
         if resolved is not None:
             from .envs import _build_pypi_specs
 
-            requested_specs = [
-                MatchSpec(dep.conda_build_form())
-                for dep in resolved.conda_dependencies.values()
-            ]
+            requested_specs = list(resolved.conda_dependencies.values())
             requested_specs.extend(_build_pypi_specs(resolved))
             for dependency in resolved.pypi_dependencies.values():
                 if dependency.path:

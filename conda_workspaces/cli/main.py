@@ -393,10 +393,30 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         help="Include installed package records in the workspace snapshot.",
     )
 
+    dependency_location_parser = argparse.ArgumentParser(add_help=False)
+    dependency_location = dependency_location_parser.add_mutually_exclusive_group()
+    dependency_location.add_argument(
+        "-e",
+        "--environment",
+        default=None,
+        help="Target dependencies declared directly on an environment.",
+    )
+    dependency_location.add_argument(
+        "--feature",
+        default=None,
+        help="Target a shared feature.",
+    )
+    dependency_location_parser.add_argument(
+        "--platform",
+        default=None,
+        help="Target a platform table below the selected dependency location.",
+    )
+
     add_parser_cmd = sub.add_parser(
         "add",
         help="Add a dependency to the workspace.",
         add_help=False,
+        parents=[dependency_location_parser],
     )
     add_parser_help(add_parser_cmd)
     add_output_and_prompt_options(add_parser_cmd)
@@ -404,23 +424,6 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         "specs",
         nargs="+",
         help="Package specs to add (e.g. 'numpy>=1.24').",
-    )
-    add_location = add_parser_cmd.add_mutually_exclusive_group()
-    add_location.add_argument(
-        "-e",
-        "--environment",
-        default=None,
-        help="Target dependencies declared directly on an environment.",
-    )
-    add_location.add_argument(
-        "--feature",
-        default=None,
-        help="Target a shared feature.",
-    )
-    add_parser_cmd.add_argument(
-        "--platform",
-        default=None,
-        help="Target a platform table below the selected dependency location.",
     )
     add_parser_cmd.add_argument(
         "--pypi",
@@ -450,10 +453,34 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         help="Remove and recreate the affected environment(s) from scratch.",
     )
 
+    update_parser = sub.add_parser(
+        "update",
+        help="Update selected conda dependencies without widening constraints.",
+        add_help=False,
+        parents=[dependency_location_parser],
+    )
+    add_parser_help(update_parser)
+    add_output_and_prompt_options(update_parser)
+    update_parser.add_argument(
+        "specs",
+        nargs="+",
+        help=(
+            "Declared conda roots to update. Bare names preserve existing"
+            " constraints, while explicit specs replace them."
+        ),
+    )
+    update_parser.add_argument(
+        "--no-install",
+        action="store_true",
+        default=False,
+        help="Update the complete lockfile without changing installed prefixes.",
+    )
+
     rm_parser = sub.add_parser(
         "remove",
         help="Remove a dependency from the workspace.",
         add_help=False,
+        parents=[dependency_location_parser],
     )
     add_parser_help(rm_parser)
     add_output_and_prompt_options(rm_parser)
@@ -461,23 +488,6 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         "specs",
         nargs="+",
         help="Package names to remove.",
-    )
-    remove_location = rm_parser.add_mutually_exclusive_group()
-    remove_location.add_argument(
-        "-e",
-        "--environment",
-        default=None,
-        help="Target dependencies declared directly on an environment.",
-    )
-    remove_location.add_argument(
-        "--feature",
-        default=None,
-        help="Target a shared feature.",
-    )
-    rm_parser.add_argument(
-        "--platform",
-        default=None,
-        help="Target a platform table below the selected dependency location.",
     )
     rm_parser.add_argument(
         "--pypi",
@@ -823,6 +833,7 @@ def execute_workspace(args: argparse.Namespace) -> int:
 
     json_result = bool(getattr(args, "json", False)) and subcmd in {
         "add",
+        "update",
         "remove",
         "install",
         "lock",
@@ -889,6 +900,10 @@ def _dispatch_workspace(args: argparse.Namespace, subcmd: str) -> int:
         from .workspace.add import execute_add
 
         return execute_add(args)
+    elif subcmd == "update":
+        from .workspace.update import execute_update
+
+        return execute_update(args)
     elif subcmd == "remove":
         from .workspace.remove import execute_remove
 

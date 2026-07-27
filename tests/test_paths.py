@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from conda_workspaces.paths import (
+    atomic_write_text,
     has_absolute_path_syntax,
     is_path_segment,
     parse_relative_posix_path,
@@ -194,3 +195,20 @@ def test_resolve_relative_path_rejects_symlink_escape(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         resolve_relative_path(project, PurePosixPath("linked/environment.yml"))
+
+
+def test_atomic_write_text_preserves_symlink_target(tmp_path: Path) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("old", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
+
+    atomic_write_text(link, "new")
+
+    assert link.is_symlink()
+    assert link.read_text(encoding="utf-8") == "new"
+    assert target.read_text(encoding="utf-8") == "new"
+    assert {path.name for path in tmp_path.iterdir()} == {"link.txt", "target.txt"}

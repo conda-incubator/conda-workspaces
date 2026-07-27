@@ -311,9 +311,10 @@ error.
 
 ### Dependency mutation locations
 
-`conda workspace add` and `conda workspace remove` change one explicit
-declaration location. They do not search the composed environment for
-the declaration that currently wins. The
+`conda workspace add`, `conda workspace update`, and
+`conda workspace remove` change one explicit declaration location.
+They do not search the composed environment for the declaration that
+currently wins. The
 {ref}`dependency mutation rules <dependency-mutation-rules>` define the
 selector mapping, workspace inheritance behavior, and wrong-location
 diagnostics.
@@ -328,6 +329,10 @@ conda workspace add --feature test --platform win-64 "pytest<9"
 # Private platform override within one environment
 conda workspace add --environment test --platform win-64 pywin32
 ```
+
+`workspace update` uses the same selectors. A bare package name keeps
+the declaration unchanged and updates only that constrained root in
+installed prefixes and `conda.lock`.
 
 ## Channels
 

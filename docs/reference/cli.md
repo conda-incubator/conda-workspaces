@@ -8,8 +8,9 @@ accept the same subcommands, flags, and arguments.
 ### Structured output
 
 Successful commands that advertise `--json` emit exactly one JSON
-value on stdout. Successful `add`, `remove`, `install`, `lock`, `clean`,
-`import`, `archive`, and `unarchive` operations return:
+value on stdout. Successful `add`, `update`, `remove`, `install`,
+`lock`, `clean`, `import`, `archive`, and `unarchive` operations
+return:
 
 ```json
 {"success": true}

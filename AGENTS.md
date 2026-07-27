@@ -8,7 +8,7 @@
 
 - CLI modules are organized into subpackages by subcommand group:
   `conda_workspaces/cli/workspace/` (init, install, list, info, add,
-  remove, clean, lock, activate, shell) and
+  update, remove, clean, lock, activate, shell) and
   `conda_workspaces/cli/task/` (run, list, add, remove, export).
   `cli/main.py` contains parser configuration and dispatch for both
   subcommands; `cli/__init__.py` is a thin re-export shim.
@@ -226,7 +226,7 @@
   | Emits JSON (use `add_output_and_prompt_options`)         | Side-effect only (use `_accept_json_silently`)          |
   |----------------------------------------------------------|---------------------------------------------------------|
   | `info`, `list`, `envs`, `export`, `quickstart`,          | `init`, `activate`, `run`, `shell`                      |
-  | `install`, `lock`, `add`, `remove`, `clean`, `import`,   |                                                         |
+  | `install`, `lock`, `add`, `update`, `remove`, `clean`,   |                                                         |
   | `archive`, `unarchive`, `task run`, `task list`,         |                                                         |
   | `task add`, `task remove`,                               |                                                         |
   | `task export`                                            |                                                         |

@@ -32,6 +32,7 @@ over. Environments are real conda prefixes you can inspect with
 | `conda activate myenv` | `conda workspace shell` (or `conda workspace shell -e myenv`) |
 | `conda deactivate` | `exit` |
 | `conda install numpy` | `conda workspace add numpy` (edits the manifest and installs) |
+| `conda update numpy` | `conda workspace update numpy` (preserves the declared constraint) |
 | `conda remove numpy` | `conda workspace remove numpy` (edits the manifest and uninstalls) |
 | `conda list` | `conda workspace list` |
 | `conda run -n myenv CMD` | `conda workspace run -- CMD` |
