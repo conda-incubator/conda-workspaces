@@ -48,6 +48,7 @@ numpy = ">=1.24"
 
 [feature.test.dependencies]
 pytest = ">=8.0"
+ruff = ">=0.9"
 
 [environments]
 default = []
@@ -74,8 +75,7 @@ Add tasks to the same manifest:
 
 ```toml
 [tasks]
-test = { cmd = "pytest tests/ -v", depends-on = ["build"] }
-build = "python -m build"
+test = "pytest tests/ -v"
 lint = "ruff check ."
 
 [tasks.check]
@@ -85,13 +85,15 @@ depends-on = ["test", "lint"]
 Then run them:
 
 ```bash
-conda task run check        # resolves dependencies, runs build → lint → test
+conda task run -e test check  # resolves dependencies, runs test and lint
 conda task list             # shows all available tasks
-conda task run test         # builds first, then tests
+conda task run -e test test   # runs one task in the test environment
 ```
 
-Tasks run in your current conda environment by default, or target a
-workspace environment with `-e myenv`.
+Tasks beside a workspace use its `default` environment when that prefix is
+installed, otherwise they use the current conda environment. Use `-e myenv`
+to require another installed workspace environment. Tasks-only manifests use
+the current conda environment.
 
 ## Why conda-workspaces?
 

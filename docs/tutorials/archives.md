@@ -36,6 +36,9 @@ The selected workspace manifest and `conda.lock` must be regular files.
 Replace either symlink with a regular file before creating an archive.
 Archives created by other tools must also store these root members as
 regular files before `unarchive --install` can use them.
+An installable archive must contain exactly one valid root workspace manifest:
+`conda.toml`, `pixi.toml`, or a workspace-bearing `pyproject.toml`. Remove
+extra root manifests before creating the archive.
 
 If no `-o` is given, the archive is named after the workspace
 (`<name>.tar.zst`) and placed in the project root. The workspace name
@@ -279,11 +282,12 @@ receipt-verified `unarchive` first to publish the package archives and their
 conda cache records, then run `conda workspace install --locked` from the
 extracted workspace.
 
-Without a verified receipt, `unarchive` extracts the files but skips
-package cache priming. Pass `--no-install` when you only want the files:
+Omit `--install` when you only want to extract the files. Without a verified
+receipt, cache priming is skipped automatically. With a verified receipt, add
+`--no-install` when package-cache priming must also be skipped:
 
 ```bash
-conda workspace unarchive my-project-offline.tar.zst --no-install
+conda workspace unarchive my-project-offline.tar.zst --receipt --no-install
 ```
 
 ## Security

@@ -212,7 +212,7 @@ To use PyPI dependencies you need:
 
 - [conda-pypi](https://github.com/conda/conda-pypi) (`>=0.9.0`) for
   name mapping and wheel extraction
-- [conda-rattler-solver](https://github.com/conda-incubator/conda-rattler-solver)
+- [conda-rattler-solver](https://github.com/conda/conda-rattler-solver)
   as the solver backend (no longer a hard dependency of conda-pypi, so
   install it explicitly)
 - The `conda-pypi` channel (`conda config --append channels conda-pypi`)

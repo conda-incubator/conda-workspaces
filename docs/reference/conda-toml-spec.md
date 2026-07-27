@@ -367,15 +367,14 @@ When a tool resolves an environment named `<env>`:
 2. Merge each named feature listed in `features`, in order. For each
    feature, merge its unqualified declarations and then its matching
    `[feature.<name>.target.<platform>]` overrides. Later features
-   override earlier ones for conflicting keys. Lists are concatenated
-   and de-duplicated.
+   override earlier ones for conflicting dependency keys.
 3. Merge dependencies declared directly on the environment.
 4. Merge matching
    `[environments.<env>.target.<platform>]` dependencies.
 
-Channel order is preserved.  Duplicate dependency names within the
-same stack (conda or PyPI) are an error and the tool MUST surface them
-to the user.
+Conda and PyPI dependency maps follow these ordered last-wins rules.
+Channel order is preserved and duplicate channels are removed. Activation
+scripts are concatenated in feature order without implicit de-duplication.
 
 (dependency-mutation-rules)=
 

@@ -394,9 +394,11 @@ conda workspace update --platform win-64 pywin32 --no-install
 ```
 
 Bare names preserve existing constraints. Explicit MatchSpecs replace
-the selected declaration. `update` manages conda dependencies only and
-skips uninstalled environments. Use `--no-install` for a lock-only
-update, including a target that does not match the host.
+the selected declaration. `update` manages conda dependencies only, updates
+affected installed host prefixes, and leaves uninstalled prefixes absent.
+A normal update requires at least one affected host prefix to be installed.
+Use `--no-install` when none is installed or for a lock-only update, including
+a target that does not match the host.
 
 ![dependency management demo](../demos/dependency-management.gif)
 

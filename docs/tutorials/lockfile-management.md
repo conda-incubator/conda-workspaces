@@ -211,8 +211,9 @@ Changes that do **not** trigger a re-solve:
 - Editing comments or whitespace in the manifest
 - Reordering dependencies (same set, different order)
 - Changing task definitions, archive config, or activation scripts
-- Adding a platform that is not the current one (checked at lock time,
-  not install time)
+
+Adding any declared platform that is absent from `conda.lock` makes the
+lockfile stale and requires a new solve.
 
 ## Summary
 

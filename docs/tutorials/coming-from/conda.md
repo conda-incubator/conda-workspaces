@@ -28,15 +28,15 @@ over. Environments are real conda prefixes you can inspect with
 
 | conda | conda-workspaces |
 |---|---|
-| `conda create -n myenv python=3.10` | `conda workspace init` + `conda workspace add python=3.10` |
-| `conda activate myenv` | `conda workspace shell` (or `conda workspace shell -e myenv`) |
+| `conda create -n myenv python=3.10` | `conda workspace init` + `conda workspace add -e myenv python=3.10` |
+| `conda activate myenv` | `conda workspace shell -e myenv` |
 | `conda deactivate` | `exit` |
 | `conda install numpy` | `conda workspace add numpy` (edits the manifest and installs) |
 | `conda update numpy` | `conda workspace update numpy` (preserves the declared constraint) |
 | `conda remove numpy` | `conda workspace remove numpy` (edits the manifest and uninstalls) |
 | `conda list` | `conda workspace list` |
-| `conda run -n myenv CMD` | `conda workspace run -- CMD` |
-| `conda env export > environment.yml` | `conda workspace lock` (generates `conda.lock`) |
+| `conda run -n myenv CMD` | `conda workspace run -e myenv -- CMD` |
+| `conda env export > environment.yml` | `conda workspace export -e myenv --from-prefix --file environment.yml` |
 
 ## Migrating an environment.yml
 
@@ -73,13 +73,13 @@ dependencies:
     - requests>=2.31
 ```
 
-The equivalent `conda.toml` is:
+On a `linux-64` machine, the equivalent `conda.toml` is:
 
 ```toml
 [workspace]
 name = "my-project"
 channels = ["conda-forge"]
-platforms = ["linux-64", "osx-arm64"]
+platforms = ["linux-64"]
 
 [dependencies]
 python = ">=3.10"

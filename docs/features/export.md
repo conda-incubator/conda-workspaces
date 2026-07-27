@@ -26,23 +26,23 @@ as `conda-lockfiles`' rattler-lock-v6 the moment it is installed.
 
 ```bash
 # Default: environment-yaml from the declared manifest (no install needed)
-conda workspace export -e default --file environment.yml
+conda workspace export -e default --file exports/environment.yml
 
 # environment.json, format auto-detected from the filename
-conda workspace export -e default --file environment.json
+conda workspace export -e default --file exports/environment.json
 
-# Re-emit the workspace as a conda.toml manifest (cross-format export)
-conda workspace export --format conda-toml --file conda.toml
+# Export the selected environment as a new conda.toml manifest
+conda workspace export --format conda-toml --file exports/conda.toml
 
-# Same content, nested under [tool.conda] in pyproject.toml
-conda workspace export --format pyproject-toml --file pyproject.toml
+# Export the same flattened environment under [tool.conda]
+conda workspace export --format pyproject-toml --file exports/pyproject.toml
 
-# Multi-platform conda.lock re-emit via the lockfile exporter
-conda workspace export --format conda-workspaces-lock-v1 \
-    --platform linux-64 --platform osx-arm64 --file conda.lock
+# Re-emit exact package records from an existing conda.lock
+conda workspace export --from-lockfile --format conda-workspaces-lock-v1 \
+    --platform linux-64 --platform osx-arm64 --file exports/conda.lock
 
-# Build the export from an existing conda.lock rather than re-solving
-conda workspace export --from-lockfile --file environment.yml
+# Export environment.yml from an existing conda.lock
+conda workspace export --from-lockfile --file exports/environment.yml
 
 # Mirror ``conda export`` semantics on an installed prefix
 conda workspace export --from-prefix --no-builds --from-history
@@ -67,6 +67,9 @@ Three sources feed the exporter:
   `conda export` does, so `--no-builds`, `--ignore-channels`, and
   `--from-history` behave identically.
 
+Use `conda workspace lock` when the goal is to solve the complete workspace
+and update its canonical `conda.lock`. Export does not run the solver.
+
 `--platform` (repeatable) intersects declared or available platforms
 with the chosen subset. Passing multiple platforms requires an exporter
 that opts into `multiplatform_export`. The `conda-workspaces-lock-v1`,
@@ -78,22 +81,24 @@ exporters raise a clear error.
 
 :::{versionadded} 0.4.0
 Three new exporter plugins — `conda-toml`, `pixi-toml`, and
-`pyproject-toml` — round-trip a workspace back into any manifest
-dialect conda-workspaces already reads. Combined with
-`conda workspace import`, this makes `conda workspace` a
-bidirectional translator across every supported manifest format.
+`pyproject-toml` — write one selected environment in any manifest
+dialect conda-workspaces already reads.
 :::
 
-The `conda-toml`, `pixi-toml`, and `pyproject-toml` exporters round-trip
-a workspace back into any of the manifest dialects conda-workspaces
-already reads. Declared specs that appear on every requested platform
-land under the top-level `[dependencies]` / `[pypi-dependencies]`
-tables. Platform-specific deltas move under `[target.<platform>.*]`.
+The manifest exporters flatten one selected environment. They preserve its
+declared dependencies across the requested platforms, but do not preserve the
+source workspace's named features, other environments, tasks, activation
+settings, or archive configuration. Write to a new file unless replacing that
+structure with a single flattened environment is intentional. Specs that appear
+on every requested platform land under the top-level `[dependencies]` /
+`[pypi-dependencies]` tables. Platform-specific deltas move under
+`[target.<platform>.*]`.
 The `pyproject-toml` exporter wraps the same content under
 `[tool.conda]`, and when the target `pyproject.toml` already exists it
 splices the `[tool.conda]` subtree into the existing document so peer
 `[project]`, `[build-system]`, `[tool.ruff]`, `[tool.pixi]`, and
-friends survive untouched. Any stale `[tool.conda]` is replaced.
+friends survive untouched. Any existing `[tool.conda]` is replaced by the
+flattened selected environment.
 `conda.toml` and `pixi.toml` keep the default overwrite semantics of
 every other conda exporter.
 

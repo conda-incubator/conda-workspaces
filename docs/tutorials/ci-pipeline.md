@@ -202,8 +202,9 @@ schema or channel invariants raises `LockfileMergeError` and no
 ## Nightly lockfile refresh
 
 Set up a scheduled workflow that re-solves the lockfile and opens a
-pull request when package versions change. Use `--no-lock` to bypass
-the CI-default strict mode and force a fresh solve:
+pull request when package versions change. `conda workspace lock`
+always solves. The CI-default strict mode applies to `workspace install`,
+so no override is needed here:
 
 ```yaml
 # .github/workflows/refresh-lock.yml

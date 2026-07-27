@@ -35,6 +35,7 @@ numpy = ">=1.24"
 [feature.test.dependencies]
 pytest = ">=8.0"
 pytest-cov = ">=4.0"
+ruff = ">=0.9"
 
 [environments]
 test = { features = ["test"] }
@@ -52,7 +53,7 @@ Install and manage your environments, then run tasks:
 ```console
 $ conda workspace install              # solve + install + generate conda.lock
 $ conda workspace envs                 # list defined environments
-$ conda task run check                 # runs lint and test in dependency order
+$ conda task run -e test check         # runs lint and test in the test environment
 $ conda workspace shell -e test        # spawn a shell with test env activated
 $ conda workspace install --locked     # reproducible install from conda.lock
 ```

@@ -58,17 +58,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   (#125, #140)
 - `--environment` now targets `[environments.NAME.dependencies]` instead of a
   same-named feature. Review `[feature.NAME]` tables created by older `add -e`
-  commands, move private dependencies to the environment table, and remove only
-  accidental feature declarations. (#123, #139)
+  commands, move private dependencies to the environment table, and remove the
+  feature and its environment feature-list entry only when they were accidental.
+  (#123, #139)
 - Dependency mutation and import or export preserve representable MatchSpec fields
   instead of reducing them to versions. Unsupported dependency sources now fail
-  before output is written. Rerun explicit specs if an earlier `add` lost
-  constraints. (#124, #138, #147)
+  before output is written. If an earlier `add` lost constraints, rerun each full
+  MatchSpec with the feature, environment, and platform selectors identified by
+  `conda workspace info --json` in `provenance.location`. (#124, #138, #147)
 - Lock-backed installs now remove stale unmanaged conda packages and record only
   manifest roots as direct requests. Workspaces affected by 0.7.x should run
-  `conda workspace install --force-reinstall` once to rebuild prefixes and the
-  lockfile from the manifest. `--force-reinstall` recreates prefixes without
-  forcing a solve. Add `--no-lock` when a fresh solve is also required.
+  `conda workspace install --force-reinstall --no-lock` once. `--no-lock`
+  regenerates the lockfile from the manifest, while `--force-reinstall` recreates
+  the prefixes.
   (#117, #141, #155)
 - Receipt-verified bundles now prime a complete offline Conda cache. Recreate or
   re-unarchive older bundles before offline installation. Remove a conflicting
