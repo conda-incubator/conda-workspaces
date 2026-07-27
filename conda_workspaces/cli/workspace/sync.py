@@ -1,10 +1,10 @@
 """Shared solve/install/lock pipeline used by ``install``, ``add``, and ``remove``.
 
-Given a workspace config and a list of environment names, this module
-resolves each environment, installs packages into its prefix, and
-updates ``conda.lock``.  The same logic backs ``conda workspace install``
-as well as the auto-install behaviour of ``conda workspace add`` and
-``conda workspace remove``.
+Given a workspace config and selected environment names, this module
+installs packages into those prefixes and resolves every declared
+environment for the canonical ``conda.lock``. The same logic backs
+``conda workspace install`` as well as the auto-install behaviour of
+``conda workspace add`` and ``conda workspace remove``.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from ...envs import activate_d_scripts, install_environment
 from ...lockfile import generate_lockfile
-from ...resolver import resolve_environment
+from ...resolver import resolve_all_environments, resolve_environment
 from .. import status
 
 if TYPE_CHECKING:
@@ -58,12 +58,13 @@ def sync_environments(
     dry_run: bool = False,
     console: Console,
 ) -> None:
-    """Resolve, install, and lock the given workspace environments.
+    """Resolve and install the selected environments, then lock the workspace.
 
     When *no_install* is true the prefixes are not touched but the
-    lockfile is still regenerated.  When *dry_run* is true neither the
-    prefixes nor the lockfile are written.  ``install_environment``
-    receives *force_reinstall* / *dry_run* verbatim.
+    complete canonical lockfile is still regenerated. When *dry_run*
+    is true neither the prefixes nor the lockfile are written.
+    ``install_environment`` receives *force_reinstall* / *dry_run*
+    verbatim.
 
     If new files appear under ``$PREFIX/etc/conda/activate.d/`` and the
     caller is inside a ``conda workspace shell`` session
@@ -73,13 +74,17 @@ def sync_environments(
     if not names:
         return
 
-    resolved_all = {
-        name: resolve_environment(config, name, ctx.platform) for name in names
-    }
+    resolved_all = resolve_all_environments(config)
+    for name in names:
+        resolved_all[name] = resolve_environment(
+            config, name, None if no_install else ctx.platform
+        )
+
     solve_prefixes = {}
 
     if not no_install:
-        for i, (name, resolved) in enumerate(resolved_all.items()):
+        for i, name in enumerate(names):
+            resolved = resolved_all[name]
             if i > 0:
                 console.print()
             status.message(

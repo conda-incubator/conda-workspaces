@@ -300,12 +300,12 @@ manifest and lockfile without touching the prefix, or
 conda workspace add numpy
 ```
 
-`add` and `remove` update the manifest, resolve the affected
-environments, install into their prefixes, and refresh `conda.lock`
-in one go — the same shape as `pixi add` / `pixi remove`.
+`add` and `remove` update the manifest, install into the affected
+prefixes, and refresh a complete `conda.lock` in one go — the same
+shape as `pixi add` / `pixi remove`.
 
-Add to a specific feature (only environments composing that feature
-are re-synced):
+Add to a specific feature (only prefixes for environments composing
+that feature are installed or updated):
 
 ```bash
 conda workspace add --feature test pytest
@@ -327,7 +327,7 @@ If you want the old manifest-only behaviour, or to stage a batch of
 edits before running the solver, opt out per command:
 
 ```bash
-conda workspace add numpy --no-install            # update manifest + conda.lock, skip install
+conda workspace add numpy --no-install            # update manifest + complete conda.lock, skip install
 conda workspace add numpy --no-lockfile-update    # update manifest only
 conda workspace add numpy --force-reinstall       # recreate the affected env(s) from scratch
 conda workspace add numpy --dry-run               # solve only, touch nothing on disk

@@ -443,7 +443,7 @@ def test_default_feature_syncs_all_envs(
     execute_fn,
     spec: str,
 ) -> None:
-    """Editing the default feature re-syncs every env without ``no-default-feature``."""
+    """Editing the default feature selects each environment that composes it."""
     args = make_args(
         _DEFAULTS,
         manifest_file=sync_workspace,
@@ -469,7 +469,7 @@ def test_named_feature_syncs_only_composing_envs(
     execute_fn,
     spec: str,
 ) -> None:
-    """``--feature test`` only re-syncs envs whose features list includes ``test``."""
+    """``--feature test`` selects only environments that compose ``test``."""
     args = make_args(
         _DEFAULTS,
         manifest_file=sync_workspace,
@@ -502,10 +502,18 @@ def test_no_lockfile_update_skips_sync(
     assert stub_sync == []
 
 
-def test_add_no_install_writes_lockfile(
-    sync_workspace: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("execute_fn", "spec"),
+    [(execute_add, "coverage"), (execute_remove, "pytest")],
+    ids=["add", "remove"],
+)
+def test_feature_mutation_no_install_writes_complete_lockfile(
+    sync_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    execute_fn,
+    spec: str,
 ) -> None:
-    """Regression guard for conda-lockfiles 0.2 lockfile composition."""
+    """A selective manifest edit still locks every environment."""
 
     class FakeRecord:
         def __init__(self, name: str, url: str) -> None:
@@ -527,17 +535,19 @@ def test_add_no_install_writes_lockfile(
     args = make_args(
         _DEFAULTS,
         manifest_file=sync_workspace,
-        specs=["numpy"],
+        specs=[spec],
+        feature="test",
         no_install=True,
         no_lockfile_update=False,
     )
 
-    assert execute_add(args) == 0
+    assert execute_fn(args) == 0
 
     data = load_yaml(sync_workspace.parent / "conda.lock")
     assert data["version"] == 1
     assert set(data["environments"]) == {"default", "test"}
     assert "linux-64" in data["environments"]["default"]["packages"]
+    assert "linux-64" in data["environments"]["test"]["packages"]
 
 
 @pytest.mark.parametrize(

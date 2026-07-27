@@ -8,6 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Selective `conda workspace install -e` and feature-scoped `add` or
+  `remove` operations now install only the selected or affected
+  prefixes while regenerating the canonical `conda.lock` for every
+  declared environment and platform. Workflows that relied on an
+  incomplete canonical lock should use `conda workspace lock -e
+  <environment> --output <fragment>` instead. (#121)
 - `conda workspace lock` now requires an explicit `--output` with
   `--environment`, `--platform`, or `--skip-unsolvable`. Run an
   unfiltered lock to replace the complete canonical `conda.lock`, or

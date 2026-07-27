@@ -19,7 +19,7 @@ Start with a workspace that has no lockfile:
 ```bash
 mkdir my-project && cd my-project
 conda workspace init --name my-project
-conda workspace add "python>=3.12"
+conda workspace add --no-lockfile-update "python>=3.12"
 ```
 
 Run install:
@@ -73,11 +73,11 @@ one step:
 conda workspace add "requests>=2.28"
 ```
 
-To see the staleness detection separately, use `--no-install` to
-only update the manifest:
+To see the staleness detection separately, use
+`--no-lockfile-update` to only update the manifest:
 
 ```bash
-conda workspace add --no-install "flask>=3"
+conda workspace add --no-lockfile-update "flask>=3"
 ```
 
 Now check the status:
@@ -131,7 +131,7 @@ otherwise:
 conda workspace install --locked
 
 # Add a new dep without solving to make the lockfile stale
-conda workspace add --no-install "httpx>=0.27"
+conda workspace add --no-lockfile-update "httpx>=0.27"
 
 # This fails with LockfileStaleError
 conda workspace install --locked

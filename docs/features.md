@@ -517,9 +517,9 @@ fix a minimum `__glibc` version when solving `linux-64` from macOS).
 
 `--environment`, `--platform`, and `--skip-unsolvable` can produce an
 incomplete result, so they require `--output`. An unfiltered lock is
-the only command that implicitly replaces the canonical `conda.lock`.
-Pass `--output conda.lock` when replacing it with a filtered result is
-intentional.
+the only `workspace lock` form that implicitly replaces the canonical
+`conda.lock`. Pass `--output conda.lock` when replacement with a
+filtered result is intentional.
 
 Solves are fail-fast by default: the first platform that cannot be
 resolved raises an error that names the environment and the platform,
@@ -530,7 +530,8 @@ fails, the command still raises with an aggregated summary rather than
 writing an empty lockfile — non-solver errors (missing channel, invalid
 manifest, etc.) always abort regardless of the flag.
 
-The lockfile contains all environments and their resolved packages:
+The canonical lockfile contains all environments and their resolved
+packages:
 
 ```yaml
 version: 1
@@ -569,6 +570,12 @@ This means day-to-day installs are fast (no solver) while the lockfile
 stays current when the manifest changes. The check compares the
 manifest's dependency specs against locked package versions, so
 whitespace or comment changes do not trigger a re-solve.
+
+With `-e/--environment`, only the selected prefix is installed or
+updated. The solve path covers every declared environment and platform
+when producing or previewing the canonical `conda.lock`. Use `conda
+workspace lock -e <environment> --output <fragment>` when a partial
+lock artifact is intentional.
 
 | Lockfile state | Default behavior | `--locked` | `--frozen` | `--no-lock` |
 | --- | --- | --- | --- | --- |
