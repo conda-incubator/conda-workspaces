@@ -75,7 +75,7 @@ cache priming:
 
 ```bash
 conda workspace archive --lock --bundle --receipt -o offline.tar.zst
-conda workspace unarchive offline.tar.zst --receipt
+CONDA_OFFLINE=true conda workspace unarchive offline.tar.zst --receipt --install
 ```
 
 For handoff workflows that need a separate integrity record, `--receipt`

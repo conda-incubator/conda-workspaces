@@ -269,11 +269,15 @@ copy bundled packages into the local conda cache before installation:
 
 ```bash
 conda workspace archive --lock --bundle --receipt -o my-project-offline.tar.zst
-conda workspace unarchive my-project-offline.tar.zst --receipt
-# packages are primed into the conda cache after receipt verification
-cd my-project-offline
-conda workspace install --locked
+CONDA_OFFLINE=true conda workspace unarchive my-project-offline.tar.zst \
+  --receipt \
+  --install
 ```
+
+The same empty-cache offline flow can be split into two commands. Run
+receipt-verified `unarchive` first to publish the package archives and their
+conda cache records, then run `conda workspace install --locked` from the
+extracted workspace.
 
 Without a verified receipt, `unarchive` extracts the files but skips
 package cache priming. Pass `--no-install` when you only want the files:
@@ -301,6 +305,11 @@ When `--bundle` is used, package hashes are verified against the
 lockfile's SHA256 entries at archive creation and before receipt-verified
 cache priming. Packages without a SHA256 entry in the lockfile are
 rejected instead of being copied into the conda package cache.
+
+Receipt verification covers package archives copied from the bundle. Conda's
+normal trust in pre-existing extracted package cache entries still applies.
+Set `CONDA_PKGS_DIRS` to a new empty directory when an installation must not
+reuse existing extracted cache contents.
 
 ### Trust model for bundled archives
 

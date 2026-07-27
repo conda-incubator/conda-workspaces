@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from conda.base.context import context as conda_context
+from conda.core.package_cache_data import PackageCacheData
 
 import conda_workspaces.archive as archive_module
 import conda_workspaces.paths as paths_module
@@ -284,6 +285,44 @@ packages:
         return WorkspaceArchive(archive_path, receipt=receipt_path)
 
     return build
+
+
+@pytest.fixture
+def installable_bundled_archive(
+    receipt_bundled_archive_factory: Callable[
+        [str, str, bytes, str | None], WorkspaceArchive
+    ],
+) -> WorkspaceArchive:
+    """Build a receipt-backed bundle containing one valid conda package."""
+    package = io.BytesIO()
+    index = json.dumps(
+        {
+            "name": "offline-demo",
+            "version": "1.0",
+            "build": "h0",
+            "build_number": 0,
+            "subdir": conda_context.subdir,
+            "depends": [],
+        }
+    ).encode()
+    files = b"share/offline-demo.txt\n"
+    payload = b"installed offline\n"
+    with tarfile.open(fileobj=package, mode="w:bz2") as tar:
+        for name, content in (
+            ("info/index.json", index),
+            ("info/files", files),
+            ("share/offline-demo.txt", payload),
+        ):
+            member = tarfile.TarInfo(name)
+            member.mode = 0o644
+            member.size = len(content)
+            tar.addfile(member, io.BytesIO(content))
+    return receipt_bundled_archive_factory(
+        "offline-demo",
+        "offline-demo-1.0-h0.tar.bz2",
+        package.getvalue(),
+        "offline-demo",
+    )
 
 
 def test_collect_files_git_tracked(git_project: Path) -> None:
@@ -3038,12 +3077,163 @@ def test_workspace_archive_extract_refreshes_same_target_lock_cache(
     first = archives[0].extract(target=target, package_cache=package_cache)
     shutil.rmtree(target)
     second = archives[1].extract(target=target, package_cache=package_cache)
+    shutil.rmtree(target)
+    repeated = archives[0].extract(target=target, package_cache=package_cache)
 
     assert first.primed_packages == 1
     assert second.primed_packages == 1
+    assert repeated.primed_packages == 0
+    package_names = {package_name for _, package_name, _ in packages}
     assert {path.name for path in package_cache.iterdir()} == {
-        package_name for _, package_name, _ in packages
+        *package_names,
+        "urls.txt",
+        *(package_name.removesuffix(".conda") for package_name in package_names),
     }
+    for package_name in package_names:
+        assert (
+            package_cache
+            / package_name.removesuffix(".conda")
+            / "info"
+            / "repodata_record.json"
+        ).is_file()
+
+
+def test_workspace_archive_extract_rejects_cache_stem_collisions_before_publication(
+    tmp_path: Path,
+    snapshot_tree: SnapshotTree,
+) -> None:
+    root = tmp_path / "collision-workspace"
+    root.mkdir()
+    (root / "conda.toml").write_text(
+        f"""\
+[workspace]
+name = "collision"
+channels = ["conda-forge"]
+platforms = ["{conda_context.subdir}"]
+""",
+        encoding="utf-8",
+    )
+    packages = [
+        ("demo-1.0-h0.conda", b"conda package"),
+        ("demo-1.0-h0.tar.bz2", b"tar package"),
+    ]
+    package_records = []
+    package_paths = []
+    for filename, content in packages:
+        url = (
+            f"https://conda.anaconda.org/conda-forge/{conda_context.subdir}/{filename}"
+        )
+        package_records.append(
+            f"""\
+  - conda: {url}
+    sha256: {hashlib.sha256(content).hexdigest()}
+    name: demo
+    version: "1.0"
+    build: h0
+    subdir: {conda_context.subdir}
+    depends: []
+"""
+        )
+        package_path = tmp_path / "source-cache" / filename
+        package_path.parent.mkdir(exist_ok=True)
+        package_path.write_bytes(content)
+        package_paths.append(package_path)
+    environment_records = "\n".join(
+        f"        - conda: https://conda.anaconda.org/conda-forge/{conda_context.subdir}/{filename}"
+        for filename, _ in packages
+    )
+    (root / "conda.lock").write_text(
+        f"""\
+version: 1
+environments:
+  default:
+    channels:
+      - url: https://conda.anaconda.org/conda-forge/
+    packages:
+      {conda_context.subdir}:
+{environment_records}
+packages:
+{"".join(package_records)}""",
+        encoding="utf-8",
+    )
+    archive_path = tmp_path / "collision.tar.gz"
+    archive_config = ArchiveConfig()
+    create_archive(
+        root,
+        archive_path,
+        archive_config,
+        bundle_packages=package_paths,
+    )
+    receipt_path = ArchiveReceipt.default_path(archive_path)
+    ArchiveReceipt.build(
+        root=root,
+        archive_path=archive_path,
+        archive_config=archive_config,
+        manifest_path=root / "conda.toml",
+        lockfile_path=root / "conda.lock",
+        environment_prefixes={"default": ".conda/envs/default"},
+        options={"bundle": True, "lock": False},
+    ).write(receipt_path)
+    archive = WorkspaceArchive(archive_path, receipt=receipt_path)
+    before = snapshot_tree(tmp_path)
+
+    with pytest.raises(ArchiveError, match="same extracted cache entry"):
+        archive.extract(
+            target=tmp_path / "extracted",
+            package_cache=tmp_path / "package-cache",
+        )
+
+    assert snapshot_tree(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    "cache_entry",
+    ["mismatched-record", "entry-symlink", "info-symlink"],
+    ids=["mismatched-record", "entry-symlink", "info-symlink"],
+)
+def test_workspace_archive_extract_rejects_conflicting_cache_records(
+    tmp_path: Path,
+    snapshot_tree: SnapshotTree,
+    receipt_bundled_archive_factory: Callable[
+        [str, str, bytes, str | None], WorkspaceArchive
+    ],
+    cache_entry: str,
+) -> None:
+    package_name = "demo-1.0-h0.conda"
+    archive = receipt_bundled_archive_factory(
+        "cache-record",
+        package_name,
+        b"package",
+        None,
+    )
+    cache = tmp_path / "package-cache"
+    first_target = tmp_path / "first"
+    archive.extract(target=first_target, package_cache=cache)
+    shutil.rmtree(first_target)
+
+    extracted = cache / package_name.removesuffix(".conda")
+    if cache_entry == "mismatched-record":
+        record_path = extracted / "info" / "repodata_record.json"
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        record["url"] = "https://example.invalid/replaced.conda"
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+    elif cache_entry == "entry-symlink":
+        shutil.rmtree(extracted)
+        extracted.symlink_to(tmp_path / "outside-cache")
+    else:
+        outside_info = tmp_path / "outside-info"
+        shutil.copytree(extracted / "info", outside_info)
+        shutil.rmtree(extracted / "info")
+        (extracted / "info").symlink_to(outside_info, target_is_directory=True)
+    before = snapshot_tree(tmp_path)
+
+    with pytest.raises(ArchiveError, match="Package cache entry conflicts"):
+        archive.extract(
+            target=tmp_path / "second",
+            package_cache=cache,
+        )
+
+    assert snapshot_tree(tmp_path) == before
 
 
 @pytest.mark.parametrize("dry_run", [False, True], ids=["extract", "dry-run"])
@@ -3333,6 +3523,97 @@ def test_workspace_archive_install_uses_public_handler(
         assert result.prefix_reference_matches == (
             resolved_install_prefix / "prefix.txt",
         )
+
+
+@pytest.mark.parametrize(
+    "workflow",
+    ["combined", "two-step"],
+    ids=["combined", "two-step"],
+)
+def test_workspace_archive_installs_bundle_from_empty_cache_offline(
+    installable_bundled_archive: WorkspaceArchive,
+    tmp_path: Path,
+    workflow: str,
+) -> None:
+    cache = tmp_path / f"{workflow}-cache"
+    target = tmp_path / f"{workflow}-workspace"
+
+    PackageCacheData.clear()
+    try:
+        with (
+            conda_context._override("_pkgs_dirs", (str(cache),)),
+            conda_context._override("offline", True),
+        ):
+            if workflow == "combined":
+                result = installable_bundled_archive.install(
+                    target=target,
+                    package_cache=cache,
+                )
+                assert result.return_code == 0
+                assert result.primed_packages == 1
+            else:
+                extracted = installable_bundled_archive.extract(
+                    target=target,
+                    package_cache=cache,
+                )
+                assert extracted.primed_packages == 1
+                assert (
+                    WorkspaceArchive.install_from_lockfile(target, None, None, None)
+                    == 0
+                )
+    finally:
+        PackageCacheData.clear()
+
+    assert (
+        target / ".conda" / "envs" / "default" / "share" / "offline-demo.txt"
+    ).read_text(encoding="utf-8") == "installed offline\n"
+    record = json.loads(
+        (cache / "offline-demo-1.0-h0" / "info" / "repodata_record.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert record["url"].endswith(
+        f"/{conda_context.subdir}/offline-demo-1.0-h0.tar.bz2"
+    )
+    assert (
+        record["sha256"]
+        == hashlib.sha256(
+            (cache / "offline-demo-1.0-h0.tar.bz2").read_bytes()
+        ).hexdigest()
+    )
+
+
+def test_workspace_archive_install_rejects_cache_archive_changed_during_preflight(
+    installable_bundled_archive: WorkspaceArchive,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import conda_workspaces.lockfile as lockfile_module
+
+    cache = tmp_path / "package-cache"
+    target = tmp_path / "workspace"
+    package = cache / "offline-demo-1.0-h0.tar.bz2"
+    handler_calls: list[Path] = []
+
+    def change_cached_package(*_args: object, **_kwargs: object) -> None:
+        content = package.read_bytes()
+        package.write_bytes(b"x" * len(content))
+
+    monkeypatch.setattr(
+        lockfile_module,
+        "install_from_lockfile",
+        change_cached_package,
+    )
+
+    with pytest.raises(ArchiveHashMismatchError):
+        installable_bundled_archive.install(
+            target=target,
+            package_cache=cache,
+            install_handler=lambda workspace, *_: handler_calls.append(workspace) or 0,
+        )
+
+    assert handler_calls == []
+    assert not target.exists()
 
 
 def test_workspace_archive_install_validates_manifest_before_public_handler(
