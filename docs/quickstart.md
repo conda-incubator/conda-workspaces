@@ -77,13 +77,21 @@ conda workspace quickstart --json --name demo "python=3.12"
 manifest), adds any specs passed on the command line, installs the
 selected environment, and drops into a shell. It forwards the flags
 you already know from `init` (`--format`, `--name`, `-c/--channel`,
-`--platform`), `install` (`-e/--environment`, `--force-reinstall`,
-`--locked`, `--frozen`), and conda's shared flags (`--dry-run`,
-`--json`, `--yes`). Use `--no-shell` for CI or scripted runs; `--json`
-implies `--no-shell`, silences the status banners the nested
-`init` / `add` / `install` handlers would otherwise print, and emits
-a single structured `{workspace, environment, manifest, specs_added,
-shell_spawned}` payload on stdout — safe to pipe into `jq`.
+`--override-channels`, `--platform`), `install` (`-e/--environment`,
+`--force-reinstall`, `--locked`, `--frozen`), and conda's shared flags
+(`--dry-run`, `--json`, `--yes`). Use `--no-shell` for CI or scripted
+runs. `--json` implies `--no-shell`, silences the status banners the
+nested `init` / `add` / `install` handlers would otherwise print, and
+emits a single structured `{workspace, environment, manifest,
+specs_added, shell_spawned}` payload on stdout — safe to pipe into
+`jq`.
+
+New workspaces inherit conda's configured channels in their existing
+order. Repeated `-c/--channel` values are prepended in command-line
+order. Pass `--override-channels` with at least one `-c` to use only
+the explicit channels. Initialization fails when no channel is
+available. `quickstart --copy` and `--clone` preserve the source
+manifest's channels instead of applying these initialization options.
 
 ### Manual setup
 

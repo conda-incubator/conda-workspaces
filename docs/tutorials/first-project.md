@@ -15,7 +15,8 @@ Start by creating a `conda.toml` in your project root:
 
 ```bash
 mkdir my-project && cd my-project
-conda workspace init --format conda --name my-project
+conda workspace init --format conda --name my-project \
+  -c conda-forge --override-channels
 ```
 
 This creates a `conda.toml` with sensible defaults:

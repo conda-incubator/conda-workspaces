@@ -48,6 +48,28 @@ def _accept_json_silently(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_workspace_channel_options(parser: argparse.ArgumentParser) -> None:
+    """Add conda-native channel options for workspace initialization."""
+    parser.add_argument(
+        "--channel",
+        "-c",
+        action="append",
+        default=None,
+        dest="channel",
+        help=(
+            "Prepend a channel to configured conda channels."
+            " Repeatable. Use --override-channels to exclude configured channels."
+        ),
+    )
+    parser.add_argument(
+        "--override-channels",
+        "-O",
+        action="store_true",
+        default=False,
+        help="Use only channels supplied with -c/--channel. Requires a channel.",
+    )
+
+
 def _handle_error(exc: CondaError) -> int:
     """Render a CondaError with Rich and return its exit code.
 
@@ -111,14 +133,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Workspace name (defaults to directory name).",
     )
-    init_parser.add_argument(
-        "--channel",
-        "-c",
-        action="append",
-        default=None,
-        dest="channels",
-        help="Channels to include (repeatable, default: conda-forge).",
-    )
+    _add_workspace_channel_options(init_parser)
     init_parser.add_argument(
         "--platform",
         action="append",
@@ -688,14 +703,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Workspace name (defaults to directory name).",
     )
-    quickstart_parser.add_argument(
-        "--channel",
-        "-c",
-        action="append",
-        default=None,
-        dest="channels",
-        help="Channels to include (repeatable, default: conda-forge).",
-    )
+    _add_workspace_channel_options(quickstart_parser)
     quickstart_parser.add_argument(
         "--platform",
         action="append",
