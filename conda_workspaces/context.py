@@ -105,8 +105,9 @@ class WorkspaceContext:
         """Whether the process is running in a CI environment."""
         return os.environ.get("CI", "").lower() in ("true", "1", "yes")
 
-    def env_prefix(self, env_name: str) -> Path:
-        """Return the prefix path for a named environment."""
+    @staticmethod
+    def validate_environment_name(env_name: str) -> None:
+        """Reject an environment name that cannot map to a local prefix."""
         posix_name = PurePosixPath(env_name)
         windows_name = PureWindowsPath(env_name)
         if (
@@ -120,6 +121,9 @@ class WorkspaceContext:
         ):
             raise EnvironmentNameInvalidError(env_name)
 
+    def env_prefix(self, env_name: str) -> Path:
+        """Return the prefix path for a named environment."""
+        self.validate_environment_name(env_name)
         prefix = self.envs_dir / env_name
         envs_dir = self.envs_dir.resolve(strict=False)
         try:

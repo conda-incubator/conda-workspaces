@@ -69,6 +69,7 @@ conda workspace quickstart python=3.14 numpy
 conda workspace quickstart --copy ../other-workspace
 # scripted / CI: skip the interactive shell, emit a JSON summary
 conda workspace quickstart --no-shell --name demo "python=3.12" "numpy>=2"
+conda workspace quickstart --no-shell -e dev "python=3.12" pytest
 conda workspace quickstart --json --name demo "python=3.12"
 ```
 
@@ -85,6 +86,20 @@ nested `init` / `add` / `install` handlers would otherwise print, and
 emits a single structured `{workspace, environment, manifest,
 specs_added, shell_spawned}` payload on stdout — safe to pipe into
 `jq`.
+
+Positional specs are added as private dependencies of the selected
+environment, including the default environment. Quickstart creates the
+environment when necessary, writes the specs below
+`[environments.<name>.dependencies]`, and installs its
+`.conda/envs/<name>` prefix. To share dependencies across environments,
+run `conda workspace init` followed by `conda workspace add` without
+`-e/--environment`.
+
+`--locked` and `--frozen` cannot be combined with positional specs.
+Adding specs changes the manifest and requires a new lock, so
+`quickstart` rejects that combination before creating or copying a
+manifest. Omit the lock mode while bootstrapping specs, then use
+`conda workspace install --locked` or `--frozen` for later installs.
 
 New workspaces inherit conda's configured channels in their existing
 order. Repeated `-c/--channel` values are prepended in command-line

@@ -38,6 +38,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- `conda workspace quickstart -e <name> <specs>` now creates the named
+  environment when needed, records the specs as private dependencies,
+  installs only that prefix, and reports the same environment in JSON.
+  This also makes specs private to the default environment instead of
+  placing them in the shared top-level `[dependencies]` table. Use
+  `conda workspace init`, then `conda workspace add` without
+  `-e/--environment`, when specs should be shared across environments.
+  `--locked` and `--frozen` with positional specs now fail
+  before writing because adding specs must regenerate `conda.lock`.
+  Remove the lock mode while bootstrapping specs, then use
+  `conda workspace install --locked` or `--frozen` for later installs.
+  (#126)
 - `conda workspace remove` now clears direct requested specs that are
   absent from the resolved manifest before installing the remaining
   dependency closure. Packages still required transitively remain

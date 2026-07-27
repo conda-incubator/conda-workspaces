@@ -750,13 +750,19 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         "--locked",
         action="store_true",
         default=False,
-        help="Install from existing lockfiles, verifying they are up-to-date.",
+        help=(
+            "Install from existing lockfiles, verifying they are up-to-date."
+            " Cannot be combined with positional package specs."
+        ),
     )
     quickstart_parser.add_argument(
         "--frozen",
         action="store_true",
         default=False,
-        help="Install from existing lockfiles without checking freshness.",
+        help=(
+            "Install from existing lockfiles without checking freshness."
+            " Cannot be combined with positional package specs."
+        ),
     )
     quickstart_parser.add_argument(
         "--copy",

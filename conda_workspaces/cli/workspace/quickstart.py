@@ -38,6 +38,7 @@ from conda.base.context import context as conda_context
 from conda.exceptions import ArgumentError
 from rich.console import Console
 
+from ...context import WorkspaceContext
 from ...exceptions import (
     ManifestExistsError,
     QuickstartCopyError,
@@ -85,7 +86,13 @@ def execute_quickstart(
             "--override-channels."
         )
     specs: list[str] = list(args.specs or [])
+    if specs and (args.locked or args.frozen):
+        raise ArgumentError(
+            "Positional package specs cannot be combined with --locked or --frozen. "
+            "Omit the lock mode to create or update conda.lock while adding specs."
+        )
     env_name: str = args.environment or "default"
+    WorkspaceContext.validate_environment_name(env_name)
     fmt: str = args.manifest_format or "conda"
 
     workspace_root = Path.cwd()
@@ -207,7 +214,7 @@ def execute_quickstart(
                         manifest_file=handler_manifest_path,
                         validation_manifest_path=manifest_path if dry_run else None,
                         specs=list(specs),
-                        environment=None,
+                        environment=env_name,
                         feature=None,
                         pypi=False,
                         no_install=False,
