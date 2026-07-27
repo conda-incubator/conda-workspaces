@@ -116,7 +116,7 @@ def test_install_flags_forwarded(
     assert recorded[0] == (force, dry_run)
 
 
-def test_install_dry_run_skips_lockfile(
+def test_install_dry_run_previews_lockfile(
     pixi_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -128,15 +128,19 @@ def test_install_dry_run_skips_lockfile(
         lambda ctx, resolved, **kw: None,
     )
 
-    lock_calls: list[dict] = []
+    lock_calls: list[tuple[dict, bool]] = []
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.sync.generate_lockfile",
-        lambda ctx, resolved_envs, **kwargs: lock_calls.append(resolved_envs),
+        lambda ctx, resolved_envs, **kwargs: lock_calls.append(
+            (resolved_envs, kwargs["dry_run"])
+        ),
     )
 
     args = make_args(_DEFAULTS, environment="default", dry_run=True)
     execute_install(args)
-    assert lock_calls == []
+    assert len(lock_calls) == 1
+    assert set(lock_calls[0][0]) == {"default"}
+    assert lock_calls[0][1] is True
 
 
 @pytest.mark.parametrize(
@@ -160,7 +164,7 @@ def test_install_frozen(
     locked_calls: list[str] = []
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.install.install_from_lockfile",
-        lambda ctx, name: locked_calls.append(name),
+        lambda ctx, name, **kwargs: locked_calls.append(name),
     )
 
     args = make_args(_DEFAULTS, environment=env_arg, frozen=True)
@@ -168,6 +172,48 @@ def test_install_frozen(
     assert result == 0
     assert set(locked_calls) == expected_names
     assert output_fragment in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["frozen", "locked", "current"],
+    ids=["frozen", "locked", "up-to-date"],
+)
+def test_install_lockfile_paths_forward_dry_run(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mode: str,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.lockfile_status",
+        lambda ctx, config: LockfileStatus(status=LockfileStatus.UP_TO_DATE),
+    )
+    calls: list[tuple[str, bool]] = []
+
+    def record_install(ctx, name, *, dry_run=False, **kwargs) -> None:
+        calls.append((name, dry_run))
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.install_from_lockfile",
+        record_install,
+    )
+    kwargs = {mode: True} if mode != "current" else {}
+
+    result = execute_install(
+        make_args(
+            _DEFAULTS,
+            environment="default",
+            dry_run=True,
+            **kwargs,
+        )
+    )
+
+    assert result == 0
+    assert calls == [("default", True)]
+    assert "Would install" in capsys.readouterr().out
 
 
 def test_install_locked_validates_freshness(
@@ -204,7 +250,7 @@ def test_install_default_uses_lockfile_when_satisfiable(
     locked_calls: list[str] = []
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.install.install_from_lockfile",
-        lambda ctx, name: locked_calls.append(name),
+        lambda ctx, name, **kwargs: locked_calls.append(name),
     )
 
     sync_calls: list[str] = []
@@ -242,7 +288,7 @@ def test_install_default_solves_when_not_satisfiable(
     locked_calls: list[str] = []
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.install.install_from_lockfile",
-        lambda ctx, name: locked_calls.append(name),
+        lambda ctx, name, **kwargs: locked_calls.append(name),
     )
 
     sync_calls: list[str] = []
@@ -322,7 +368,7 @@ def test_install_ci_mode(
     locked_calls: list[str] = []
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.install.install_from_lockfile",
-        lambda ctx, name: locked_calls.append(name),
+        lambda ctx, name, **kwargs: locked_calls.append(name),
     )
 
     args = make_args(_DEFAULTS)

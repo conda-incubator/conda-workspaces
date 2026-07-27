@@ -60,6 +60,7 @@ def execute_archive(
     if console is None:
         console = Console(highlight=False)
 
+    dry_run = bool(getattr(args, "dry_run", False))
     if args.lock:
         status.message(
             console,
@@ -76,13 +77,16 @@ def execute_archive(
         bundle=args.bundle,
         exclude=tuple(args.exclude or ()),
         receipt=getattr(args, "receipt", None),
+        dry_run=dry_run,
     )
 
     if args.lock:
-        status.message(console, "Updated", "lockfile", "conda.lock")
-    status.message(console, "Created", "archive", str(archive.path))
+        action = "Would update" if dry_run else "Updated"
+        status.message(console, action, "lockfile", "conda.lock")
+    action = "Would create" if dry_run else "Created"
+    status.message(console, action, "archive", str(archive.path))
     if archive.receipt_path is not None:
-        status.message(console, "Created", "receipt", str(archive.receipt_path))
+        status.message(console, action, "receipt", str(archive.receipt_path))
     return 0
 
 
@@ -124,6 +128,7 @@ def execute_unarchive(
     if console is None:
         console = Console(highlight=False)
 
+    dry_run = bool(getattr(args, "dry_run", False))
     if getattr(args, "prefix", None) is not None and not args.install:
         raise ArchiveError(
             "--prefix requires --install.",
@@ -139,9 +144,11 @@ def execute_unarchive(
         args.archive_path,
         receipt=getattr(args, "receipt", None),
     )
+
+    preparing = "Inspecting" if dry_run else "Extracting"
     status.message(
         console,
-        "Extracting",
+        preparing,
         "archive",
         str(archive.path.name),
         style="bold blue",
@@ -157,17 +164,20 @@ def execute_unarchive(
             require_sha256=getattr(args, "require_sha256", False),
             prime_cache=not args.no_install,
             install_handler=install_from_archive_cli(console),
+            dry_run=dry_run,
         )
     else:
         result = archive.extract(
             target=args.target,
             require_sha256=getattr(args, "require_sha256", False),
             prime_cache=not args.no_install,
+            dry_run=dry_run,
         )
 
     if result.verified:
         status.message(console, "Verified", "archive", str(archive.path.name))
-    status.message(console, "Extracted", "archive", str(result.target))
+    action = "Would extract" if dry_run else "Extracted"
+    status.message(console, action, "archive", str(result.target))
     if result.verified:
         status.message(console, "Verified", "receipt", str(result.receipt_path))
 
@@ -176,7 +186,16 @@ def execute_unarchive(
             f"  Archive includes {result.info['package_count']} bundled packages"
         )
         if result.cache_priming_skipped:
-            console.print("  Skipping package cache priming without verified receipt")
+            action = "Would skip" if dry_run else "Skipping"
+            console.print(f"  {action} package cache priming without verified receipt")
+        elif dry_run and not args.no_install:
+            status.message(
+                console,
+                "Would prime",
+                "packages",
+                str(result.primed_packages),
+                detail="into conda cache",
+            )
         elif result.primed_packages > 0:
             status.message(
                 console,
@@ -187,6 +206,10 @@ def execute_unarchive(
             )
 
     if args.install:
+        if dry_run:
+            name = getattr(args, "environment", None) or "workspace environments"
+            status.message(console, "Would install", "environment", name)
+            return 0
         if (
             result.return_code == 0
             and result.install_prefix is not None

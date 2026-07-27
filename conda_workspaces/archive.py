@@ -10,12 +10,15 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import importlib
+import os
+import posixpath
 import shutil
 import subprocess
 import tarfile
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
+from io import BytesIO
 from os.path import expanduser
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING
@@ -27,13 +30,25 @@ from .exceptions import (
     ArchiveError,
     ArchiveHashMismatchError,
     ArchivePathTraversalError,
+    LockfileNotFoundError,
+    LockfileStaleError,
+    WorkspaceParseError,
 )
+from .lockfile import load_lockfile_data
 from .manifests import find_parser
-from .paths import has_absolute_path_syntax, is_path_segment, parse_relative_posix_path
+from .models import LockfileStatus
+from .paths import (
+    has_absolute_path_syntax,
+    is_path_segment,
+    output_paths_collide,
+    parse_relative_posix_path,
+    validate_directory_output,
+    validate_file_output,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-    from typing import Any
+    from typing import Any, BinaryIO
 
     from .context import WorkspaceContext
     from .models import ArchiveConfig
@@ -198,21 +213,63 @@ class WorkspaceArchive:
         bundle: bool = False,
         exclude: tuple[str, ...] = (),
         receipt: bool | str | Path | None = None,
+        dry_run: bool = False,
     ) -> WorkspaceArchive:
-        """Create an archive for *workspace* and return its handle."""
+        """Create an archive for *workspace* and return its handle.
+
+        When *dry_run* is true, all inputs are resolved and validated without
+        writing the lockfile, archive, receipt, or package cache.
+        """
         from .context import WorkspaceContext
-        from .lockfile import generate_lockfile, lockfile_path
-        from .manifests import detect_and_parse
+        from .lockfile import lockfile_path, render_lockfile
+        from .manifests import clear_workspace_manifest_caches, detect_and_parse
         from .models import ArchiveConfig
 
+        clear_workspace_manifest_caches()
         _, config = detect_and_parse(workspace)
         ctx = WorkspaceContext(config)
+        lock_path = lockfile_path(ctx)
+        manifest_path = Path(config.manifest_path)
+        if manifest_path.is_symlink():
+            raise ArchiveError(
+                "Cannot archive workspace manifest: symbolic links are not supported.",
+                hints=[
+                    f"Replace {manifest_path} with a regular file before archiving."
+                ],
+            )
+        lock_source: Path | list[dict] = lock_path
+        lock_data: object | None = None
+        lock_content: str | None = None
 
         if lock:
+            if output_paths_collide(lock_path, manifest_path):
+                raise ArchiveError(
+                    "The workspace lockfile cannot overwrite the workspace manifest."
+                )
+            if lock_path.is_symlink():
+                raise ArchiveError(
+                    "Cannot archive workspace lockfile: symbolic links are not"
+                    " supported.",
+                    hints=[
+                        f"Replace {lock_path} with a regular file before archiving."
+                    ],
+                )
             from .resolver import resolve_all_environments
 
             resolved_envs = resolve_all_environments(config, ctx.platform)
-            generate_lockfile(ctx, resolved_envs, config=config)
+            lock_content = render_lockfile(
+                ctx,
+                resolved_envs,
+                config=config,
+                dry_run=dry_run,
+            )
+            lock_data = load_lockfile_data(lock_content)
+            lock_source = lock_data.get("packages", []) or []
+        elif lock_path.is_symlink():
+            raise ArchiveError(
+                "Cannot archive workspace lockfile: symbolic links are not supported.",
+                hints=[f"Replace {lock_path} with a regular file before archiving."],
+            )
 
         archive_config = ArchiveConfig(
             include=config.archive.include,
@@ -220,11 +277,43 @@ class WorkspaceArchive:
             compression=config.archive.compression,
             compression_level=config.archive.compression_level,
         )
-        output_path = cls.default_output_path(ctx, output)
-        archive = cls(output_path, receipt=receipt)
+        requested_output_path = (
+            cls.default_output_path(ctx, output).expanduser().absolute()
+        )
+        if requested_output_path.is_symlink():
+            raise ArchiveError("The archive output cannot be a symbolic link.")
+        archive = cls(requested_output_path, receipt=receipt)
+        output_path = archive.path
         receipt_path = archive.receipt_path
-        manifest_path = Path(config.manifest_path)
-        lock_path = lockfile_path(ctx)
+        extra_files = (lock_path,) if lock else ()
+
+        protected_paths = {
+            "workspace manifest": manifest_path,
+            "workspace lockfile": lock_path,
+        }
+        output_paths = {"archive output": output_path}
+        if receipt_path is not None:
+            output_paths["receipt output"] = receipt_path
+        for output_label, candidate in output_paths.items():
+            if candidate.is_symlink():
+                raise ArchiveError(f"The {output_label} cannot be a symbolic link.")
+            for protected_label, protected in protected_paths.items():
+                if output_paths_collide(candidate, protected):
+                    raise ArchiveError(
+                        f"The {output_label} cannot overwrite the {protected_label}."
+                    )
+
+        validate_file_output(output_path)
+        if lock:
+            validate_file_output(lock_path)
+        if receipt_path is not None:
+            validate_file_output(receipt_path)
+        with open_tar_for_write(
+            BytesIO(),
+            detect_compression(output_path),
+            archive_config.compression_level,
+        ):
+            pass
 
         if receipt_path is not None:
             archive.validate_receipt_inputs(
@@ -234,29 +323,79 @@ class WorkspaceArchive:
                 manifest_path=manifest_path,
                 lockfile_path=lock_path,
                 receipt_path=receipt_path,
+                extra_files=extra_files,
+            )
+            if lock_data is None:
+                lock_data = load_lockfile_data(lock_path.read_bytes())
+            from .receipts import ReceiptInventory
+
+            ReceiptInventory.from_lockfile_data(
+                lock_data,
+                environment_prefixes=receipt_environment_prefixes(
+                    config_environments=list(config.environments),
+                    ctx_root=ctx.root,
+                    env_prefix=ctx.env_prefix,
+                ),
             )
 
         bundle_packages = None
         if bundle:
             from conda.base.context import context as conda_context
 
-            if not lock_path.is_file():
+            if not lock and not lock_path.is_file():
                 raise ArchiveError(
                     "Cannot bundle packages: no conda.lock found.",
                     hints=["Run 'conda workspace lock' first."],
                 )
             cache_dirs = [Path(d) for d in conda_context.pkgs_dirs]
-            bundle_packages = collect_bundle_packages(lock_path, cache_dirs)
-            verify_package_hashes(bundle_packages, lock_path)
+            bundle_packages = collect_bundle_packages(lock_source, cache_dirs)
+            for package in bundle_packages:
+                if package.is_symlink() or not package.is_file():
+                    raise ArchiveError(
+                        f"Cannot bundle package: {package} is not a regular file."
+                    )
+                for output_label, candidate in output_paths.items():
+                    if output_paths_collide(candidate, package):
+                        raise ArchiveError(
+                            f"The {output_label} cannot overwrite a bundled package."
+                        )
+            verify_package_hashes(bundle_packages, lock_source)
 
-        archive_path = create_archive(
-            ctx.root,
-            output_path,
-            archive_config,
-            bundle_packages=bundle_packages,
+        previous_lock = (
+            lock_path.read_bytes()
+            if lock_content is not None and lock_path.exists()
+            else None
         )
+        try:
+            if lock_content is not None and not dry_run:
+                lock_path.parent.mkdir(parents=True, exist_ok=True)
+                lock_path.write_text(lock_content, encoding="utf-8")
+            archive_path = create_archive(
+                ctx.root,
+                output_path,
+                archive_config,
+                bundle_packages=bundle_packages,
+                extra_files=extra_files,
+                regular_members=(
+                    manifest_path.relative_to(ctx.root).as_posix(),
+                    lock_path.relative_to(ctx.root).as_posix(),
+                ),
+                virtual_regular_members=(
+                    (lock_path.relative_to(ctx.root).as_posix(),)
+                    if lock and not lock_path.exists()
+                    else ()
+                ),
+                dry_run=dry_run,
+            )
+        except BaseException:
+            if lock_content is not None and not dry_run:
+                if previous_lock is None:
+                    lock_path.unlink(missing_ok=True)
+                else:
+                    lock_path.write_bytes(previous_lock)
+            raise
 
-        if receipt_path is not None:
+        if receipt_path is not None and not dry_run:
             receipt_obj = cls.build_receipt(
                 ctx=ctx,
                 archive_path=archive_path,
@@ -305,9 +444,10 @@ class WorkspaceArchive:
         manifest_path: Path,
         lockfile_path: Path,
         receipt_path: Path,
+        extra_files: tuple[Path, ...] = (),
     ) -> None:
         """Validate inputs required to write a receipt for a new archive."""
-        if receipt_path.resolve() == output.resolve():
+        if output_paths_collide(receipt_path, output):
             raise ArchiveError(
                 "Receipt path cannot be the archive path.",
                 hints=["Choose a separate JSON path for --receipt."],
@@ -316,15 +456,42 @@ class WorkspaceArchive:
             raise ArchiveError(
                 "Cannot write receipt: workspace manifest was not found."
             )
-        if not lockfile_path.is_file():
+        if not lockfile_path.is_file() and lockfile_path not in extra_files:
             raise ArchiveError(
                 "Cannot write receipt: no conda.lock found.",
                 hints=["Run 'conda workspace lock' first."],
             )
 
+        from .receipts import ArchiveReceipt
+
+        subject_names = (
+            output.name,
+            ArchiveReceipt.archive_name(root, manifest_path),
+            ArchiveReceipt.archive_name(root, lockfile_path),
+        )
+        if len(set(subject_names)) != len(subject_names):
+            raise ArchiveError(
+                "Cannot write receipt: archive subjects would have duplicate names."
+            )
+
+        archive_files = collect_archive_files(
+            root,
+            archive_config,
+            extra_files=extra_files,
+        )
+        receipt_identity = receipt_path.resolve(strict=False)
+        archive_files = [
+            path
+            for path in archive_files
+            if path.resolve(strict=False) != receipt_identity
+        ]
+        if any(output_paths_collide(receipt_path, path) for path in archive_files):
+            raise ArchiveError(
+                "Receipt output cannot overwrite an archived workspace input."
+            )
         archive_members = {
             path.relative_to(root).as_posix()
-            for path in collect_archive_files(root, archive_config)
+            for path in archive_files
             if path.resolve() != output.resolve()
         }
         required_members: dict[str, Path] = {
@@ -414,11 +581,44 @@ class WorkspaceArchive:
         require_sha256: bool = False,
         prime_cache: bool = True,
         package_cache: str | Path | None = None,
+        dry_run: bool = False,
     ) -> WorkspaceArchiveExtractResult:
         """Extract the archive and optionally prime bundled package cache files."""
+        return self._extract(
+            target=target,
+            require_sha256=require_sha256,
+            prime_cache=prime_cache,
+            package_cache=package_cache,
+            dry_run=dry_run,
+        )
+
+    def _extract(
+        self,
+        *,
+        target: str | Path | None,
+        require_sha256: bool,
+        prime_cache: bool,
+        package_cache: str | Path | None,
+        dry_run: bool,
+        validate_workspace: Callable[[Path, ArchiveReceipt | None], None] | None = None,
+    ) -> WorkspaceArchiveExtractResult:
+        """Stage, validate, and optionally promote an archive workspace."""
+        requested_target = (
+            Path(target).expanduser() if target is not None else self.default_target()
+        )
+        target_path = requested_target.resolve()
+        target_existed = target_path.exists()
+        target_identity = None
+        target_timestamps = None
+        if target_existed:
+            target_stat = target_path.stat()
+            target_identity = (target_stat.st_dev, target_stat.st_ino)
+            target_timestamps = (target_stat.st_atime_ns, target_stat.st_mtime_ns)
+        ensure_extract_target_empty(requested_target)
+        validate_directory_output(requested_target)
+
         if require_sha256 and self.receipt_path is None:
             raise ArchiveError("--require-sha256 requires --receipt.")
-
         archive_path = self.require_existing_archive()
         info = inspect_archive(archive_path)
         if not info["has_manifest"]:
@@ -426,45 +626,146 @@ class WorkspaceArchive:
                 "Not a workspace archive: no manifest found.",
                 hints=["This does not appear to be a conda workspace archive."],
             )
-
-        target_path = (
-            Path(target).expanduser() if target is not None else self.default_target()
-        )
         receipt = self.verify() if self.receipt_path is not None else None
-        if receipt is None:
-            extracted = extract_archive(archive_path, target_path)
-        else:
-            extracted = extract_verified_archive(
-                archive_path,
-                target_path,
-                receipt,
-                require_sha256=require_sha256,
-            )
+        if receipt is not None:
+            with open_tar(archive_path) as tar:
+                for label, name in zip(
+                    ("workspace manifest", "workspace lockfile"),
+                    receipt.workspace_paths,
+                    strict=True,
+                ):
+                    try:
+                        member = tar.getmember(name)
+                    except KeyError:
+                        raise ArchiveError(
+                            f"Receipt {label} is missing from the archive."
+                        ) from None
+                    if not member.isreg():
+                        raise ArchiveError(
+                            f"Receipt {label} is not a regular archive member."
+                        )
 
-        primed_packages = 0
-        cache_priming_skipped = False
-        if info["has_packages"] and prime_cache:
-            if receipt is None:
-                cache_priming_skipped = True
-            else:
+        temporary_parent = None
+        if not dry_run:
+            temporary_parent = target_path.parent
+            while not temporary_parent.exists():
+                temporary_parent = temporary_parent.parent
+        with tempfile.TemporaryDirectory(
+            prefix="conda-workspaces-",
+            dir=temporary_parent,
+        ) as temporary:
+            staged = extract_archive(archive_path, Path(temporary) / "workspace")
+            if receipt is not None:
+                receipt.verify_extracted(staged, require_sha256=require_sha256)
+            cache_priming_skipped = bool(
+                info["has_packages"] and prime_cache and receipt is None
+            )
+            cache_plan: list[tuple[str, Path]] = []
+            if info["has_packages"] and prime_cache and receipt is not None:
                 if package_cache is None:
                     from conda.base.context import context as conda_context
 
-                    package_cache = conda_context.pkgs_dirs[0]
-                primed_packages = prime_package_cache(
-                    extracted,
-                    Path(package_cache),
-                    verified=True,
-                )
+                    cache_path = Path(conda_context.pkgs_dirs[0])
+                else:
+                    cache_path = Path(package_cache)
+                if cache_path.resolve().is_relative_to(target_path):
+                    raise ArchiveError(
+                        "Package cache must be outside the archive extraction target.",
+                        hints=["Choose a package cache in a separate directory."],
+                    )
+                validate_directory_output(cache_path)
 
-        return WorkspaceArchiveExtractResult(
-            target=extracted,
-            receipt_path=self.receipt_path,
-            verified=receipt is not None,
-            info=info,
-            primed_packages=primed_packages,
-            cache_priming_skipped=cache_priming_skipped,
-        )
+                packages = sorted(
+                    path
+                    for suffix in CONDA_PACKAGE_SUFFIXES
+                    for path in (staged / "packages").glob(f"*{suffix}")
+                )
+                verify_package_hashes(packages, staged / "conda.lock")
+                for package in packages:
+                    destination = cache_path / package.name
+                    if destination.is_symlink():
+                        raise ArchiveError(
+                            "Package cache destinations cannot be symbolic links."
+                        )
+                    validate_file_output(destination)
+                    if destination.exists():
+                        expected = file_sha256(package)
+                        actual = file_sha256(destination)
+                        if actual != expected:
+                            raise ArchiveHashMismatchError(
+                                package.name,
+                                expected=expected,
+                                actual=actual,
+                            )
+                        continue
+                    cache_plan.append((package.name, destination))
+
+            if validate_workspace is not None:
+                validate_workspace(staged, receipt)
+
+            primed_packages = len(cache_plan)
+            if dry_run:
+                extracted = target_path
+            else:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                if requested_target.resolve() != target_path:
+                    raise ArchiveError(
+                        "Extraction target changed while the archive was staged."
+                    )
+                if target_existed:
+                    try:
+                        target_stat = target_path.lstat()
+                    except FileNotFoundError:
+                        target_stat = None
+                    if (
+                        target_stat is None
+                        or (target_stat.st_dev, target_stat.st_ino) != target_identity
+                    ):
+                        raise ArchiveError(
+                            "Extraction target changed while the archive was staged."
+                        )
+                    assert target_timestamps is not None
+                    ensure_extract_target_empty(target_path)
+                    moved: list[Path] = []
+                    try:
+                        for child in staged.iterdir():
+                            destination = target_path / child.name
+                            child.rename(destination)
+                            moved.append(destination)
+                    except BaseException:
+                        for destination in reversed(moved):
+                            destination.rename(staged / destination.name)
+                        raise
+                    finally:
+                        if os.utime in os.supports_follow_symlinks:
+                            os.utime(
+                                target_path,
+                                ns=target_timestamps,
+                                follow_symlinks=False,
+                            )
+                        else:
+                            os.utime(target_path, ns=target_timestamps)
+                    staged.rmdir()
+                else:
+                    if target_path.exists() or target_path.is_symlink():
+                        raise ArchiveError(
+                            "Extraction target changed while the archive was staged."
+                        )
+                    staged.rename(target_path)
+                extracted = target_path
+                for name, destination in cache_plan:
+                    if not destination.exists():
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(extracted / "packages" / name, destination)
+
+            return WorkspaceArchiveExtractResult(
+                target=extracted,
+                receipt_path=self.receipt_path,
+                verified=receipt is not None,
+                info=info,
+                primed_packages=primed_packages,
+                cache_priming_skipped=cache_priming_skipped,
+            )
 
     def install(
         self,
@@ -478,8 +779,13 @@ class WorkspaceArchive:
         package_cache: str | Path | None = None,
         install_handler: Callable[[Path, str | None, Path | None, str | None], int]
         | None = None,
+        dry_run: bool = False,
     ) -> WorkspaceArchiveInstallResult:
-        """Extract the archive and install environments from its lockfile."""
+        """Extract the archive and install environments from its lockfile.
+
+        When *dry_run* is true, archive and install inputs are validated
+        without extracting files or changing an environment prefix.
+        """
         final_prefix = str(prefix) if prefix is not None else None
         if final_prefix is not None and not environment:
             raise ArchiveError(
@@ -502,13 +808,6 @@ class WorkspaceArchive:
                     hints=["Pass an absolute runtime prefix such as /opt/runtime."],
                 )
 
-        extract_result = self.extract(
-            target=target,
-            require_sha256=require_sha256,
-            prime_cache=prime_cache,
-            package_cache=package_cache,
-        )
-
         install_prefix = Path(final_prefix) if final_prefix is not None else None
         runtime_prefix = None
         if final_prefix is not None:
@@ -519,19 +818,92 @@ class WorkspaceArchive:
             elif str(install_prefix) != final_prefix:
                 runtime_prefix = final_prefix
 
-        self.resolve_extracted_manifest(extract_result.target)
-        handler = install_handler or self.install_from_lockfile
-        return_code = handler(
-            extract_result.target,
-            environment,
-            install_prefix,
-            runtime_prefix,
+        if install_prefix is not None:
+            validate_directory_output(install_prefix)
+
+        def validate_workspace(
+            workspace: Path,
+            receipt: ArchiveReceipt | None,
+        ) -> None:
+            from .context import WorkspaceContext
+            from .lockfile import install_from_lockfile, lockfile_status
+            from .manifests import clear_workspace_manifest_caches, detect_and_parse
+
+            manifest_path = self.resolve_extracted_manifest(workspace)
+            lock_path = workspace / "conda.lock"
+            if lock_path.is_symlink() or not lock_path.is_file():
+                raise ArchiveError(
+                    "Cannot install from archive: no conda.lock found.",
+                    hints=["Create the archive with a conda.lock file."],
+                )
+            if receipt is not None and receipt.workspace_paths != (
+                manifest_path.name,
+                "conda.lock",
+            ):
+                raise ArchiveError(
+                    "Cannot install from archive: the receipt must bind the selected"
+                    " root manifest and conda.lock."
+                )
+
+            clear_workspace_manifest_caches()
+            load_yaml.cache_clear()
+            _, config = detect_and_parse(manifest_path)
+            ctx = WorkspaceContext(config)
+            try:
+                status = lockfile_status(ctx, config)
+            except Exception as exc:
+                raise ArchiveError(
+                    "Cannot parse workspace lockfile: conda.lock"
+                ) from exc
+            if status.status == LockfileStatus.OUT_OF_DATE:
+                raise LockfileStaleError(
+                    manifest_path,
+                    lock_path,
+                    reason=status.reason,
+                )
+            if status.status == LockfileStatus.MISSING:
+                raise LockfileNotFoundError("(all)", lock_path)
+
+            names = (
+                [environment] if environment is not None else list(config.environments)
+            )
+            for name in names:
+                config.get_environment(name)
+                install_from_lockfile(
+                    ctx,
+                    name,
+                    prefix=install_prefix if environment is not None else None,
+                    target_prefix_override=(
+                        runtime_prefix if environment is not None else None
+                    ),
+                    dry_run=True,
+                )
+
+        extract_result = self._extract(
+            target=target,
+            require_sha256=require_sha256,
+            prime_cache=prime_cache,
+            package_cache=package_cache,
+            dry_run=dry_run,
+            validate_workspace=validate_workspace,
         )
+
+        if dry_run:
+            return_code = 0
+        else:
+            handler = install_handler or self.install_from_lockfile
+            return_code = handler(
+                extract_result.target,
+                environment,
+                install_prefix,
+                runtime_prefix,
+            )
 
         prefix_matches: tuple[Path, ...] = ()
         prefix_matches_truncated = False
         if (
             return_code == 0
+            and not dry_run
             and install_prefix is not None
             and runtime_prefix is not None
         ):
@@ -562,7 +934,13 @@ class WorkspaceArchive:
         candidates = []
         for filename in MANIFEST_FILENAMES:
             path = workspace / filename
-            if path.is_file() and find_parser(path).has_workspace(path):
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                find_parser(path).parse(path)
+            except WorkspaceParseError:
+                continue
+            else:
                 candidates.append(path)
 
         if not candidates:
@@ -593,7 +971,10 @@ class WorkspaceArchive:
         """Install workspace environments from ``conda.lock`` without the CLI."""
         from .context import WorkspaceContext
         from .lockfile import install_from_lockfile
-        from .manifests import detect_and_parse
+        from .manifests import clear_workspace_manifest_caches, detect_and_parse
+
+        clear_workspace_manifest_caches()
+        load_yaml.cache_clear()
 
         _, config = detect_and_parse(
             WorkspaceArchive.resolve_extracted_manifest(workspace)
@@ -708,30 +1089,6 @@ def receipt_environment_prefixes(
     return prefixes
 
 
-def extract_verified_archive(
-    archive_path: Path,
-    target: Path,
-    receipt: ArchiveReceipt,
-    *,
-    require_sha256: bool = False,
-) -> Path:
-    """Extract to a staging directory, verify, then move into *target*."""
-    ensure_extract_target_empty(target)
-    target = target.resolve()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    staged = Path(tempfile.mkdtemp(prefix=f".{target.name}.verify-", dir=target.parent))
-    try:
-        extract_archive(archive_path, staged)
-        receipt.verify_extracted(staged, require_sha256=require_sha256)
-        if target.exists():
-            target.rmdir()
-        staged.rename(target)
-    except BaseException:
-        shutil.rmtree(staged, ignore_errors=True)
-        raise
-    return target
-
-
 def parse_relative_archive_path(
     path: str,
     *,
@@ -812,20 +1169,28 @@ def matches_patterns(rel_path: str, patterns: tuple[str, ...]) -> bool:
 def collect_archive_files(
     root: Path,
     archive_config: ArchiveConfig,
+    *,
+    extra_files: tuple[Path, ...] = (),
 ) -> list[Path]:
     """Collect workspace files eligible for archiving.
 
     In git repos, only tracked files are included. Otherwise all files
-    under *root* are considered, filtered by builtin and user excludes.
+    under *root* are considered. *extra_files* are also considered even
+    when they are untracked or not written yet. Builtin and user filters
+    apply to every candidate.
     """
     if is_git_repo(root):
         candidates = git_tracked_files(root)
     else:
         candidates = [p for p in root.rglob("*") if p.is_file()]
+    candidates.extend(extra_files)
 
     result: list[Path] = []
-    for path in candidates:
-        rel = path.relative_to(root).as_posix()
+    for path in set(candidates):
+        try:
+            rel = path.relative_to(root).as_posix()
+        except ValueError:
+            continue
         if is_excluded_by_builtins(rel):
             continue
         if archive_config.include and not matches_patterns(rel, archive_config.include):
@@ -872,9 +1237,11 @@ def zstd_module() -> Any:
 
 @contextmanager
 def open_tar_for_write(
-    output: Path, compression: str, compression_level: int | None
+    output: Path | BinaryIO,
+    compression: str,
+    compression_level: int | None,
 ) -> Iterator[tarfile.TarFile]:
-    """Open a tar archive for writing, optionally setting compression level."""
+    """Open a tar archive path or binary stream for writing."""
     if compression == "zst" and not tarfile_supports_zstd():
         with zstd_module().open(output, "wb", level=compression_level) as compressed:
             with tarfile.open(fileobj=compressed, mode="w:") as tf:
@@ -885,7 +1252,12 @@ def open_tar_for_write(
     kwargs = {}
     if compression_level is not None:
         kwargs["compresslevel"] = compression_level
-    with tarfile.open(output, mode, **kwargs) as tf:  # ty: ignore[no-matching-overload]
+    target = {"name": output} if isinstance(output, Path) else {"fileobj": output}
+    with tarfile.open(
+        mode=mode,
+        **target,
+        **kwargs,
+    ) as tf:  # ty: ignore[no-matching-overload]
         yield tf
 
 
@@ -895,6 +1267,10 @@ def create_archive(
     archive_config: ArchiveConfig,
     *,
     bundle_packages: list[Path] | None = None,
+    extra_files: tuple[Path, ...] = (),
+    regular_members: tuple[str, ...] = (),
+    virtual_regular_members: tuple[str, ...] = (),
+    dry_run: bool = False,
 ) -> Path:
     """Create a tar archive of the workspace at *root*.
 
@@ -902,39 +1278,153 @@ def create_archive(
     If *bundle_packages* is provided, the listed conda package archives
     are added under a ``packages/`` prefix inside the archive.
     """
-    output = output.resolve()
+    output = output.expanduser().absolute()
+    if output.is_symlink():
+        raise ArchiveError("Archive output cannot be a symbolic link.")
+    for package in bundle_packages or ():
+        if output_paths_collide(output, package):
+            raise ArchiveError(
+                "Archive output cannot overwrite a bundled package input."
+            )
+
+    files = collect_archive_files(root, archive_config, extra_files=extra_files)
+    files = exclude_archive_output(files, output)
+    validate_archive_members_for_create(
+        root=root,
+        files=files,
+        bundle_packages=bundle_packages,
+        regular_members=frozenset(regular_members),
+        virtual_regular_members=frozenset(virtual_regular_members),
+    )
+
+    if dry_run:
+        return output
+
     output.parent.mkdir(parents=True, exist_ok=True)
-
-    files = collect_archive_files(root, archive_config)
-    files = [f for f in files if f.resolve() != output]
-
     compression = detect_compression(output)
 
     with open_tar_for_write(
         output, compression, archive_config.compression_level
     ) as tf:
-        add_files_to_tar(tf, root, files)
+        add_files_to_tar(
+            tf,
+            root,
+            files,
+            regular_members=frozenset(regular_members),
+        )
         if bundle_packages:
             add_packages_to_tar(tf, bundle_packages)
 
     return output
 
 
-def add_files_to_tar(tf: tarfile.TarFile, root: Path, files: list[Path]) -> None:
+def exclude_archive_output(files: list[Path], output: Path) -> list[Path]:
+    """Exclude *output* while rejecting physical aliases among workspace inputs."""
+    result = []
+    for path in files:
+        if path.resolve() == output.resolve():
+            continue
+        if output_paths_collide(path, output):
+            raise ArchiveError(
+                "Archive output cannot overwrite a hardlinked workspace input."
+            )
+        result.append(path)
+    return result
+
+
+def validate_archive_members_for_create(
+    *,
+    root: Path,
+    files: list[Path],
+    bundle_packages: list[Path] | None = None,
+    regular_members: frozenset[str] = frozenset(),
+    virtual_regular_members: frozenset[str] = frozenset(),
+) -> None:
+    """Validate the complete member topology before creating an archive.
+
+    *virtual_regular_members* represents generated files that do not exist
+    during a dry run.
+    """
+    members: list[tarfile.TarInfo] = []
+    with tarfile.open(fileobj=BytesIO(), mode="w:") as tf:
+        for path in files:
+            arcname = path.relative_to(root).as_posix()
+            if arcname in virtual_regular_members and not path.exists():
+                member = tarfile.TarInfo(arcname)
+                member.type = tarfile.REGTYPE
+            else:
+                dereference = tf.dereference
+                tf.dereference = arcname in regular_members
+                try:
+                    member = tf.gettarinfo(str(path), arcname=arcname)
+                finally:
+                    tf.dereference = dereference
+                if member is None:
+                    raise ArchiveError(f"Cannot archive unsupported file: {path}")
+            members.append(member)
+
+        for package in bundle_packages or ():
+            if package.is_symlink() or not package.is_file():
+                raise ArchiveError(
+                    f"Cannot bundle package: {package} is not a regular file."
+                )
+            dereference = tf.dereference
+            tf.dereference = True
+            try:
+                member = tf.gettarinfo(
+                    str(package),
+                    arcname=f"packages/{package.name}",
+                )
+            finally:
+                tf.dereference = dereference
+            if member is None:
+                raise ArchiveError(
+                    f"Cannot bundle package: {package} is not a regular file."
+                )
+            members.append(member)
+
+    validate_tar_members(members)
+
+
+def add_files_to_tar(
+    tf: tarfile.TarFile,
+    root: Path,
+    files: list[Path],
+    *,
+    regular_members: frozenset[str] = frozenset(),
+) -> None:
     """Add workspace *files* to the tar, using paths relative to *root*."""
     for path in files:
         arcname = path.relative_to(root).as_posix()
-        tf.add(str(path), arcname=arcname)
+        if arcname in regular_members:
+            dereference = tf.dereference
+            tf.dereference = True
+            try:
+                tf.add(str(path), arcname=arcname)
+            finally:
+                tf.dereference = dereference
+        else:
+            tf.add(str(path), arcname=arcname)
 
 
 def add_packages_to_tar(tf: tarfile.TarFile, packages: list[Path]) -> None:
     """Add conda package archives under the ``packages/`` archive prefix."""
     for pkg in packages:
+        if pkg.is_symlink() or not pkg.is_file():
+            raise ArchiveError(f"Cannot bundle package: {pkg} is not a regular file.")
         arcname = f"packages/{pkg.name}"
-        tf.add(str(pkg), arcname=arcname)
+        dereference = tf.dereference
+        tf.dereference = True
+        try:
+            tf.add(str(pkg), arcname=arcname)
+        finally:
+            tf.dereference = dereference
 
 
-def validate_tar_member(member: tarfile.TarInfo, target: Path) -> None:
+def validate_tar_member(
+    member: tarfile.TarInfo,
+    target: Path | None = None,
+) -> None:
     """Raise :class:`ArchivePathTraversalError` if *member* escapes *target*.
 
     Checks for disallowed file types (device nodes, FIFOs, etc.),
@@ -948,11 +1438,12 @@ def validate_tar_member(member: tarfile.TarInfo, target: Path) -> None:
     except ValueError:
         raise ArchivePathTraversalError(member.name) from None
 
-    try:
-        resolved = target.joinpath(*member_path.parts).resolve()
-        resolved.relative_to(target.resolve())
-    except ValueError:
-        raise ArchivePathTraversalError(member.name)
+    if target is not None:
+        try:
+            resolved = target.joinpath(*member_path.parts).resolve()
+            resolved.relative_to(target.resolve())
+        except ValueError:
+            raise ArchivePathTraversalError(member.name)
 
     if member.issym() or member.islnk():
         try:
@@ -962,14 +1453,72 @@ def validate_tar_member(member: tarfile.TarInfo, target: Path) -> None:
             )
         except ValueError:
             raise ArchivePathTraversalError(member.name) from None
-        resolved_link = target.joinpath(
-            *member_path.parent.parts,
-            *link_target.parts,
-        ).resolve()
+
+        base = member_path.parent if member.issym() else PurePosixPath()
+        normalized_link = posixpath.normpath((base / link_target).as_posix())
         try:
-            resolved_link.relative_to(target.resolve())
+            normalized_path = parse_relative_archive_path(normalized_link)
         except ValueError:
             raise ArchivePathTraversalError(member.name)
+
+        if target is not None:
+            resolved_link = target.joinpath(*normalized_path.parts).resolve()
+            try:
+                resolved_link.relative_to(target.resolve())
+            except ValueError:
+                raise ArchivePathTraversalError(member.name)
+
+
+def validate_tar_members(
+    members: list[tarfile.TarInfo],
+    target: Path | None = None,
+) -> None:
+    """Validate the paths and extraction topology of all archive *members*."""
+    seen: dict[tuple[str, ...], tuple[PurePosixPath, tarfile.TarInfo]] = {}
+    materialized_files: set[PurePosixPath] = set()
+
+    for member in members:
+        validate_tar_member(member, target)
+        member_path = parse_relative_archive_path(member.name)
+        path_parts = member_path.parts
+        if path_parts in seen:
+            raise ArchiveError(f"Archive contains duplicate member: {member.name}")
+
+        for size in range(len(path_parts) - 1, 0, -1):
+            parent = seen.get(path_parts[:size])
+            if parent is not None and not parent[1].isdir():
+                raise ArchiveError(
+                    f"Archive member '{member.name}' is nested under"
+                    f" non-directory member '{parent[0].as_posix()}'."
+                )
+
+        if not member.isdir():
+            descendant = next(
+                (
+                    path
+                    for key, (path, _) in seen.items()
+                    if key[: len(path_parts)] == path_parts
+                    and len(key) > len(path_parts)
+                ),
+                None,
+            )
+            if descendant is not None:
+                raise ArchiveError(
+                    f"Archive member '{member.name}' conflicts with"
+                    f" nested member '{descendant.as_posix()}'."
+                )
+
+        if member.islnk():
+            link_path = parse_relative_archive_path(posixpath.normpath(member.linkname))
+            if link_path not in materialized_files:
+                raise ArchiveError(
+                    f"Archive hardlink '{member.name}' refers to an"
+                    " unavailable earlier file."
+                )
+
+        seen[path_parts] = (member_path, member)
+        if member.isreg() or member.islnk():
+            materialized_files.add(member_path)
 
 
 @contextmanager
@@ -1018,12 +1567,11 @@ def extract_archive(archive_path: Path, target: Path) -> Path:
     """
     ensure_extract_target_empty(target)
     target = target.resolve()
-    target.mkdir(parents=True, exist_ok=True)
 
     with open_tar(archive_path) as tf:
         members = tf.getmembers()
-        for member in members:
-            validate_tar_member(member, target)
+        validate_tar_members(members, target)
+        target.mkdir(parents=True, exist_ok=True)
         if hasattr(tarfile, "data_filter"):
             tf.extractall(path=target, members=members, filter="data")
         else:
@@ -1034,7 +1582,7 @@ def extract_archive(archive_path: Path, target: Path) -> Path:
 
 def parse_lockfile_packages(lockfile_path: Path) -> list[dict]:
     """Parse the ``packages`` list from a conda lockfile."""
-    data = load_yaml(lockfile_path)
+    data = load_lockfile_data(lockfile_path.read_bytes())
     return data.get("packages", []) or []
 
 
@@ -1053,14 +1601,16 @@ def url_to_filename(url: str) -> str:
 
 
 def collect_bundle_packages(
-    lockfile_path: Path,
+    lockfile: Path | list[dict],
     cache_dirs: list[Path],
 ) -> list[Path]:
     """Locate conda packages referenced by the lockfile in local caches.
 
     Raises :class:`ArchiveError` if any package is missing from all caches.
     """
-    packages_data = parse_lockfile_packages(lockfile_path)
+    packages_data = (
+        parse_lockfile_packages(lockfile) if isinstance(lockfile, Path) else lockfile
+    )
     result: list[Path] = []
     seen: dict[str, str | None] = {}
 
@@ -1105,9 +1655,11 @@ def collect_bundle_packages(
     return sorted(result, key=lambda p: p.name)
 
 
-def build_hash_index(lockfile_path: Path) -> dict[str, str]:
+def build_hash_index(lockfile: Path | list[dict]) -> dict[str, str]:
     """Build a filename-to-SHA256 mapping from lockfile package entries."""
-    packages_data = parse_lockfile_packages(lockfile_path)
+    packages_data = (
+        parse_lockfile_packages(lockfile) if isinstance(lockfile, Path) else lockfile
+    )
     index: dict[str, str] = {}
     for pkg in packages_data:
         url = pkg.get("conda") or pkg.get("url", "")
@@ -1128,13 +1680,13 @@ def file_sha256(path: Path) -> str:
 
 def verify_package_hashes(
     packages: list[Path],
-    lockfile_path: Path,
+    lockfile: Path | list[dict],
 ) -> None:
     """Verify SHA256 hashes of *packages* against the lockfile.
 
     Raises :class:`ArchiveHashMismatchError` on the first mismatch.
     """
-    expected = build_hash_index(lockfile_path)
+    expected = build_hash_index(lockfile)
 
     for pkg_path in packages:
         exp_hash = expected.get(pkg_path.name)
@@ -1154,77 +1706,42 @@ def verify_package_hashes(
             )
 
 
-def prime_package_cache(
-    extracted_dir: Path,
-    cache_dir: Path,
-    *,
-    verified: bool = False,
-) -> int:
-    """Copy bundled packages from an extracted archive into the conda cache.
-
-    Only copies packages after the archive has been verified by an
-    external integrity record. Package SHA256 hashes are still verified
-    against the extracted lockfile before copying.
-    Returns the number of packages added to the cache.
-    """
-    packages_dir = extracted_dir / "packages"
-    if not packages_dir.is_dir():
-        return 0
-
-    packages = sorted(
-        path
-        for suffix in CONDA_PACKAGE_SUFFIXES
-        for path in packages_dir.glob(f"*{suffix}")
-    )
-    if not packages:
-        return 0
-    if not verified:
-        raise ArchiveError(
-            "Cannot prime package cache from unverified archive packages.",
-            hints=[
-                "Verify the archive with an external receipt before cache priming.",
-                "Use 'conda workspace unarchive --receipt ...' or extract without"
-                " cache priming.",
-            ],
-        )
-
-    lockfile = extracted_dir / "conda.lock"
-    if not lockfile.is_file():
-        raise ArchiveError(
-            "Cannot prime package cache: bundled packages require conda.lock.",
-            hints=[
-                "Extract the archive without cache priming using --no-install,",
-                "or rebuild the archive with its lockfile included.",
-            ],
-        )
-
-    verify_package_hashes(packages, lockfile)
-
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    count = 0
-    for pkg in packages:
-        dest = cache_dir / pkg.name
-        if not dest.exists():
-            shutil.copy2(pkg, dest)
-            count += 1
-
-    return count
-
-
 def inspect_archive(archive_path: Path) -> dict[str, object]:
-    """Return metadata about an archive without extracting it."""
+    """Validate archive members and return metadata without extracting."""
     with open_tar(archive_path) as tf:
-        names = set(tf.getnames())
+        members = tf.getmembers()
+        validate_tar_members(members)
+    manifest_members = [
+        member
+        for member in members
+        if member.name in MANIFEST_FILENAMES and member.isreg()
+    ]
+    if any(member.name in MANIFEST_FILENAMES and member.islnk() for member in members):
+        raise ArchiveError("Workspace manifest is not a regular file.")
+
+    lock_members = [member for member in members if member.name == "conda.lock"]
+    if lock_members and not lock_members[0].isreg():
+        raise ArchiveError("The workspace lockfile must be a regular file.")
 
     package_members = [
-        n
-        for n in names
-        if n.startswith("packages/") and n.endswith(CONDA_PACKAGE_SUFFIXES)
+        member
+        for member in members
+        if member.name.startswith("packages/")
+        and member.name.endswith(CONDA_PACKAGE_SUFFIXES)
     ]
+    for member in package_members:
+        if (
+            PurePosixPath(member.name).parent != PurePosixPath("packages")
+            or not member.isreg()
+        ):
+            raise ArchiveError(
+                "Bundled packages must be regular files and direct children"
+                " of packages/."
+            )
 
     return {
-        "has_manifest": bool(names & MANIFEST_FILENAMES),
-        "has_lockfile": "conda.lock" in names,
+        "has_manifest": bool(manifest_members),
+        "has_lockfile": bool(lock_members),
         "has_packages": len(package_members) > 0,
         "package_count": len(package_members),
     }

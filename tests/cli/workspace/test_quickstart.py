@@ -7,17 +7,25 @@ from io import StringIO
 from typing import TYPE_CHECKING
 
 import pytest
+from conda.exceptions import InvalidMatchSpec
 from rich.console import Console
 
 from conda_workspaces.cli.workspace import quickstart as quickstart_module
 from conda_workspaces.cli.workspace.quickstart import execute_quickstart
-from conda_workspaces.exceptions import QuickstartCopyError
+from conda_workspaces.exceptions import (
+    LockfileNotFoundError,
+    LockfileStaleError,
+    ManifestExistsError,
+    QuickstartCopyError,
+)
 
 from ..conftest import make_args
 
 if TYPE_CHECKING:
     import argparse
     from pathlib import Path
+
+    from tests.conftest import SnapshotTree
 
 
 _DEFAULTS = {
@@ -286,18 +294,34 @@ def test_quickstart_json_routes_subhandlers_through_silent_console(
     assert payload["specs_added"] == ["python=3.14"]
 
 
-def test_quickstart_dry_run_skips_side_effects(
-    orchestrated: dict, tmp_path: Path
+@pytest.mark.parametrize(
+    ("specs", "handler"),
+    [([], "install"), (["python"], "add")],
+    ids=["install", "add"],
+)
+def test_quickstart_dry_run_validates_staged_manifest(
+    orchestrated: dict,
+    tmp_path: Path,
+    specs: list[str],
+    handler: str,
 ) -> None:
-    """``--dry-run`` runs no sub-handlers and writes no files."""
-    result = orchestrated["run"](dry_run=True, specs=["python"])
+    """``--dry-run`` delegates validation against a temporary manifest."""
+    staged_contents: list[str] = []
+
+    def inspect_manifest(ns, *, console):  # type: ignore[no-untyped-def]
+        del console
+        staged_contents.append(ns.manifest_file.read_text(encoding="utf-8"))
+
+    orchestrated["runners"][handler]._effect = inspect_manifest
+    result = orchestrated["run"](dry_run=True, specs=specs)
 
     assert result == 0
     runners = orchestrated["runners"]
     assert runners["init"].calls == []
-    assert runners["add"].calls == []
-    assert runners["install"].calls == []
+    assert len(runners[handler].calls) == 1
+    assert runners[handler].calls[0].dry_run is True
     assert runners["shell"].calls == []
+    assert staged_contents and "[workspace]" in staged_contents[0]
     assert not (tmp_path / "conda.toml").exists()
 
 
@@ -311,13 +335,131 @@ def test_quickstart_dry_run_with_copy_reports_but_does_not_write(
     dest = tmp_path / "dst"
     dest.mkdir()
     monkeypatch.chdir(dest)
+    staged_contents: list[str] = []
+
+    def inspect_manifest(ns, *, console):  # type: ignore[no-untyped-def]
+        del console
+        staged_contents.append(ns.manifest_file.read_text(encoding="utf-8"))
+
+    orchestrated["runners"]["install"]._effect = inspect_manifest
 
     result = orchestrated["run"](dry_run=True, copy_from=source)
 
     assert result == 0
     assert not (dest / "conda.toml").exists()
+    assert len(orchestrated["runners"]["install"].calls) == 1
+    assert staged_contents and "name='x'" in staged_contents[0]
     rendered = orchestrated["console"].file.getvalue()
     assert "Would copy" in rendered
+
+
+@pytest.mark.parametrize(
+    ("overrides", "lock_content", "expected_error"),
+    [
+        ({"specs": ["???"]}, None, InvalidMatchSpec),
+        ({"frozen": True}, None, LockfileNotFoundError),
+        (
+            {"locked": True},
+            "version: 1\nenvironments: {}\npackages: []\n",
+            LockfileStaleError,
+        ),
+    ],
+    ids=["malformed-spec", "frozen-missing-lock", "locked-stale-lock"],
+)
+def test_quickstart_dry_run_validates_prospective_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot_tree: SnapshotTree,
+    overrides: dict,
+    lock_content: str | None,
+    expected_error: type[Exception],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CI", raising=False)
+    if lock_content is not None:
+        (tmp_path / "conda.lock").write_text(lock_content, encoding="utf-8")
+    before = snapshot_tree(tmp_path)
+
+    with pytest.raises(expected_error):
+        execute_quickstart(
+            make_args(
+                _DEFAULTS,
+                dry_run=True,
+                no_shell=True,
+                **overrides,
+            ),
+            console=Console(file=StringIO(), force_terminal=False),
+        )
+
+    assert snapshot_tree(tmp_path) == before
+
+
+@pytest.mark.parametrize("specs", [[], ["python"]], ids=["install", "add"])
+def test_quickstart_dry_run_validates_requested_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot_tree: SnapshotTree,
+    specs: list[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CI", raising=False)
+    blocked_prefix = tmp_path / ".conda" / "envs" / "default"
+    blocked_prefix.parent.mkdir(parents=True)
+    blocked_prefix.write_bytes(b"blocked")
+    before = snapshot_tree(tmp_path)
+
+    with pytest.raises(FileExistsError, match="not a directory"):
+        execute_quickstart(
+            make_args(_DEFAULTS, dry_run=True, no_shell=True, specs=specs),
+            console=Console(file=StringIO(), force_terminal=False),
+        )
+
+    assert snapshot_tree(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    ("copy_manifest", "expected_error"),
+    [(False, ManifestExistsError), (True, QuickstartCopyError)],
+    ids=["init", "copy"],
+)
+def test_quickstart_dry_run_rejects_dangling_manifest_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot_tree: SnapshotTree,
+    copy_manifest: bool,
+    expected_error: type[Exception],
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    manifest = workspace / "conda.toml"
+    outside = tmp_path / "outside.toml"
+    manifest.symlink_to(outside)
+    copy_from = None
+    if copy_manifest:
+        source = tmp_path / "source"
+        source.mkdir()
+        (source / "conda.toml").write_text(
+            "[workspace]\nname = 'source'\n",
+            encoding="utf-8",
+        )
+        copy_from = source
+    monkeypatch.chdir(workspace)
+    before = snapshot_tree(tmp_path)
+
+    with pytest.raises(expected_error, match="already exists"):
+        execute_quickstart(
+            make_args(
+                _DEFAULTS,
+                copy_from=copy_from,
+                dry_run=True,
+                no_shell=True,
+            ),
+            console=Console(file=StringIO(), force_terminal=False),
+        )
+
+    assert snapshot_tree(tmp_path) == before
+    assert manifest.is_symlink()
+    assert not outside.exists()
 
 
 @pytest.mark.parametrize(

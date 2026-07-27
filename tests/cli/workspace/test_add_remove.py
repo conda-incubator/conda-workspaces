@@ -17,6 +17,9 @@ from ..conftest import make_args
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from conda_workspaces.models import WorkspaceConfig
+    from tests.conftest import SnapshotTree
+
 _DEFAULTS = {
     "manifest_file": None,
     "specs": [],
@@ -584,6 +587,53 @@ def test_flags_forwarded_to_sync(
 
     _, flags = stub_sync[0]
     assert flags == expected_flags
+
+
+@pytest.mark.parametrize(
+    "execute_fn, spec, dependency, present",
+    [
+        (execute_add, "numpy", "numpy", True),
+        (execute_remove, "python", "python", False),
+    ],
+    ids=["add", "remove"],
+)
+def test_dependency_dry_run_uses_prospective_config_without_writes(
+    sync_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot_tree: SnapshotTree,
+    execute_fn,
+    spec: str,
+    dependency: str,
+    present: bool,
+) -> None:
+    synced: list[tuple[WorkspaceConfig, bool]] = []
+
+    def record_sync(config, ctx, env_names, *, dry_run=False, **kwargs) -> None:
+        synced.append((config, dry_run))
+
+    module = "add" if execute_fn is execute_add else "remove"
+    monkeypatch.setattr(
+        f"conda_workspaces.cli.workspace.{module}.sync_environments",
+        record_sync,
+    )
+    before = snapshot_tree(sync_workspace.parent)
+
+    result = execute_fn(
+        make_args(
+            _DEFAULTS,
+            manifest_file=sync_workspace,
+            specs=[spec],
+            no_lockfile_update=False,
+            dry_run=True,
+        )
+    )
+
+    assert result == 0
+    assert snapshot_tree(sync_workspace.parent) == before
+    assert len(synced) == 1
+    config, dry_run = synced[0]
+    assert (dependency in config.features["default"].conda_dependencies) is present
+    assert dry_run is True
 
 
 def test_remove_no_match_skips_sync(

@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import io
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
+
+    from tests.conftest import SnapshotTree
 
 from conda.base.context import context as conda_context
 from conda.common.serialize.yaml import dump as yaml_dump
@@ -412,6 +414,170 @@ def test_generate_lockfile_solves_expected_pairs(
         assert f"python-{env_name}-{platform}.conda" in content
 
 
+@pytest.mark.parametrize("explicit_output", [False, True], ids=["default", "explicit"])
+@pytest.mark.parametrize("preexisting", [False, True], ids=["absent", "existing"])
+def test_generate_lockfile_dry_run_preserves_output(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    fake_solver_factory,
+    resolved_envs_factory,
+    snapshot_tree: SnapshotTree,
+    explicit_output: bool,
+    preexisting: bool,
+) -> None:
+    ctx = workspace_ctx_factory(platform="linux-64", env_names=["default"])
+    calls = fake_solver_factory()
+    resolved_envs = resolved_envs_factory(default=["linux-64"])
+    output = (
+        tmp_path / "fragments" / "conda.lock.linux-64"
+        if explicit_output
+        else tmp_path / LOCKFILE_NAME
+    )
+    if preexisting:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"existing lock")
+    before = snapshot_tree(tmp_path)
+
+    result = generate_lockfile(
+        ctx,
+        resolved_envs,
+        output_path=output if explicit_output else None,
+        dry_run=True,
+    )
+
+    assert result == output
+    assert calls == [("default", "linux-64")]
+    assert snapshot_tree(tmp_path) == before
+
+
+def test_generate_lockfile_dry_run_isolates_package_cache(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    resolved_envs_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot_tree: SnapshotTree,
+) -> None:
+    ctx = workspace_ctx_factory(platform="linux-64", env_names=["default"])
+    resolved_envs = resolved_envs_factory(default=["linux-64"])
+    configured_cache = tmp_path / "configured-pkgs"
+    configured_cache.mkdir()
+    (configured_cache / "keep.txt").write_bytes(b"keep")
+    repodata_cache = configured_cache / "cache"
+    repodata_cache.mkdir()
+    (repodata_cache / "cached.json").write_bytes(b"cached")
+    solver_caches: list[tuple[Path, ...]] = []
+
+    def cache_writing_solve(self, platform, *, prefix):
+        caches = tuple(Path(path) for path in conda_context.pkgs_dirs)
+        cache = caches[0]
+        assert (cache / "cache" / "cached.json").read_bytes() == b"cached"
+        cache.mkdir(parents=True, exist_ok=True)
+        (cache / "solver-write.txt").write_bytes(b"solver")
+        solver_caches.append(caches)
+        return [
+            _FakePkg(
+                "python",
+                "https://conda.anaconda.org/conda-forge/"
+                f"{platform}/python-{self.name}-{platform}.conda",
+            )
+        ]
+
+    monkeypatch.setattr(
+        ResolvedEnvironment,
+        "solve_for_platform",
+        cache_writing_solve,
+    )
+
+    with conda_context._override("_pkgs_dirs", (str(configured_cache),)):
+        before = snapshot_tree(configured_cache)
+        generate_lockfile(ctx, resolved_envs, dry_run=True)
+        assert snapshot_tree(configured_cache) == before
+        assert conda_context.pkgs_dirs == (str(configured_cache),)
+
+    assert len(solver_caches) == 1
+    assert solver_caches[0][1:] == (configured_cache,)
+    assert not solver_caches[0][0].exists()
+
+
+def test_generate_lockfile_uses_solve_prefix_override(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    resolved_envs_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = workspace_ctx_factory(platform="linux-64", env_names=["default"])
+    resolved_envs = resolved_envs_factory(default=["linux-64"])
+    preview_prefix = tmp_path / ".default.dry-run"
+    prefixes: list[Path] = []
+
+    def fake_solve(self, platform, *, prefix):
+        prefixes.append(Path(prefix))
+        return []
+
+    monkeypatch.setattr(ResolvedEnvironment, "solve_for_platform", fake_solve)
+
+    generate_lockfile(
+        ctx,
+        resolved_envs,
+        dry_run=True,
+        solve_prefixes={"default": preview_prefix},
+    )
+
+    assert prefixes == [preview_prefix]
+    assert not preview_prefix.exists()
+
+
+def test_generate_lockfile_rejects_manifest_output_before_solving(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    fake_solver_factory,
+    resolved_envs_factory,
+    snapshot_tree: SnapshotTree,
+) -> None:
+    ctx = workspace_ctx_factory(platform="linux-64", env_names=["default"])
+    manifest = Path(ctx.config.manifest_path)
+    manifest.write_text("[workspace]\nname = 'keep'\n", encoding="utf-8")
+    calls = fake_solver_factory()
+    resolved_envs = resolved_envs_factory(default=["linux-64"])
+    before = snapshot_tree(tmp_path)
+
+    with pytest.raises(ValueError, match="cannot overwrite"):
+        generate_lockfile(
+            ctx,
+            resolved_envs,
+            output_path=manifest,
+            dry_run=True,
+        )
+
+    assert calls == []
+    assert snapshot_tree(tmp_path) == before
+
+
+def test_generate_lockfile_rejects_invalid_output_target(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    fake_solver_factory,
+    resolved_envs_factory,
+    snapshot_tree: SnapshotTree,
+) -> None:
+    ctx = workspace_ctx_factory(platform="linux-64", env_names=["default"])
+    fake_solver_factory()
+    resolved_envs = resolved_envs_factory(default=["linux-64"])
+    output = tmp_path / "fragments" / "conda.lock.linux-64"
+    output.mkdir(parents=True)
+    before = snapshot_tree(tmp_path)
+
+    with pytest.raises(IsADirectoryError):
+        generate_lockfile(
+            ctx,
+            resolved_envs,
+            output_path=output,
+            dry_run=True,
+        )
+
+    assert snapshot_tree(tmp_path) == before
+
+
 @pytest.mark.parametrize(
     ("platform", "expected_extra", "forbidden"),
     [
@@ -759,12 +925,14 @@ def test_install_from_lockfile_errors(
         install_from_lockfile(ctx, env_name)
 
 
+@pytest.mark.parametrize("dry_run", [False, True], ids=["install", "dry-run"])
 def test_install_from_lockfile(
     tmp_path: Path,
     workspace_ctx_factory: Callable[..., WorkspaceContext],
     monkeypatch: pytest.MonkeyPatch,
+    dry_run: bool,
 ) -> None:
-    """install_from_lockfile reads conda.lock, extracts URLs, and installs."""
+    """install_from_lockfile validates URLs before its dry-run write boundary."""
     ctx = workspace_ctx_factory()
     python_url = "https://example.com/channel/linux-64/python.conda"
     numpy_url = "https://example.com/channel/noarch/numpy.conda"
@@ -812,16 +980,55 @@ def test_install_from_lockfile(
         fake_install,
     )
 
-    install_from_lockfile(ctx, "default")
+    install_from_lockfile(ctx, "default", dry_run=dry_run)
 
-    assert len(get_records_calls) == 1
-    assert get_records_calls[0] == [
-        f"{python_url}#sha256:{python_sha256}",
-        f"{numpy_url}#{numpy_md5}",
-    ]
-    assert len(install_calls) == 1
-    assert install_calls[0]["records"] == records_sentinel
-    assert install_calls[0]["prefix"] == str(ctx.env_prefix("default"))
+    if dry_run:
+        assert get_records_calls == []
+        assert install_calls == []
+        assert not ctx.env_prefix("default").exists()
+    else:
+        assert len(get_records_calls) == 1
+        assert get_records_calls[0] == [
+            f"{python_url}#sha256:{python_sha256}",
+            f"{numpy_url}#{numpy_md5}",
+        ]
+        assert len(install_calls) == 1
+        assert install_calls[0]["records"] == records_sentinel
+        assert install_calls[0]["prefix"] == str(ctx.env_prefix("default"))
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["install", "dry-run"])
+@pytest.mark.parametrize(
+    "prefix_setup",
+    ["file", "file-ancestor"],
+)
+def test_install_from_lockfile_rejects_invalid_prefix_before_writes(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    snapshot_tree: SnapshotTree,
+    dry_run: bool,
+    prefix_setup: str,
+) -> None:
+    ctx = workspace_ctx_factory(platform="linux-64")
+    (tmp_path / LOCKFILE_NAME).write_text(
+        "version: 1\nenvironments:\n  default:\n    channels: []\n"
+        "    packages:\n      linux-64: []\npackages: []\n",
+        encoding="utf-8",
+    )
+    blocked = tmp_path / "blocked-prefix"
+    blocked.write_bytes(b"keep")
+    prefix = blocked if prefix_setup == "file" else blocked / "environment"
+    before = snapshot_tree(tmp_path)
+
+    with pytest.raises((FileExistsError, NotADirectoryError)):
+        install_from_lockfile(
+            ctx,
+            "default",
+            prefix=prefix,
+            dry_run=dry_run,
+        )
+
+    assert snapshot_tree(tmp_path) == before
 
 
 @pytest.mark.parametrize(
@@ -1204,13 +1411,50 @@ def test_merge_lockfiles_byte_stable_with_single_run(
     assert merged_path.read_text(encoding="utf-8") == single_content
 
 
+def test_merge_lockfiles_dry_run_preserves_output(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    fake_solver_factory,
+    resolved_envs_factory,
+    write_fragment: Callable[[WorkspaceContext, dict, str], Path],
+    snapshot_tree: SnapshotTree,
+) -> None:
+    ctx = workspace_ctx_factory(env_names=["default"])
+    fake_solver_factory()
+    resolved_envs = resolved_envs_factory(default=["linux-64", "osx-arm64"])
+    fragments = [
+        write_fragment(ctx, resolved_envs, "linux-64"),
+        write_fragment(ctx, resolved_envs, "osx-arm64"),
+    ]
+    target = lockfile_path(ctx)
+    target.write_bytes(b"existing lock")
+    before = snapshot_tree(ctx.root)
+
+    result = merge_lockfiles(fragments, ctx, dry_run=True)
+
+    assert result == target
+    assert snapshot_tree(ctx.root) == before
+
+
+def test_merge_lockfiles_validates_output_before_reading_fragments(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+) -> None:
+    ctx = workspace_ctx_factory()
+    ctx.config.manifest_path = str(lockfile_path(ctx))
+
+    with pytest.raises(ValueError, match="cannot overwrite"):
+        merge_lockfiles([tmp_path / "missing-fragment"], ctx)
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
 def test_merge_lockfiles_rejects_empty_input(
     workspace_ctx_factory: Callable[..., WorkspaceContext],
+    dry_run: bool,
 ) -> None:
     """An empty fragment list is a user error."""
     ctx = workspace_ctx_factory()
     with pytest.raises(LockfileMergeError, match="no lockfile fragments"):
-        merge_lockfiles([], ctx)
+        merge_lockfiles([], ctx, dry_run=dry_run)
 
 
 def test_merge_lockfiles_missing_file(

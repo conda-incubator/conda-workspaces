@@ -64,6 +64,33 @@ def test_init_refuses_overwrite(
         execute_init(args)
 
 
+@pytest.mark.parametrize(
+    ("fmt", "filename"),
+    [
+        ("pixi", "pixi.toml"),
+        ("conda", "conda.toml"),
+        ("pyproject", "pyproject.toml"),
+    ],
+    ids=["pixi", "conda", "pyproject"],
+)
+def test_init_refuses_dangling_manifest_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fmt: str,
+    filename: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / filename
+    outside = tmp_path / "outside.toml"
+    target.symlink_to(outside)
+
+    with pytest.raises(ManifestExistsError, match="already exists"):
+        execute_init(make_args(_DEFAULTS, manifest_format=fmt, name="proj"))
+
+    assert target.is_symlink()
+    assert not outside.exists()
+
+
 def test_init_pixi_toml_structure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

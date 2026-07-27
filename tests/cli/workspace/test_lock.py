@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from conda.exceptions import CondaValueError
@@ -12,6 +13,9 @@ from conda_workspaces.exceptions import EnvironmentNotFoundError, PlatformError
 
 from ..conftest import make_args
 
+if TYPE_CHECKING:
+    from tests.conftest import SnapshotTree
+
 _DEFAULTS = {
     "manifest_file": None,
     "environment": None,
@@ -19,6 +23,7 @@ _DEFAULTS = {
     "skip_unsolvable": False,
     "merge": None,
     "output": None,
+    "dry_run": False,
 }
 
 
@@ -43,6 +48,7 @@ def capture_generate_lockfile(monkeypatch: pytest.MonkeyPatch, pixi_workspace: P
         skip_unsolvable=False,
         on_skip=None,
         output_path=None,
+        dry_run=False,
     ):
         calls.append(
             {
@@ -53,6 +59,7 @@ def capture_generate_lockfile(monkeypatch: pytest.MonkeyPatch, pixi_workspace: P
                 "skip_unsolvable": skip_unsolvable,
                 "on_skip": on_skip,
                 "output_path": output_path,
+                "dry_run": dry_run,
             }
         )
         return output_path or (pixi_workspace / "conda.lock")
@@ -64,12 +71,17 @@ def capture_generate_lockfile(monkeypatch: pytest.MonkeyPatch, pixi_workspace: P
 
 
 @pytest.mark.parametrize(
-    "env_arg, expected_keys, output_fragment",
+    "env_arg, expected_keys",
     [
-        ("default", {"default"}, "Updated"),
-        (None, {"default", "test"}, "Updated"),
+        ("default", {"default"}),
+        (None, {"default", "test"}),
     ],
     ids=["single-env", "all-envs"],
+)
+@pytest.mark.parametrize(
+    ("dry_run", "output_fragment"),
+    [(False, "Updated"), (True, "Would update")],
+    ids=["write", "dry-run"],
 )
 def test_lock_envs(
     pixi_workspace: Path,
@@ -78,16 +90,18 @@ def test_lock_envs(
     capture_generate_lockfile: list[dict],
     env_arg: str | None,
     expected_keys: set[str],
+    dry_run: bool,
     output_fragment: str,
 ) -> None:
     monkeypatch.chdir(pixi_workspace)
 
-    result = execute_lock(make_args(_DEFAULTS, environment=env_arg))
+    result = execute_lock(make_args(_DEFAULTS, environment=env_arg, dry_run=dry_run))
     assert result == 0
     assert len(capture_generate_lockfile) == 1
     assert set(capture_generate_lockfile[0]["resolved_envs"].keys()) == expected_keys
     assert capture_generate_lockfile[0]["config"] is not None
     assert capture_generate_lockfile[0]["platforms"] is None
+    assert capture_generate_lockfile[0]["dry_run"] is dry_run
     assert output_fragment in capsys.readouterr().out
 
 
@@ -170,10 +184,41 @@ def test_lock_forwards_output_path(
     assert capture_generate_lockfile[0]["output_path"] == target
 
 
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+def test_lock_rejects_manifest_as_output(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot_tree: SnapshotTree,
+    dry_run: bool,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    manifest = pixi_workspace / "pixi.toml"
+    before = snapshot_tree(pixi_workspace)
+
+    with pytest.raises(ValueError, match="cannot overwrite"):
+        execute_lock(
+            make_args(
+                _DEFAULTS,
+                output=manifest,
+                dry_run=dry_run,
+            )
+        )
+
+    assert snapshot_tree(pixi_workspace) == before
+
+
+@pytest.mark.parametrize(
+    ("dry_run", "output_fragment"),
+    [(False, "Updated"), (True, "Would update")],
+    ids=["write", "dry-run"],
+)
 def test_lock_merge_dispatches_to_merge_lockfiles(
     pixi_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
     capture_generate_lockfile: list[dict],
+    dry_run: bool,
+    output_fragment: str,
 ) -> None:
     """``--merge`` bypasses the solver and calls ``merge_lockfiles``."""
     monkeypatch.chdir(pixi_workspace)
@@ -184,22 +229,29 @@ def test_lock_merge_dispatches_to_merge_lockfiles(
 
     seen_paths: list[list] = []
 
-    def fake_merge(paths, ctx):
+    def fake_merge(paths, ctx, *, dry_run=False):
         seen_paths.append(list(paths))
+        assert dry_run is expected_dry_run
         return pixi_workspace / "conda.lock"
 
+    expected_dry_run = dry_run
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.lock.merge_lockfiles", fake_merge
     )
 
     result = execute_lock(
-        make_args(_DEFAULTS, merge=[str(frag1), str(frag2)]),
+        make_args(
+            _DEFAULTS,
+            merge=[str(frag1), str(frag2)],
+            dry_run=dry_run,
+        ),
     )
     assert result == 0
     assert capture_generate_lockfile == []
     assert len(seen_paths) == 1
     resolved = {p.resolve() for p in seen_paths[0]}
     assert resolved == {frag1.resolve(), frag2.resolve()}
+    assert output_fragment in capsys.readouterr().out
 
 
 def test_lock_merge_glob_expansion(
@@ -213,8 +265,9 @@ def test_lock_merge_glob_expansion(
 
     seen_paths: list[list] = []
 
-    def fake_merge(paths, ctx):
+    def fake_merge(paths, ctx, *, dry_run=False):
         seen_paths.append(list(paths))
+        assert dry_run is False
         return pixi_workspace / "conda.lock"
 
     monkeypatch.setattr(

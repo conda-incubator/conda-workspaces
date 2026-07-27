@@ -215,6 +215,21 @@ To recreate environments from scratch, use `--force-reinstall`:
 conda workspace install --force-reinstall
 ```
 
+To preview a workspace change without writing it, pass `--dry-run`:
+
+```bash
+conda workspace quickstart "python>=3.12" --dry-run
+conda workspace add "pandas>=2" --dry-run
+conda workspace install --force-reinstall --dry-run
+conda workspace lock --dry-run
+```
+
+A preview may parse manifests, validate inputs, and run the solver. It
+does not modify manifests, lockfiles, environment prefixes, activation
+metadata, archives, receipts, or extraction targets, and it does not
+modify configured package caches. `quickstart` validates a temporary
+prospective manifest and discards it afterward.
+
 ## Lock
 
 ![lockfile demo](../demos/lockfile.gif)

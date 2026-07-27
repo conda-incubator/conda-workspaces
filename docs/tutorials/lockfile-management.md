@@ -175,6 +175,22 @@ conda workspace install --no-lock
 This runs the solver even when the lockfile is satisfiable. The
 lockfile is regenerated afterward.
 
+## Step 8: Preview lockfile operations
+
+Use `--dry-run` to validate and solve without changing the lockfile or
+an environment prefix:
+
+```bash
+conda workspace lock --dry-run
+conda workspace install --dry-run
+conda workspace install --frozen --dry-run
+```
+
+Lock previews still resolve and serialize the proposed lock data.
+Install previews still validate the selected manifest or lockfile. An
+existing `conda.lock`, every environment prefix, and configured package
+caches remain unchanged.
+
 ## What triggers a re-solve?
 
 The staleness check compares the manifest against the lockfile

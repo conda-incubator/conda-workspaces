@@ -76,6 +76,7 @@ def sync_environments(
     resolved_all = {
         name: resolve_environment(config, name, ctx.platform) for name in names
     }
+    solve_prefixes = {}
 
     if not no_install:
         for i, (name, resolved) in enumerate(resolved_all.items()):
@@ -92,13 +93,20 @@ def sync_environments(
             prefix = ctx.env_prefix(name)
             before = activate_d_scripts(prefix)
 
-            install_environment(
+            solve_prefix = install_environment(
                 ctx,
                 resolved,
                 force_reinstall=force_reinstall,
                 dry_run=dry_run,
             )
-            status.message(console, "Installed", "environment", name)
+            if dry_run and force_reinstall:
+                solve_prefixes[name] = solve_prefix
+            status.message(
+                console,
+                "Would install" if dry_run else "Installed",
+                "environment",
+                name,
+            )
 
             if not dry_run:
                 new_scripts = activate_d_scripts(prefix) - before
@@ -109,10 +117,17 @@ def sync_environments(
                         " [bold]conda workspace shell[/bold] to pick them up."
                     )
 
-    if not dry_run:
-        console.print()
-        console.print(
-            "[bold blue]Updating[/bold blue] [bold]conda.lock[/bold][dim]...[/dim]"
-        )
-        generate_lockfile(ctx, resolved_all, config=config)
-        console.print("[bold cyan]Updated[/bold cyan] [bold]conda.lock[/bold]")
+    console.print()
+    progress = "Resolving" if dry_run else "Updating"
+    console.print(
+        f"[bold blue]{progress}[/bold blue] [bold]conda.lock[/bold][dim]...[/dim]"
+    )
+    generate_lockfile(
+        ctx,
+        resolved_all,
+        config=config,
+        dry_run=dry_run,
+        solve_prefixes=solve_prefixes or None,
+    )
+    action = "Would update" if dry_run else "Updated"
+    console.print(f"[bold cyan]{action}[/bold cyan] [bold]conda.lock[/bold]")

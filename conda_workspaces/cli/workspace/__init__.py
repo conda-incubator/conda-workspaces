@@ -31,7 +31,13 @@ def workspace_context_from_args(
 ) -> tuple[WorkspaceConfig, WorkspaceContext]:
     """Parse the workspace manifest and build a context from CLI *args*.
 
-    Uses ``--file`` / ``-f`` when provided, otherwise auto-detects.
+    Uses ``--file`` / ``-f`` when provided, otherwise auto-detects. Quickstart
+    previews may parse a staged file while validating paths at
+    ``validation_manifest_path``.
     """
     _, config = detect_and_parse(workspace_manifest_path_from_args(args))
+    validation_manifest_path = getattr(args, "validation_manifest_path", None)
+    if validation_manifest_path is not None:
+        config.root = str(validation_manifest_path.parent)
+        config.manifest_path = str(validation_manifest_path)
     return config, WorkspaceContext(config)

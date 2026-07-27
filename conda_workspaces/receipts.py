@@ -7,14 +7,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 from urllib.parse import urlsplit
 
-from conda_lockfiles.load_yaml import load_yaml
-
 from .archive import (
     file_sha256,
     parse_relative_archive_path,
     url_to_filename,
 )
 from .exceptions import ArchiveError, ArchiveHashMismatchError
+from .lockfile import load_lockfile_data
 from .paths import has_absolute_path_syntax
 
 if TYPE_CHECKING:
@@ -164,6 +163,8 @@ class ArchiveReceipt:
     def write(self, path: Path) -> Path:
         """Write the receipt as stable JSON."""
         self.validate()
+        if path.is_symlink():
+            raise ArchiveError("Receipt output cannot be a symbolic link.")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps(self.statement, indent=2, sort_keys=True) + "\n",
@@ -399,9 +400,23 @@ class ReceiptInventory:
         environment_prefixes: Mapping[str, str | Path] | None = None,
     ) -> ReceiptInventory:
         """Return receipt-ready package inventory from ``conda.lock``."""
-        data = load_yaml(lockfile_path)
+        data = load_lockfile_data(lockfile_path.read_bytes())
+        return cls.from_lockfile_data(
+            data,
+            environment_prefixes=environment_prefixes,
+        )
+
+    @classmethod
+    def from_lockfile_data(
+        cls,
+        data: object,
+        *,
+        environment_prefixes: Mapping[str, str | Path] | None = None,
+    ) -> ReceiptInventory:
+        """Return receipt-ready inventory from parsed lockfile *data*."""
         if not isinstance(data, dict):
             raise ArchiveError("Invalid lockfile: expected a mapping.")
+        data = cast("dict[str, object]", data)
         lockfile_envs = data.get("environments") or {}
         if not isinstance(lockfile_envs, dict):
             raise ArchiveError("Invalid lockfile: environments must be a mapping.")
@@ -413,6 +428,7 @@ class ReceiptInventory:
             env_data = lockfile_envs.get(env_name, {}) or {}
             if not isinstance(env_data, dict):
                 raise ArchiveError("Invalid lockfile: environment must be a mapping.")
+            env_data = cast("dict[str, object]", env_data)
             platform_packages = env_data.get("packages", {}) or {}
             if not isinstance(platform_packages, dict):
                 raise ArchiveError(
@@ -426,6 +442,7 @@ class ReceiptInventory:
                 for ref in refs:
                     if not isinstance(ref, dict):
                         raise ArchiveError("Invalid lockfile package reference.")
+                    ref = cast("dict[str, object]", ref)
                     url = ReceiptPackageRecord.package_url(ref)
                     source = packages_by_url.get(url, ref)
                     package = ReceiptPackageRecord.from_record(

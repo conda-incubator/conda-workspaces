@@ -68,3 +68,48 @@ def resolve_relative_path(root: Path, path: PurePosixPath) -> Path:
     except ValueError as exc:
         raise ValueError(f"Path escapes root: {path!s}") from exc
     return resolved
+
+
+def output_paths_collide(left: Path, right: Path) -> bool:
+    """Return whether two output paths address the same file target."""
+    if left.resolve(strict=False) == right.resolve(strict=False):
+        return True
+    try:
+        return left.samefile(right)
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def validate_path_parent(path: Path) -> None:
+    """Require the nearest existing parent of *path* to be a directory.
+
+    Write previews use this read-only check before their mutation boundary so
+    a file or broken symlink in the parent chain fails exactly as execution
+    would.
+    """
+    parent = path.parent
+    while not parent.exists() and not parent.is_symlink() and parent != parent.parent:
+        parent = parent.parent
+    if not parent.is_dir():
+        raise NotADirectoryError(f"Path parent is not a directory: {parent}")
+
+
+def validate_file_output(path: Path) -> None:
+    """Validate the existing shape of a prospective output file path."""
+    validate_path_parent(path)
+    if path.is_symlink() and not path.exists():
+        target = path.resolve(strict=False)
+        if not target.parent.is_dir():
+            raise FileNotFoundError(f"Symlink target parent does not exist: {target}")
+        return
+    if path.exists() and not path.is_file():
+        raise IsADirectoryError(f"Output path is not a file: {path}")
+
+
+def validate_directory_output(path: Path) -> None:
+    """Validate the existing shape of a prospective output directory path."""
+    validate_path_parent(path)
+    if path.exists() and not path.is_dir():
+        raise FileExistsError(f"Output path is not a directory: {path}")
+    if path.is_symlink() and not path.exists():
+        raise FileExistsError(f"Output path is a broken symlink: {path}")

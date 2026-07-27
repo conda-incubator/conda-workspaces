@@ -32,6 +32,11 @@ my-project.tar.zst
     ...
 ```
 
+The selected workspace manifest and `conda.lock` must be regular files.
+Replace either symlink with a regular file before creating an archive.
+Archives created by other tools must also store these root members as
+regular files before `unarchive --install` can use them.
+
 If no `-o` is given, the archive is named after the workspace
 (`<name>.tar.zst`) and placed in the project root. The workspace name
 must be a single filename segment for this default; pass `-o/--output`
@@ -149,6 +154,31 @@ conda workspace archive --lock
 This is equivalent to running `conda workspace lock` followed by
 `conda workspace archive`, but in a single command.
 
+## Preview archive operations
+
+Preview archive creation with `--dry-run`:
+
+```bash
+conda workspace archive --lock --receipt --dry-run -o my-project.tar.zst
+```
+
+The command validates the workspace and solves the requested lock data,
+then reports the archive and receipt paths without writing any of them.
+
+Preview extraction and installation the same way:
+
+```bash
+conda workspace unarchive my-project.tar.zst \
+  --target /tmp/workspace \
+  --install \
+  --dry-run
+```
+
+The archive is staged in a temporary directory so its manifest, lockfile,
+packages, and optional receipt follow the same validation path as a real
+extraction. The staging directory is discarded, the requested target and
+package cache remain unchanged, and no environment prefix is created or changed.
+
 ## Write a receipt for verification
 
 ![archive receipt demo](../../demos/archives-receipt.gif)
@@ -228,7 +258,9 @@ conda workspace archive --lock --bundle -o my-project-offline.tar.zst
 ```
 
 This adds a `packages/` directory inside the archive. Package hashes
-are verified against the lockfile before bundling.
+are verified against the lockfile before bundling. Archives created by
+other tools must store each package file directly under `packages/`,
+without nested directories or links.
 
 On the receiving end, pair bundled archives with a receipt when you want
 `conda workspace unarchive` to verify the external integrity record and

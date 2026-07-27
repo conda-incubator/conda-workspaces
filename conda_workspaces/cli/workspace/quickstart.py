@@ -28,9 +28,13 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import shutil
 import sys
+import tempfile
+from contextlib import ExitStack
 from pathlib import Path
 
+from conda.base.context import context as conda_context
 from rich.console import Console
 
 from ...exceptions import (
@@ -79,6 +83,7 @@ def execute_quickstart(
     fmt: str = args.manifest_format or "conda"
 
     workspace_root = Path.cwd()
+    source_manifest: Path | None = None
 
     # Global prompt / output flags every sub-handler must see
     # (``--dry-run`` / ``--yes`` / ``-v`` / ``-q`` / ``--debug`` /
@@ -112,20 +117,20 @@ def execute_quickstart(
         # stays consistent.  The real work lives on :class:`ManifestParser`;
         # we only layer dry-run preview + Rich output on top.
         try:
-            manifest = ManifestParser.resolve_source(copy_from)
-            manifest_path = workspace_root / manifest.name
-            if manifest_path.exists():
+            source_manifest = ManifestParser.resolve_source(copy_from)
+            manifest_path = workspace_root / source_manifest.name
+            if manifest_path.exists() or manifest_path.is_symlink():
                 raise ManifestExistsError(manifest_path)
             if dry_run:
                 console.print(
-                    f"[bold blue]Would copy[/bold blue] [bold]{manifest}[/bold]"
+                    f"[bold blue]Would copy[/bold blue] [bold]{source_manifest}[/bold]"
                     f" -> [bold]{manifest_path}[/bold]"
                 )
             else:
                 ManifestParser.copy_manifest(copy_from, workspace_root)
                 console.print(
-                    f"[bold cyan]Copied[/bold cyan] [bold]{manifest.name}[/bold]"
-                    f" from [bold]{manifest.parent}[/bold]"
+                    f"[bold cyan]Copied[/bold cyan] [bold]{source_manifest.name}[/bold]"
+                    f" from [bold]{source_manifest.parent}[/bold]"
                 )
         except FileNotFoundError as exc:
             raise QuickstartCopyError(
@@ -149,6 +154,8 @@ def execute_quickstart(
         )
         parser = ManifestParser.for_format_alias(fmt)
         manifest_path = parser.manifest_path(workspace_root)
+        if manifest_path.is_symlink():
+            raise ManifestExistsError(manifest_path)
     else:
         execute_init(
             with_prompts(
@@ -163,34 +170,57 @@ def execute_quickstart(
         parser = ManifestParser.for_format_alias(fmt)
         manifest_path = parser.manifest_path(workspace_root)
 
-    if dry_run:
-        # No manifest on disk yet; skip add/install side effects.
-        pass
-    elif specs:
-        execute_add(
-            with_prompts(
-                manifest_file=None,
-                specs=list(specs),
-                environment=None,
-                feature=None,
-                pypi=False,
-                no_install=False,
-                no_lockfile_update=False,
-                force_reinstall=args.force_reinstall,
-            ),
-            console=console,
-        )
-    else:
-        execute_install(
-            with_prompts(
-                manifest_file=None,
-                environment=args.environment,
-                force_reinstall=args.force_reinstall,
-                locked=args.locked,
-                frozen=args.frozen,
-            ),
-            console=console,
-        )
+    with ExitStack() as stack:
+        handler_manifest_path: Path | None = None
+        if dry_run:
+            temporary = stack.enter_context(
+                tempfile.TemporaryDirectory(prefix="conda-workspaces-quickstart-")
+            )
+            staged_root = Path(temporary)
+            if source_manifest is not None:
+                handler_manifest_path = ManifestParser.copy_manifest(
+                    source_manifest,
+                    staged_root,
+                )
+            else:
+                parser = ManifestParser.for_format_alias(fmt)
+                handler_manifest_path = parser.manifest_path(staged_root)
+                if manifest_path.exists():
+                    shutil.copy2(manifest_path, handler_manifest_path)
+                parser.write_workspace_stub(
+                    staged_root,
+                    args.name or workspace_root.name,
+                    args.channels or ["conda-forge"],
+                    args.platforms or [conda_context.subdir],
+                )
+
+        if specs:
+            execute_add(
+                with_prompts(
+                    manifest_file=handler_manifest_path,
+                    validation_manifest_path=manifest_path if dry_run else None,
+                    specs=list(specs),
+                    environment=None,
+                    feature=None,
+                    pypi=False,
+                    no_install=False,
+                    no_lockfile_update=False,
+                    force_reinstall=args.force_reinstall,
+                ),
+                console=console,
+            )
+        else:
+            execute_install(
+                with_prompts(
+                    manifest_file=handler_manifest_path,
+                    validation_manifest_path=manifest_path if dry_run else None,
+                    environment=args.environment,
+                    force_reinstall=args.force_reinstall,
+                    locked=args.locked,
+                    frozen=args.frozen,
+                ),
+                console=console,
+            )
 
     shell_spawned = False
     if not no_shell and not dry_run:

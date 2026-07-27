@@ -25,6 +25,7 @@ def execute_clean(args: argparse.Namespace, *, console: Console | None = None) -
     config, ctx = workspace_context_from_args(args)
 
     env_name = getattr(args, "environment", None)
+    dry_run = getattr(args, "dry_run", False)
 
     try:
         if env_name:
@@ -41,10 +42,10 @@ def execute_clean(args: argparse.Namespace, *, console: Console | None = None) -
                 )
                 return 0
 
-            confirm_yn(f"Remove {env_name} environment?")
-
-            remove_environment(ctx, env_name)
-            status.message(console, "Removed", "environment", env_name)
+            installed = [env_name]
+            if not dry_run:
+                confirm_yn(f"Remove {env_name} environment?")
+                remove_environment(ctx, env_name)
         else:
             installed = list_installed_environments(ctx)
             if not installed:
@@ -54,26 +55,33 @@ def execute_clean(args: argparse.Namespace, *, console: Console | None = None) -
                 )
                 return 0
 
-            if not conda_context.always_yes:
-                names = ", ".join(installed)
-                confirm_yn(f"Remove {names} environments?")
+            if not dry_run:
+                if not conda_context.always_yes:
+                    names = ", ".join(installed)
+                    confirm_yn(f"Remove {names} environments?")
 
-            for i, name in enumerate(installed):
-                if i > 0:
-                    console.print()
-                status.message(
-                    console,
-                    "Removing",
-                    "environment",
-                    name,
-                    style="bold blue",
-                    ellipsis=True,
-                )
-            clean_all(ctx)
-            for i, name in enumerate(installed):
-                if i > 0:
-                    console.print()
-                status.message(console, "Removed", "environment", name)
+                for i, name in enumerate(installed):
+                    if i > 0:
+                        console.print()
+                    status.message(
+                        console,
+                        "Removing",
+                        "environment",
+                        name,
+                        style="bold blue",
+                        ellipsis=True,
+                    )
+                clean_all(ctx)
+
+        for i, name in enumerate(installed):
+            if i > 0:
+                console.print()
+            status.message(
+                console,
+                "Would remove" if dry_run else "Removed",
+                "environment",
+                name,
+            )
     except (CondaSystemExit, DryRunExit):
         return 0
 

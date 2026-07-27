@@ -53,6 +53,7 @@ from conda.models.dist import Dist
 from conda.models.version import VersionSpec
 from conda.plugins.types import EnvironmentSpecBase
 
+from .context import isolated_package_cache
 from .exceptions import (
     AllTargetsUnsolvableError,
     EnvironmentNotFoundError,
@@ -63,9 +64,14 @@ from .exceptions import (
     SolveError,
 )
 from .models import LockfileStatus
+from .paths import (
+    output_paths_collide,
+    validate_directory_output,
+    validate_file_output,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
     from typing import Any, ClassVar, Final
 
     from conda.common.path import PathType
@@ -108,6 +114,15 @@ class _SolvedEnvironment:
     config: EnvironmentConfig
     explicit_packages: Sequence[PackageRecord]
     external_packages: dict[str, list[str]] = field(default_factory=dict)
+
+
+def load_lockfile_data(content: str | bytes) -> Any:
+    """Parse in-memory lockfile YAML with the same safe loader as disk reads."""
+    from conda.common.serialize import yaml_safe_load
+
+    if isinstance(content, bytes):
+        content = content.decode("utf-8")
+    return yaml_safe_load(content)
 
 
 def lockfile_path(ctx: WorkspaceContext) -> Path:
@@ -674,7 +689,7 @@ class CondaLockLoader(EnvironmentSpecBase):
         }
 
 
-def generate_lockfile(
+def render_lockfile(
     ctx: WorkspaceContext,
     resolved_envs: dict[str, ResolvedEnvironment],
     *,
@@ -683,19 +698,19 @@ def generate_lockfile(
     progress: Callable[[str, str], None] | None = None,
     skip_unsolvable: bool = False,
     on_skip: Callable[[str, str, SolveError], None] | None = None,
-    output_path: Path | None = None,
-) -> Path:
-    """Generate a ``conda.lock`` by solving workspace environments.
+    solve_prefixes: Mapping[str, str | Path] | None = None,
+    dry_run: bool = False,
+) -> str:
+    """Solve workspace environments and serialize ``conda.lock`` content.
 
-    Solves each environment in *resolved_envs* for every platform it
-    declares (intersected with *platforms* when given) and writes the
-    results to ``<workspace>/conda.lock``.  When *config* is supplied,
-    each ``(environment, platform)`` pair is resolved from the manifest
-    just before solving so target-specific dependency tables only apply
-    to the platform they declare.  Serialisation is delegated to
+    Each environment in *resolved_envs* is solved for every platform it
+    declares, intersected with *platforms* when given. When *config* is
+    supplied, each ``(environment, platform)`` pair is resolved from the
+    manifest just before solving so target-specific dependency tables only
+    apply to the platform they declare. Serialisation is delegated to
     :func:`.export.multiplatform_export` so this function and ``conda
     export --format=conda-workspaces-lock-v1`` produce byte-identical
-    output.  Solver chatter is silenced inside
+    output. Solver chatter is silenced inside
     :meth:`ResolvedEnvironment.solve_for_platform` itself, so the caller
     is free to render status through the optional *progress* callback
     without stdout bookkeeping.
@@ -709,13 +724,8 @@ def generate_lockfile(
     pair fails.  Non-solver errors (missing channel, invalid manifest,
     etc.) always abort.
 
-    When *output_path* is given, the lockfile is written there instead
-    of the default ``<workspace>/conda.lock``.  Matrix CI runners use
-    this to emit per-platform fragments
-    (e.g. ``conda.lock.linux-64``) that a coordinator job later stitches
-    back together with :func:`merge_lockfiles`.
-
-    Returns the path to the generated lockfile.
+    Returns the serialized lockfile without writing it. When *dry_run* is
+    true, solver package-cache writes use disposable storage.
     """
     from conda.models.environment import EnvironmentConfig
 
@@ -726,63 +736,112 @@ def generate_lockfile(
     envs: list[_SolvedEnvironment] = []
     failures: list[SolveError] = []
 
-    for name, resolved in resolved_envs.items():
-        declared = sorted(set(resolved.platforms or [host_platform]))
-        if platforms is None:
-            targets = declared
-        else:
-            targets = []
-            for requested in platforms:
-                try:
-                    target = resolved.resolve_platform_name(requested, declared)
-                except PlatformError:
-                    continue
-                if target not in targets:
-                    targets.append(target)
-        if not targets:
-            continue
-        for target in targets:
-            if progress is not None:
-                progress(name, target)
-            target_resolved = (
-                resolve_environment(config, name, target)
-                if config is not None
-                else resolved
-            )
-            package_platform = target_resolved.platform_subdir(target)
-            channels = tuple(str(ch) for ch in target_resolved.channels)
-            try:
-                records = target_resolved.solve_for_platform(
-                    package_platform,
-                    prefix=ctx.env_prefix(target_resolved.name),
-                )
-            except SolveError as exc:
-                if not skip_unsolvable:
-                    raise
-                failures.append(exc)
-                if on_skip is not None:
-                    on_skip(name, target, exc)
+    with isolated_package_cache(dry_run):
+        for name, resolved in resolved_envs.items():
+            declared = sorted(set(resolved.platforms or [host_platform]))
+            if platforms is None:
+                targets = declared
+            else:
+                targets = []
+                for requested in platforms:
+                    try:
+                        target = resolved.resolve_platform_name(requested, declared)
+                    except PlatformError:
+                        continue
+                    if target not in targets:
+                        targets.append(target)
+            if not targets:
                 continue
-            envs.append(
-                _SolvedEnvironment(
-                    name=name,
-                    platform=target,
-                    package_platform=package_platform,
-                    config=EnvironmentConfig(channels=channels),
-                    explicit_packages=records,
+            for target in targets:
+                if progress is not None:
+                    progress(name, target)
+                target_resolved = (
+                    resolve_environment(config, name, target)
+                    if config is not None
+                    else resolved
                 )
-            )
+                package_platform = target_resolved.platform_subdir(target)
+                channels = tuple(str(ch) for ch in target_resolved.channels)
+                try:
+                    solve_prefix = (
+                        solve_prefixes.get(name, ctx.env_prefix(target_resolved.name))
+                        if solve_prefixes is not None
+                        else ctx.env_prefix(target_resolved.name)
+                    )
+                    records = target_resolved.solve_for_platform(
+                        package_platform,
+                        prefix=solve_prefix,
+                    )
+                except SolveError as exc:
+                    if not skip_unsolvable:
+                        raise
+                    failures.append(exc)
+                    if on_skip is not None:
+                        on_skip(name, target, exc)
+                    continue
+                envs.append(
+                    _SolvedEnvironment(
+                        name=name,
+                        platform=target,
+                        package_platform=package_platform,
+                        config=EnvironmentConfig(channels=channels),
+                        explicit_packages=records,
+                    )
+                )
 
     if failures and not envs:
         raise AllTargetsUnsolvableError(failures)
 
+    return multiplatform_export(envs)
+
+
+def generate_lockfile(
+    ctx: WorkspaceContext,
+    resolved_envs: dict[str, ResolvedEnvironment],
+    *,
+    config: WorkspaceConfig | None = None,
+    platforms: tuple[str, ...] | None = None,
+    progress: Callable[[str, str], None] | None = None,
+    skip_unsolvable: bool = False,
+    on_skip: Callable[[str, str, SolveError], None] | None = None,
+    output_path: Path | None = None,
+    dry_run: bool = False,
+    solve_prefixes: Mapping[str, str | Path] | None = None,
+) -> Path:
+    """Solve workspace environments and write their ``conda.lock``.
+
+    When *output_path* is given, the lockfile is written there instead
+    of the default ``<workspace>/conda.lock``. Matrix CI runners use this
+    to emit per-platform fragments that a coordinator job later combines
+    with :func:`merge_lockfiles`. When *dry_run* is true, solving and
+    serialization still run without creating or changing the output.
+    """
     path = output_path if output_path is not None else lockfile_path(ctx)
+    validate_lockfile_output(ctx, path)
+    content = render_lockfile(
+        ctx,
+        resolved_envs,
+        config=config,
+        platforms=platforms,
+        progress=progress,
+        skip_unsolvable=skip_unsolvable,
+        on_skip=on_skip,
+        solve_prefixes=solve_prefixes,
+        dry_run=dry_run,
+    )
+    if dry_run:
+        return path
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(multiplatform_export(envs), encoding="utf-8")
+    path.write_text(content, encoding="utf-8")
     return path
 
 
-def merge_lockfiles(paths: Sequence[Path], ctx: WorkspaceContext) -> Path:
+def merge_lockfiles(
+    paths: Sequence[Path],
+    ctx: WorkspaceContext,
+    *,
+    dry_run: bool = False,
+) -> Path:
     """Merge per-platform ``conda.lock`` fragments into a single lockfile.
 
     Designed for CI matrix pipelines that split locking across runners:
@@ -819,6 +878,9 @@ def merge_lockfiles(paths: Sequence[Path], ctx: WorkspaceContext) -> Path:
     records for the same package URL are accepted only when their
     metadata matches exactly.
 
+    When *dry_run* is true, every fragment is validated and the merged
+    data is serialized, but the canonical lockfile remains unchanged.
+
     Returns the path to the merged lockfile.
     """
     from conda.common.serialize.yaml import dump as yaml_dump
@@ -826,6 +888,9 @@ def merge_lockfiles(paths: Sequence[Path], ctx: WorkspaceContext) -> Path:
 
     if not paths:
         raise LockfileMergeError("no lockfile fragments were supplied")
+
+    out_path = lockfile_path(ctx)
+    validate_lockfile_output(ctx, out_path)
 
     env_order: list[str] = []
     env_channels: dict[str, list[dict[str, Any]]] = {}
@@ -998,12 +1063,21 @@ def merge_lockfiles(paths: Sequence[Path], ctx: WorkspaceContext) -> Path:
         "packages": merged_packages,
     }
 
-    out_path = lockfile_path(ctx)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     buf = io.StringIO()
     yaml_dump(merged, buf)
+    if dry_run:
+        return out_path
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(buf.getvalue(), encoding="utf-8")
     return out_path
+
+
+def validate_lockfile_output(ctx: WorkspaceContext, path: Path) -> None:
+    """Reject lock outputs that could overwrite the selected manifest."""
+    manifest_path = Path(ctx.config.manifest_path)
+    if output_paths_collide(path, manifest_path):
+        raise ValueError("Lockfile output cannot overwrite the workspace manifest.")
+    validate_file_output(path)
 
 
 def install_from_lockfile(
@@ -1012,6 +1086,7 @@ def install_from_lockfile(
     *,
     prefix: Path | None = None,
     target_prefix_override: str | Path | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Install an environment from ``conda.lock``.
 
@@ -1019,6 +1094,9 @@ def install_from_lockfile(
     package list for *env_name* on the current platform, downloads the
     exact packages, and installs them into the environment prefix —
     bypassing the solver entirely.
+
+    When *dry_run* is true, the lockfile and selected package references
+    are validated without creating or changing the target prefix.
 
     Raises ``LockfileNotFoundError`` if the lockfile is missing or does
     not contain the requested environment/platform.
@@ -1029,8 +1107,6 @@ def install_from_lockfile(
         install_explicit_packages,
     )
 
-    from .resolver import resolve_environment
-
     path = lockfile_path(ctx)
     if not path.is_file():
         raise LockfileNotFoundError("(all)", path)
@@ -1039,15 +1115,17 @@ def install_from_lockfile(
     lock_platform = ctx.platform
     package_platform = ctx.platform
     try:
-        resolved = resolve_environment(ctx.config, env_name)
-        lock_platform = ctx.config.resolve_platform_name(
-            ctx.platform,
-            resolved.platforms or ctx.config.platforms,
-        )
-        package_platform = ctx.config.platform_subdir(lock_platform)
-    except (EnvironmentNotFoundError, PlatformError):
-        pass
-    try:
+        from .resolver import resolve_environment
+
+        try:
+            resolved = resolve_environment(ctx.config, env_name)
+            lock_platform = ctx.config.resolve_platform_name(
+                ctx.platform,
+                resolved.platforms or ctx.config.platforms,
+            )
+            package_platform = ctx.config.platform_subdir(lock_platform)
+        except (EnvironmentNotFoundError, PlatformError):
+            pass
         urls = loader.explicit_package_specs_for(
             lock_platform,
             env_name,
@@ -1057,6 +1135,9 @@ def install_from_lockfile(
         raise LockfileNotFoundError(env_name, path) from exc
 
     install_prefix = prefix or ctx.env_prefix(env_name)
+    validate_directory_output(install_prefix)
+    if dry_run:
+        return
     install_prefix.mkdir(parents=True, exist_ok=True)
 
     override = (

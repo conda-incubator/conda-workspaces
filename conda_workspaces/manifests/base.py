@@ -152,7 +152,7 @@ class ManifestParser(ABC):
         """
         manifest = cls.resolve_source(source)
         target = dest_dir / manifest.name
-        if target.exists():
+        if target.exists() or target.is_symlink():
             raise ManifestExistsError(target)
         shutil.copyfile(manifest, target)
         return target
@@ -176,7 +176,7 @@ class ManifestParser(ABC):
         outright, and report ``"Updated"`` when they did so.
         """
         path = self.manifest_path(base_dir)
-        if path.exists():
+        if path.exists() or path.is_symlink():
             raise ManifestExistsError(path)
 
         doc = tomlkit.document()
@@ -544,9 +544,19 @@ class ManifestParser(ABC):
     def has_workspace(self, path: Path) -> bool:
         """Return True if *path* contains workspace configuration."""
 
-    @abstractmethod
     def parse(self, path: Path) -> WorkspaceConfig:
-        """Parse *path* and return a ``WorkspaceConfig``."""
+        """Parse TOML from *path* and return a ``WorkspaceConfig``."""
+        try:
+            data = tomlkit.loads(path.read_text(encoding="utf-8")).unwrap()
+            return self.parse_data(data, path)
+        except WorkspaceParseError:
+            raise
+        except Exception as exc:
+            raise WorkspaceParseError(path, str(exc)) from exc
+
+    @abstractmethod
+    def parse_data(self, data: dict[str, Any], path: Path) -> WorkspaceConfig:
+        """Parse already-loaded manifest *data* associated with *path*."""
 
     def has_tasks(self, path: Path) -> bool:
         """Return True if *path* contains task definitions."""
