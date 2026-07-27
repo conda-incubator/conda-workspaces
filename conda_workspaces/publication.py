@@ -117,7 +117,8 @@ class WorkspacePublication:
             raise CondaWorkspacesError(
                 f"Workspace manifest cannot be read safely: {self.manifest_path}"
             ) from exc
-        if current_text != self.original_text:
+        expected_text = self.updated_text if self.started else self.original_text
+        if current_text != expected_text:
             raise CondaWorkspacesError(
                 "Workspace manifest changed while the "
                 f"{self.operation} was being prepared. Retry the {self.operation}."
@@ -478,9 +479,10 @@ class WorkspacePublication:
                 raise CondaWorkspacesError(
                     "Workspace manifest changed before publication."
                 ) from exc
-            if self._guard_identity_validator is not None:
-                self._guard_identity_validator()
-        self.started = True
+            self.started = True
+            self.validate_manifest_generation()
+        else:
+            self.started = True
 
     def read_lockfile_bytes(self) -> bytes:
         """Read one stable lockfile snapshot from the guarded workspace root."""

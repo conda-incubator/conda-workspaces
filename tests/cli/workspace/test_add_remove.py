@@ -1056,6 +1056,41 @@ platforms = ["win-64"]
     assert doc["environments"]["windows"]["features"] == ["windows"]
 
 
+def test_add_feature_target_ignores_same_named_environment(tmp_path: Path) -> None:
+    path = tmp_path / "pixi.toml"
+    path.write_text(
+        """\
+[workspace]
+name = "same-name-feature-platform"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[feature.test.dependencies]
+pytest = ">=8"
+
+[environments.test]
+features = []
+""",
+        encoding="utf-8",
+    )
+    args = make_args(
+        _DEFAULTS,
+        manifest_file=path,
+        specs=["coverage"],
+        feature="test",
+        platform="linux-64",
+    )
+
+    assert execute_add(args) == 0
+
+    document = tomlkit.loads(path.read_text(encoding="utf-8"))
+    assert (
+        document["feature"]["test"]["target"]["linux-64"]["dependencies"]["coverage"]
+        == "*"
+    )
+    assert document["environments"]["test"]["features"] == []
+
+
 def test_add_feature_target_uses_affected_environment_scope(tmp_path: Path) -> None:
     path = tmp_path / "pixi.toml"
     path.write_text(

@@ -123,6 +123,31 @@ def test_publish_lockfile_writes_manifest_before_lock(
     assert publication.started is True
 
 
+def test_publish_manifest_accepts_its_generation_and_rejects_later_changes(
+    publication_manifest: Path,
+    make_publication: Callable[..., WorkspacePublication],
+) -> None:
+    original_text = publication_manifest.read_bytes().decode("utf-8")
+    updated_text = original_text.replace('python = ">=3.12"', 'python = ">=3.13"')
+    publication = make_publication(
+        publication_manifest,
+        updated_text=updated_text,
+    )
+
+    with publication.guard():
+        publication.publish_manifest()
+        publication.validate_manifest_generation()
+        assert publication_manifest.read_bytes().decode("utf-8") == updated_text
+
+        concurrent_text = updated_text.replace('python = ">=3.13"', 'python = ">=3.14"')
+        publication_manifest.write_bytes(concurrent_text.encode("utf-8"))
+        with pytest.raises(CondaWorkspacesError, match="manifest changed"):
+            publication.validate_manifest_generation()
+
+    assert publication.original_text == original_text
+    assert publication_manifest.read_bytes().decode("utf-8") == concurrent_text
+
+
 def test_publish_lockfile_keeps_manifest_when_lock_write_fails(
     publication_manifest: Path,
     monkeypatch: pytest.MonkeyPatch,
