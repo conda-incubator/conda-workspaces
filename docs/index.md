@@ -146,8 +146,8 @@ Task-oriented guides for integrations and automation.
 :link: features
 :link-type: doc
 
-Environments, features, platform overrides, PyPI dependencies,
-task dependencies, caching, templates, and more.
+Overview plus focused pages for tasks, environments, locking, export,
+archives, and CI usage.
 :::
 
 :::{grid-item-card} {octicon}`gear` Configuration
