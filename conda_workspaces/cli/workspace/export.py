@@ -22,6 +22,8 @@ from rich.console import Console
 from ...exceptions import EnvironmentNotFoundError
 from ...export import resolve_exporter, run_exporter
 from ...manifests.base import ManifestParser
+from ...paths import atomic_write_text, regular_file_generation
+from .. import status
 from . import workspace_context_from_args
 
 if TYPE_CHECKING:
@@ -37,6 +39,13 @@ def execute_export(
     """Build :class:`Environment` objects and hand them to the selected exporter."""
     if console is None:
         console = Console(highlight=False)
+
+    output_path: Path | None = args.output
+    dry_run: bool = args.dry_run
+    if output_path is not None and not dry_run:
+        if output_path.is_symlink():
+            raise ValueError(f"Output path cannot be a symbolic link: {output_path}")
+        output_generation = regular_file_generation(output_path)
 
     config, ctx = workspace_context_from_args(args)
     env_name: str = args.environment or "default"
@@ -82,8 +91,6 @@ def execute_export(
 
     content = run_exporter(exporter, envs)
 
-    output_path: Path | None = args.output
-    dry_run: bool = args.dry_run
     json_output: bool = args.json
 
     if dry_run or output_path is None:
@@ -105,18 +112,25 @@ def execute_export(
             )
         return 0
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    if output_path.is_file():
+    parser = ManifestParser.for_exporter_format(resolved_format)
+    if output_path.is_file() and parser is not None:
         # Give the parser a chance to merge the exported content into
         # an existing file rather than wholesale overwriting it.  The
         # default is still overwrite (same as ``conda export -f
         # environment.yaml``); :class:`PyprojectTomlParser` opts into a
         # nested-table merge so peer ``[project]`` / ``[build-system]``
         # tables survive.
-        parser = ManifestParser.for_exporter_format(resolved_format)
-        if parser is not None:
-            content = parser.merge_export(output_path, content)
-    output_path.write_text(content, encoding="utf-8")
+        existing, merge_generation = parser.read_manifest_text_with_generation(
+            output_path
+        )
+        if merge_generation != output_generation:
+            raise ValueError(f"Output path changed before writing: {output_path}")
+        content = parser.merge_export_text(existing, content)
+    atomic_write_text(
+        output_path,
+        content,
+        expected_generation=output_generation,
+    )
 
     if json_output:
         console.print_json(
@@ -132,8 +146,9 @@ def execute_export(
     else:
         console.print(
             f"[bold green]Exported[/bold green] environment "
-            f"[bold]{env_name}[/bold] to [bold]{output_path}[/bold]"
-            f" ([dim]{resolved_format}[/dim])"
+            f"[bold]{status.escape_for_console(env_name)}[/bold] to [bold]"
+            f"{status.escape_for_console(output_path)}[/bold]"
+            f" ([dim]{status.escape_for_console(resolved_format)}[/dim])"
         )
 
     return 0

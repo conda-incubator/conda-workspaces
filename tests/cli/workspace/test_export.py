@@ -12,6 +12,7 @@ from conda.common.serialize.yaml import loads as yaml_loads
 from conda.exceptions import CondaValueError
 from rich.console import Console
 
+import conda_workspaces.cli.workspace.export as export_module
 from conda_workspaces.cli.workspace.export import execute_export
 from conda_workspaces.exceptions import (
     EnvironmentNotFoundError,
@@ -164,6 +165,117 @@ def test_export_declared_source_writes_yaml(
     assert "dependencies" in data
     conda_deps = [dep for dep in data["dependencies"] if isinstance(dep, str)]
     assert any(dep.startswith("python") for dep in conda_deps)
+
+
+def test_export_status_escapes_repository_controlled_markup(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    export_console: Console,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    manifest = pixi_workspace / "pixi.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            "default = []",
+            '"[red]unsafe" = []',
+        ),
+        encoding="utf-8",
+    )
+    output = pixi_workspace / "[blue]environment.yml"
+
+    result = execute_export(
+        make_args(
+            _DEFAULTS,
+            environment="[red]unsafe",
+            output=output,
+            export_platforms=["linux-64"],
+        ),
+        console=export_console,
+    )
+
+    assert result == 0
+    rendered = export_console.file.getvalue()
+    assert "[red]unsafe" in rendered
+    assert "[blue]environment.yml" in rendered
+
+
+def test_export_declared_source_redacts_relative_channel_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    export_console: Console,
+) -> None:
+    (tmp_path / "conda.toml").write_text(
+        """\
+[workspace]
+channels = ["t/SENSITIVE-VALUE/private"]
+platforms = ["linux-64"]
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    output = tmp_path / "environment.yml"
+
+    execute_export(
+        make_args(_DEFAULTS, output=output, export_platforms=["linux-64"]),
+        console=export_console,
+    )
+
+    data = yaml_loads(output.read_text(encoding="utf-8"))
+    assert data["channels"] == ["https://conda.anaconda.org/private"]
+
+
+@pytest.mark.parametrize(
+    ("format_name", "filename"),
+    [
+        ("environment-yaml", "environment.yml"),
+        ("environment-json", "environment.json"),
+        ("conda-toml", "exported.conda.toml"),
+    ],
+    ids=["yaml", "json", "conda-toml"],
+)
+@pytest.mark.parametrize(
+    "dependency",
+    [
+        (
+            'artifact = { url = "https://user:LEAKME@packages.example.test/'
+            'linux-64/artifact-1.0-0.conda?token=SECRET" }'
+        ),
+        'artifact = { build = "https://user:LEAKME@packages.example.test/x" }',
+    ],
+    ids=["url", "build"],
+)
+def test_export_declared_source_rejects_conda_url_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    export_console: Console,
+    format_name: str,
+    filename: str,
+    dependency: str,
+) -> None:
+    (tmp_path / "conda.toml").write_text(
+        '[workspace]\nchannels = ["conda-forge"]\nplatforms = ["linux-64"]\n\n'
+        f"[dependencies]\n{dependency}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    output = tmp_path / filename
+
+    with pytest.raises(CondaValueError) as error:
+        execute_export(
+            make_args(
+                _DEFAULTS,
+                output=output,
+                format=format_name,
+                export_platforms=["linux-64"],
+            ),
+            console=export_console,
+        )
+
+    message = str(error.value)
+    assert "LEAKME" not in message
+    assert "user" not in message
+    assert "token=SECRET" not in message
+    assert not output.exists()
 
 
 def test_export_declared_source_writes_json(
@@ -378,6 +490,62 @@ def test_export_from_lockfile_missing_raises(
         execute_export(make_args(_DEFAULTS, from_lockfile=True))
 
 
+def test_export_manifest_format_from_lockfile_keeps_exact_package(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    export_console: Console,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    url = "https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-h123_0.conda"
+    digest = "a" * 64
+    (pixi_workspace / "conda.lock").write_text(
+        "version: 1\n"
+        "environments:\n"
+        "  default:\n"
+        "    channels:\n"
+        "    - url: https://conda.anaconda.org/conda-forge\n"
+        "    packages:\n"
+        "      linux-64:\n"
+        f"      - conda: {url}\n"
+        "packages:\n"
+        f"- conda: {url}\n"
+        f"  sha256: {digest}\n",
+        encoding="utf-8",
+    )
+
+    class FakeRecord:
+        name = "python"
+        sha256 = digest
+
+        def __init__(self, package_url: str) -> None:
+            self.url = package_url
+
+    monkeypatch.setattr(
+        "conda_lockfiles.rattler_lock.v6.records_from_conda_urls",
+        lambda metadata_by_url, **kwargs: tuple(
+            FakeRecord(package_url) for package_url in metadata_by_url
+        ),
+    )
+    output = pixi_workspace / "exported.toml"
+
+    execute_export(
+        make_args(
+            _DEFAULTS,
+            output=output,
+            format="conda-toml",
+            from_lockfile=True,
+            export_platforms=["linux-64"],
+        ),
+        console=export_console,
+    )
+
+    package = tomlkit.loads(output.read_text(encoding="utf-8")).unwrap()[
+        "dependencies"
+    ]["python"]
+    assert package["url"] == url
+    assert package["sha256"] == digest
+
+
 def test_export_from_prefix_not_installed_raises(
     pixi_workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -479,6 +647,159 @@ def test_export_manifest_format_plugin_hook(
     for key in path:
         cursor = cursor[key]  # type: ignore[index]
     assert cursor["platforms"] == ["linux-64", "osx-arm64"]
+
+
+@pytest.mark.parametrize(
+    ("format_name", "filename", "dependency_path"),
+    [
+        ("conda-toml", "exported-conda.toml", ("dependencies", "python")),
+        ("pixi-toml", "exported-pixi.toml", ("dependencies", "python")),
+        (
+            "pyproject-toml",
+            "exported-pyproject.toml",
+            ("tool", "conda", "dependencies", "python"),
+        ),
+    ],
+    ids=["conda-toml", "pixi-toml", "pyproject-toml"],
+)
+def test_export_manifest_formats_preserve_channel_qualified_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    export_console: Console,
+    format_name: str,
+    filename: str,
+    dependency_path: tuple[str, ...],
+) -> None:
+    (tmp_path / "conda.toml").write_text(
+        """\
+[workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+python = { version = "3.12", channel = "conda-forge" }
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    output = tmp_path / filename
+
+    execute_export(
+        make_args(
+            _DEFAULTS,
+            output=output,
+            format=format_name,
+            export_platforms=["linux-64"],
+        ),
+        console=export_console,
+    )
+
+    cursor: object = tomlkit.loads(output.read_text(encoding="utf-8")).unwrap()
+    for key in dependency_path:
+        cursor = cursor[key]  # type: ignore[index]
+    assert cursor["channel"] == (  # type: ignore[index]
+        "https://conda.anaconda.org/conda-forge"
+    )
+
+
+def test_export_rejects_unrepresentable_pypi_source_without_writing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    export_console: Console,
+) -> None:
+    (tmp_path / "conda.toml").write_text(
+        """\
+[workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[pypi-dependencies.local]
+path = "./local"
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    output = tmp_path / "exported.toml"
+
+    with pytest.raises(CondaValueError, match="cannot represent losslessly"):
+        execute_export(
+            make_args(
+                _DEFAULTS,
+                output=output,
+                format="conda-toml",
+                export_platforms=["linux-64"],
+            ),
+            console=export_console,
+        )
+
+    assert not output.exists()
+
+
+def test_export_rejects_symlinked_output(
+    pixi_workspace: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    export_console: Console,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    outside = tmp_path / "outside.yml"
+    outside.write_text("keep me", encoding="utf-8")
+    output = pixi_workspace / "environment.yml"
+    output.symlink_to(outside)
+
+    with pytest.raises(ValueError, match="symbolic link"):
+        execute_export(
+            make_args(
+                _DEFAULTS,
+                output=output,
+                export_platforms=["linux-64"],
+            ),
+            console=export_console,
+        )
+
+    assert outside.read_text(encoding="utf-8") == "keep me"
+
+
+@pytest.mark.parametrize(
+    ("format_name", "filename"),
+    [
+        ("environment-yaml", "environment.yml"),
+        ("pyproject-toml", "pyproject.toml"),
+    ],
+    ids=["replace", "merge"],
+)
+def test_export_rejects_output_changed_during_rendering(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    export_console: Console,
+    format_name: str,
+    filename: str,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    output = pixi_workspace / filename
+    output.write_text("# original\n", encoding="utf-8")
+    concurrent = "# concurrent\n"
+    run_exporter = export_module.run_exporter
+
+    def replace_output(*args, **kwargs):
+        content = run_exporter(*args, **kwargs)
+        output.write_text(concurrent, encoding="utf-8")
+        return content
+
+    monkeypatch.setattr(export_module, "run_exporter", replace_output)
+
+    with pytest.raises(ValueError, match="changed before writing"):
+        execute_export(
+            make_args(
+                _DEFAULTS,
+                output=output,
+                format=format_name,
+                export_platforms=["linux-64"],
+            ),
+            console=export_console,
+        )
+
+    assert output.read_text(encoding="utf-8") == concurrent
 
 
 def test_export_pyproject_merges_into_existing_file(

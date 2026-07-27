@@ -9,9 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import tomlkit
-
-from ..exceptions import TaskParseError, WorkspaceParseError
+from ..exceptions import WorkspaceParseError
 from ..models import WorkspaceConfig
 from .base import ManifestParser
 from .normalize import parse_feature_tasks, parse_tasks_and_targets
@@ -39,7 +37,7 @@ class PixiTomlParser(ManifestParser):
         return path.name in self.filenames
 
     def has_workspace(self, path: Path) -> bool:
-        data = self.read_toml(str(path))
+        data = self.load_toml(path)
         return "workspace" in data or "project" in data
 
     def parse_data(self, data: dict[str, Any], path: Path) -> WorkspaceConfig:
@@ -78,14 +76,11 @@ class PixiTomlParser(ManifestParser):
         return config
 
     def has_tasks(self, path: Path) -> bool:
-        return bool(self.read_toml(str(path)).get("tasks"))
+        data = self.load_toml(path)
+        return bool(data.get("tasks"))
 
-    def parse_tasks(self, path: Path) -> dict[str, Task]:
-        try:
-            data = tomlkit.loads(path.read_text(encoding="utf-8")).unwrap()
-        except Exception as exc:
-            raise TaskParseError(str(path), str(exc)) from exc
-
+    def parse_tasks_data(self, data: dict[str, Any]) -> dict[str, Task]:
+        """Parse pixi tasks from an already loaded manifest mapping."""
         tasks = parse_tasks_and_targets(data)
         parse_feature_tasks(data, tasks)
         return tasks

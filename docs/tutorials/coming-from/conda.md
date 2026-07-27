@@ -51,6 +51,14 @@ equivalent workspace configuration. Use `--dry-run` to preview the
 output without writing a file, or `-o custom.toml` to choose a
 different output path.
 
+The importer preserves representable conda channel, build, subdir, hash, and
+credential-free direct URL fields, along with PyPI extras. It rejects embedded
+credentials in direct package sources, PyPI direct URLs, and environment
+markers instead of silently changing their meaning. Keep PyPI direct sources
+in the source manifest until the importer can represent them losslessly.
+Replace platform markers with
+`[target.<platform>.pypi-dependencies]` declarations when applicable.
+
 For reference, given an existing `environment.yml`:
 
 ```yaml
@@ -129,6 +137,11 @@ This means you can share a `conda.toml` or `conda.lock` with someone
 who has conda-workspaces installed and they can create an environment
 with the familiar `conda env create` command — no new workflow to
 learn.
+
+The `conda.lock` loader used by `conda env create` rejects external package
+references because that interface cannot carry their verified artifacts into
+conda's installer. Declare external dependencies in `conda.toml`, regenerate
+`conda.lock`, then use `conda workspace install`.
 
 The companion [conda-lockfiles](https://github.com/conda/conda-lockfiles)
 plugin (installed as a dependency) adds the same `conda env create`

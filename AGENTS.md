@@ -56,14 +56,18 @@
   under 1 ms), solver and virtual-package helpers inside
   `ResolvedEnvironment` (`solve_for_platform`,
   `virtual_package_overrides`, `scoped_virtual_packages`) and
-  `lockfile.install_from_lockfile` (avoids pulling in heavy
-  solver/envs machinery for lockfile-read operations),
+  `lockfile.install_from_lockfile` and its `LockfileInstallPlan`
+  methods (avoid pulling in heavy solver/envs machinery for
+  lockfile-read operations),
   `template.py` where `_get_jinja_env()` lazily imports jinja2,
   `cli/task/run.py` where workspace context is lazily imported for
   environment resolution (tasks work without a workspace),
   `manifests/toml.py` where `CondaTomlParser.parse()` delegates to
   `PixiTomlParser` (breaks a real circular dependency since
   `pixi_toml` imports helpers from `toml`),
+  `archive.py` where receipt types are imported at their use sites
+  (breaks the archive/receipt cycle since `receipts.py` imports shared
+  archive validation helpers),
   `cli/workspace/shell.py` where `conda_spawn` is an optional
   dependency, `envs.py` where `conda_pypi` is an optional
   dependency, and `env_spec.py` where heavy workspace parsing and

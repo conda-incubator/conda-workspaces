@@ -3,19 +3,67 @@
 from __future__ import annotations
 
 import re
-import shutil
 from abc import ABC, abstractmethod
-from functools import lru_cache
 from typing import TYPE_CHECKING
 
 import tomlkit
 from conda.base.constants import KNOWN_SUBDIRS
+from conda.exceptions import InvalidMatchSpec
 from packaging.requirements import InvalidRequirement, Requirement
 
-from ..exceptions import ManifestExistsError, TaskNotFoundError, WorkspaceParseError
-from ..models import WorkspaceConfig
+from ..exceptions import (
+    ManifestExistsError,
+    TaskNotFoundError,
+    TaskParseError,
+    WorkspaceParseError,
+)
+from ..models import (
+    Channel,
+    MatchSpec,
+    PyPIDependency,
+    WorkspaceConfig,
+    has_match_spec_url_credentials,
+    has_url_credentials,
+    has_url_credentials_in_data,
+    redact_channel_name,
+    redact_channel_url,
+    redact_url_text,
+)
+from ..parsing import (
+    decode_limited_text,
+    read_limited_text,
+    validate_document_limits,
+)
+from ..paths import atomic_write_text, read_regular_file_bytes_with_generation
 
 _PYPI_NAME_TAIL_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(.*)$")
+MATCH_SPEC_FIELD_ALIASES: dict[str, str] = {
+    "version": "version",
+    "build": "build",
+    "build-number": "build_number",
+    "build_number": "build_number",
+    "channel": "channel",
+    "subdir": "subdir",
+    "md5": "md5",
+    "sha256": "sha256",
+    "url": "url",
+    "fn": "fn",
+    "file-name": "fn",
+    "license": "license",
+    "license-family": "license_family",
+    "license_family": "license_family",
+    "features": "features",
+    "track-features": "track_features",
+    "track_features": "track_features",
+}
+MATCH_SPEC_TOML_FIELDS: dict[str, str] = {
+    field: "file-name" if field == "fn" else field.replace("_", "-")
+    for field in dict.fromkeys(MATCH_SPEC_FIELD_ALIASES.values())
+}
+MAX_MANIFEST_BYTES = 16 * 1024**2
+MAX_MANIFEST_DEPTH = 128
+MAX_MANIFEST_COLLECTION_ITEMS = 100_000
+MAX_MANIFEST_ITEMS = 1_000_000
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -27,6 +75,102 @@ if TYPE_CHECKING:
     from tomlkit.items import InlineTable, Table
 
     from ..models import Task
+    from ..paths import FileGeneration
+
+
+def match_spec_to_toml(spec: MatchSpec) -> str | InlineTable:
+    """Return a lossless workspace TOML value for a conda ``MatchSpec``.
+
+    This is a module-level function because ``MatchSpec`` is owned by conda and
+    the serializer is shared by parsers, importers, mutations, and exporters.
+    """
+    if has_match_spec_url_credentials(spec, include_channel=False):
+        raise InvalidMatchSpec(
+            spec.name or "package",
+            "credential-bearing package fields cannot be written to workspace"
+            " manifests. Configure authentication outside the manifest, then"
+            " remove embedded authentication, Anaconda /t/<token>/ segments,"
+            " queries, and fragments",
+        )
+
+    unsupported = [
+        field
+        for field in MatchSpec.FIELD_NAMES
+        if field not in MATCH_SPEC_TOML_FIELDS
+        and field != "name"
+        and spec.get_raw_value(field) is not None
+    ]
+    if spec.optional is not False:
+        unsupported.append("optional")
+    if spec.target is not None:
+        unsupported.append("target")
+    if unsupported:
+        fields = ", ".join(unsupported)
+        raise InvalidMatchSpec(
+            spec.name or "package",
+            f"field(s) cannot be represented in a workspace manifest: {fields}",
+        )
+
+    subdir = spec.get_raw_value("subdir")
+    if subdir is not None and subdir not in KNOWN_SUBDIRS:
+        raise InvalidMatchSpec(
+            spec.name or "package",
+            f"subdir '{subdir}' is not a known conda platform",
+        )
+
+    fields: dict[str, Any] = {}
+    for field, key in MATCH_SPEC_TOML_FIELDS.items():
+        value = spec.get_raw_value(field)
+        if value is None:
+            continue
+        if field == "channel":
+            channel = Channel(value)
+            original = spec.original_spec_str or ""
+            prefix, separator, _ = original.rpartition("::")
+            explicit_channel = (
+                prefix
+                if separator and re.match(r"(?i)[a-z][a-z0-9+.-]*://", prefix)
+                else None
+            )
+            if explicit_channel is None:
+                match = re.search(
+                    r"(?:^|[\[,])\s*channel\s*=\s*(?:"
+                    r"(?P<quote>['\"])(?P<quoted>.*?)(?P=quote)|"
+                    r"(?P<unquoted>[^,'\"\]\s]+))",
+                    original,
+                )
+                if match is not None:
+                    raw_channel = match.group("quoted") or match.group("unquoted")
+                    if re.match(r"(?i)[a-z][a-z0-9+.-]*://", raw_channel):
+                        explicit_channel = raw_channel
+            if explicit_channel is not None:
+                value = redact_channel_name(explicit_channel)
+            elif spec.original_spec_str is None and channel.base_url:
+                value = redact_channel_url(channel)
+            else:
+                value = next(
+                    candidate
+                    for candidate in (
+                        channel.canonical_name,
+                        channel.name,
+                        str(channel),
+                    )
+                    if candidate and Channel(candidate) == channel
+                )
+                value = redact_channel_name(str(value))
+        elif field == "build_number":
+            value = str(value)
+        elif isinstance(value, frozenset):
+            value = sorted(value)
+        fields[key] = value
+
+    if not fields:
+        return "*"
+    if list(fields) == ["version"]:
+        return fields["version"]
+    table = tomlkit.inline_table()
+    table.update(fields)
+    return table
 
 
 class ManifestParser(ABC):
@@ -71,15 +215,71 @@ class ManifestParser(ABC):
     }
 
     @staticmethod
-    @lru_cache(maxsize=16)
-    def read_toml(path_str: str) -> dict:
-        """Read and parse a TOML file, returning empty dict on failure."""
-        from pathlib import Path
+    def read_manifest_text(path: Path) -> str:
+        """Read one repository manifest under the configured byte limit."""
+        return read_limited_text(
+            path,
+            maximum_bytes=MAX_MANIFEST_BYTES,
+            label="Manifest TOML",
+        )
 
+    @staticmethod
+    def read_manifest_text_with_generation(path: Path) -> tuple[str, FileGeneration]:
+        """Read a mutable manifest without links and return its generation."""
+        content, generation = read_regular_file_bytes_with_generation(
+            path,
+            maximum_bytes=MAX_MANIFEST_BYTES,
+            label="Manifest TOML",
+        )
+        return decode_limited_text(
+            content,
+            maximum_bytes=MAX_MANIFEST_BYTES,
+            label="Manifest TOML",
+        ), generation
+
+    @staticmethod
+    def parse_toml_text(content: str) -> tomlkit.TOMLDocument:
+        """Parse manifest TOML text under explicit resource limits."""
+        content = decode_limited_text(
+            content,
+            maximum_bytes=MAX_MANIFEST_BYTES,
+            label="Manifest TOML",
+        )
+        document = tomlkit.loads(content)
+        validate_document_limits(
+            document.unwrap(),
+            label="Manifest TOML",
+            maximum_depth=MAX_MANIFEST_DEPTH,
+            maximum_collection_items=MAX_MANIFEST_COLLECTION_ITEMS,
+            maximum_items=MAX_MANIFEST_ITEMS,
+        )
+        return document
+
+    @classmethod
+    def parse_toml_text_with_redacted_errors(
+        cls,
+        content: str,
+        path: Path,
+    ) -> tomlkit.TOMLDocument:
+        """Parse mutable manifest text without exposing sensitive diagnostics."""
         try:
-            return tomlkit.loads(Path(path_str).read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+            return cls.parse_toml_text(content)
+        except Exception as exc:
+            raise WorkspaceParseError(path, redact_url_text(str(exc))) from exc
+
+    @classmethod
+    def load_toml(cls, path: Path) -> tomlkit.TOMLDocument:
+        """Read and parse one repository manifest under explicit limits."""
+        return cls.parse_toml_text(cls.read_manifest_text(path))
+
+    @classmethod
+    def load_toml_with_generation(
+        cls,
+        path: Path,
+    ) -> tuple[tomlkit.TOMLDocument, FileGeneration]:
+        """Read a mutable manifest and retain the generation to replace."""
+        content, generation = cls.read_manifest_text_with_generation(path)
+        return cls.parse_toml_text_with_redacted_errors(content, path), generation
 
     @property
     def manifest_filename(self) -> str:
@@ -154,7 +354,11 @@ class ManifestParser(ABC):
         target = dest_dir / manifest.name
         if target.exists() or target.is_symlink():
             raise ManifestExistsError(target)
-        shutil.copyfile(manifest, target)
+        atomic_write_text(
+            target,
+            cls.read_manifest_text(manifest),
+            expected_identity=None,
+        )
         return target
 
     def write_workspace_stub(
@@ -187,7 +391,11 @@ class ManifestParser(ABC):
         doc.add("workspace", ws)
         doc.add("dependencies", tomlkit.table())
 
-        path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+        atomic_write_text(
+            path,
+            tomlkit.dumps(doc),
+            expected_identity=None,
+        )
         return path, "Created"
 
     def merge_export(self, existing_path: Path, exported: str) -> str:
@@ -208,6 +416,10 @@ class ManifestParser(ABC):
         only when ``--file`` points to an existing file, so a fresh
         export still writes the exporter output verbatim.
         """
+        return exported
+
+    def merge_export_text(self, existing: str, exported: str) -> str:
+        """Merge *exported* with a previously captured existing generation."""
         return exported
 
     def parse_system_requirements(
@@ -461,14 +673,14 @@ class ManifestParser(ABC):
 
         name = next((env.name for env in envs if env.name), None)
         platforms = sorted({env.platform for env in envs})
-        channels = list(envs[0].config.channels)
+        channels = [
+            redact_channel_name(str(channel)) for channel in envs[0].config.channels
+        ]
 
-        # Per-platform specs as ``{name: suffix}`` dicts symmetric with
-        # ``WorkspaceDependencyResolver`` / ``toml.parse_pypi_dependencies`` — a
-        # name-only MatchSpec round-trips as ``"*"``, versioned
-        # MatchSpecs keep their ``conda_build_form`` suffix, PyPI
-        # entries keep their ``Requirement.specifier`` string.  When
-        # a PyPI entry is not a valid PEP 508 string (e.g. the
+        # Per-platform specs as ``{name: manifest value}`` dicts symmetric with
+        # ``WorkspaceDependencyResolver`` / ``toml.parse_pypi_dependencies``.
+        # Conda fields and named PyPI direct URLs retain their source identity.
+        # When a PyPI entry is not a valid PEP 508 string (e.g. the
         # ``"requests*"`` that
         # :meth:`~conda_workspaces.models.PyPIDependency.__str__`
         # emits for a ``requests = "*"`` manifest wildcard), fall
@@ -476,31 +688,66 @@ class ManifestParser(ABC):
         # non-identifier character — matches what ``environment-yaml``
         # does in the same case: pass the input through as-is rather
         # than crashing.
-        per_platform_conda: dict[str, dict[str, str]] = {}
-        per_platform_pypi: dict[str, dict[str, str]] = {}
+        per_platform_conda: dict[str, dict[str, Any]] = {}
+        per_platform_pypi: dict[str, dict[str, Any]] = {}
         for env in envs:
-            conda_row: dict[str, str] = {}
-            for spec in env.requested_packages:
-                parts = spec.conda_build_form().split(None, 1)
-                conda_row[parts[0]] = parts[1] if len(parts) > 1 else "*"
+            conda_row: dict[str, Any] = {}
+            requested_packages = list(env.requested_packages)
+            if not requested_packages:
+                for record in env.explicit_packages:
+                    url = getattr(record, "url", None)
+                    if not url:
+                        raise InvalidMatchSpec(
+                            getattr(record, "name", "package"),
+                            "an exact package URL is required for manifest export",
+                        )
+                    digests = {
+                        algorithm: value
+                        for algorithm in ("sha256", "md5")
+                        if (value := getattr(record, algorithm, None))
+                    }
+                    requested_packages.append(MatchSpec(MatchSpec(url), **digests))
+            for spec in requested_packages:
+                package_name = spec.get_exact_value("name")
+                if not package_name:
+                    raise InvalidMatchSpec(
+                        str(spec),
+                        "an exact package name is required for manifest export",
+                    )
+                conda_row[package_name] = match_spec_to_toml(spec)
             per_platform_conda[env.platform] = conda_row
 
-            pypi_row: dict[str, str] = {}
+            pypi_row: dict[str, Any] = {}
             for raw in env.external_packages.get("pip", []):
                 try:
                     req = Requirement(raw)
-                    pypi_row[req.name] = str(req.specifier) or "*"
                 except InvalidRequirement:
                     match = _PYPI_NAME_TAIL_RE.match(raw.strip())
-                    if match:
+                    if match and match.group(2).strip() == "*":
                         name_part, tail = match.groups()
                         pypi_row[name_part] = tail.strip() or "*"
+                        continue
+                    raise ValueError(
+                        "Cannot export an invalid PyPI dependency."
+                    ) from None
+                if req.marker is not None:
+                    raise ValueError(
+                        f"PyPI dependency '{req.name}' has an environment marker"
+                        " that workspace manifests cannot represent."
+                    )
+                dependency = PyPIDependency(
+                    name=req.name,
+                    spec=str(req.specifier),
+                    extras=tuple(sorted(req.extras)),
+                    url=req.url,
+                )
+                pypi_row[req.name] = dependency.to_manifest_toml()
             per_platform_pypi[env.platform] = pypi_row
 
         common_conda = cls._intersect_rows(per_platform_conda)
         common_pypi = cls._intersect_rows(per_platform_pypi)
 
-        target: dict[str, dict[str, dict[str, str]]] = {}
+        target: dict[str, dict[str, dict[str, Any]]] = {}
         for platform in platforms:
             delta_conda = {
                 n: s
@@ -524,8 +771,11 @@ class ManifestParser(ABC):
         }
 
     @classmethod
-    def _intersect_rows(cls, per_platform: dict[str, dict[str, str]]) -> dict[str, str]:
-        """Return entries present in every platform mapping with identical values."""
+    def _intersect_rows(
+        cls,
+        per_platform: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Return entries present on every platform with identical values."""
         if not per_platform:
             return {}
         platforms = list(per_platform)
@@ -547,12 +797,54 @@ class ManifestParser(ABC):
     def parse(self, path: Path) -> WorkspaceConfig:
         """Parse TOML from *path* and return a ``WorkspaceConfig``."""
         try:
-            data = tomlkit.loads(path.read_text(encoding="utf-8")).unwrap()
-            return self.parse_data(data, path)
-        except WorkspaceParseError:
-            raise
+            content = self.read_manifest_text(path)
+        except WorkspaceParseError as exc:
+            reason = redact_url_text(exc.reason)
+            if reason == exc.reason:
+                raise
+            raise WorkspaceParseError(path, reason) from exc
         except Exception as exc:
-            raise WorkspaceParseError(path, str(exc)) from exc
+            raise WorkspaceParseError(path, redact_url_text(str(exc))) from exc
+        return self.parse_text(path, content)
+
+    def parse_text(self, path: Path, content: str) -> WorkspaceConfig:
+        """Parse *content* and bind the result to that manifest generation."""
+        data = self.parse_toml_text_with_redacted_errors(content, path).unwrap()
+        config = self.parse_data_with_redacted_errors(data, path)
+        config._manifest_text = content
+        return config
+
+    def parse_data_with_redacted_errors(
+        self,
+        data: dict[str, Any],
+        path: Path,
+    ) -> WorkspaceConfig:
+        """Parse manifest data without exposing credential-bearing diagnostics."""
+        try:
+            return self.parse_data(data, path)
+        except WorkspaceParseError as exc:
+            reason = redact_url_text(exc.reason)
+            if reason == exc.reason:
+                raise
+            raise WorkspaceParseError(path, reason) from exc
+        except Exception as exc:
+            raise WorkspaceParseError(path, redact_url_text(str(exc))) from exc
+
+    def validate_no_url_credentials(
+        self,
+        data: Mapping[str, Any],
+        path: Path,
+        *,
+        content: str | None = None,
+    ) -> None:
+        """Reject sensitive URL material anywhere in manifest-owned data."""
+        if has_url_credentials_in_data(data) or (
+            content is not None and has_url_credentials(content)
+        ):
+            raise WorkspaceParseError(
+                path,
+                "embedded URL credentials are not supported",
+            )
 
     @abstractmethod
     def parse_data(self, data: dict[str, Any], path: Path) -> WorkspaceConfig:
@@ -564,28 +856,45 @@ class ManifestParser(ABC):
 
     def parse_tasks(self, path: Path) -> dict[str, Task]:
         """Parse *path* and return a mapping of task-name to Task."""
+        try:
+            data = self.load_toml(path).unwrap()
+        except Exception as exc:
+            raise TaskParseError(str(path), redact_url_text(str(exc))) from exc
+        return self.parse_tasks_data(data)
+
+    def parse_tasks_data(self, data: dict[str, Any]) -> dict[str, Task]:
+        """Parse tasks from an already loaded manifest mapping."""
         return {}
 
     def add_task(self, path: Path, name: str, task: Task) -> None:
         """Persist a top-level task definition into *path*."""
         if path.exists():
-            doc = tomlkit.loads(path.read_text(encoding="utf-8"))
+            doc, generation = self.load_toml_with_generation(path)
         else:
             doc = tomlkit.document()
+            generation = None
 
         tasks_section = doc.setdefault("tasks", tomlkit.table())
         tasks_section[name] = self.task_to_toml_inline(task)
-        path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+        atomic_write_text(
+            path,
+            tomlkit.dumps(doc),
+            expected_generation=generation,
+        )
 
     def remove_task(self, path: Path, name: str) -> None:
         """Remove the top-level task named *name* from *path*."""
-        doc = tomlkit.loads(path.read_text(encoding="utf-8"))
+        doc, generation = self.load_toml_with_generation(path)
         tasks_section = doc.get("tasks", {})
         if name not in tasks_section:
             raise TaskNotFoundError(name, list(tasks_section.keys()))
         del tasks_section[name]
         self.remove_target_overrides(doc, name)
-        path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+        atomic_write_text(
+            path,
+            tomlkit.dumps(doc),
+            expected_generation=generation,
+        )
 
     def task_to_toml_inline(self, task: Task) -> str | InlineTable:
         """Convert a *task* to a TOML-serializable value (string or inline table)."""

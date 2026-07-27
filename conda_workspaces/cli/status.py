@@ -25,9 +25,11 @@ Error output::
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
-from rich.markup import escape as _escape
+from ..models import redact_url_text
+from ..terminal import escape_for_console
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -49,17 +51,18 @@ def _format(
     *noun* is the object type (``task``, ``environment``),
     *name* is the specific item.
     """
+    safe_verb = escape_for_console(verb)
     if style:
-        text = f"[{style}]{verb}[/{style}]"
+        text = f"[{style}]{safe_verb}[/{style}]"
     else:
-        text = verb
-    text += f" [bold]{_escape(name)}[/bold] {noun}"
+        text = safe_verb
+    text += f" [bold]{escape_for_console(name)}[/bold] {escape_for_console(noun)}"
     if ellipsis:
         text += "[dim]...[/dim]"
     if detail:
-        text += f"  [dim]{_escape(detail)}[/dim]"
+        text += f"  [dim]{escape_for_console(detail)}[/dim]"
     if suffix:
-        text += f" [dim]({suffix})[/dim]"
+        text += f" [dim]({escape_for_console(suffix)})[/dim]"
     return text
 
 
@@ -120,8 +123,6 @@ def _class_name_to_label(cls_name: str) -> str:
         CondaIOError      → conda IO
         JSONDecodeError   → JSON decode
     """
-    import re
-
     name = cls_name.removesuffix("Error")
     words = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", name)
     words = re.sub(r"([a-z])([A-Z])", r"\1 \2", words)
@@ -134,9 +135,9 @@ def _format_error_message(exc: Exception) -> str:
     """Extract a human-readable error message from an exception."""
     error_message = getattr(exc, "error_message", None)
     if error_message:
-        return error_message
+        return redact_url_text(str(error_message))
     label = _class_name_to_label(type(exc).__name__)
-    detail = str(exc)
+    detail = redact_url_text(str(exc))
     return f"{label}: {detail}" if detail else label
 
 
@@ -165,11 +166,17 @@ def print_error(
             msg = _format_error_message(inner)
             if msg not in seen:
                 seen.add(msg)
-                console.print(f"[bold red]Error:[/bold red] {_escape(msg)}")
+                console.print(f"[bold red]Error:[/bold red] {escape_for_console(msg)}")
                 for hint in getattr(inner, "hints", []):
-                    console.print(f"[bold cyan]Hint:[/bold cyan] {_escape(hint)}")
+                    console.print(
+                        "[bold cyan]Hint:[/bold cyan] "
+                        f"{escape_for_console(redact_url_text(str(hint)))}"
+                    )
     else:
         msg = _format_error_message(exc)
-        console.print(f"[bold red]Error:[/bold red] {_escape(msg)}")
+        console.print(f"[bold red]Error:[/bold red] {escape_for_console(msg)}")
         for hint in getattr(exc, "hints", []):
-            console.print(f"[bold cyan]Hint:[/bold cyan] {_escape(hint)}")
+            console.print(
+                "[bold cyan]Hint:[/bold cyan] "
+                f"{escape_for_console(redact_url_text(str(hint)))}"
+            )

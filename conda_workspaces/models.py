@@ -14,22 +14,259 @@ resolution, and spec parsing.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field, fields
+from collections.abc import Collection, Mapping
+from dataclasses import dataclass, field, fields, replace
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, ClassVar
+from urllib.parse import unquote_to_bytes, urlsplit
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from typing import Any
 
 from conda.base.constants import KNOWN_SUBDIRS
-from conda.models.channel import Channel  # noqa: TC002
-from conda.models.match_spec import MatchSpec  # noqa: TC002
+from conda.models.channel import Channel
+from conda.models.match_spec import MatchSpec
 
 from .exceptions import (
+    EnvironmentNameInvalidError,
     EnvironmentNotFoundError,
     FeatureNotFoundError,
     PlatformError,
 )
+from .paths import is_path_segment, portable_path_key
+
+_URL_CANDIDATE_RE = re.compile(r"(?i)(?:[a-z][a-z0-9+.-]*:)?//[^\s'\"<>]*")
+
+
+def _decode_url_bytes(value: str) -> bytes | None:
+    decoded = value.encode()
+    for _ in range(4):
+        next_value = unquote_to_bytes(decoded)
+        if next_value == decoded:
+            return decoded
+        decoded = next_value
+    return None
+
+
+def _redact_url_once(url: str) -> str:
+    """Redact sensitive URL structure visible without decoding the whole value."""
+    absolute_like = re.match(r"(?i)^[a-z][a-z0-9+.-]*://", url) is not None
+    scheme_relative_like = url.startswith("//")
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "<redacted-url>" if absolute_like or scheme_relative_like else url
+    if absolute_like and not parts.netloc and parts.scheme != "file":
+        return "<redacted-url>"
+    if scheme_relative_like and not parts.netloc:
+        return "<redacted-url>"
+    if not parts.scheme and not scheme_relative_like:
+        return url
+    if parts.scheme != "file":
+        try:
+            hostname = parts.hostname
+            _ = parts.port
+        except ValueError:
+            return "<redacted-url>"
+        if (
+            not hostname
+            or "\\" in parts.netloc
+            or any(character.isspace() for character in parts.netloc)
+        ):
+            return "<redacted-url>"
+
+    decoded_path = _decode_url_bytes(parts.path)
+    if decoded_path is None:
+        return "<redacted-url>"
+    if re.search(rb"(?i)(?:[a-z][a-z0-9+.-]*:)?//[^/]*@", decoded_path):
+        return "<redacted-url>"
+
+    segments: list[str] = []
+    redact_next = False
+    path_changed = False
+    for raw_segment in parts.path.split("/"):
+        decoded_segment = _decode_url_bytes(raw_segment)
+        if decoded_segment is None:
+            return "<redacted-url>"
+
+        normalized_segment = decoded_segment.lower()
+        if redact_next:
+            redact_next = False
+            path_changed = True
+            continue
+        if normalized_segment == b"t" or normalized_segment.endswith(b"/t"):
+            redact_next = True
+            path_changed = True
+            continue
+        if normalized_segment.startswith(b"t/") or b"/t/" in normalized_segment:
+            path_changed = True
+            continue
+        segments.append(raw_segment)
+    path = "/".join(segments) if path_changed else parts.path
+    redacted = parts._replace(
+        netloc=parts.netloc.rpartition("@")[2],
+        path=path,
+        query="",
+        fragment="",
+    ).geturl()
+    separator = url.find(":")
+    if separator >= 0 and url[:separator].lower() == parts.scheme:
+        redacted = url[:separator] + redacted[separator:]
+    return redacted
+
+
+def redact_url(url: str) -> str:
+    """Remove credentials, tokens, query, and fragment from an absolute URL."""
+    redacted = _redact_url_once(url)
+    decoded = _decode_url_bytes(redacted)
+    if decoded is None:
+        return "<redacted-url>"
+    try:
+        decoded_text = decoded.decode()
+    except UnicodeDecodeError:
+        return "<redacted-url>"
+    if decoded_text != redacted and _redact_url_once(decoded_text) != decoded_text:
+        return "<redacted-url>"
+    return redacted
+
+
+def has_url_credentials(value: str) -> bool:
+    """Return whether a manifest string contains sensitive URL material."""
+    decoded = _decode_url_bytes(value)
+    if decoded is None:
+        return True
+    if re.search(
+        rb"(?i)(?:^|[^a-z0-9._~-])t[\\/][^\\/\s?#]+(?:[\\/]|$)",
+        decoded,
+    ):
+        return True
+    candidates = [value]
+    if decoded != value.encode():
+        candidates.append(decoded.decode("utf-8", errors="ignore"))
+    return any(
+        redact_url(match.group(0)) != match.group(0)
+        for candidate in candidates
+        for match in _URL_CANDIDATE_RE.finditer(candidate)
+    )
+
+
+def has_match_spec_url_credentials(
+    spec: MatchSpec,
+    *,
+    include_channel: bool = True,
+) -> bool:
+    """Return whether a conda MatchSpec field contains sensitive URL material."""
+    return any(
+        value is not None and has_url_credentials(str(value))
+        for field in MatchSpec.FIELD_NAMES
+        if include_channel or field != "channel"
+        for value in (spec.get_raw_value(field),)
+    )
+
+
+def redact_url_text(value: str) -> str:
+    """Remove sensitive URL material embedded in a larger diagnostic string."""
+    pieces: list[str] = []
+    offset = 0
+    for match in _URL_CANDIDATE_RE.finditer(value):
+        pieces.append(value[offset : match.start()])
+        pieces.append(redact_url(match.group(0)))
+        offset = match.end()
+    pieces.append(value[offset:])
+    redacted = "".join(pieces)
+    if has_url_credentials(redacted):
+        return "<redacted-url-value>"
+    return redacted
+
+
+def has_url_credentials_in_data(value: object) -> bool:
+    """Return whether nested structured data contains URL credentials."""
+    values = [value]
+    seen: set[int] = set()
+    while values:
+        current = values.pop()
+        if isinstance(current, str):
+            if has_url_credentials(current):
+                return True
+            continue
+        if isinstance(current, Mapping):
+            identity = id(current)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            values.extend(current.keys())
+            values.extend(current.values())
+        elif isinstance(current, Collection) and not isinstance(
+            current,
+            (bytes, bytearray),
+        ):
+            identity = id(current)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            values.extend(current)
+    return False
+
+
+def normalize_url_scheme(url: str) -> str:
+    """Make URL schemes explicit and lowercase without changing URL identity."""
+    if url.startswith("//"):
+        try:
+            if urlsplit(url).netloc:
+                return f"https:{url}"
+        except ValueError:
+            return url
+    match = re.match(r"(?i)^([a-z][a-z0-9+.-]*)(?=://)", url)
+    if match is None:
+        return url
+    return match.group(1).lower() + url[match.end(1) :]
+
+
+def redact_channel_name(channel: str | Channel) -> str:
+    """Return a credential-free channel name for display or export.
+
+    Conda treats a relative ``t/<token>/<channel>`` value as a named channel,
+    so its canonical name still contains the token. Resolve that form only
+    when redaction changes the resolved URL, while preserving ordinary names
+    such as ``conda-forge``.
+    """
+    original = channel.canonical_name if isinstance(channel, Channel) else channel
+    if original.startswith("//"):
+        original = normalize_url_scheme(original)
+    redacted = redact_url(original)
+    if redacted != original:
+        return redact_url_text(redacted)
+
+    parsed = (
+        channel
+        if isinstance(channel, Channel)
+        else Channel(normalize_url_scheme(channel))
+    )
+    location = parsed.location or ""
+    if location.startswith("//"):
+        token_path = f"/t/{parsed.token}" if parsed.token else ""
+        return redact_url_text(
+            normalize_url_scheme(redact_url(f"{location}{token_path}/{parsed.name}"))
+        )
+
+    resolved = str(parsed)
+    redacted_resolved = redact_url(resolved)
+    candidate = redacted_resolved if redacted_resolved != resolved else original
+    return redact_url_text(candidate)
+
+
+def redact_channel_url(channel: Channel) -> str:
+    """Return a credential-free resolved URL for a channel or channel name."""
+    if not isinstance(channel, Channel):
+        return redact_channel_name(str(channel))
+    canonical = redact_channel_name(channel)
+    if canonical != channel.canonical_name:
+        return canonical
+    value = (
+        canonical if re.match(r"(?i)^[a-z][a-z0-9+.-]*://", canonical) else str(channel)
+    )
+    return redact_url(value)
 
 
 @dataclass(frozen=True)
@@ -42,6 +279,9 @@ class LockfileStatus:
 
     status: str
     reason: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "reason", redact_url_text(self.reason or ""))
 
 
 @dataclass(frozen=True)
@@ -96,6 +336,27 @@ class PyPIDependency:
             "url": self.url,
         }
         return {key: value for key, value in fields.items() if value} or "*"
+
+    def redacted(self) -> PyPIDependency:
+        """Return a copy safe to include in diagnostic output."""
+        return replace(
+            self,
+            spec=redact_url_text(self.spec),
+            path=redact_url_text(self.path) if self.path else None,
+            git=redact_url_text(self.git) if self.git else None,
+            url=redact_url_text(self.url) if self.url else None,
+        )
+
+    def to_manifest_toml(self) -> str | dict[str, object]:
+        """Return a safe manifest value without changing direct URL semantics."""
+        if self.redacted() != self:
+            raise ValueError(
+                f"PyPI dependency '{self.name}' has a direct URL that cannot be"
+                " written safely. Remove embedded authentication, Anaconda token"
+                " paths, queries, and fragments, then configure authentication"
+                " outside the workspace manifest."
+            )
+        return self.to_toml()
 
 
 @dataclass
@@ -240,6 +501,15 @@ class WorkspaceConfig:
     )
     _platform_name_segment_re: ClassVar[re.Pattern[str]] = re.compile(r"[^A-Za-z0-9]+")
 
+    @property
+    def _manifest_text(self) -> str | None:
+        """Return the exact manifest generation accepted by the parser."""
+        return self.__dict__.get("_accepted_manifest_text")
+
+    @_manifest_text.setter
+    def _manifest_text(self, value: str | None) -> None:
+        self.__dict__["_accepted_manifest_text"] = value
+
     def __post_init__(self) -> None:
         """Ensure the default feature and environment always exist.
 
@@ -256,6 +526,19 @@ class WorkspaceConfig:
             self.environments[Environment.DEFAULT_NAME] = Environment(
                 name=Environment.DEFAULT_NAME
             )
+
+        environment_keys: dict[tuple[str, ...], str] = {}
+        for name in self.environments:
+            if not is_path_segment(name):
+                raise EnvironmentNameInvalidError(name)
+            key = portable_path_key(PurePosixPath(name))
+            existing = environment_keys.get(key)
+            if existing is not None:
+                raise EnvironmentNameInvalidError(
+                    name,
+                    reason=f"it conflicts with environment '{existing}'",
+                )
+            environment_keys[key] = name
 
         for platform in self.platforms:
             self.platform_subdirs.setdefault(platform, platform)

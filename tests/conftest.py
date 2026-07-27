@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Protocol
 
 import pytest
 
+import conda_workspaces.publication as publication_mod
 from conda_workspaces.models import (
     Channel,
     Environment,
@@ -21,7 +22,7 @@ from conda_workspaces.models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from conda.testing.fixtures import TmpEnvFixture
@@ -43,6 +44,97 @@ class SnapshotTree(Protocol):
     """Callable signature for byte-for-byte filesystem snapshots."""
 
     def __call__(self, root: Path) -> dict[str, tuple[str, bytes | str | None]]: ...
+
+
+class ReplacePublicationWriter(Protocol):
+    """Callable signature for replacing both publication writer variants."""
+
+    def __call__(
+        self,
+        callback: Callable[[Path, str, Callable[[str], None]], None],
+    ) -> None: ...
+
+
+@pytest.fixture
+def replace_lockfile_install_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[str, Callable[..., None]], None]:
+    """Replace one module's prepared lockfile installer with a recording fake."""
+
+    def replace(module: str, record: Callable[..., None]) -> None:
+        class FakeInstallPlan:
+            preflight_prefix_identity = None
+
+            def __init__(
+                self,
+                ctx: object,
+                name: str,
+                kwargs: dict[str, object],
+            ) -> None:
+                self.ctx = ctx
+                self.name = name
+                self.kwargs = kwargs
+
+            @classmethod
+            def prepare(
+                cls,
+                ctx: object,
+                name: str,
+                **kwargs: object,
+            ) -> FakeInstallPlan:
+                record("prepare", ctx, name, kwargs)
+                return cls(ctx, name, kwargs)
+
+            def execute(self) -> None:
+                record("execute", self.ctx, self.name, self.kwargs)
+
+        monkeypatch.setattr(f"{module}.LockfileInstallPlan", FakeInstallPlan)
+
+    return replace
+
+
+@pytest.fixture
+def replace_publication_writer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> ReplacePublicationWriter:
+    """Replace path and descriptor-relative publication with one callback."""
+    original_write = publication_mod.atomic_write_text
+    original_write_at = publication_mod.atomic_write_text_at
+
+    def replace(
+        callback: Callable[[Path, str, Callable[[str], None]], None],
+    ) -> None:
+        def write(path: Path, content: str, **kwargs: object) -> None:
+            callback(
+                path,
+                content,
+                lambda replacement: original_write(path, replacement, **kwargs),
+            )
+
+        def write_at(
+            directory_descriptor: int,
+            name: str,
+            content: str,
+            *,
+            display_path: Path,
+            **kwargs: object,
+        ) -> None:
+            callback(
+                display_path,
+                content,
+                lambda replacement: original_write_at(
+                    directory_descriptor,
+                    name,
+                    replacement,
+                    display_path=display_path,
+                    **kwargs,
+                ),
+            )
+
+        monkeypatch.setattr(publication_mod, "atomic_write_text", write)
+        monkeypatch.setattr(publication_mod, "atomic_write_text_at", write_at)
+
+    return replace
 
 
 @pytest.fixture
@@ -202,7 +294,9 @@ def existing_extract_target(tmp_path: Path) -> ExistingExtractTarget:
 
     def _create(kind: str, *, name: str = "extracted") -> Path:
         target = tmp_path / name
-        if kind == "non-empty":
+        if kind == "empty":
+            target.mkdir()
+        elif kind == "non-empty":
             target.mkdir()
             (target / "conda.toml").write_text("trusted = true\n", encoding="utf-8")
         elif kind == "file-target":

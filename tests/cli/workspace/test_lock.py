@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
 from conda.exceptions import CondaValueError
+from rich.console import Console
 
 from conda_workspaces.cli.workspace.lock import execute_lock
-from conda_workspaces.exceptions import EnvironmentNotFoundError, PlatformError
+from conda_workspaces.exceptions import (
+    CondaWorkspacesError,
+    EnvironmentNotFoundError,
+    PlatformError,
+)
 
 from ..conftest import make_args
 
@@ -49,6 +56,7 @@ def capture_generate_lockfile(monkeypatch: pytest.MonkeyPatch):
         on_skip=None,
         output_path=None,
         dry_run=False,
+        publish_lockfile=None,
     ):
         calls.append(
             {
@@ -60,6 +68,7 @@ def capture_generate_lockfile(monkeypatch: pytest.MonkeyPatch):
                 "on_skip": on_skip,
                 "output_path": output_path,
                 "dry_run": dry_run,
+                "publish_lockfile": publish_lockfile,
             }
         )
 
@@ -286,6 +295,32 @@ def test_lock_forwards_output_path(
     assert capture_generate_lockfile[0]["output_path"] == target
 
 
+def test_lock_rejects_manifest_changed_during_render(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    manifest = pixi_workspace / "pixi.toml"
+    lockfile = pixi_workspace / "conda.lock"
+
+    def render_and_change_manifest(*args: object, **kwargs: object) -> str:
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8") + "\n# concurrent change\n",
+            encoding="utf-8",
+        )
+        return "version: 1\nenvironments: {}\npackages: []\n"
+
+    monkeypatch.setattr(
+        "conda_workspaces.lockfile.render_lockfile",
+        render_and_change_manifest,
+    )
+
+    with pytest.raises(CondaWorkspacesError, match="manifest changed"):
+        execute_lock(make_args(_DEFAULTS))
+
+    assert not lockfile.exists()
+
+
 @pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
 def test_lock_rejects_manifest_as_output(
     pixi_workspace: Path,
@@ -331,9 +366,10 @@ def test_lock_merge_dispatches_to_merge_lockfiles(
 
     seen_paths: list[list] = []
 
-    def fake_merge(paths, ctx, *, dry_run=False):
+    def fake_merge(paths, ctx, *, dry_run=False, publish_lockfile=None):
         seen_paths.append(list(paths))
         assert dry_run is expected_dry_run
+        assert callable(publish_lockfile) is not dry_run
         return pixi_workspace / "conda.lock"
 
     expected_dry_run = dry_run
@@ -367,9 +403,10 @@ def test_lock_merge_glob_expansion(
 
     seen_paths: list[list] = []
 
-    def fake_merge(paths, ctx, *, dry_run=False):
+    def fake_merge(paths, ctx, *, dry_run=False, publish_lockfile=None):
         seen_paths.append(list(paths))
         assert dry_run is False
+        assert callable(publish_lockfile)
         return pixi_workspace / "conda.lock"
 
     monkeypatch.setattr(
@@ -419,3 +456,87 @@ def test_lock_merge_no_matches_raises(
 
     with pytest.raises(CondaValueError, match="matched no files"):
         execute_lock(make_args(_DEFAULTS, merge=["conda.lock.missing.*"]))
+
+
+def test_lock_rejects_hardlink_output_alias(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capture_generate_lockfile: list[dict],
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    canonical = pixi_workspace / "conda.lock"
+    canonical.write_text("original", encoding="utf-8")
+    alias = pixi_workspace / "lock-alias"
+    alias.hardlink_to(canonical)
+
+    with pytest.raises(CondaValueError, match="hardlink alias"):
+        execute_lock(make_args(_DEFAULTS, output=alias))
+
+    assert canonical.read_text(encoding="utf-8") == "original"
+    assert alias.read_text(encoding="utf-8") == "original"
+    assert capture_generate_lockfile == []
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+@pytest.mark.parametrize("boundary", ["leaf", "parent"], ids=["leaf", "parent"])
+def test_lock_rejects_symlinked_manifest(
+    pixi_workspace: Path,
+    capture_generate_lockfile: list[dict],
+    dry_run: bool,
+    boundary: str,
+) -> None:
+    if boundary == "leaf":
+        linked_boundary = pixi_workspace / "linked.toml"
+        linked_boundary.symlink_to(pixi_workspace / "pixi.toml")
+        linked_manifest = linked_boundary
+    else:
+        linked_boundary = pixi_workspace / "linked-parent"
+        linked_boundary.symlink_to(pixi_workspace, target_is_directory=True)
+        linked_manifest = linked_boundary / "pixi.toml"
+
+    with pytest.raises(
+        (CondaWorkspacesError, NotADirectoryError),
+        match="symlink|symbolic link",
+    ):
+        execute_lock(
+            make_args(
+                _DEFAULTS,
+                manifest_file=linked_manifest,
+                dry_run=dry_run,
+            )
+        )
+
+    assert linked_boundary.is_symlink()
+    assert capture_generate_lockfile == []
+
+
+def test_lock_progress_does_not_emit_terminal_controls(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capture_generate_lockfile: list[dict],
+) -> None:
+    payload = "spoof\x1b[2J\x1b]8;;https://example.invalid\x1b\\"
+    output_path = pixi_workspace / payload
+    console = Console(file=StringIO(), force_terminal=True, color_system=None)
+    monkeypatch.chdir(pixi_workspace)
+
+    result = execute_lock(
+        make_args(
+            _DEFAULTS,
+            output=output_path,
+            skip_unsolvable=True,
+        ),
+        console=console,
+    )
+    capture_generate_lockfile[0]["progress"](payload, payload)
+    capture_generate_lockfile[0]["on_skip"](
+        payload,
+        payload,
+        SimpleNamespace(reason=payload),
+    )
+
+    assert result == 0
+    output = console.file.getvalue()
+    assert "\x1b[2J" not in output
+    assert "\x1b]8;;https://example.invalid" not in output
+    assert r"\x1b[2J" in output

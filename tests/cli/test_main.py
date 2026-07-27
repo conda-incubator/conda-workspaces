@@ -396,6 +396,38 @@ def test_workspace_json_errors_do_not_leak_stdout(
 
 
 @pytest.mark.usefixtures("reset_conda_context")
+def test_workspace_json_conda_error_redacts_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret = "JSON-LEAK"
+
+    def fail(args: argparse.Namespace) -> int:
+        del args
+        raise CondaError(
+            f"fetch failed for https://alice:{secret}@packages.test/t/OTHER/private"
+        )
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.add.execute_add",
+        fail,
+    )
+    args = argparse.Namespace(subcmd="add", json=True)
+    reset_context(argparse_args=args)
+
+    with pytest.raises(CondaError) as exc_info:
+        execute_workspace(args)
+
+    serialized = json.dumps(exc_info.value.dump_map())
+    assert secret not in serialized
+    assert "alice" not in serialized
+    assert "OTHER" not in serialized
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+@pytest.mark.usefixtures("reset_conda_context")
 def test_workspace_json_nonzero_result_routes_output_to_stderr(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

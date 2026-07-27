@@ -107,6 +107,10 @@ order. Pass `--override-channels` with at least one `-c` to use only
 the explicit channels. Initialization fails when no channel is
 available. `quickstart --copy` and `--clone` preserve the source
 manifest's channels instead of applying these initialization options.
+Inherited channel URLs are written without basic authentication,
+Anaconda `/t/<token>/` path segments, queries, or fragments. Keep the
+credential-free channel identity in the manifest and configure authentication
+through Conda outside the repository.
 
 ### Manual setup
 

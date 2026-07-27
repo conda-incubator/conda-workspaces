@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from .exceptions import (
     PlatformError,
 )
+from .models import redact_url_text
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -290,7 +291,11 @@ class ResolvedEnvironment:
                     )
                 return list(solver.solve_final_state(prune=True))
             except (UnsatisfiableError, SystemExit) as exc:
-                raise SolveError(self.name, str(exc), platform=platform) from exc
+                raise SolveError(
+                    self.name,
+                    redact_url_text(str(exc)),
+                    platform=platform,
+                ) from exc
 
     def target_platforms(
         self,

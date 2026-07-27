@@ -6,7 +6,6 @@ import argparse
 from typing import TYPE_CHECKING
 
 from rich.console import Console
-from rich.markup import escape
 
 from ...archive import (
     WorkspaceArchive,
@@ -40,14 +39,18 @@ def warn_staging_prefix_references(
         "[bold yellow]Warning:[/bold yellow] "
         "installed files still reference the staging prefix"
     )
-    console.print(f"  [dim]staging prefix:[/dim] {escape(str(install_prefix))}")
-    console.print(f"  [dim]runtime prefix:[/dim] {escape(str(runtime_prefix))}")
+    console.print(
+        f"  [dim]staging prefix:[/dim] {status.escape_for_console(install_prefix)}"
+    )
+    console.print(
+        f"  [dim]runtime prefix:[/dim] {status.escape_for_console(runtime_prefix)}"
+    )
     for path in matches:
         try:
             display_path = path.relative_to(install_prefix)
         except ValueError:
             display_path = path
-        console.print(f"  [dim]- {escape(str(display_path))}[/dim]")
+        console.print(f"  [dim]- {status.escape_for_console(display_path)}[/dim]")
     if truncated:
         console.print("  [dim]additional matches omitted[/dim]")
 

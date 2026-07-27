@@ -96,3 +96,33 @@ def test_list_json_alias(tmp_path):
     data = json.loads(buf.getvalue())
     assert data["tasks"]["check"].get("alias") is True
     assert "depends_on" in data["tasks"]["check"]
+
+
+def test_list_does_not_emit_manifest_terminal_controls(tmp_path):
+    path = tmp_path / "conda.toml"
+    path.write_text(
+        '[tasks."erase\\u001b[2J"]\n'
+        'cmd = "echo\\u001b[31m"\n'
+        'description = "link\\u001b]8;;https://example.invalid\\u001b\\\\"\n'
+    )
+
+    console, buf = _make_console()
+    result = execute_list(_list_args(path), console=console)
+
+    assert result == 0
+    output = buf.getvalue()
+    assert "\x1b[2J" not in output
+    assert "\x1b]8;;https://example.invalid" not in output
+    assert r"\x1b[2J" in output
+
+
+def test_list_json_preserves_rich_markup_as_data(tmp_path):
+    path = tmp_path / "conda.toml"
+    path.write_text('[tasks]\n"[bold]build[/bold]" = "echo ok"\n')
+
+    console, buf = _make_console()
+    result = execute_list(_list_args(path, use_json=True), console=console)
+
+    assert result == 0
+    data = json.loads(buf.getvalue())
+    assert "[bold]build[/bold]" in data["tasks"]

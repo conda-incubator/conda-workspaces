@@ -259,9 +259,14 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
 
         if has_deps and verbose and (rendered_inputs or rendered_outputs):
             if rendered_inputs:
-                console.print(f"  [dim]inputs: {rendered_inputs}[/dim]")
+                console.print(
+                    f"  [dim]inputs: {status.escape_for_console(rendered_inputs)}[/dim]"
+                )
             if rendered_outputs:
-                console.print(f"  [dim]outputs: {rendered_outputs}[/dim]")
+                console.print(
+                    "  [dim]outputs: "
+                    f"{status.escape_for_console(rendered_outputs)}[/dim]"
+                )
 
         exit_code = shell.run(
             cmd,
@@ -381,7 +386,10 @@ def _run_adhoc(
 
     if dry_run:
         if not getattr(args, "quiet", False):
-            console.print(f"[bold yellow]Would run[/bold yellow] [dim]{full_cmd}[/dim]")
+            console.print(
+                "[bold yellow]Would run[/bold yellow] "
+                f"[dim]{status.escape_for_console(full_cmd)}[/dim]"
+            )
         return 0
 
     shell = SubprocessShell()

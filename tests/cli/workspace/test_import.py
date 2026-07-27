@@ -12,12 +12,18 @@ import pytest
 import tomlkit
 from conda.base.constants import on_win
 from conda.exceptions import DryRunExit
+from conda.models.channel import Channel
 from conda.utils import quote_for_shell
 from rich.console import Console
 
+import conda_workspaces.cli.workspace.import_manifest as import_manifest_mod
 from conda_workspaces.cli.workspace.import_manifest import execute_import
-from conda_workspaces.exceptions import ManifestImportError
+from conda_workspaces.exceptions import ManifestImportError, WorkspaceParseError
+from conda_workspaces.importers import base as importer_base
 from conda_workspaces.importers import find_importer
+from conda_workspaces.importers.serialize import config_to_toml
+from conda_workspaces.manifests import find_parser as find_manifest_parser
+from conda_workspaces.models import WorkspaceConfig
 from conda_workspaces.runner import SubprocessShell
 
 from ..conftest import make_args
@@ -158,6 +164,612 @@ def test_import_manifest_produces_workspace(
     doc = find_importer(p).convert(p)
     assert doc["workspace"]["name"] == expected_name
     assert "channels" in doc["workspace"]
+
+
+@pytest.mark.parametrize(
+    ("filename", "original", "replacement", "task_name"),
+    [
+        pytest.param(
+            "pixi.toml",
+            _PIXI_TOML,
+            _PIXI_TOML.replace("pixi-demo", "replacement").replace(
+                'build = "python -m build"', 'changed = "echo changed"'
+            ),
+            "build",
+            id="pixi",
+        ),
+        pytest.param(
+            "pyproject.toml",
+            _PYPROJECT_TOML,
+            _PYPROJECT_TOML.replace("pyproject-demo", "replacement").replace(
+                'lint = "ruff check ."', 'changed = "echo changed"'
+            ),
+            "lint",
+            id="pyproject",
+        ),
+    ],
+)
+def test_toml_import_uses_one_source_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    original: str,
+    replacement: str,
+    task_name: str,
+) -> None:
+    path = tmp_path / filename
+    path.write_text(original, encoding="utf-8")
+    parser = find_importer(path)
+    manifest_parser = find_manifest_parser(path)
+    read_manifest_text = manifest_parser.read_manifest_text
+    reads = 0
+
+    def replace_after_read(candidate: Path) -> str:
+        nonlocal reads
+        reads += 1
+        content = read_manifest_text(candidate)
+        candidate.write_text(replacement, encoding="utf-8")
+        return content
+
+    monkeypatch.setattr(
+        type(manifest_parser),
+        "read_manifest_text",
+        staticmethod(replace_after_read),
+    )
+
+    doc = parser.convert(path)
+
+    assert reads == 1
+    assert doc["workspace"]["name"] != "replacement"
+    assert task_name in doc["tasks"]
+    assert "changed" not in doc["tasks"]
+
+
+@pytest.mark.parametrize(
+    ("dependency_yaml", "message"),
+    [
+        (
+            "  - https://user:password@packages.test/private/acme-runtime-1.0-0.conda",
+            "direct conda package sources",
+        ),
+        (
+            (
+                "  - pip:\n"
+                "      - acme-client @ https://user:password@packages.test/private/"
+                "acme_client-1.0-py3-none-any.whl"
+            ),
+            "direct PyPI package sources",
+        ),
+    ],
+    ids=["conda", "pypi"],
+)
+def test_environment_yml_import_rejects_lossy_direct_sources(
+    tmp_path: Path,
+    dependency_yaml: str,
+    message: str,
+) -> None:
+    path = tmp_path / "environment.yml"
+    path.write_text(
+        f"name: secure\nchannels:\n  - conda-forge\ndependencies:\n{dependency_yaml}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=message) as exc_info:
+        find_importer(path).convert(path)
+
+    assert "user" not in str(exc_info.value)
+    assert "password" not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("dependencies_yaml", "message"),
+    [
+        ("dependencies: python>=3.12\n", "dependencies must be a list"),
+        (
+            "dependencies:\n  - pip:\n      requests>=2\n",
+            "pip dependencies must be a list",
+        ),
+    ],
+    ids=["dependencies-scalar", "pip-scalar"],
+)
+def test_environment_yml_import_rejects_scalar_dependency_collections(
+    tmp_path: Path,
+    dependencies_yaml: str,
+    message: str,
+) -> None:
+    path = tmp_path / "environment.yml"
+    path.write_text(f"name: bounded\n{dependencies_yaml}", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        find_importer(path).convert(path)
+
+
+@pytest.mark.parametrize(
+    "dependency_yaml",
+    [
+        "  - bad name https://user:password@packages.test/private/pkg.conda",
+        (
+            "  - pip:\n"
+            "      - bad name @ https://user:password@packages.test/private/pkg.whl"
+        ),
+    ],
+    ids=["conda", "pypi"],
+)
+def test_environment_yml_import_does_not_echo_malformed_source_credentials(
+    tmp_path: Path,
+    dependency_yaml: str,
+) -> None:
+    path = tmp_path / "environment.yml"
+    path.write_text(
+        f"name: secure\ndependencies:\n{dependency_yaml}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        find_importer(path).convert(path)
+
+    assert "user" not in str(exc_info.value)
+    assert "password" not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "qualifier",
+    ["private", "https://packages.example.test/private"],
+    ids=["named-channel", "url-channel"],
+)
+@pytest.mark.parametrize(
+    "manifest_kind",
+    ["environment", "anaconda-project", "conda-project"],
+)
+def test_yaml_import_preserves_channel_qualified_dependencies(
+    tmp_path: Path,
+    qualifier: str,
+    manifest_kind: str,
+) -> None:
+    dependency = f"{qualifier}::internal-runtime>=1"
+    if manifest_kind == "environment":
+        path = tmp_path / "environment.yml"
+        path.write_text(
+            f"name: secure\ndependencies:\n  - {dependency}\n",
+            encoding="utf-8",
+        )
+    elif manifest_kind == "anaconda-project":
+        path = tmp_path / "anaconda-project.yml"
+        path.write_text(
+            f"name: secure\npackages:\n  - {dependency}\n",
+            encoding="utf-8",
+        )
+    else:
+        environment_path = tmp_path / "environment.yml"
+        environment_path.write_text(
+            f"name: secure\ndependencies:\n  - {dependency}\n",
+            encoding="utf-8",
+        )
+        path = tmp_path / "conda-project.yml"
+        path.write_text(
+            "name: secure\nenvironments:\n  default:\n    - environment.yml\n",
+            encoding="utf-8",
+        )
+
+    doc = find_importer(path).convert(path)
+
+    imported = doc["dependencies"]["internal-runtime"]
+    assert imported["channel"] == qualifier
+    assert imported["version"] == ">=1"
+
+
+@pytest.mark.parametrize(
+    "manifest_kind",
+    ["environment", "anaconda-project", "conda-project"],
+)
+def test_yaml_import_preserves_conda_fields_and_pypi_extras(
+    tmp_path: Path,
+    manifest_kind: str,
+) -> None:
+    digest = "a" * 64
+    packages = (
+        "  - \"internal-runtime[version='1.0',build='secure_0',"
+        f"sha256='{digest}']\"\n"
+        "  - pip:\n"
+        "      - secure-client[crypto]>=2\n"
+    )
+    if manifest_kind == "environment":
+        path = tmp_path / "environment.yml"
+        path.write_text(
+            f"name: secure\ndependencies:\n{packages}",
+            encoding="utf-8",
+        )
+    elif manifest_kind == "anaconda-project":
+        path = tmp_path / "anaconda-project.yml"
+        path.write_text(
+            f"name: secure\npackages:\n{packages}",
+            encoding="utf-8",
+        )
+    else:
+        (tmp_path / "environment.yml").write_text(
+            f"name: secure\ndependencies:\n{packages}",
+            encoding="utf-8",
+        )
+        path = tmp_path / "conda-project.yml"
+        path.write_text(
+            "name: secure\nenvironments:\n  default:\n    - environment.yml\n",
+            encoding="utf-8",
+        )
+
+    doc = find_importer(path).convert(path)
+
+    conda_dependency = doc["dependencies"]["internal-runtime"]
+    pypi_dependency = doc["pypi-dependencies"]["secure-client"]
+    assert conda_dependency["version"] == "1.0"
+    assert conda_dependency["build"] == "secure_0"
+    assert conda_dependency["sha256"] == digest
+    assert pypi_dependency["version"] == ">=2"
+    assert pypi_dependency["extras"] == ["crypto"]
+
+
+@pytest.mark.parametrize(
+    "manifest_kind",
+    ["environment", "anaconda-project", "conda-project"],
+)
+def test_yaml_import_rejects_pypi_markers(
+    tmp_path: Path,
+    manifest_kind: str,
+) -> None:
+    packages = "  - pip:\n      - \"secure-client>=2; python_version < '3.13'\"\n"
+    if manifest_kind == "environment":
+        path = tmp_path / "environment.yml"
+        path.write_text(
+            f"name: secure\ndependencies:\n{packages}",
+            encoding="utf-8",
+        )
+    elif manifest_kind == "anaconda-project":
+        path = tmp_path / "anaconda-project.yml"
+        path.write_text(
+            f"name: secure\npackages:\n{packages}",
+            encoding="utf-8",
+        )
+    else:
+        (tmp_path / "environment.yml").write_text(
+            f"name: secure\ndependencies:\n{packages}",
+            encoding="utf-8",
+        )
+        path = tmp_path / "conda-project.yml"
+        path.write_text(
+            "name: secure\nenvironments:\n  default:\n    - environment.yml\n",
+            encoding="utf-8",
+        )
+
+    with pytest.raises(ValueError, match="cannot represent environment markers"):
+        find_importer(path).convert(path)
+
+
+def test_environment_yml_import_preserves_safe_direct_conda_source(
+    tmp_path: Path,
+) -> None:
+    url = "https://packages.example.test/linux-64/acme-runtime-1.0-0.conda"
+    path = tmp_path / "environment.yml"
+    path.write_text(
+        f"name: secure\ndependencies:\n  - {url}\n",
+        encoding="utf-8",
+    )
+
+    dependency = find_importer(path).convert(path)["dependencies"]["acme-runtime"]
+
+    assert dependency["url"] == url
+    assert dependency["subdir"] == "linux-64"
+
+
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [
+        pytest.param(
+            "environment.yml",
+            """\
+name: secure
+channels:
+  - https://user:password@packages.test/t/secret/private?token=secret#metadata
+  - t/relative-secret/private
+""",
+            id="environment-yml",
+        ),
+        pytest.param(
+            "anaconda-project.yml",
+            """\
+name: secure
+channels:
+  - https://user:password@packages.test/t/secret/private?token=secret#metadata
+  - t/relative-secret/private
+""",
+            id="anaconda-project",
+        ),
+    ],
+)
+def test_yaml_import_redacts_channel_credentials(
+    tmp_path: Path,
+    filename: str,
+    content: str,
+) -> None:
+    path = tmp_path / filename
+    path.write_text(content, encoding="utf-8")
+
+    doc = find_importer(path).convert(path)
+
+    assert doc["workspace"]["channels"] == [
+        "https://packages.test/private",
+        "https://conda.anaconda.org/private",
+    ]
+
+
+def test_yaml_import_rejects_oversized_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(importer_base, "MAX_MANIFEST_BYTES", 8)
+    path = tmp_path / "environment.yml"
+    path.write_text("name: oversized\n", encoding="utf-8")
+
+    with pytest.raises(ManifestImportError, match="maximum size"):
+        find_importer(path).convert(path)
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(
+            """\
+name: secure
+commands:
+  leak: "echo https://user:password@packages.test/file"
+""",
+            id="command",
+        ),
+        pytest.param(
+            """\
+name: secure
+commands:
+  leak:
+    unix: echo ok
+    variables:
+      SOURCE_URL: https://user:password@packages.test/file
+""",
+            id="environment",
+        ),
+    ],
+)
+def test_execute_import_rejects_credentials_in_rendered_tasks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    content: str,
+    dry_run: bool,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "anaconda-project.yml"
+    source.write_text(content, encoding="utf-8")
+
+    with pytest.raises(WorkspaceParseError, match="embedded URL credentials"):
+        execute_import(
+            make_args(_DEFAULTS, file=source, dry_run=dry_run),
+            console=Console(file=StringIO(), width=200),
+        )
+
+    assert not (tmp_path / "conda.toml").exists()
+
+
+def test_conda_project_import_redacts_environment_channel_credentials(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "conda-project.yml"
+    project.write_text(_CONDA_PROJECT_YML, encoding="utf-8")
+    (tmp_path / "environment.yml").write_text(
+        """\
+name: secure
+channels:
+  - https://user:password@packages.test/t/secret/private?token=secret#metadata
+  - t/relative-secret/private
+""",
+        encoding="utf-8",
+    )
+
+    doc = find_importer(project).convert(project)
+
+    assert doc["workspace"]["channels"] == [
+        "https://packages.test/private",
+        "https://conda.anaconda.org/private",
+    ]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://user:password@packages.test/t/secret/file.txt?token=secret#metadata",
+        "t/VALIDATION-LEAK/private/file.txt",
+    ],
+    ids=["absolute", "relative-token"],
+)
+def test_anaconda_project_import_rejects_download_credentials(
+    tmp_path: Path,
+    url: str,
+) -> None:
+    path = tmp_path / "anaconda-project.yml"
+    path.write_text(
+        f"""name: secure
+downloads:
+  artifact:
+    url: {url}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ManifestImportError) as caught:
+        find_importer(path).convert(path)
+
+    message = str(caught.value)
+    for secret in ("user", "password", "secret", "VALIDATION-LEAK"):
+        assert secret not in message
+
+
+@pytest.mark.parametrize(
+    ("filename", "namespace"),
+    [
+        pytest.param("pixi.toml", "", id="pixi"),
+        pytest.param("pyproject.toml", "tool.conda.", id="pyproject"),
+    ],
+)
+def test_import_preserves_and_redacts_source_channel_identity(
+    tmp_path: Path,
+    filename: str,
+    namespace: str,
+) -> None:
+    project = '[project]\nname = "channel-import"\n\n' if namespace else ""
+    path = tmp_path / filename
+    path.write_text(
+        f"""{project}[{namespace}workspace]
+name = "channel-import"
+channels = [
+  "conda-forge",
+  "https://user:password@conda.anaconda.org/t/secret/private/label/dev?token=secret#metadata",
+  "t/relative-secret/private",
+]
+platforms = ["linux-64"]
+
+[{namespace}dependencies]
+named = {{ version = ">=1", channel = "conda-forge" }}
+private = {{ version = ">=1", channel = "https://u:p@packages.test/t/s/private?x=y#z" }}
+relative = {{ version = ">=1", channel = "t/dependency-secret/private" }}
+
+[{namespace}feature.tools]
+channels = [
+  {{ channel = "bioconda", priority = 1 }},
+  "https://user:password@packages.example.test/t/secret/team/channel?token=secret#metadata",
+  {{ channel = "t/feature-secret/private", priority = 2 }},
+]
+
+[{namespace}environments.tools]
+features = ["tools"]
+""",
+        encoding="utf-8",
+    )
+
+    doc = find_importer(path).convert(path)
+
+    assert doc["workspace"]["channels"] == [
+        "conda-forge",
+        "https://conda.anaconda.org/private/label/dev",
+        "https://conda.anaconda.org/private",
+    ]
+    assert doc["feature"]["tools"]["channels"] == [
+        "bioconda",
+        "https://packages.example.test/team/channel",
+        "https://conda.anaconda.org/private",
+    ]
+    assert doc["dependencies"]["named"]["channel"] == "conda-forge"
+    assert doc["dependencies"]["private"]["channel"] == "https://packages.test/private"
+    assert doc["dependencies"]["relative"]["channel"] == (
+        "https://conda.anaconda.org/private"
+    )
+
+
+@pytest.mark.parametrize(
+    ("filename", "namespace"),
+    [
+        pytest.param("pixi.toml", "", id="pixi"),
+        pytest.param("pyproject.toml", "tool.conda.", id="pyproject"),
+    ],
+)
+@pytest.mark.parametrize(
+    "table",
+    [
+        "pypi-dependencies",
+        "feature.dev.pypi-dependencies",
+        "environments.dev.pypi-dependencies",
+        "target.linux-64.pypi-dependencies",
+    ],
+    ids=["default", "feature", "environment", "target"],
+)
+def test_import_rejects_credentialed_pypi_direct_urls(
+    tmp_path: Path,
+    filename: str,
+    namespace: str,
+    table: str,
+) -> None:
+    project = '[project]\nname = "pypi-import"\n\n' if namespace else ""
+    credential_url = (
+        "https://user:password@packages.test/t/secret/"
+        "pkg.whl?token=secret#sha256=deadbeef"
+    )
+    path = tmp_path / filename
+    path.write_text(
+        f"""{project}[{namespace}workspace]
+name = "pypi-import"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[{namespace}{table}]
+artifact = {{ url = {json.dumps(credential_url)} }}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="direct URL that cannot be written safely"):
+        find_importer(path).convert(path)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://user:password@packages.test/t/secret/pkg.whl?token=secret#fragment",
+        " @ https://user:password@packages.test/t/secret/pkg.whl?token=secret#fragment",
+    ],
+    ids=["bare-url", "pep508-tail"],
+)
+def test_import_rejects_credentialed_url_in_pypi_version(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    path = tmp_path / "pixi.toml"
+    path.write_text(
+        f"""[workspace]
+name = "pypi-import"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[pypi-dependencies]
+artifact = {json.dumps(value)}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WorkspaceParseError, match="credential-bearing URL"):
+        find_importer(path).convert(path)
+
+
+@pytest.mark.parametrize(
+    ("channel", "expected"),
+    [
+        pytest.param(
+            "conda-forge",
+            "https://conda.anaconda.org/conda-forge",
+            id="named",
+        ),
+        pytest.param(
+            "HTTPS://user:password@packages.test/t/secret/private?x=y#z",
+            "HTTPS://packages.test/private",
+            id="uppercase-url",
+        ),
+        pytest.param(
+            "t/SENSITIVE-VALUE/private",
+            "https://conda.anaconda.org/private",
+            id="relative-token",
+        ),
+    ],
+)
+def test_config_to_toml_serializes_channel(channel: str, expected: str) -> None:
+    config = WorkspaceConfig(channels=[Channel(channel)])
+
+    doc = config_to_toml(config)
+
+    assert doc["workspace"]["channels"] == [expected]
 
 
 @pytest.mark.parametrize(
@@ -695,3 +1307,51 @@ def test_execute_import_overwrite_confirmed(
     assert "Overwrite" in confirm_calls[0]
     content = (tmp_path / "conda.toml").read_text(encoding="utf-8")
     assert "[workspace]" in content
+
+
+@pytest.mark.parametrize(
+    "initially_exists",
+    [False, True],
+    ids=["absent-created", "existing-replaced"],
+)
+def test_execute_import_rejects_output_changed_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    initially_exists: bool,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "environment.yml"
+    source.write_text(_ENVIRONMENT_YML, encoding="utf-8")
+    output = tmp_path / "conda.toml"
+    if initially_exists:
+        output.write_text("# original\n", encoding="utf-8")
+
+        def replace_during_prompt(message: str) -> None:
+            output.unlink()
+            output.write_text("# concurrent\n", encoding="utf-8")
+
+        monkeypatch.setattr(import_manifest_mod, "confirm_yn", replace_during_prompt)
+    else:
+        atomic_write_text = import_manifest_mod.atomic_write_text
+
+        def create_before_publication(
+            path: Path,
+            content: str,
+            **kwargs: object,
+        ) -> None:
+            path.write_text("# concurrent\n", encoding="utf-8")
+            atomic_write_text(path, content, **kwargs)
+
+        monkeypatch.setattr(
+            import_manifest_mod,
+            "atomic_write_text",
+            create_before_publication,
+        )
+
+    with pytest.raises(ValueError, match="changed before writing"):
+        execute_import(
+            make_args(_DEFAULTS, file=source, output=output),
+            console=Console(file=StringIO(), width=200),
+        )
+
+    assert output.read_text(encoding="utf-8") == "# concurrent\n"

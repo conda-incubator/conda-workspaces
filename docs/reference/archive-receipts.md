@@ -154,10 +154,10 @@ order:
    compare it with the receipt.
 7. Move the staged directory into the requested target.
 
-Verified extraction refuses to use an existing symlink target, existing
-file target, or non-empty directory target. This prevents an attacker
-from satisfying receipt paths with pre-existing files outside the
-staged extraction.
+Verified extraction requires the target path to be absent. Existing links,
+files, and directories, including empty directories, are rejected. This
+prevents an attacker from satisfying receipt paths with pre-existing files
+outside the staged extraction.
 
 Pass `--require-sha256` with `--receipt` to require every compared
 package record to include SHA-256. Without it, the receipt still

@@ -86,8 +86,9 @@ location:
 conda workspace unarchive my-project.tar.zst --target /path/to/destination
 ```
 
-The target directory must be empty or absent. `unarchive` refuses to
-extract over existing files.
+The target path must be absent. `unarchive` refuses to extract over an
+existing file, link, or directory, including an empty directory. Remove an
+empty target before retrying.
 
 After extraction, install the environments from the lockfile:
 
@@ -225,7 +226,7 @@ conda workspace unarchive dist/my-project.tar.zst \
 Verified extraction checks the archive digest before extraction, then
 extracts to a temporary staging directory, verifies the extracted
 manifest, lockfile, and package inventory, and only then moves the
-workspace to the target. The target must be empty or absent.
+workspace to the target. The target path must be absent.
 
 Receipts require both the manifest and `conda.lock` to be present in the
 archive. If `include`, `exclude`, or `--exclude` filters would remove
@@ -285,9 +286,16 @@ conda workspace unarchive my-project-offline.tar.zst --no-install
 
 Archives are extracted with path traversal protection. Every member is
 validated before extraction: absolute paths, `..` components, symlinks
-escaping the target directory, and special file types (device nodes,
-FIFOs) are all rejected. On Python 3.12+ the `filter="data"` parameter
-provides additional defense-in-depth.
+escaping the target directory, hardlinks, and special file types (device
+nodes, FIFOs) are all rejected. Extraction also requires a supported Python
+patch release that provides `tarfile.data_filter`. Update Python before
+retrying if that filter is unavailable.
+
+Archive creation and extraction use descriptor-relative filesystem operations
+when the platform provides them. On platforms without those APIs, member
+validation and path-based publication checks remain in place, but an active
+process running as the same operating-system user can still race a parent path
+or junction by swapping and restoring it during one operation.
 
 When `--bundle` is used, package hashes are verified against the
 lockfile's SHA256 entries at archive creation and before receipt-verified

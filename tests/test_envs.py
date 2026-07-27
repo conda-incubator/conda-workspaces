@@ -7,6 +7,7 @@ import importlib.util
 import logging
 import sys
 import types
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -16,7 +17,7 @@ import pytest
 if TYPE_CHECKING:
     from tests.conftest import CreateWorkspaceEnv, SnapshotTree
 
-from conda.base.constants import ChannelPriority, UpdateModifier
+from conda.base.constants import PREFIX_STATE_FILE, ChannelPriority, UpdateModifier
 from conda.base.context import context as conda_context
 from conda.core.envs_manager import PrefixData
 from conda.exceptions import PackageNotInstalledError, UnsatisfiableError
@@ -36,8 +37,13 @@ from conda_workspaces.envs import (
     install_environment,
     list_installed_environments,
     remove_environment,
+    validate_path_dependencies,
 )
-from conda_workspaces.exceptions import EnvironmentNotInstalledError, SolveError
+from conda_workspaces.exceptions import (
+    CondaWorkspacesError,
+    EnvironmentNotInstalledError,
+    SolveError,
+)
 from conda_workspaces.models import (
     Channel,
     Environment,
@@ -70,17 +76,32 @@ def workspace(tmp_path: Path) -> WorkspaceContext:
     return WorkspaceContext(config)
 
 
+@pytest.mark.parametrize(
+    "descriptor_deletion",
+    [True, False],
+    ids=["descriptor", "detached-fallback"],
+)
 def test_remove_environment(
     workspace: WorkspaceContext,
     monkeypatch: pytest.MonkeyPatch,
     tmp_workspace_env: CreateWorkspaceEnv,
+    descriptor_deletion: bool,
 ) -> None:
     tmp_workspace_env(workspace.root, "default")
+    sibling = tmp_workspace_env(workspace.root, "sibling")
     assert workspace.env_exists("default")
 
+    if not descriptor_deletion:
+
+        @contextmanager
+        def without_descriptor(path: Path):
+            yield None
+
+        monkeypatch.setattr(envs_mod, "anchored_directory", without_descriptor)
     monkeypatch.setattr("conda_workspaces.envs.unregister_env", lambda path: None)
     remove_environment(workspace, "default")
     assert not workspace.env_exists("default")
+    assert PrefixData(str(sibling)).is_environment()
 
 
 def test_remove_environment_nonexistent(
@@ -102,7 +123,8 @@ def test_clean_all(
 
     monkeypatch.setattr("conda_workspaces.envs.unregister_env", lambda path: None)
     clean_all(workspace)
-    assert not workspace.envs_dir.is_dir()
+    assert workspace.envs_dir.is_dir()
+    assert not any(workspace.envs_dir.iterdir())
 
 
 def test_clean_all_no_envs_dir(workspace: WorkspaceContext) -> None:
@@ -125,6 +147,204 @@ def test_clean_all_preserves_non_environment_directories(
 
     assert not prefix.exists()
     assert (unrelated / "keep.txt").read_bytes() == b"keep"
+
+
+def test_clean_all_rejects_symlinked_external_envs_dir(
+    workspace: WorkspaceContext,
+    tmp_workspace_env: CreateWorkspaceEnv,
+) -> None:
+    base = workspace.root
+    project = base / "project"
+    external = base / "external"
+    project.mkdir()
+    prefixes = [
+        tmp_workspace_env(external, name, pkg_count=1) for name in ("first", "second")
+    ]
+    workspace.config.root = str(project)
+    state_dir = project / ".conda"
+    state_dir.mkdir()
+    try:
+        (state_dir / "envs").symlink_to(
+            external / ".conda" / "envs",
+            target_is_directory=True,
+        )
+    except OSError as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
+
+    with pytest.raises(CondaWorkspacesError, match="contains a symlink"):
+        list_installed_environments(workspace)
+    with pytest.raises(CondaWorkspacesError, match="contains a symlink"):
+        clean_all(workspace)
+
+    assert all(PrefixData(str(prefix)).is_environment() for prefix in prefixes)
+    assert all((prefix / "conda-meta" / "pkg-0.json").is_file() for prefix in prefixes)
+
+
+def test_clean_all_rejects_envs_dir_replacement_during_iteration(
+    workspace: WorkspaceContext,
+    tmp_workspace_env: CreateWorkspaceEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_prefix = tmp_workspace_env(workspace.root, "project")
+    external_root = workspace.root / "external"
+    external_prefix = tmp_workspace_env(external_root, "external")
+    envs_dir = workspace.envs_dir
+    displaced = envs_dir.with_name("displaced-envs")
+    original_iter = WorkspaceContext.iter_installed_prefixes
+
+    def replacing_iter(ctx: WorkspaceContext):
+        for prefix, identity in original_iter(ctx):
+            ctx.envs_dir.rename(displaced)
+            ctx.envs_dir.symlink_to(
+                external_root / ".conda" / "envs",
+                target_is_directory=True,
+            )
+            yield prefix, identity
+
+    monkeypatch.setattr(WorkspaceContext, "iter_installed_prefixes", replacing_iter)
+
+    with pytest.raises(CondaWorkspacesError, match="contains a symlink"):
+        clean_all(workspace)
+
+    assert PrefixData(str(displaced / project_prefix.name)).is_environment()
+    assert PrefixData(str(external_prefix)).is_environment()
+
+
+def test_remove_environment_anchors_deletion_during_parent_replacement(
+    workspace: WorkspaceContext,
+    tmp_workspace_env: CreateWorkspaceEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_prefix = tmp_workspace_env(workspace.root, "project")
+    external_root = workspace.root / "external"
+    external_prefix = tmp_workspace_env(external_root, "external")
+    envs_dir = workspace.envs_dir
+    with envs_mod.anchored_directory(envs_dir) as descriptor:
+        if descriptor is None:
+            pytest.skip("descriptor-anchored deletion unavailable")
+    displaced = envs_dir.with_name("displaced-envs")
+    original_remove = envs_mod.remove_anchored_directory
+    replaced = False
+
+    def replace_parent(
+        parent_descriptor: int,
+        name: str,
+        expected_identity: tuple[int, int],
+    ) -> None:
+        nonlocal replaced
+        if replaced:
+            original_remove(parent_descriptor, name, expected_identity)
+            return
+        replaced = True
+        envs_dir.rename(displaced)
+        envs_dir.symlink_to(
+            external_root / ".conda" / "envs",
+            target_is_directory=True,
+        )
+        original_remove(parent_descriptor, name, expected_identity)
+
+    monkeypatch.setattr(envs_mod, "unregister_env", lambda path: None)
+    monkeypatch.setattr(envs_mod, "remove_anchored_directory", replace_parent)
+
+    with pytest.raises(CondaWorkspacesError, match="contains a symlink"):
+        remove_environment(workspace, project_prefix.name)
+
+    assert not (displaced / project_prefix.name).exists()
+    assert PrefixData(str(external_prefix)).is_environment()
+
+
+def test_remove_environment_rejects_descriptor_leaf_replacement(
+    workspace: WorkspaceContext,
+    tmp_workspace_env: CreateWorkspaceEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp_workspace_env(workspace.root, "project", pkg_count=1)
+    external_root = workspace.root / "external"
+    external_prefix = tmp_workspace_env(external_root, "external", pkg_count=1)
+    with envs_mod.anchored_directory(workspace.envs_dir) as descriptor:
+        if descriptor is None:
+            pytest.skip("descriptor-anchored deletion unavailable")
+    original_remove = envs_mod.remove_anchored_directory
+    replaced = False
+
+    def replace_leaf(
+        parent_descriptor: int,
+        name: str,
+        expected_identity: tuple[int, int],
+    ) -> None:
+        nonlocal replaced
+        if name == "conda-meta" and not replaced:
+            replaced = True
+            envs_mod.os.rename(
+                name,
+                ".displaced-conda-meta",
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+            )
+            envs_mod.os.symlink(
+                external_prefix / "conda-meta",
+                name,
+                target_is_directory=True,
+                dir_fd=parent_descriptor,
+            )
+        original_remove(parent_descriptor, name, expected_identity)
+
+    monkeypatch.setattr(envs_mod, "unregister_env", lambda path: None)
+    monkeypatch.setattr(envs_mod, "remove_anchored_directory", replace_leaf)
+
+    with pytest.raises(CondaWorkspacesError, match="changed before deletion"):
+        remove_environment(workspace, "project")
+
+    detached = next(workspace.envs_dir.glob(".project.remove-*"))
+    assert (detached / "conda-meta").is_symlink()
+    assert (detached / ".displaced-conda-meta" / "pkg-0.json").is_file()
+    assert (external_prefix / "conda-meta" / "pkg-0.json").is_file()
+
+
+def test_clean_all_rejects_real_prefix_replacement(
+    workspace: WorkspaceContext,
+    tmp_workspace_env: CreateWorkspaceEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_prefix = tmp_workspace_env(workspace.root, "project", pkg_count=1)
+    replacement_root = workspace.root / "replacement"
+    replacement_prefix = tmp_workspace_env(
+        replacement_root,
+        "project",
+        pkg_count=1,
+    )
+    displaced = workspace.envs_dir / ".displaced-project"
+    original_iter = WorkspaceContext.iter_installed_prefixes
+
+    def replacing_iter(ctx: WorkspaceContext):
+        for prefix, identity in original_iter(ctx):
+            prefix.rename(displaced)
+            replacement_prefix.rename(prefix)
+            yield prefix, identity
+
+    monkeypatch.setattr(WorkspaceContext, "iter_installed_prefixes", replacing_iter)
+
+    with pytest.raises(CondaWorkspacesError, match="changed before removal"):
+        clean_all(workspace)
+
+    assert (displaced / "conda-meta" / "pkg-0.json").is_file()
+    assert (project_prefix / "conda-meta" / "pkg-0.json").is_file()
+
+
+def test_remove_environment_rejects_symlinked_prefix(
+    workspace: WorkspaceContext,
+    tmp_workspace_env: CreateWorkspaceEnv,
+) -> None:
+    external_root = workspace.root / "external"
+    external_prefix = tmp_workspace_env(external_root, "external")
+    workspace.envs_dir.mkdir(parents=True)
+    linked_prefix = workspace.envs_dir / "linked"
+    linked_prefix.symlink_to(external_prefix, target_is_directory=True)
+
+    with pytest.raises(CondaWorkspacesError):
+        remove_environment(workspace, linked_prefix.name)
+
+    assert PrefixData(str(external_prefix)).is_environment()
 
 
 @pytest.mark.parametrize(
@@ -668,19 +888,29 @@ def test_install_prune_reconciles_requested_specs(
         lambda self: {
             "python": MatchSpec("python >=3.10"),
             "boltons": MatchSpec("boltons"),
+            "local-package": MatchSpec("local-package"),
         },
     )
     monkeypatch.setattr(envs_mod, "conda_context", FakeContext())
+    path_install_calls: list[str] = []
+    monkeypatch.setattr(
+        envs_mod,
+        "_install_path_deps",
+        lambda prefix, environment: path_install_calls.append(environment.name),
+    )
 
     dependencies = {"python": MatchSpec("python >=3.10")} if has_remaining_spec else {}
     resolved = ResolvedEnvironment(
         name="default",
         conda_dependencies=dependencies,
+        pypi_dependencies={
+            "local-package": PyPIDependency(name="local-package", path="."),
+        },
         channels=[Channel("conda-forge")],
     )
     install_environment(workspace, resolved, dry_run=dry_run, prune=True)
 
-    expected_call_count = 2 if has_remaining_spec and not dry_run else 1
+    expected_call_count = 3 if has_remaining_spec and not dry_run else 1
     assert len(solver_calls) == expected_call_count
     if dry_run and has_remaining_spec:
         assert {spec.name for spec in solver_calls[0].specs_to_add} == {"python"}
@@ -689,23 +919,43 @@ def test_install_prune_reconciles_requested_specs(
             "update_modifier": UpdateModifier.UPDATE_SPECS,
             "prune": True,
         }
+    elif has_remaining_spec:
+        validation, removal, installation = solver_calls
+        assert {spec.name for spec in validation.specs_to_add} == {"python"}
+        assert validation.specs_to_remove == []
+        assert validation.solve_kwargs == {
+            "update_modifier": UpdateModifier.UPDATE_SPECS,
+            "prune": True,
+        }
+        assert validation.txn.downloaded is True
+        assert validation.txn.executed is False
+        assert {spec.name for spec in removal.specs_to_remove} == expected_removed
+        assert "local-package" not in {spec.name for spec in removal.specs_to_remove}
+        assert removal.specs_to_add == []
+        assert removal.solve_kwargs == {"update_modifier": UpdateModifier.UPDATE_SPECS}
+        assert {spec.name for spec in installation.specs_to_add} == {"python"}
+        assert installation.specs_to_remove == []
+        assert installation.solve_kwargs == {
+            "update_modifier": UpdateModifier.FREEZE_INSTALLED
+        }
     else:
         assert {
             spec.name for spec in solver_calls[0].specs_to_remove
         } == expected_removed
+        assert "local-package" not in {
+            spec.name for spec in solver_calls[0].specs_to_remove
+        }
         assert solver_calls[0].specs_to_add == []
         assert solver_calls[0].solve_kwargs == {
             "update_modifier": UpdateModifier.UPDATE_SPECS
         }
-    if has_remaining_spec and not dry_run:
-        assert {spec.name for spec in solver_calls[1].specs_to_add} == {"python"}
-        assert solver_calls[1].specs_to_remove == []
-        assert solver_calls[1].solve_kwargs == {
-            "update_modifier": UpdateModifier.FREEZE_INSTALLED
-        }
 
     assert all(solver.txn.summary_printed is dry_run for solver in solver_calls)
-    assert all(solver.txn.executed is not dry_run for solver in solver_calls)
+    if dry_run:
+        assert all(not solver.txn.executed for solver in solver_calls)
+    else:
+        assert all(solver.txn.executed for solver in solver_calls[-2:])
+    assert path_install_calls == ([] if dry_run else ["default"])
 
 
 def test_install_solve_error(
@@ -900,10 +1150,9 @@ def test_build_pypi_specs_no_rattler_solver(
 
 def test_install_path_deps_no_conda_pypi(
     block_conda_pypi: None,
-    caplog: pytest.LogCaptureFixture,
     tmp_path: Path,
 ) -> None:
-    """Warns and skips when conda-pypi is not installed."""
+    """A missing conda-pypi installation fails the environment install."""
     resolved = ResolvedEnvironment(
         name="default",
         pypi_dependencies={
@@ -911,10 +1160,8 @@ def test_install_path_deps_no_conda_pypi(
         },
     )
 
-    with caplog.at_level(logging.WARNING):
+    with pytest.raises(SolveError, match="require conda-pypi"):
         _install_path_deps(tmp_path, resolved)
-
-    assert "conda-pypi is not installed" in caplog.text
 
 
 def test_install_path_deps_skips_normal(tmp_path: Path) -> None:
@@ -1002,13 +1249,46 @@ def test_install_path_deps_success(
     assert install_calls[0] == sentinel_package
 
 
-def test_install_path_deps_build_failure_warns(
+@pytest.mark.parametrize(
+    "boundary",
+    ["preflight", "build"],
+    ids=["preflight", "build"],
+)
+def test_path_dependency_rejects_relative_anaconda_token(
+    fake_pypi_build: tuple,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+) -> None:
+    build_calls, install_calls, _, _ = fake_pypi_build
+    secret = "ENV-PATH-LEAK"
+    source = Path("t") / secret / "private"
+    (tmp_path / source).mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    resolved = ResolvedEnvironment(
+        name="default",
+        pypi_dependencies={
+            "local": PyPIDependency(name="local", path=str(source)),
+        },
+    )
+
+    with pytest.raises(SolveError) as exc_info:
+        if boundary == "preflight":
+            validate_path_dependencies(resolved)
+        else:
+            _install_path_deps(tmp_path / "prefix", resolved)
+
+    assert secret not in str(exc_info.value)
+    assert build_calls == []
+    assert install_calls == []
+
+
+def test_install_path_deps_build_failure_raises(
     fake_pypi_build: tuple,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """When pypa_to_conda raises, logs warning and continues."""
+    """A local package build failure fails the environment install."""
     _, _, build_mod, _ = fake_pypi_build
 
     def broken_build(project, **kwargs):
@@ -1024,11 +1304,26 @@ def test_install_path_deps_build_failure_warns(
         },
     )
 
-    with caplog.at_level(logging.WARNING):
+    with pytest.raises(SolveError, match="build exploded"):
         _install_path_deps(tmp_path, resolved)
 
-    assert "Failed to install" in caplog.text
-    assert "broken" in caplog.text
+
+def test_install_path_only_dependency_runs_without_solver(
+    workspace: WorkspaceContext,
+    fake_pypi_build: tuple,
+) -> None:
+    build_calls, install_calls, _, sentinel_package = fake_pypi_build
+    resolved = ResolvedEnvironment(
+        name="default",
+        pypi_dependencies={
+            "local": PyPIDependency(name="local", path="./src"),
+        },
+    )
+
+    install_environment(workspace, resolved)
+
+    assert len(build_calls) == 1
+    assert install_calls == [sentinel_package]
 
 
 def test_install_merges_pypi_specs_into_solver(
@@ -1097,6 +1392,57 @@ def test_apply_activation_scripts(
     assert "FOO=bar" in dest.read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("sink", ["state", "script"], ids=["state", "script"])
+@pytest.mark.parametrize("mutation", ["rewrite", "replace"])
+def test_activation_metadata_rejects_output_generation_changes(
+    workspace: WorkspaceContext,
+    tmp_workspace_env: CreateWorkspaceEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    sink: str,
+    mutation: str,
+) -> None:
+    prefix = tmp_workspace_env(workspace.root, "default")
+    if sink == "state":
+        target = prefix / PREFIX_STATE_FILE
+        target.write_text('{"env_vars": {"ORIGINAL": "1"}}', encoding="utf-8")
+        concurrent = '{"env_vars": {"CONCURRENT": "preserved"}}'
+
+        def operation() -> None:
+            _apply_activation_env(prefix, {"UPDATED": "1"})
+
+    else:
+        source = workspace.root / "setup.sh"
+        source.write_text("export UPDATED=1\n", encoding="utf-8")
+        target = prefix / "etc" / "conda" / "activate.d" / source.name
+        target.parent.mkdir(parents=True)
+        target.write_text("export ORIGINAL=1\n", encoding="utf-8")
+        concurrent = "export CONCURRENT=preserved\n"
+
+        def operation() -> None:
+            _apply_activation_scripts(prefix, [str(source)])
+
+    atomic_binary_writer = envs_mod.atomic_binary_writer
+
+    @contextmanager
+    def replace_output(path: Path, **kwargs):
+        assert path == target
+        if mutation == "rewrite":
+            target.write_text(concurrent, encoding="utf-8")
+        else:
+            replacement = target.with_name(f"{target.name}.replacement")
+            replacement.write_text(concurrent, encoding="utf-8")
+            replacement.replace(target)
+        with atomic_binary_writer(path, **kwargs) as stream:
+            yield stream
+
+    monkeypatch.setattr(envs_mod, "atomic_binary_writer", replace_output)
+
+    with pytest.raises(ValueError, match="changed before writing"):
+        operation()
+
+    assert target.read_text(encoding="utf-8") == concurrent
+
+
 def test_apply_activation_scripts_missing(
     workspace: WorkspaceContext,
     tmp_workspace_env: CreateWorkspaceEnv,
@@ -1111,6 +1457,48 @@ def test_apply_activation_scripts_missing(
     assert "skipping" in caplog.text
 
 
+@pytest.mark.parametrize(
+    "sink",
+    ["activation-script", "path-dependency"],
+    ids=["activation-script", "path-dependency"],
+)
+def test_repository_paths_do_not_emit_terminal_controls(
+    tmp_path: Path,
+    fake_pypi_build: tuple,
+    caplog: pytest.LogCaptureFixture,
+    sink: str,
+) -> None:
+    controlled_path = tmp_path / "[bold]\x1b[31m\x7f\x9bsource"
+
+    with caplog.at_level(logging.INFO):
+        if sink == "activation-script":
+            _apply_activation_scripts(
+                tmp_path / "prefix",
+                [str(controlled_path)],
+            )
+        else:
+            _install_path_deps(
+                tmp_path / "prefix",
+                ResolvedEnvironment(
+                    name="default",
+                    pypi_dependencies={
+                        "local": PyPIDependency(
+                            name="local",
+                            path=str(controlled_path),
+                        )
+                    },
+                ),
+            )
+
+    assert "\x1b" not in caplog.text
+    assert "\x7f" not in caplog.text
+    assert "\x9b" not in caplog.text
+    assert r"\x1b" in caplog.text
+    assert r"\x7f" in caplog.text
+    assert r"\x9b" in caplog.text
+    assert r"\[bold]" in caplog.text
+
+
 def test_apply_activation_scripts_empty(
     workspace: WorkspaceContext,
     tmp_workspace_env: CreateWorkspaceEnv,
@@ -1119,6 +1507,69 @@ def test_apply_activation_scripts_empty(
     prefix = tmp_workspace_env(workspace.root, "default")
     _apply_activation_scripts(prefix, [])
     assert not (prefix / "etc" / "conda" / "activate.d").exists()
+
+
+@pytest.mark.parametrize("broken", [False, True], ids=["linked", "broken"])
+def test_validate_activation_metadata_rejects_symlinked_script_source(
+    workspace: WorkspaceContext,
+    tmp_workspace_env: CreateWorkspaceEnv,
+    broken: bool,
+) -> None:
+    prefix = tmp_workspace_env(workspace.root, "default")
+    target = workspace.root / "target.sh"
+    if not broken:
+        target.write_text("export SAFE=1\n", encoding="utf-8")
+    source = workspace.root / "activate.sh"
+    source.symlink_to(target)
+    resolved = ResolvedEnvironment(
+        name="default",
+        activation_scripts=[str(source)],
+    )
+
+    with pytest.raises(CondaWorkspacesError, match="not a regular file"):
+        envs_mod.validate_activation_metadata(prefix, resolved)
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    ["state-leaf", "state-parent", "scripts-directory", "script-leaf"],
+)
+def test_activation_metadata_rejects_symlink_boundaries(
+    workspace: WorkspaceContext,
+    tmp_workspace_env: CreateWorkspaceEnv,
+    boundary: str,
+) -> None:
+    prefix = tmp_workspace_env(workspace.root, "default")
+    outside = workspace.root / "outside"
+    outside.mkdir()
+    marker = outside / "marker"
+    marker.write_text("keep", encoding="utf-8")
+
+    if boundary == "state-leaf":
+        (prefix / "conda-meta" / "state").symlink_to(marker)
+    elif boundary == "state-parent":
+        metadata = prefix / "conda-meta"
+        metadata.rename(prefix / "real-conda-meta")
+        metadata.symlink_to(outside, target_is_directory=True)
+    else:
+        source = workspace.root / "setup.sh"
+        source.write_text("export SAFE=1\n", encoding="utf-8")
+        activate_d = prefix / "etc" / "conda" / "activate.d"
+        activate_d.parent.mkdir(parents=True)
+        if boundary == "scripts-directory":
+            activate_d.symlink_to(outside, target_is_directory=True)
+        else:
+            activate_d.mkdir()
+            (activate_d / source.name).symlink_to(marker)
+
+    with pytest.raises(CondaWorkspacesError, match="symlink"):
+        if boundary.startswith("state-"):
+            _apply_activation_env(prefix, {"MY_VAR": "value"})
+        else:
+            _apply_activation_scripts(prefix, [str(source)])
+
+    assert marker.read_text(encoding="utf-8") == "keep"
+    assert not (outside / "setup.sh").exists()
 
 
 @pytest.mark.parametrize(

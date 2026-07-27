@@ -8,12 +8,14 @@ import-time overhead negligible.
 from __future__ import annotations
 
 import os
+import stat
 from contextlib import contextmanager
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
 from threading import RLock
 from typing import TYPE_CHECKING, cast
 
-from .exceptions import EnvironmentNameInvalidError
+from .exceptions import CondaWorkspacesError, EnvironmentNameInvalidError
+from .paths import is_path_segment
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -98,7 +100,109 @@ class WorkspaceContext:
     @property
     def envs_dir(self) -> Path:
         """Directory where project-local environments are stored."""
-        return self.root / self.config.envs_dir
+        if "envs_dir" not in self._cache:
+            root = self.root
+            envs_dir = root / self.config.envs_dir
+            candidates: list[Path] = []
+            candidate = envs_dir
+            while candidate != root and candidate != candidate.parent:
+                candidates.append(candidate)
+                candidate = candidate.parent
+            for candidate in candidates:
+                if candidate.is_symlink():
+                    raise CondaWorkspacesError(
+                        f"Workspace environments path contains a symlink: {candidate}"
+                    )
+            resolved_root = root.resolve(strict=False)
+            resolved = envs_dir.resolve(strict=False)
+            try:
+                relative = resolved.relative_to(resolved_root)
+            except ValueError as exc:
+                raise CondaWorkspacesError(
+                    "Workspace environments directory escapes the workspace:"
+                    f" {envs_dir}"
+                ) from exc
+            if not relative.parts:
+                raise CondaWorkspacesError(
+                    "Workspace environments directory cannot be the workspace root."
+                )
+            self._cache["envs_dir"] = envs_dir
+            self._cache["envs_dir_candidates"] = tuple(candidates)
+
+        envs_dir = cast("Path", self._cache["envs_dir"])
+        for candidate in cast(
+            "tuple[Path, ...]",
+            self._cache["envs_dir_candidates"],
+        ):
+            if candidate.is_symlink():
+                raise CondaWorkspacesError(
+                    f"Workspace environments path contains a symlink: {candidate}"
+                )
+        return envs_dir
+
+    def envs_dir_identity(self) -> tuple[int, int] | None:
+        """Return the current environments directory identity without following it."""
+        envs_dir = self.envs_dir
+        try:
+            current = envs_dir.lstat()
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISDIR(current.st_mode):
+            raise CondaWorkspacesError(
+                f"Workspace environments path is not a directory: {envs_dir}"
+            )
+        return current.st_dev, current.st_ino
+
+    def require_envs_dir_identity(self, expected: tuple[int, int]) -> None:
+        """Reject replacement of the environments directory during an operation."""
+        current = self.envs_dir_identity()
+        if current != expected:
+            raise CondaWorkspacesError(
+                "Workspace environments directory changed while it was being used."
+            )
+
+    def iter_installed_prefixes(self) -> Iterator[tuple[Path, tuple[int, int]]]:
+        """Yield valid conda prefixes and the identities that were inspected."""
+        from conda.core.envs_manager import PrefixData
+
+        envs_dir = self.envs_dir
+        if not envs_dir.is_dir():
+            return
+        for prefix in envs_dir.iterdir():
+            try:
+                before = prefix.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(before.st_mode):
+                raise CondaWorkspacesError(
+                    f"Workspace environment prefix cannot be a symlink: {prefix}"
+                )
+            if (
+                not stat.S_ISDIR(before.st_mode)
+                or not PrefixData(str(prefix)).is_environment()
+            ):
+                continue
+            try:
+                after = prefix.lstat()
+            except FileNotFoundError as exc:
+                raise CondaWorkspacesError(
+                    "Workspace environment prefix changed while it was inspected:"
+                    f" {prefix}"
+                ) from exc
+            identity = before.st_dev, before.st_ino
+            if (
+                not stat.S_ISDIR(after.st_mode)
+                or (
+                    after.st_dev,
+                    after.st_ino,
+                )
+                != identity
+            ):
+                raise CondaWorkspacesError(
+                    "Workspace environment prefix changed while it was inspected:"
+                    f" {prefix}"
+                )
+            yield prefix, identity
 
     @property
     def platform(self) -> str:
@@ -126,28 +230,17 @@ class WorkspaceContext:
     @staticmethod
     def validate_environment_name(env_name: str) -> None:
         """Reject an environment name that cannot map to a local prefix."""
-        posix_name = PurePosixPath(env_name)
-        windows_name = PureWindowsPath(env_name)
-        if (
-            not env_name
-            or env_name in {".", ".."}
-            or len(posix_name.parts) != 1
-            or len(windows_name.parts) != 1
-            or posix_name.is_absolute()
-            or windows_name.is_absolute()
-            or windows_name.drive
-        ):
+        if not is_path_segment(env_name):
             raise EnvironmentNameInvalidError(env_name)
 
     def env_prefix(self, env_name: str) -> Path:
         """Return the prefix path for a named environment."""
         self.validate_environment_name(env_name)
         prefix = self.envs_dir / env_name
-        envs_dir = self.envs_dir.resolve(strict=False)
-        try:
-            prefix.resolve(strict=False).relative_to(envs_dir)
-        except ValueError as exc:
-            raise EnvironmentNameInvalidError(env_name) from exc
+        if prefix.is_symlink():
+            raise CondaWorkspacesError(
+                f"Workspace environment prefix cannot be a symlink: {prefix}"
+            )
         return prefix
 
     def env_exists(self, env_name: str) -> bool:

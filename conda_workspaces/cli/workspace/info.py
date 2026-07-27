@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import tomlkit
 from conda.exceptions import ArgumentError
 from rich.console import Console
 from rich.table import Table
@@ -16,8 +15,10 @@ from tomlkit.items import Table as TomlTable
 from ...envs import get_environment_info, list_installed_packages
 from ...exceptions import WorkspaceParseError
 from ...lockfile import lockfile_status
-from ...models import LockfileStatus
+from ...manifests import find_parser
+from ...models import LockfileStatus, redact_channel_name, redact_url_text
 from ...resolver import known_platforms, resolve_all_environments, resolve_environment
+from .. import status
 from . import workspace_context_from_args
 from .dependencies import (
     DependencyLocation,
@@ -27,6 +28,8 @@ from .list import package_table
 
 if TYPE_CHECKING:
     import argparse
+
+    import tomlkit
 
     from ...context import WorkspaceContext
     from ...models import WorkspaceConfig
@@ -81,7 +84,7 @@ def _show_workspace_info(
         "name": config.name or "(unnamed)",
         "version": config.version or "",
         "description": config.description or "",
-        "channels": [ch.canonical_name for ch in config.channels],
+        "channels": [redact_channel_name(ch) for ch in config.channels],
         "platforms": config.platforms,
         "known_platforms": known,
         "environments": list(config.environments.keys()),
@@ -104,33 +107,55 @@ def _show_workspace_info(
         table = Table(show_header=False, show_edge=False, pad_edge=False)
         table.add_column("Key", style="bold")
         table.add_column("Value")
-        table.add_row("Manifest", str(info["manifest"]))
-        table.add_row("Name", info["name"])
+        table.add_row("Manifest", status.escape_for_console(info["manifest"]))
+        table.add_row("Name", status.escape_for_console(info["name"]))
         if info["version"]:
-            table.add_row("Version", info["version"])
+            table.add_row("Version", status.escape_for_console(info["version"]))
         if info["description"]:
-            table.add_row("Description", info["description"])
-        table.add_row("Channels", ", ".join(info["channels"]) or "(none)")
-        table.add_row("Platforms", ", ".join(info["platforms"]) or "(all)")
+            table.add_row(
+                "Description",
+                status.escape_for_console(info["description"]),
+            )
+        table.add_row(
+            "Channels",
+            status.escape_for_console(", ".join(info["channels"]) or "(none)"),
+        )
+        table.add_row(
+            "Platforms",
+            status.escape_for_console(", ".join(info["platforms"]) or "(all)"),
+        )
         # Only surface the reachable set when a feature has broadened
         # it; otherwise the row is redundant with "Platforms".
         if set(known) != set(info["platforms"]):
-            table.add_row("Known Platforms", ", ".join(known) or "(none)")
-        table.add_row("Environments", ", ".join(info["environments"]))
-        table.add_row("Features", ", ".join(info["features"]) or "(none)")
+            table.add_row(
+                "Known Platforms",
+                status.escape_for_console(", ".join(known) or "(none)"),
+            )
+        table.add_row(
+            "Environments",
+            status.escape_for_console(", ".join(info["environments"])),
+        )
+        table.add_row(
+            "Features",
+            status.escape_for_console(", ".join(info["features"]) or "(none)"),
+        )
         status_style = {
             LockfileStatus.UP_TO_DATE: "green",
             LockfileStatus.OUT_OF_DATE: "yellow",
             LockfileStatus.MISSING: "red",
         }[lock.status]
-        lockfile_label = f"[{status_style}]{lock.status}[/{status_style}]"
+        lockfile_label = (
+            f"[{status_style}]{status.escape_for_console(lock.status)}[/{status_style}]"
+        )
         if lock.reason:
-            lockfile_label += f" ({lock.reason})"
+            lockfile_label += f" ({status.escape_for_console(lock.reason)})"
         table.add_row("Lockfile", lockfile_label)
         console.print(table)
         if include_packages:
             for env_name in config.environments:
-                console.print(f"\n[bold]Packages in {env_name}:[/bold]")
+                console.print(
+                    f"\n[bold]Packages in {status.escape_for_console(env_name)}:[/bold]"
+                )
                 if not ctx.env_exists(env_name):
                     console.print("  (not installed)")
                     continue
@@ -160,15 +185,16 @@ def _show_env_info(
         "installed": install_info["exists"],
         "features": config.environments[env_name].features,
         "no_default_feature": config.environments[env_name].no_default_feature,
-        "channels": [ch.canonical_name for ch in resolved.channels],
+        "channels": [redact_channel_name(ch) for ch in resolved.channels],
         "platforms": resolved.platforms,
         "channel_priority": resolved.channel_priority,
         "conda_dependencies": {
-            name: dep.conda_build_form()
+            name: redact_url_text(dep.conda_build_form())
             for name, dep in resolved.conda_dependencies.items()
         },
         "pypi_dependencies": {
-            name: str(dep) for name, dep in resolved.pypi_dependencies.items()
+            name: str(dep.redacted())
+            for name, dep in resolved.pypi_dependencies.items()
         },
     }
 
@@ -181,26 +207,35 @@ def _show_env_info(
         table = Table(show_header=False, show_edge=False, pad_edge=False)
         table.add_column("Key", style="bold")
         table.add_column("Value")
-        table.add_row("Environment", info["name"])
-        table.add_row("Prefix", info["prefix"])
+        table.add_row("Environment", status.escape_for_console(info["name"]))
+        table.add_row("Prefix", status.escape_for_console(info["prefix"]))
         table.add_row("Installed", "yes" if info["installed"] else "no")
         if info["installed"]:
             table.add_row("Packages", str(info.get("packages_installed", "?")))
-        table.add_row("Channels", ", ".join(info["channels"]) or "(none)")
-        table.add_row("Platforms", ", ".join(info["platforms"]) or "(all)")
+        table.add_row(
+            "Channels",
+            status.escape_for_console(", ".join(info["channels"]) or "(none)"),
+        )
+        table.add_row(
+            "Platforms",
+            status.escape_for_console(", ".join(info["platforms"]) or "(all)"),
+        )
         if info["channel_priority"]:
-            table.add_row("Channel priority", info["channel_priority"])
+            table.add_row(
+                "Channel priority",
+                status.escape_for_console(info["channel_priority"]),
+            )
         console.print(table)
 
         if info["conda_dependencies"]:
             console.print("\n[bold]Conda dependencies:[/bold]")
             for _name, spec in sorted(info["conda_dependencies"].items()):
-                console.print(f"  {spec}")
+                console.print(f"  {status.escape_for_console(spec)}")
 
         if info["pypi_dependencies"]:
             console.print("\n[bold]PyPI dependencies:[/bold]")
             for _name, spec in sorted(info["pypi_dependencies"].items()):
-                console.print(f"  {spec}")
+                console.print(f"  {status.escape_for_console(spec)}")
 
     return 0
 
@@ -213,7 +248,7 @@ def _environment_details(
 ) -> list[dict[str, object]]:
     """Return complete environment composition for structured workspace info."""
     manifest_path = Path(config.manifest_path)
-    document = tomlkit.loads(manifest_path.read_text(encoding="utf-8"))
+    document = find_parser(manifest_path).load_toml(manifest_path)
     source, namespace = workspace_toml_source(
         document,
         manifest_path,
@@ -258,7 +293,7 @@ def _environment_details(
                             config,
                             "dependencies",
                             name,
-                            dep.conda_build_form(),
+                            redact_url_text(dep.conda_build_form()),
                             locations["dependencies"].get(name),
                         )
                         for name, dep in resolved.conda_dependencies.items()
@@ -270,7 +305,7 @@ def _environment_details(
                             config,
                             "pypi-dependencies",
                             name,
-                            dep.to_toml(),
+                            dep.redacted().to_toml(),
                             locations["pypi-dependencies"].get(name),
                         )
                         for name, dep in resolved.pypi_dependencies.items()
@@ -285,7 +320,7 @@ def _environment_details(
             "no_default_feature": environment.no_default_feature,
             "prefix": str(ctx.env_prefix(env_name)),
             "installed": installed,
-            "channels": [channel.canonical_name for channel in base.channels],
+            "channels": [redact_channel_name(channel) for channel in base.channels],
             "platforms": base.platforms,
             "channel_priority": base.channel_priority,
             "resolutions": resolutions,

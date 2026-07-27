@@ -10,6 +10,7 @@ from rich.table import Table
 
 from ...envs import list_installed_environments, list_installed_packages
 from ...exceptions import EnvironmentNotFoundError, EnvironmentNotInstalledError
+from .. import status
 from . import workspace_context_from_args
 
 if TYPE_CHECKING:
@@ -36,7 +37,11 @@ def package_table(packages: list[PackageRow]) -> Table:
     table.add_column("Version")
     table.add_column("Build")
     for package in packages:
-        table.add_row(package["name"], package["version"], package["build"])
+        table.add_row(
+            status.escape_for_console(package["name"]),
+            status.escape_for_console(package["version"]),
+            status.escape_for_console(package["build"]),
+        )
     return table
 
 
@@ -78,8 +83,9 @@ def _list_packages(
     else:
         if not packages:
             console.print(
-                f"No packages in [bold]{env_name}[/bold] environment."
-                f" Run 'conda workspace install -e {env_name}' first."
+                f"No packages in [bold]{status.escape_for_console(env_name)}[/bold]"
+                " environment. Run 'conda workspace install -e "
+                f"{status.escape_for_console(env_name)}' first."
             )
             return 0
 
@@ -138,8 +144,12 @@ def _list_environments(
                 feats = "(none)"
             else:
                 feats = "(default)"
-            status = "yes" if row["installed"] else "no"
-            table.add_row(row["name"], feats, status)
+            installed_label = "yes" if row["installed"] else "no"
+            table.add_row(
+                status.escape_for_console(row["name"]),
+                status.escape_for_console(feats),
+                installed_label,
+            )
         console.print(table)
 
     return 0

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import tomlkit
+from conda.base.context import context as conda_context
 
+import conda_workspaces.cli.workspace.update as update_mod
+import conda_workspaces.publication as publication_mod
 from conda_workspaces.cli.workspace.update import execute_update
 from conda_workspaces.exceptions import (
     CondaWorkspacesError,
@@ -171,6 +175,58 @@ def test_update_bare_name_preserves_manifest_bytes(
         ("private", "linux-64"): {"defaultpkg"},
         ("private", "osx-arm64"): {"defaultpkg"},
     }
+
+
+def test_update_rejects_existing_embedded_credentials(
+    layered_manifest: Path,
+    update_runtime: SimpleNamespace,
+) -> None:
+    layered_manifest.write_text(
+        layered_manifest.read_text(encoding="utf-8").replace(
+            'channels = ["conda-forge"]',
+            'channels = ["https://user:secret@repo.example/conda"]',
+        ),
+        encoding="utf-8",
+    )
+    before = layered_manifest.read_bytes()
+
+    with pytest.raises(CondaWorkspacesError, match="embedded URL credentials"):
+        execute_update(
+            make_args(
+                _DEFAULTS,
+                manifest_file=layered_manifest,
+                specs=["defaultpkg"],
+            )
+        )
+
+    assert layered_manifest.read_bytes() == before
+    assert update_runtime.sync_calls == []
+
+
+def test_update_redacts_malformed_manifest_credentials(
+    layered_manifest: Path,
+    update_runtime: SimpleNamespace,
+) -> None:
+    layered_manifest.write_text(
+        layered_manifest.read_text(encoding="utf-8")
+        + '\nmalformed = "https://user:LEAKME@example.test/[\n',
+        encoding="utf-8",
+    )
+    before = layered_manifest.read_bytes()
+
+    with pytest.raises(CondaWorkspacesError) as caught:
+        execute_update(
+            make_args(
+                _DEFAULTS,
+                manifest_file=layered_manifest,
+                specs=["defaultpkg"],
+            )
+        )
+
+    assert "LEAKME" not in str(caught.value)
+    assert "user" not in str(caught.value)
+    assert layered_manifest.read_bytes() == before
+    assert update_runtime.sync_calls == []
 
 
 def test_update_explicit_spec_replaces_selected_constraint(
@@ -571,23 +627,22 @@ def test_update_no_install_skips_prefixes_and_refreshes_complete_lock(
     }
 
 
-def test_update_no_install_reports_lock_recovery_after_publication(
+def test_update_keeps_manifest_when_lock_publication_fails(
     layered_manifest: Path,
     update_runtime: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
+    replace_publication_writer,
 ) -> None:
-    def fail_write(*args, **kwargs):
-        raise OSError("write failed")
+    before = layered_manifest.read_bytes()
 
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.update.write_lockfile",
-        fail_write,
-    )
+    def fail_write(path, content, write):
+        if path.name == "conda.lock":
+            raise OSError("write failed")
+        write(content)
 
-    with pytest.raises(
-        CondaWorkspacesError,
-        match="after publishing its desired state",
-    ) as exc_info:
+    replace_publication_writer(fail_write)
+
+    with pytest.raises(CondaWorkspacesError, match="write failed"):
         execute_update(
             make_args(
                 _DEFAULTS,
@@ -597,12 +652,229 @@ def test_update_no_install_reports_lock_recovery_after_publication(
             )
         )
 
-    document = tomlkit.loads(layered_manifest.read_text(encoding="utf-8"))
-    assert document["feature"]["dev"]["dependencies"]["featurepkg"] == ">=2"
-    assert exc_info.value.hints == [
-        f"Run 'conda workspace --file {layered_manifest} lock' to refresh"
-        " conda.lock from the published manifest."
-    ]
+    assert layered_manifest.read_bytes() != before
+    assert 'featurepkg = ">=2"' in layered_manifest.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("existing_lock", [False, True], ids=["missing", "existing"])
+def test_update_rolls_back_lock_when_manifest_publication_fails(
+    layered_manifest: Path,
+    update_runtime: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    existing_lock: bool,
+    replace_publication_writer,
+) -> None:
+    before = layered_manifest.read_bytes()
+    lock_path = layered_manifest.with_name("conda.lock")
+    if existing_lock:
+        lock_path.write_text("existing-lock", encoding="utf-8")
+
+    def fail_manifest(path, content, write) -> None:
+        if path.name == layered_manifest.name:
+            raise OSError("manifest write failed")
+        write(content)
+
+    replace_publication_writer(fail_manifest)
+
+    with pytest.raises(OSError, match="manifest write failed"):
+        execute_update(
+            make_args(
+                _DEFAULTS,
+                manifest_file=layered_manifest,
+                specs=["featurepkg>=2"],
+                feature="dev",
+            )
+        )
+
+    assert layered_manifest.read_bytes() == before
+    if existing_lock:
+        assert lock_path.read_text(encoding="utf-8") == "existing-lock"
+    else:
+        assert not lock_path.exists()
+
+
+def test_update_publishes_manifest_and_lock_under_workspace_guard(
+    layered_manifest: Path,
+    update_runtime: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    replace_publication_writer,
+) -> None:
+    events: list[str] = []
+    guard_held = False
+
+    @contextmanager
+    def record_guard(stream):
+        nonlocal guard_held
+        lock_stat = (layered_manifest.parent / ".conda" / "workspace.lock").stat()
+        opened_stat = publication_mod.os.fstat(stream.fileno())
+        assert (opened_stat.st_dev, opened_stat.st_ino) == (
+            lock_stat.st_dev,
+            lock_stat.st_ino,
+        )
+        assert conda_context.no_lock is False
+        events.append("enter")
+        guard_held = True
+        try:
+            yield
+        finally:
+            guard_held = False
+            events.append("exit")
+
+    def record_publication(path, content, write) -> None:
+        assert guard_held
+        events.append("lockfile" if path.name == "conda.lock" else "manifest")
+        write(content)
+
+    monkeypatch.setattr(publication_mod, "lock", record_guard)
+    replace_publication_writer(record_publication)
+
+    def record_sync(config, ctx, env_names, **kwargs) -> None:
+        assert guard_held
+        kwargs["publish_lockfile"]("rendered-lock")
+        assert guard_held
+        events.append("install")
+
+    update_runtime.installed.update({"dev", "private"})
+    monkeypatch.setattr(update_mod, "sync_environments", record_sync)
+
+    with conda_context._override("no_lock", True):
+        assert (
+            execute_update(
+                make_args(
+                    _DEFAULTS,
+                    manifest_file=layered_manifest,
+                    specs=["featurepkg>=2"],
+                    feature="dev",
+                    no_install=False,
+                )
+            )
+            == 0
+        )
+        assert conda_context.no_lock is True
+
+    assert events == ["enter", "manifest", "lockfile", "install", "exit"]
+
+
+def test_update_rejects_symlinked_workspace_publication_lock(
+    layered_manifest: Path,
+    update_runtime: SimpleNamespace,
+) -> None:
+    before = layered_manifest.read_bytes()
+    state_dir = layered_manifest.parent / ".conda"
+    state_dir.mkdir()
+    outside = layered_manifest.parent / "outside-lock"
+    outside.write_bytes(b"keep")
+    (state_dir / "workspace.lock").symlink_to(outside)
+
+    with pytest.raises(CondaWorkspacesError, match="publication lock is a symlink"):
+        execute_update(
+            make_args(
+                _DEFAULTS,
+                manifest_file=layered_manifest,
+                specs=["featurepkg>=2"],
+                feature="dev",
+            )
+        )
+
+    assert layered_manifest.read_bytes() == before
+    assert outside.read_bytes() == b"keep"
+    assert not layered_manifest.with_name("conda.lock").exists()
+
+
+def test_update_rejects_publication_lock_created_during_open(
+    layered_manifest: Path,
+    update_runtime: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before = layered_manifest.read_bytes()
+    lock_path = layered_manifest.parent / ".conda" / "workspace.lock"
+    outside = layered_manifest.parent / "outside-lock"
+    outside.write_bytes(b"keep")
+    real_open = publication_mod.os.open
+
+    def race_open(path, flags, mode=0o777, *, dir_fd=None):
+        if Path(path).name == lock_path.name and not lock_path.exists():
+            lock_path.symlink_to(outside)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(publication_mod.os, "open", race_open)
+
+    with pytest.raises(CondaWorkspacesError, match="publication lock"):
+        execute_update(
+            make_args(
+                _DEFAULTS,
+                manifest_file=layered_manifest,
+                specs=["featurepkg>=2"],
+                feature="dev",
+            )
+        )
+
+    assert layered_manifest.read_bytes() == before
+    assert outside.read_bytes() == b"keep"
+    assert not layered_manifest.with_name("conda.lock").exists()
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+@pytest.mark.parametrize("boundary", ["leaf", "parent"], ids=["leaf", "parent"])
+def test_update_rejects_symlinked_manifest(
+    layered_manifest: Path,
+    dry_run: bool,
+    boundary: str,
+) -> None:
+    before = layered_manifest.read_bytes()
+    if boundary == "leaf":
+        linked_boundary = layered_manifest.with_name("linked.toml")
+        linked_boundary.symlink_to(layered_manifest)
+        linked_manifest = linked_boundary
+    else:
+        linked_boundary = layered_manifest.with_name("linked-parent")
+        linked_boundary.symlink_to(layered_manifest.parent, target_is_directory=True)
+        linked_manifest = linked_boundary / layered_manifest.name
+
+    with pytest.raises(
+        (CondaWorkspacesError, NotADirectoryError),
+        match="symlink|symbolic link",
+    ):
+        execute_update(
+            make_args(
+                _DEFAULTS,
+                manifest_file=linked_manifest,
+                specs=["featurepkg>=2"],
+                feature="dev",
+                dry_run=dry_run,
+            )
+        )
+
+    assert layered_manifest.read_bytes() == before
+    assert linked_boundary.is_symlink()
+    assert not layered_manifest.with_name("conda.lock").exists()
+
+
+def test_update_rejects_manifest_changed_before_publication(
+    layered_manifest: Path,
+    update_runtime: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    concurrent_text = layered_manifest.read_text(encoding="utf-8") + "\n# concurrent\n"
+
+    def edit_before_publish(config, ctx, env_names, **kwargs) -> None:
+        layered_manifest.write_text(concurrent_text, encoding="utf-8")
+        kwargs["publish_lockfile"]("rendered-lock")
+
+    monkeypatch.setattr(update_mod, "sync_environments", edit_before_publish)
+
+    with pytest.raises(CondaWorkspacesError, match="manifest changed"):
+        execute_update(
+            make_args(
+                _DEFAULTS,
+                manifest_file=layered_manifest,
+                specs=["featurepkg>=2"],
+                feature="dev",
+            )
+        )
+
+    assert layered_manifest.read_text(encoding="utf-8") == concurrent_text
+    assert not layered_manifest.with_name("conda.lock").exists()
 
 
 def test_update_dry_run_uses_replacement_without_writing_manifest(

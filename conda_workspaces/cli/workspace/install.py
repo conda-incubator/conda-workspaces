@@ -2,20 +2,36 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rich.console import Console
 
-from ...exceptions import LockfileNotFoundError, LockfileStaleError
-from ...lockfile import install_from_lockfile, lockfile_path, lockfile_status
+from ...context import isolated_package_cache
+from ...exceptions import (
+    CondaWorkspacesError,
+    LockfileNotFoundError,
+    LockfileStaleError,
+)
+from ...lockfile import (
+    MAX_LOCKFILE_BYTES,
+    LockfileInstallPlan,
+    check_lockfile_satisfiability,
+    load_lockfile_data,
+    lockfile_path,
+    lockfile_status,
+)
 from ...models import LockfileStatus
+from ...paths import read_regular_file_bytes
+from ...publication import WorkspacePublication
 from .. import status
 from . import workspace_context_from_args
 from .sync import sync_environments
 
 if TYPE_CHECKING:
     import argparse
+    from collections.abc import Callable
 
     from ...context import WorkspaceContext
     from ...models import WorkspaceConfig
@@ -25,7 +41,10 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
     """Install (create/update) workspace environments."""
     if console is None:
         console = Console(highlight=False)
-    config, ctx = workspace_context_from_args(args)
+    requested_manifest_path = getattr(args, "manifest_file", None)
+    if requested_manifest_path is not None:
+        WorkspacePublication.validate_manifest_path(Path(requested_manifest_path))
+    config, ctx = workspace_context_from_args(args, for_mutation=True)
 
     env_name = getattr(args, "environment", None)
     force = getattr(args, "force_reinstall", False)
@@ -35,17 +54,31 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
     no_lock = getattr(args, "no_lock", False)
     prefix = getattr(args, "prefix", None)
     target_prefix_override = getattr(args, "target_prefix_override", None)
+    WorkspacePublication.validate_manifest_path(Path(config.manifest_path))
+    publication = (
+        None if dry_run else WorkspacePublication.from_current_manifest(ctx, "install")
+    )
+    validate_workspace = (
+        publication.validate_manifest_generation if publication is not None else None
+    )
+    read_lockfile = publication.read_lockfile_bytes if publication is not None else None
 
     if frozen:
-        return install_from_lockfile_all(
-            ctx,
-            config,
-            env_name,
-            console=console,
-            prefix=prefix,
-            target_prefix_override=target_prefix_override,
-            dry_run=dry_run,
+        publication_guard = (
+            publication.guard() if publication is not None else nullcontext()
         )
+        with publication_guard:
+            return install_from_lockfile_all(
+                ctx,
+                config,
+                env_name,
+                console=console,
+                prefix=prefix,
+                target_prefix_override=target_prefix_override,
+                dry_run=dry_run,
+                validate_workspace=validate_workspace,
+                read_lockfile=read_lockfile,
+            )
 
     strict = locked or (ctx.is_ci and not no_lock)
     if strict:
@@ -58,19 +91,10 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
                 lockfile_path(ctx),
                 reason=lock.reason,
             )
-        return install_from_lockfile_all(
-            ctx,
-            config,
-            env_name,
-            console=console,
-            prefix=prefix,
-            target_prefix_override=target_prefix_override,
-            dry_run=dry_run,
+        publication_guard = (
+            publication.guard() if publication is not None else nullcontext()
         )
-
-    if not no_lock and not force:
-        lock = lockfile_status(ctx, config)
-        if lock.status == LockfileStatus.UP_TO_DATE:
+        with publication_guard:
             return install_from_lockfile_all(
                 ctx,
                 config,
@@ -79,22 +103,53 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
                 prefix=prefix,
                 target_prefix_override=target_prefix_override,
                 dry_run=dry_run,
+                validate_current=True,
+                validate_workspace=validate_workspace,
+                read_lockfile=read_lockfile,
             )
+
+    if not no_lock and not force:
+        lock = lockfile_status(ctx, config)
+        if lock.status == LockfileStatus.UP_TO_DATE:
+            publication_guard = (
+                publication.guard() if publication is not None else nullcontext()
+            )
+            with publication_guard:
+                return install_from_lockfile_all(
+                    ctx,
+                    config,
+                    env_name,
+                    console=console,
+                    prefix=prefix,
+                    target_prefix_override=target_prefix_override,
+                    dry_run=dry_run,
+                    validate_current=True,
+                    validate_workspace=validate_workspace,
+                    read_lockfile=read_lockfile,
+                )
         if lock.status == LockfileStatus.OUT_OF_DATE:
             console.print(
                 f"[bold yellow]Lockfile out of date[/bold yellow]:"
-                f" {lock.reason}. Re-solving environments."
+                f" {status.escape_for_console(lock.reason)}. Re-solving environments."
             )
 
     env_names = [env_name] if env_name else list(config.environments.keys())
-    sync_environments(
-        config,
-        ctx,
-        env_names,
-        force_reinstall=force,
-        dry_run=dry_run,
-        console=console,
+    publication_guard = (
+        publication.guard() if publication is not None else nullcontext()
     )
+    with publication_guard:
+        sync_environments(
+            config,
+            ctx,
+            env_names,
+            force_reinstall=force,
+            dry_run=dry_run,
+            publish_lockfile=(
+                publication.publish_lockfile if publication is not None else None
+            ),
+            validate_workspace=validate_workspace,
+            console=console,
+        )
     return 0
 
 
@@ -107,40 +162,74 @@ def install_from_lockfile_all(
     prefix: Path | None = None,
     target_prefix_override: str | Path | None = None,
     dry_run: bool = False,
+    validate_current: bool = False,
+    validate_workspace: Callable[[], None] | None = None,
+    read_lockfile: Callable[[], bytes] | None = None,
 ) -> int:
     """Install environments from existing lockfiles (no solving)."""
     if (prefix is not None or target_prefix_override is not None) and not env_name:
-        from ...exceptions import CondaWorkspacesError
-
         raise CondaWorkspacesError(
             "Explicit prefix installation requires an environment name.",
             hints=["Pass -e/--environment with --prefix."],
         )
 
     env_names = [env_name] if env_name else list(config.environments)
-    for index, name in enumerate(env_names):
-        if index > 0:
-            console.print()
-        status.message(
-            console,
-            "Installing",
-            "environment",
-            name,
-            style="bold blue",
-            ellipsis=True,
+    path = lockfile_path(ctx)
+    try:
+        if validate_workspace is not None:
+            validate_workspace()
+        lockfile_data = load_lockfile_data(
+            read_lockfile()
+            if read_lockfile is not None
+            else read_regular_file_bytes(
+                path,
+                maximum_bytes=MAX_LOCKFILE_BYTES,
+                label="workspace lockfile",
+            )
         )
-        install_from_lockfile(
-            ctx,
-            name,
-            prefix=prefix,
-            target_prefix_override=target_prefix_override,
-            dry_run=dry_run,
-        )
-        status.message(
-            console,
-            "Would install" if dry_run else "Installed",
-            "environment",
-            name,
-        )
+        if validate_workspace is not None:
+            validate_workspace()
+    except (OSError, ValueError) as exc:
+        raise LockfileNotFoundError("(all)", path) from exc
+    if validate_current:
+        current = check_lockfile_satisfiability(config, lockfile_data, ctx.platform)
+        if current.status != LockfileStatus.UP_TO_DATE:
+            raise LockfileStaleError(
+                Path(config.manifest_path),
+                path,
+                reason=current.reason,
+            )
+    with isolated_package_cache(dry_run):
+        plans = []
+        for name in env_names:
+            plans.append(
+                LockfileInstallPlan.prepare(
+                    ctx,
+                    name,
+                    prefix=prefix,
+                    target_prefix_override=target_prefix_override,
+                    lockfile_data=lockfile_data,
+                    validate_workspace=validate_workspace,
+                )
+            )
+        for index, (name, plan) in enumerate(zip(env_names, plans, strict=True)):
+            if index > 0:
+                console.print()
+            status.message(
+                console,
+                "Installing",
+                "environment",
+                name,
+                style="bold blue",
+                ellipsis=True,
+            )
+            if not dry_run:
+                plan.execute()
+            status.message(
+                console,
+                "Would install" if dry_run else "Installed",
+                "environment",
+                name,
+            )
 
     return 0

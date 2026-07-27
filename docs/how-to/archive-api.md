@@ -59,12 +59,36 @@ receipt = archive.verify()
 print(receipt.workspace_paths)
 ```
 
-Receipt verification checks the archive digest before extraction. It
-does not identify who created the archive or receipt.
+Receipt verification, member inspection, and extraction use one private archive
+snapshot. Replacing the original path after snapshotting cannot change the
+verified bytes. A receipt still does not identify who created the archive or
+receipt.
 
 ## Extract an archive
 
-Extract into an empty or missing target directory:
+Archive inspection and extraction reject more than 100,000 members, member
+paths or link targets deeper than 256 components or longer than 4,096 UTF-8
+bytes, more than 128 consecutive GNU or PAX extension headers, more than 100,000
+PAX records, more than 64 MiB of expanded GNU and PAX metadata, and more than
+100 GiB of declared regular-file data including possible link fallbacks. GNU
+sparse files, hardlinks, and unsupported tar members are rejected before their
+payloads are traversed. Extraction requires a supported Python patch release
+with `tarfile.data_filter`. Repack sparse or metadata-heavy inputs as ordinary
+files, split an archive, or exclude unneeded files when a trusted workspace
+exceeds one of these safety limits.
+
+When a receipt is configured, its archive digest is verified before member
+inspection. Archive creation also rejects a symbolic-link workspace manifest
+before reading its target. It refuses credentials embedded in the manifest or
+existing lockfile, then binds the approved manifest, lockfile, and package bytes
+to the bytes written into the archive. Remove and rotate embedded credentials,
+regenerate `conda.lock`, and configure replacement authentication through Conda
+outside the repository. Bundle and receipt lock inputs are read under the
+workspace publication guard, archive output is published atomically, and a
+receipt failure removes a new archive output but keeps a generated canonical
+lockfile that was already published successfully.
+
+Extract into a target path that does not exist yet:
 
 ```python
 result = archive.extract(target="/tmp/restored", require_sha256=True)

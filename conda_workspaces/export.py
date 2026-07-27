@@ -54,7 +54,6 @@ from conda.common.serialize.yaml import dump as yaml_dump
 from conda.exceptions import CondaValueError, EnvironmentExporterNotDetected
 from conda.models.environment import Environment
 from conda.models.environment import EnvironmentConfig as CondaEnvConfig
-from conda.models.match_spec import MatchSpec
 
 from .exceptions import (
     EnvironmentNotInstalledError,
@@ -62,6 +61,7 @@ from .exceptions import (
     PlatformError,
 )
 from .lockfile import CondaLockLoader, lockfile_path
+from .models import has_match_spec_url_credentials, redact_channel_name
 from .resolver import resolve_environment
 
 if TYPE_CHECKING:
@@ -129,17 +129,30 @@ def envs_from_manifest(
         resolved = resolve_environment(config, env_name, platform)
         package_platform = resolved.platform_subdir(platform)
 
-        requested_packages = [
-            MatchSpec(dep.conda_build_form())
-            for dep in resolved.conda_dependencies.values()
-        ]
+        requested_packages = list(resolved.conda_dependencies.values())
+        for dependency in requested_packages:
+            if has_match_spec_url_credentials(dependency):
+                raise CondaValueError(
+                    f"Conda dependency '{dependency.name or 'package'}' cannot be"
+                    " exported safely. Configure authentication outside the"
+                    " manifest and remove credentials from the package source."
+                )
 
         external_packages: dict[str, list[str]] = {}
-        pypi_entries = [
-            str(dep).strip()
-            for dep in resolved.pypi_dependencies.values()
-            if not dep.path and not dep.git and not dep.url
-        ]
+        pypi_entries: list[str] = []
+        for dep in resolved.pypi_dependencies.values():
+            try:
+                dep.to_manifest_toml()
+            except ValueError as exc:
+                raise CondaValueError(
+                    f"PyPI dependency '{dep.name}' cannot be exported safely."
+                ) from exc
+            if dep.path or dep.git:
+                raise CondaValueError(
+                    f"PyPI dependency '{dep.name}' uses a path or VCS source that"
+                    " conda environment exporters cannot represent losslessly."
+                )
+            pypi_entries.append(str(dep).strip())
         if pypi_entries:
             external_packages[_EXTERNAL_PACKAGES_PYPI_KEY] = pypi_entries
 
@@ -148,7 +161,7 @@ def envs_from_manifest(
                 name=env_name,
                 platform=package_platform,
                 config=CondaEnvConfig(
-                    channels=tuple(ch.canonical_name for ch in resolved.channels),
+                    channels=tuple(redact_channel_name(ch) for ch in resolved.channels),
                 ),
                 requested_packages=requested_packages,
                 external_packages=external_packages,

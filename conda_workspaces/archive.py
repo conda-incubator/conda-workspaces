@@ -13,17 +13,19 @@ import importlib
 import os
 import posixpath
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from io import BytesIO
 from os.path import expanduser
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from urllib.parse import urlsplit
 
+from conda.base.context import context as conda_context
 from conda_lockfiles.load_yaml import load_yaml
 
 from .exceptions import (
@@ -34,24 +36,38 @@ from .exceptions import (
     LockfileStaleError,
     WorkspaceParseError,
 )
-from .lockfile import load_lockfile_data
+from .lockfile import MAX_LOCKFILE_BYTES, load_lockfile_data
 from .manifests import find_parser
-from .models import LockfileStatus
+from .manifests.base import ManifestParser
+from .models import (
+    LockfileStatus,
+    has_url_credentials,
+    has_url_credentials_in_data,
+    redact_url_text,
+)
 from .paths import (
+    anchored_directory,
+    atomic_binary_writer,
     has_absolute_path_syntax,
     is_path_segment,
     output_paths_collide,
     parse_relative_posix_path,
+    portable_path_key,
+    read_regular_file_bytes,
+    regular_file_generation,
+    rename_noreplace,
     validate_directory_output,
     validate_file_output,
 )
+from .publication import WorkspacePublication
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-    from typing import Any, BinaryIO
+    from typing import Any, BinaryIO, Final
 
     from .context import WorkspaceContext
     from .models import ArchiveConfig
+    from .paths import FileGeneration as OutputFileGeneration
     from .receipts import ArchiveReceipt
 
 ARCHIVE_SUFFIXES: tuple[str, ...] = (
@@ -69,16 +85,234 @@ MANIFEST_FILENAMES = {"conda.toml", "pixi.toml", "pyproject.toml"}
 CONDA_PACKAGE_SUFFIXES: tuple[str, ...] = (".conda", ".tar.bz2")
 """Recognised conda package archive suffixes."""
 
+MAX_ARCHIVE_MEMBERS: Final = 100_000
+"""Maximum number of members accepted from one workspace archive."""
+
+MAX_ARCHIVE_PATH_DEPTH: Final = 256
+"""Maximum number of path components accepted for one archive member."""
+
+MAX_ARCHIVE_PATH_BYTES: Final = 4_096
+"""Maximum UTF-8 byte length accepted for one archive member path."""
+
+MAX_ARCHIVE_COMPONENTS: Final = 1_000_000
+"""Maximum cumulative path components accepted across archive members."""
+
+MAX_ARCHIVE_METADATA_BYTES: Final = 64 * 1024**2
+"""Maximum combined expanded size of GNU and PAX metadata, in bytes."""
+
+MAX_ARCHIVE_METADATA_HEADERS: Final = 128
+"""Maximum consecutive GNU and PAX extension headers."""
+
+MAX_ARCHIVE_METADATA_HEADERS_TOTAL: Final = 100_000
+"""Maximum combined GNU and PAX extension headers in one archive."""
+
+MAX_ARCHIVE_PAX_RECORDS: Final = 100_000
+"""Maximum combined PAX key/value records."""
+
+MAX_ARCHIVE_EXPANDED_BYTES: Final = 100 * 1024**3
+"""Maximum combined expanded size of regular archive members, in bytes."""
+
+MAX_ARCHIVE_RAW_BYTES: Final = 100 * 1024**3
+"""Maximum byte size accepted for one compressed or uncompressed archive."""
+
+FileGeneration = tuple[int, int, int, int, int, int]
+"""Stable identity and mutation-sensitive metadata for one regular file."""
+
+_CURRENT_ARCHIVE_OUTPUT_GENERATION = object()
+
+
+@dataclass
+class _ArchiveWriteLimits:
+    """Track aggregate resource use before archive payloads are opened."""
+
+    members: int = 0
+    expanded_bytes: int = 0
+    path_components: int = 0
+
+    def reserve(self, member: tarfile.TarInfo) -> None:
+        """Reserve the limits consumed by *member* before writing it."""
+        if self.members >= MAX_ARCHIVE_MEMBERS:
+            raise ArchiveError(
+                f"Archive contains more than {MAX_ARCHIVE_MEMBERS:,} members."
+            )
+        expanded_bytes = validate_tar_member_limits(member, self.expanded_bytes)
+        member_path = validate_tar_member(member)
+        path_components = self.path_components + len(portable_path_key(member_path))
+        if path_components > MAX_ARCHIVE_COMPONENTS:
+            raise ArchiveError(
+                "Archive member paths exceed the maximum cumulative component"
+                f" count of {MAX_ARCHIVE_COMPONENTS:,}."
+            )
+
+        self.members += 1
+        self.expanded_bytes = expanded_bytes
+        self.path_components = path_components
+
+
 ALLOWED_TAR_TYPES: frozenset[bytes] = frozenset(
     {
         tarfile.REGTYPE,
         tarfile.AREGTYPE,
         tarfile.DIRTYPE,
         tarfile.SYMTYPE,
-        tarfile.LNKTYPE,
     }
 )
 """Tar member types accepted during extraction."""
+
+EXTENDED_TAR_TYPES: frozenset[bytes] = frozenset(
+    {
+        tarfile.GNUTYPE_LONGNAME,
+        tarfile.GNUTYPE_LONGLINK,
+        tarfile.XHDTYPE,
+        tarfile.XGLTYPE,
+        tarfile.SOLARIS_XHDTYPE,
+    }
+)
+"""Tar extension headers consumed before a materialized member is returned."""
+
+
+class _BoundedTarInfo(tarfile.TarInfo):
+    """Reject oversized GNU and PAX metadata before tarfile reads its payload."""
+
+    def _proc_member(self, archive: tarfile.TarFile) -> tarfile.TarInfo:
+        if self.type == tarfile.GNUTYPE_SPARSE:
+            raise ArchiveError("Sparse archive members are not supported.")
+        if self.type in EXTENDED_TAR_TYPES:
+            metadata_headers = getattr(archive, "_workspace_metadata_headers", 0) + 1
+            if metadata_headers > MAX_ARCHIVE_METADATA_HEADERS:
+                raise ArchiveError(
+                    "Archive contains more than"
+                    f" {MAX_ARCHIVE_METADATA_HEADERS:,} consecutive metadata"
+                    " headers."
+                )
+            setattr(archive, "_workspace_metadata_headers", metadata_headers)
+            total_metadata_headers = (
+                getattr(archive, "_workspace_metadata_headers_total", 0) + 1
+            )
+            if total_metadata_headers > MAX_ARCHIVE_METADATA_HEADERS_TOTAL:
+                raise ArchiveError(
+                    "Archive contains more than"
+                    f" {MAX_ARCHIVE_METADATA_HEADERS_TOTAL:,} total metadata"
+                    " headers."
+                )
+            setattr(
+                archive,
+                "_workspace_metadata_headers_total",
+                total_metadata_headers,
+            )
+        else:
+            setattr(archive, "_workspace_metadata_headers", 0)
+            if self.type not in ALLOWED_TAR_TYPES:
+                raise ArchiveError(
+                    f"Archive member '{self.name}' has an unsupported type."
+                )
+        if self.type in (tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK):
+            if self.size > MAX_ARCHIVE_PATH_BYTES:
+                label = (
+                    "path" if self.type == tarfile.GNUTYPE_LONGNAME else "link target"
+                )
+                raise ArchiveError(
+                    f"Archive member {label} metadata exceeds the maximum length of"
+                    f" {MAX_ARCHIVE_PATH_BYTES:,} bytes."
+                )
+        if self.type in (
+            tarfile.GNUTYPE_LONGNAME,
+            tarfile.GNUTYPE_LONGLINK,
+            tarfile.XHDTYPE,
+            tarfile.XGLTYPE,
+            tarfile.SOLARIS_XHDTYPE,
+        ):
+            expanded = getattr(archive, "_workspace_metadata_bytes", 0) + self.size
+            if self.size < 0 or expanded > MAX_ARCHIVE_METADATA_BYTES:
+                raise ArchiveError(
+                    "Archive metadata expands beyond the maximum size of"
+                    f" {MAX_ARCHIVE_METADATA_BYTES:,} bytes."
+                )
+            setattr(archive, "_workspace_metadata_bytes", expanded)
+        return super()._proc_member(archive)  # ty: ignore[unresolved-attribute]
+
+    def _proc_pax(self, archive: tarfile.TarFile) -> tarfile.TarInfo:
+        """Bound PAX record count before tarfile allocates decoded entries."""
+        position = archive.fileobj.tell()
+        padded_size = (
+            (self.size + tarfile.BLOCKSIZE - 1) // tarfile.BLOCKSIZE * tarfile.BLOCKSIZE
+        )
+        data = archive.fileobj.read(padded_size)
+        records = 0
+        offset = 0
+        while offset < len(data) and data[offset] != 0:
+            separator = data.find(b" ", offset, min(offset + 32, len(data)))
+            if separator < 0:
+                break
+            try:
+                length = int(data[offset:separator])
+            except ValueError:
+                break
+            if length < 5 or offset + length > len(data):
+                break
+            records += 1
+            if (
+                getattr(archive, "_workspace_pax_records", 0) + records
+                > MAX_ARCHIVE_PAX_RECORDS
+            ):
+                raise ArchiveError(
+                    "Archive contains more than"
+                    f" {MAX_ARCHIVE_PAX_RECORDS:,} PAX metadata records."
+                )
+            offset += length
+        setattr(
+            archive,
+            "_workspace_pax_records",
+            getattr(archive, "_workspace_pax_records", 0) + records,
+        )
+        archive.fileobj.seek(position)
+        del data
+        return super()._proc_pax(archive)  # ty: ignore[unresolved-attribute]
+
+    def _reject_sparse(self, *_args: object) -> None:
+        """Reject PAX sparse maps before tarfile parses their data payload."""
+        raise ArchiveError("Sparse archive members are not supported.")
+
+    _proc_gnusparse_00 = _reject_sparse
+    _proc_gnusparse_01 = _reject_sparse
+    _proc_gnusparse_10 = _reject_sparse
+
+
+class _HashingReader:
+    """Hash exactly the bytes consumed while a regular file enters a tar."""
+
+    def __init__(self, stream: BinaryIO) -> None:
+        self.stream = stream
+        self.digest = hashlib.sha256()
+
+    def read(self, size: int = -1) -> bytes:
+        """Read and hash up to *size* bytes from the underlying stream."""
+        data = self.stream.read(size)
+        self.digest.update(data)
+        return data
+
+
+class _HashingWriter:
+    """Hash a sequential archive output stream while preserving its interface."""
+
+    def __init__(self, stream: BinaryIO) -> None:
+        self.stream = stream
+        self.digest = hashlib.sha256()
+        self.position = stream.tell()
+        self.sequential = True
+
+    def write(self, data: bytes) -> int:
+        """Write *data* and hash the bytes accepted by the output stream."""
+        if self.stream.tell() != self.position:
+            self.sequential = False
+        written = self.stream.write(data)
+        self.digest.update(data[:written])
+        self.position += written
+        return written
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.stream, name)
+
 
 BUILTIN_EXCLUDE_DIRS: frozenset[str] = frozenset(
     {
@@ -115,6 +349,8 @@ BUILTIN_SENSITIVE_EXCLUDE_PATTERNS: tuple[str, ...] = (
     "*/.condarc",
     ".git-credentials",
     "*/.git-credentials",
+    ".conda/workspace.lock",
+    "*/.conda/workspace.lock",
     ".netrc",
     "*/.netrc",
     ".npmrc",
@@ -193,6 +429,15 @@ class WorkspaceArchiveInstallResult:
 
 
 @dataclass(frozen=True)
+class ArchiveOutputCapture:
+    """Digest and inode captured from an archive's temporary output stream."""
+
+    sha256: str | None
+    identity: tuple[int, int]
+    size: int
+
+
+@dataclass(frozen=True)
 class WorkspaceArchive:
     """High-level API for creating, extracting, and installing archives."""
 
@@ -200,7 +445,7 @@ class WorkspaceArchive:
     receipt: bool | str | Path | None = None
 
     def __init__(self, path: str | Path, receipt: bool | str | Path | None = None):
-        object.__setattr__(self, "path", Path(path).expanduser().resolve())
+        object.__setattr__(self, "path", Path(path).expanduser().absolute())
         object.__setattr__(self, "receipt", receipt)
 
     @classmethod
@@ -222,12 +467,35 @@ class WorkspaceArchive:
         """
         from .context import WorkspaceContext
         from .lockfile import lockfile_path, render_lockfile
-        from .manifests import clear_workspace_manifest_caches, detect_and_parse
+        from .manifests import detect_and_parse, detect_workspace_file
         from .models import ArchiveConfig
 
-        clear_workspace_manifest_caches()
-        _, config = detect_and_parse(workspace)
+        source = Path(workspace or Path.cwd())
+        if source.is_symlink():
+            raise ArchiveError(
+                "Cannot archive workspace manifest: symbolic links are not supported.",
+                hints=[f"Replace {source} with a regular path before archiving."],
+            )
+        try:
+            manifest_source = (
+                detect_workspace_file(source, reject_symlinks=True)
+                if source.is_dir()
+                else source
+            )
+        except WorkspaceParseError as exc:
+            if "symbolic links are not supported" not in exc.reason:
+                raise
+            raise ArchiveError(
+                "Cannot archive workspace manifest: symbolic links are not supported.",
+                hints=[f"Replace {exc.path} with a regular file before archiving."],
+            ) from exc
+        _, config = detect_and_parse(manifest_source)
         ctx = WorkspaceContext(config)
+        publication = (
+            None
+            if dry_run
+            else WorkspacePublication.from_current_manifest(ctx, "archive")
+        )
         lock_path = lockfile_path(ctx)
         manifest_path = Path(config.manifest_path)
         if manifest_path.is_symlink():
@@ -254,17 +522,6 @@ class WorkspaceArchive:
                         f"Replace {lock_path} with a regular file before archiving."
                     ],
                 )
-            from .resolver import resolve_all_environments
-
-            resolved_envs = resolve_all_environments(config, ctx.platform)
-            lock_content = render_lockfile(
-                ctx,
-                resolved_envs,
-                config=config,
-                dry_run=dry_run,
-            )
-            lock_data = load_lockfile_data(lock_content)
-            lock_source = lock_data.get("packages", []) or []
         elif lock_path.is_symlink():
             raise ArchiveError(
                 "Cannot archive workspace lockfile: symbolic links are not supported.",
@@ -286,6 +543,8 @@ class WorkspaceArchive:
         output_path = archive.path
         receipt_path = archive.receipt_path
         extra_files = (lock_path,) if lock else ()
+        manifest_member = manifest_path.relative_to(ctx.root).as_posix()
+        lock_member = lock_path.relative_to(ctx.root).as_posix()
 
         protected_paths = {
             "workspace manifest": manifest_path,
@@ -303,11 +562,13 @@ class WorkspaceArchive:
                         f"The {output_label} cannot overwrite the {protected_label}."
                     )
 
-        validate_file_output(output_path)
+        archive_output_generation = regular_file_generation(output_path)
         if lock:
             validate_file_output(lock_path)
         if receipt_path is not None:
-            validate_file_output(receipt_path)
+            receipt_output_generation = regular_file_generation(receipt_path)
+        else:
+            receipt_output_generation = None
         with open_tar_for_write(
             BytesIO(),
             detect_compression(output_path),
@@ -325,92 +586,285 @@ class WorkspaceArchive:
                 receipt_path=receipt_path,
                 extra_files=extra_files,
             )
-            if lock_data is None:
-                lock_data = load_lockfile_data(lock_path.read_bytes())
-            from .receipts import ReceiptInventory
 
-            ReceiptInventory.from_lockfile_data(
-                lock_data,
-                environment_prefixes=receipt_environment_prefixes(
-                    config_environments=list(config.environments),
-                    ctx_root=ctx.root,
-                    env_prefix=ctx.env_prefix,
+        try:
+            initial_root = ctx.root.lstat()
+            if not stat.S_ISDIR(initial_root.st_mode):
+                raise ArchiveError(
+                    f"Workspace root is not a regular directory: {ctx.root}"
+                )
+            root_generation = file_generation(initial_root)
+            archive_files = exclude_archive_output(
+                collect_archive_files(
+                    ctx.root,
+                    archive_config,
+                    extra_files=extra_files,
                 ),
+                output_path,
             )
+            if file_generation(ctx.root.lstat()) != root_generation:
+                raise ArchiveError(
+                    "Workspace root changed while archive inputs were collected."
+                )
+        except OSError as exc:
+            raise ArchiveError(
+                "Workspace root changed while archive inputs were collected:"
+                f" {ctx.root}"
+            ) from exc
 
         bundle_packages = None
-        if bundle:
-            from conda.base.context import context as conda_context
-
-            if not lock and not lock_path.is_file():
-                raise ArchiveError(
-                    "Cannot bundle packages: no conda.lock found.",
-                    hints=["Run 'conda workspace lock' first."],
-                )
-            cache_dirs = [Path(d) for d in conda_context.pkgs_dirs]
-            bundle_packages = collect_bundle_packages(lock_source, cache_dirs)
-            for package in bundle_packages:
-                if package.is_symlink() or not package.is_file():
-                    raise ArchiveError(
-                        f"Cannot bundle package: {package} is not a regular file."
-                    )
-                for output_label, candidate in output_paths.items():
-                    if output_paths_collide(candidate, package):
-                        raise ArchiveError(
-                            f"The {output_label} cannot overwrite a bundled package."
-                        )
-            verify_package_hashes(bundle_packages, lock_source)
-
-        previous_lock = (
-            lock_path.read_bytes()
-            if lock_content is not None and lock_path.exists()
-            else None
+        bundle_hashes = None
+        regular_member_hashes: dict[str, str] = {}
+        publication_guard = (
+            publication.guard(expected_root_generation=root_generation)
+            if publication is not None
+            else nullcontext()
         )
-        try:
-            if lock_content is not None and not dry_run:
-                lock_path.parent.mkdir(parents=True, exist_ok=True)
-                lock_path.write_text(lock_content, encoding="utf-8")
-            archive_path = create_archive(
-                ctx.root,
-                output_path,
-                archive_config,
-                bundle_packages=bundle_packages,
-                extra_files=extra_files,
-                regular_members=(
-                    manifest_path.relative_to(ctx.root).as_posix(),
-                    lock_path.relative_to(ctx.root).as_posix(),
-                ),
-                virtual_regular_members=(
-                    (lock_path.relative_to(ctx.root).as_posix(),)
-                    if lock and not lock_path.exists()
-                    else ()
-                ),
-                dry_run=dry_run,
-            )
-        except BaseException:
-            if lock_content is not None and not dry_run:
-                if previous_lock is None:
-                    lock_path.unlink(missing_ok=True)
-                else:
-                    lock_path.write_bytes(previous_lock)
-            raise
+        output_existed = archive_output_generation is not None
+        receipt_existed = receipt_output_generation is not None
+        created_output_identity = None
+        created_receipt_identity = None
+        captured_archive_output: ArchiveOutputCapture | None = None
 
-        if receipt_path is not None and not dry_run:
-            receipt_obj = cls.build_receipt(
-                ctx=ctx,
-                archive_path=archive_path,
-                archive_config=archive_config,
-                manifest_path=manifest_path,
-                lockfile_path=lock_path,
-                options={
-                    "bundle": bundle,
-                    "lock": lock,
-                    "include": list(archive_config.include),
-                    "exclude": list(archive_config.exclude),
-                    "compressionLevel": archive_config.compression_level,
-                },
+        def capture_archive_output(value: ArchiveOutputCapture) -> None:
+            nonlocal captured_archive_output
+            captured_archive_output = value
+
+        def remove_failed_outputs() -> None:
+            if not receipt_existed and created_receipt_identity is not None:
+                assert receipt_path is not None
+                cls.remove_created_output(
+                    receipt_path,
+                    created_receipt_identity,
+                )
+            if not output_existed and created_output_identity is not None:
+                cls.remove_created_output(output_path, created_output_identity)
+
+        @contextmanager
+        def guarded_archive_outputs() -> Iterator[None]:
+            try:
+                with publication_guard:
+                    yield
+            except BaseException:
+                remove_failed_outputs()
+                raise
+
+        with guarded_archive_outputs():
+            if lock:
+                from .resolver import resolve_all_environments
+
+                resolved_envs = resolve_all_environments(config, ctx.platform)
+                lock_content = render_lockfile(
+                    ctx,
+                    resolved_envs,
+                    config=config,
+                    dry_run=dry_run,
+                )
+                lock_data = load_lockfile_data(lock_content)
+                lock_source = lock_data.get("packages", []) or []
+
+            manifest_text = (
+                publication.original_text
+                if publication is not None
+                else config._manifest_text
             )
-            receipt_obj.write(receipt_path)
+            if manifest_text is None:
+                manifest_text = ManifestParser.read_manifest_text(manifest_path)
+            cls.validate_manifest_credentials(manifest_text)
+            regular_member_hashes[manifest_member] = hashlib.sha256(
+                manifest_text.encode("utf-8")
+            ).hexdigest()
+
+            if lock_path.is_symlink():
+                raise ArchiveError(
+                    "Cannot archive workspace lockfile: symbolic links are not"
+                    " supported.",
+                    hints=[
+                        f"Replace {lock_path} with a regular file before archiving."
+                    ],
+                )
+            if lock_content is not None:
+                lock_bytes = lock_content.encode("utf-8")
+            elif lock_path.is_file():
+                if publication is not None:
+                    lock_bytes = publication.read_lockfile_bytes()
+                else:
+                    try:
+                        lock_bytes = read_regular_file_bytes(
+                            lock_path,
+                            maximum_bytes=MAX_LOCKFILE_BYTES,
+                            label="workspace lockfile",
+                        )
+                    except ValueError as exc:
+                        raise ArchiveError(
+                            f"Cannot read workspace lockfile safely: {lock_path}"
+                        ) from exc
+                lock_data = load_lockfile_data(lock_bytes)
+                lock_source = lock_data.get("packages", []) or []
+            else:
+                lock_bytes = None
+
+            if lock_data is not None:
+                assert lock_bytes is not None
+                cls.validate_lockfile_credentials(
+                    lock_data,
+                    lock_bytes.decode("utf-8"),
+                )
+            if lock_bytes is not None:
+                regular_member_hashes[lock_member] = hashlib.sha256(
+                    lock_bytes
+                ).hexdigest()
+
+            if receipt_path is not None:
+                if lock_data is None:
+                    raise ArchiveError(
+                        "Cannot create an archive receipt without conda.lock."
+                    )
+                from .receipts import ReceiptInventory
+
+                ReceiptInventory.from_lockfile_data(
+                    lock_data,
+                    environment_prefixes=receipt_environment_prefixes(
+                        config_environments=list(config.environments),
+                        ctx_root=ctx.root,
+                        env_prefix=ctx.env_prefix,
+                    ),
+                )
+
+            if bundle:
+                if not lock and not lock_path.is_file():
+                    raise ArchiveError(
+                        "Cannot bundle packages: no conda.lock found.",
+                        hints=["Run 'conda workspace lock' first."],
+                    )
+                cache_dirs = [Path(d) for d in conda_context.pkgs_dirs]
+                bundle_packages = collect_bundle_packages(lock_source, cache_dirs)
+                for package in bundle_packages:
+                    if package.is_symlink() or not package.is_file():
+                        raise ArchiveError(
+                            f"Cannot bundle package: {package} is not a regular file."
+                        )
+                    for output_label, candidate in output_paths.items():
+                        if output_paths_collide(candidate, package):
+                            raise ArchiveError(
+                                f"The {output_label} cannot overwrite a bundled"
+                                " package."
+                            )
+                verify_package_hashes(bundle_packages, lock_source)
+                bundle_hashes = build_hash_index(lock_source)
+
+            try:
+                if lock_content is not None and not dry_run:
+                    cast("WorkspacePublication", publication).publish_lockfile(
+                        lock_content
+                    )
+                archive_path = create_archive(
+                    ctx.root,
+                    output_path,
+                    archive_config,
+                    files=archive_files,
+                    root_descriptor=(
+                        publication.guarded_root_descriptor
+                        if publication is not None
+                        else None
+                    ),
+                    bundle_packages=bundle_packages,
+                    bundle_hashes=bundle_hashes,
+                    extra_files=extra_files,
+                    regular_members=(
+                        manifest_member,
+                        lock_member,
+                    ),
+                    regular_member_hashes=regular_member_hashes,
+                    virtual_regular_members=(
+                        (lock_member,) if lock and not lock_path.exists() else ()
+                    ),
+                    capture_output=capture_archive_output,
+                    capture_sha256=receipt_path is not None,
+                    expected_output_generation=archive_output_generation,
+                    dry_run=dry_run,
+                )
+                if not dry_run:
+                    assert captured_archive_output is not None
+                    created_output = archive_path.lstat()
+                    if (
+                        not stat.S_ISREG(created_output.st_mode)
+                        or (created_output.st_dev, created_output.st_ino)
+                        != captured_archive_output.identity
+                        or created_output.st_size != captured_archive_output.size
+                    ):
+                        raise ArchiveError(
+                            "Archive output changed after it was published:"
+                            f" {archive_path}"
+                        )
+                    created_output_identity = captured_archive_output.identity
+                if receipt_path is not None and not dry_run:
+                    assert lock_data is not None
+                    assert captured_archive_output is not None
+                    assert captured_archive_output.sha256 is not None
+                    live_archive_sha256, archive_generation = (
+                        file_sha256_with_generation(
+                            archive_path,
+                            expected_identity=captured_archive_output.identity,
+                            maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
+                            label="Archive output",
+                        )
+                    )
+                    if live_archive_sha256 != captured_archive_output.sha256:
+                        raise ArchiveHashMismatchError(
+                            archive_path.name,
+                            expected=captured_archive_output.sha256,
+                            actual=live_archive_sha256,
+                        )
+                    receipt_obj = cls.build_receipt(
+                        ctx=ctx,
+                        archive_config=archive_config,
+                        archive_name=archive_path.name,
+                        archive_sha256=captured_archive_output.sha256,
+                        manifest_name=manifest_member,
+                        manifest_sha256=regular_member_hashes[manifest_member],
+                        lockfile_name=lock_member,
+                        lockfile_sha256=regular_member_hashes[lock_member],
+                        lockfile_data=lock_data,
+                        options={
+                            "bundle": bundle,
+                            "lock": lock,
+                            "include": list(archive_config.include),
+                            "exclude": list(archive_config.exclude),
+                            "compressionLevel": archive_config.compression_level,
+                        },
+                    )
+                    require_regular_file_generation(
+                        archive_path,
+                        archive_generation,
+                        label="Archive output",
+                    )
+                    expected_receipt_sha256 = hashlib.sha256(
+                        receipt_obj.serialized_text().encode("utf-8")
+                    ).hexdigest()
+                    receipt_obj.write(
+                        receipt_path,
+                        expected_generation=receipt_output_generation,
+                    )
+                    receipt_sha256, receipt_generation = file_sha256_with_generation(
+                        receipt_path,
+                        label="Receipt output",
+                    )
+                    if receipt_sha256 != expected_receipt_sha256:
+                        raise ArchiveHashMismatchError(
+                            receipt_path.name,
+                            expected=expected_receipt_sha256,
+                            actual=receipt_sha256,
+                        )
+                    created_receipt_identity = receipt_generation[:2]
+                    require_regular_file_generation(
+                        archive_path,
+                        archive_generation,
+                        label="Archive output",
+                    )
+            except BaseException:
+                remove_failed_outputs()
+                raise
 
         return cls(archive_path, receipt=receipt_path)
 
@@ -434,6 +888,30 @@ class WorkspaceArchive:
             ".tar.zst",
         )
         return ctx.root / f"{name}{ext}"
+
+    @staticmethod
+    def validate_manifest_credentials(content: str) -> None:
+        """Reject credential-bearing strings before copying a manifest."""
+        document = ManifestParser.parse_toml_text(content).unwrap()
+        if has_url_credentials_in_data(document) or has_url_credentials(content):
+            raise ArchiveError(
+                "Cannot archive credentials embedded in the workspace manifest.",
+                hints=[
+                    (
+                        "Remove and rotate the credential, then configure"
+                        " authentication through Conda outside the repository."
+                    )
+                ],
+            )
+
+    @staticmethod
+    def validate_lockfile_credentials(data: dict[str, object], content: str) -> None:
+        """Reject a lockfile whose serialized URLs require redaction."""
+        if has_url_credentials_in_data(data) or has_url_credentials(content):
+            raise ArchiveError(
+                "Cannot archive credentials embedded in conda.lock.",
+                hints=["Remove and rotate the credential, then regenerate conda.lock."],
+            )
 
     @staticmethod
     def validate_receipt_inputs(
@@ -511,8 +989,10 @@ class WorkspaceArchive:
             raise ArchiveError(
                 f"Cannot write receipt: archive would not include {missing[0]}.",
                 hints=[
-                    "Receipt verification requires the workspace manifest and"
-                    " conda.lock to be included in the archive.",
+                    (
+                        "Receipt verification requires the workspace manifest and"
+                        " conda.lock to be included in the archive."
+                    ),
                     "Remove matching include/exclude filters or run without --receipt.",
                 ],
             )
@@ -521,21 +1001,28 @@ class WorkspaceArchive:
     def build_receipt(
         *,
         ctx: WorkspaceContext,
-        archive_path: Path,
         archive_config: ArchiveConfig,
-        manifest_path: Path,
-        lockfile_path: Path,
+        archive_name: str,
+        archive_sha256: str,
+        manifest_name: str,
+        manifest_sha256: str,
+        lockfile_name: str,
+        lockfile_sha256: str,
+        lockfile_data: object,
         options: dict[str, object],
     ) -> ArchiveReceipt:
-        """Build the external receipt for a newly created archive."""
+        """Build the external receipt from captured archive inputs."""
         from .receipts import ArchiveReceipt
 
-        return ArchiveReceipt.build(
-            root=ctx.root,
-            archive_path=archive_path,
+        return ArchiveReceipt.build_from_captured(
+            archive_name=archive_name,
+            archive_sha256=archive_sha256,
+            manifest_name=manifest_name,
+            manifest_sha256=manifest_sha256,
+            lockfile_name=lockfile_name,
+            lockfile_sha256=lockfile_sha256,
+            lockfile_data=lockfile_data,
             archive_config=archive_config,
-            manifest_path=manifest_path,
-            lockfile_path=lockfile_path,
             environment_prefixes=receipt_environment_prefixes(
                 config_environments=list(ctx.config.environments),
                 ctx_root=ctx.root,
@@ -607,43 +1094,22 @@ class WorkspaceArchive:
             Path(target).expanduser() if target is not None else self.default_target()
         )
         target_path = requested_target.resolve()
-        target_existed = target_path.exists()
-        target_identity = None
-        target_timestamps = None
-        if target_existed:
-            target_stat = target_path.stat()
-            target_identity = (target_stat.st_dev, target_stat.st_ino)
-            target_timestamps = (target_stat.st_atime_ns, target_stat.st_mtime_ns)
         ensure_extract_target_empty(requested_target)
         validate_directory_output(requested_target)
+        if target_path.exists():
+            raise ArchiveError(
+                "Archive extraction requires a target that does not already exist.",
+                hints=["Remove the empty target directory before extracting."],
+            )
 
         if require_sha256 and self.receipt_path is None:
             raise ArchiveError("--require-sha256 requires --receipt.")
         archive_path = self.require_existing_archive()
-        info = inspect_archive(archive_path)
-        if not info["has_manifest"]:
-            raise ArchiveError(
-                "Not a workspace archive: no manifest found.",
-                hints=["This does not appear to be a conda workspace archive."],
-            )
-        receipt = self.verify() if self.receipt_path is not None else None
-        if receipt is not None:
-            with open_tar(archive_path) as tar:
-                for label, name in zip(
-                    ("workspace manifest", "workspace lockfile"),
-                    receipt.workspace_paths,
-                    strict=True,
-                ):
-                    try:
-                        member = tar.getmember(name)
-                    except KeyError:
-                        raise ArchiveError(
-                            f"Receipt {label} is missing from the archive."
-                        ) from None
-                    if not member.isreg():
-                        raise ArchiveError(
-                            f"Receipt {label} is not a regular archive member."
-                        )
+        receipt = None
+        if self.receipt_path is not None:
+            from .receipts import ArchiveReceipt
+
+            receipt = ArchiveReceipt.load(self.receipt_path)
 
         temporary_parent = None
         if not dry_run:
@@ -654,17 +1120,43 @@ class WorkspaceArchive:
             prefix="conda-workspaces-",
             dir=temporary_parent,
         ) as temporary:
-            staged = extract_archive(archive_path, Path(temporary) / "workspace")
+            snapshot_path = Path(temporary) / archive_path.name
+            self.snapshot_archive(archive_path, snapshot_path)
+            if receipt is not None:
+                receipt.verify_archive(snapshot_path)
+            info = inspect_archive(snapshot_path)
+            if not info["has_manifest"]:
+                raise ArchiveError(
+                    "Not a workspace archive: no manifest found.",
+                    hints=["This does not appear to be a conda workspace archive."],
+                )
+            if receipt is not None:
+                with open_tar(snapshot_path) as tar:
+                    for label, name in zip(
+                        ("workspace manifest", "workspace lockfile"),
+                        receipt.workspace_paths,
+                        strict=True,
+                    ):
+                        try:
+                            member = tar.getmember(name)
+                        except KeyError:
+                            raise ArchiveError(
+                                f"Receipt {label} is missing from the archive."
+                            ) from None
+                        if not member.isreg():
+                            raise ArchiveError(
+                                f"Receipt {label} is not a regular archive member."
+                            )
+
+            staged = extract_archive(snapshot_path, Path(temporary) / "workspace")
             if receipt is not None:
                 receipt.verify_extracted(staged, require_sha256=require_sha256)
             cache_priming_skipped = bool(
                 info["has_packages"] and prime_cache and receipt is None
             )
-            cache_plan: list[tuple[str, Path]] = []
+            cache_plan: list[tuple[str, Path, str]] = []
             if info["has_packages"] and prime_cache and receipt is not None:
                 if package_cache is None:
-                    from conda.base.context import context as conda_context
-
                     cache_path = Path(conda_context.pkgs_dirs[0])
                 else:
                     cache_path = Path(package_cache)
@@ -681,6 +1173,25 @@ class WorkspaceArchive:
                     for path in (staged / "packages").glob(f"*{suffix}")
                 )
                 verify_package_hashes(packages, staged / "conda.lock")
+                receipt_hashes: dict[str, str] = {}
+                for environment in receipt.inventory.data:
+                    records = environment.get("packages")
+                    if not isinstance(records, list):
+                        raise ArchiveError("Invalid receipt package inventory.")
+                    for item in records:
+                        if not isinstance(item, dict):
+                            raise ArchiveError("Invalid receipt package inventory.")
+                        record = cast("dict[str, object]", item)
+                        filename = record.get("fn")
+                        digest = record.get("sha256")
+                        if not isinstance(filename, str) or not isinstance(digest, str):
+                            continue
+                        previous = receipt_hashes.setdefault(filename, digest)
+                        if previous != digest:
+                            raise ArchiveError(
+                                "Receipt contains conflicting package hashes for"
+                                f" '{filename}'."
+                            )
                 for package in packages:
                     destination = cache_path / package.name
                     if destination.is_symlink():
@@ -688,8 +1199,12 @@ class WorkspaceArchive:
                             "Package cache destinations cannot be symbolic links."
                         )
                     validate_file_output(destination)
+                    expected = receipt_hashes.get(package.name)
+                    if expected is None:
+                        raise ArchiveError(
+                            f"Receipt lacks a SHA256 digest for '{package.name}'."
+                        )
                     if destination.exists():
-                        expected = file_sha256(package)
                         actual = file_sha256(destination)
                         if actual != expected:
                             raise ArchiveHashMismatchError(
@@ -698,7 +1213,7 @@ class WorkspaceArchive:
                                 actual=actual,
                             )
                         continue
-                    cache_plan.append((package.name, destination))
+                    cache_plan.append((package.name, destination, expected))
 
             if validate_workspace is not None:
                 validate_workspace(staged, receipt)
@@ -707,56 +1222,114 @@ class WorkspaceArchive:
             if dry_run:
                 extracted = target_path
             else:
-                target_path.parent.mkdir(parents=True, exist_ok=True)
-                if requested_target.resolve() != target_path:
-                    raise ArchiveError(
-                        "Extraction target changed while the archive was staged."
-                    )
-                if target_existed:
+                for name, destination, expected in cache_plan:
+                    source = staged / "packages" / name
                     try:
-                        target_stat = target_path.lstat()
-                    except FileNotFoundError:
-                        target_stat = None
+                        with atomic_binary_writer(
+                            destination,
+                            expected_identity=None,
+                        ) as output_stream:
+                            with open_stable_regular_file(
+                                source,
+                                label="Bundled package source",
+                            ) as input_stream:
+                                hashing_reader = _HashingReader(input_stream)
+                                shutil.copyfileobj(
+                                    hashing_reader,
+                                    output_stream,
+                                    length=1024 * 1024,
+                                )
+                                actual = hashing_reader.digest.hexdigest()
+                                if actual != expected:
+                                    raise ArchiveHashMismatchError(
+                                        name,
+                                        expected=expected,
+                                        actual=actual,
+                                    )
+                    except FileExistsError as exc:
+                        raise ArchiveError(
+                            "Package cache destination changed before publication:"
+                            f" {destination}"
+                        ) from exc
+                    except (OSError, ValueError) as exc:
+                        raise ArchiveError(
+                            "Package cache destination cannot be published safely:"
+                            f" {destination}"
+                        ) from exc
+
+                staged_generation = staged.lstat()
+                with (
+                    anchored_directory(
+                        target_path.parent,
+                        create=True,
+                    ) as parent_descriptor,
+                    anchored_directory(staged.parent) as source_descriptor,
+                ):
+                    if requested_target.resolve() != target_path:
+                        raise ArchiveError(
+                            "Extraction target changed while the archive was staged."
+                        )
+                    if source_descriptor is None or parent_descriptor is None:
+                        if target_path.exists() or target_path.is_symlink():
+                            raise ArchiveError(
+                                "Extraction target changed while the archive was"
+                                " staged."
+                            )
+                        rename_noreplace(staged, target_path)
+                        published = target_path.lstat()
+                    else:
+                        opened_parent = os.fstat(parent_descriptor)
+                        live_parent = target_path.parent.lstat()
+                        if not stat.S_ISDIR(live_parent.st_mode) or (
+                            live_parent.st_dev,
+                            live_parent.st_ino,
+                        ) != (opened_parent.st_dev, opened_parent.st_ino):
+                            raise ArchiveError(
+                                "Extraction target changed while the archive was"
+                                " staged."
+                            )
+                        try:
+                            rename_noreplace(
+                                staged.name,
+                                target_path.name,
+                                source_dir_fd=source_descriptor,
+                                destination_dir_fd=parent_descriptor,
+                            )
+                        except OSError as exc:
+                            raise ArchiveError(
+                                "Extraction target changed while the archive was"
+                                " staged."
+                            ) from exc
+                        published = os.stat(
+                            target_path.name,
+                            dir_fd=parent_descriptor,
+                            follow_symlinks=False,
+                        )
+                        live_parent = target_path.parent.lstat()
+                        if not stat.S_ISDIR(live_parent.st_mode) or (
+                            live_parent.st_dev,
+                            live_parent.st_ino,
+                        ) != (opened_parent.st_dev, opened_parent.st_ino):
+                            raise ArchiveError(
+                                "Extraction target changed while the archive was"
+                                " staged."
+                            )
+                    live_target = target_path.lstat()
+                    expected_identity = (
+                        staged_generation.st_dev,
+                        staged_generation.st_ino,
+                    )
                     if (
-                        target_stat is None
-                        or (target_stat.st_dev, target_stat.st_ino) != target_identity
+                        requested_target.resolve() != target_path
+                        or not stat.S_ISDIR(published.st_mode)
+                        or (published.st_dev, published.st_ino) != expected_identity
+                        or not stat.S_ISDIR(live_target.st_mode)
+                        or (live_target.st_dev, live_target.st_ino) != expected_identity
                     ):
                         raise ArchiveError(
                             "Extraction target changed while the archive was staged."
                         )
-                    assert target_timestamps is not None
-                    ensure_extract_target_empty(target_path)
-                    moved: list[Path] = []
-                    try:
-                        for child in staged.iterdir():
-                            destination = target_path / child.name
-                            child.rename(destination)
-                            moved.append(destination)
-                    except BaseException:
-                        for destination in reversed(moved):
-                            destination.rename(staged / destination.name)
-                        raise
-                    finally:
-                        if os.utime in os.supports_follow_symlinks:
-                            os.utime(
-                                target_path,
-                                ns=target_timestamps,
-                                follow_symlinks=False,
-                            )
-                        else:
-                            os.utime(target_path, ns=target_timestamps)
-                    staged.rmdir()
-                else:
-                    if target_path.exists() or target_path.is_symlink():
-                        raise ArchiveError(
-                            "Extraction target changed while the archive was staged."
-                        )
-                    staged.rename(target_path)
                 extracted = target_path
-                for name, destination in cache_plan:
-                    if not destination.exists():
-                        destination.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(extracted / "packages" / name, destination)
 
             return WorkspaceArchiveExtractResult(
                 target=extracted,
@@ -796,8 +1369,10 @@ class WorkspaceArchive:
             raise ArchiveError(
                 "--dest requires --prefix.",
                 hints=[
-                    "Pass --prefix to declare the final runtime prefix for"
-                    " the selected environment.",
+                    (
+                        "Pass --prefix to declare the final runtime prefix for"
+                        " the selected environment."
+                    ),
                 ],
             )
         if final_prefix is not None:
@@ -807,13 +1382,32 @@ class WorkspaceArchive:
                     "--prefix must be an absolute path.",
                     hints=["Pass an absolute runtime prefix such as /opt/runtime."],
                 )
+            if dest is None and not Path(final_prefix).is_absolute():
+                raise ArchiveError(
+                    "--prefix must use the host platform's absolute path syntax.",
+                    hints=[
+                        (
+                            "Pass --dest when staging an archive for a different"
+                            " operating system."
+                        ),
+                    ],
+                )
 
         install_prefix = Path(final_prefix) if final_prefix is not None else None
         runtime_prefix = None
         if final_prefix is not None:
             if dest is not None:
-                dest_path = Path(dest).expanduser().resolve()
-                install_prefix = dest_path / runtime_prefix_relative_path(final_prefix)
+                dest_path = Path(dest).expanduser().absolute()
+                if dest_path.is_symlink():
+                    raise ArchiveError("--dest cannot be a symbolic link.")
+                validate_directory_output(dest_path)
+                try:
+                    relative_prefix = runtime_prefix_relative_path(final_prefix)
+                except ValueError as exc:
+                    raise ArchiveError(
+                        "--prefix must not contain '.' or '..' path components."
+                    ) from exc
+                install_prefix = dest_path / relative_prefix
                 runtime_prefix = final_prefix
             elif str(install_prefix) != final_prefix:
                 runtime_prefix = final_prefix
@@ -827,7 +1421,7 @@ class WorkspaceArchive:
         ) -> None:
             from .context import WorkspaceContext
             from .lockfile import install_from_lockfile, lockfile_status
-            from .manifests import clear_workspace_manifest_caches, detect_and_parse
+            from .manifests import detect_and_parse
 
             manifest_path = self.resolve_extracted_manifest(workspace)
             lock_path = workspace / "conda.lock"
@@ -845,7 +1439,6 @@ class WorkspaceArchive:
                     " root manifest and conda.lock."
                 )
 
-            clear_workspace_manifest_caches()
             load_yaml.cache_clear()
             _, config = detect_and_parse(manifest_path)
             ctx = WorkspaceContext(config)
@@ -971,9 +1564,8 @@ class WorkspaceArchive:
         """Install workspace environments from ``conda.lock`` without the CLI."""
         from .context import WorkspaceContext
         from .lockfile import install_from_lockfile
-        from .manifests import clear_workspace_manifest_caches, detect_and_parse
+        from .manifests import detect_and_parse
 
-        clear_workspace_manifest_caches()
         load_yaml.cache_clear()
 
         _, config = detect_and_parse(
@@ -999,6 +1591,49 @@ class WorkspaceArchive:
             raise ArchiveError(f"Archive not found: {self.path}")
         return self.path
 
+    @staticmethod
+    def snapshot_archive(source: Path, destination: Path) -> None:
+        """Copy one no-follow archive generation into private staging."""
+        try:
+            with atomic_binary_writer(
+                destination,
+                expected_identity=None,
+            ) as output_stream:
+                with open_stable_regular_file(
+                    source,
+                    label="Archive",
+                    maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
+                ) as input_stream:
+                    shutil.copyfileobj(
+                        input_stream,
+                        output_stream,
+                        length=1024 * 1024,
+                    )
+        except (OSError, ValueError) as exc:
+            raise ArchiveError(
+                f"Archive cannot be snapshotted safely: {source}"
+            ) from exc
+
+    @staticmethod
+    def remove_created_output(path: Path, expected: tuple[int, int]) -> None:
+        """Remove *path* only while it still names the created output."""
+        try:
+            with anchored_directory(path.parent) as parent_descriptor:
+                if parent_descriptor is None:
+                    current = path.lstat()
+                    if (current.st_dev, current.st_ino) == expected:
+                        path.unlink()
+                    return
+                current = os.stat(
+                    path.name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                if (current.st_dev, current.st_ino) == expected:
+                    os.unlink(path.name, dir_fd=parent_descriptor)
+        except FileNotFoundError:
+            return
+
 
 def is_absolute_runtime_prefix(prefix: str) -> bool:
     """Return whether *prefix* is absolute as a POSIX or Windows path."""
@@ -1009,10 +1644,16 @@ def runtime_prefix_relative_path(prefix: str) -> Path:
     """Return *prefix* relative to its root using host path separators."""
     posix_prefix = PurePosixPath(prefix)
     if posix_prefix.is_absolute():
-        return Path(*posix_prefix.relative_to(posix_prefix.anchor).parts)
+        parts = posix_prefix.relative_to(posix_prefix.anchor).parts
+    else:
+        windows_prefix = PureWindowsPath(prefix)
+        if not windows_prefix.is_absolute():
+            raise ValueError(f"Runtime prefix is not absolute: {prefix!r}")
+        parts = windows_prefix.relative_to(windows_prefix.anchor).parts
 
-    windows_prefix = PureWindowsPath(prefix)
-    return Path(*windows_prefix.relative_to(windows_prefix.anchor).parts)
+    if any(part in {".", ".."} for part in parts):
+        raise ValueError(f"Runtime prefix contains traversal: {prefix!r}")
+    return Path(*parts)
 
 
 def file_contains_bytes(
@@ -1024,13 +1665,13 @@ def file_contains_bytes(
 
     overlap = b""
     try:
-        with path.open("rb") as fh:
+        with open_stable_regular_file(path, label="Scanned file") as fh:
             while chunk := fh.read(chunk_size):
                 data = overlap + chunk
                 if needle in data:
                     return True
                 overlap = data[-(len(needle) - 1) :] if len(needle) > 1 else b""
-    except OSError:
+    except (OSError, ArchiveError):
         return False
     return False
 
@@ -1145,12 +1786,22 @@ def git_tracked_files(root: Path) -> list[Path]:
 
 def is_excluded_by_builtins(rel_path: str) -> bool:
     """Return True if *rel_path* falls under a builtin-excluded directory."""
+    normalized_path = "/".join(portable_path_key(PurePosixPath(rel_path)))
     for excl in BUILTIN_EXCLUDE_DIRS:
-        if rel_path == excl or rel_path.startswith(excl + "/"):
+        normalized_exclusion = excl.casefold()
+        if normalized_path == normalized_exclusion or normalized_path.startswith(
+            normalized_exclusion + "/"
+        ):
             return True
-    if matches_patterns(rel_path, BUILTIN_SENSITIVE_EXCLUDE_EXCEPTIONS):
+    normalized_exceptions = tuple(
+        pattern.casefold() for pattern in BUILTIN_SENSITIVE_EXCLUDE_EXCEPTIONS
+    )
+    if matches_patterns(normalized_path, normalized_exceptions):
         return False
-    return matches_patterns(rel_path, BUILTIN_SENSITIVE_EXCLUDE_PATTERNS)
+    normalized_patterns = tuple(
+        pattern.casefold() for pattern in BUILTIN_SENSITIVE_EXCLUDE_PATTERNS
+    )
+    return matches_patterns(normalized_path, normalized_patterns)
 
 
 def matches_patterns(rel_path: str, patterns: tuple[str, ...]) -> bool:
@@ -1266,10 +1917,19 @@ def create_archive(
     output: Path,
     archive_config: ArchiveConfig,
     *,
+    files: list[Path] | None = None,
+    root_descriptor: int | None = None,
     bundle_packages: list[Path] | None = None,
+    bundle_hashes: dict[str, str] | None = None,
     extra_files: tuple[Path, ...] = (),
     regular_members: tuple[str, ...] = (),
+    regular_member_hashes: dict[str, str] | None = None,
     virtual_regular_members: tuple[str, ...] = (),
+    capture_output: Callable[[ArchiveOutputCapture], None] | None = None,
+    capture_sha256: bool = False,
+    expected_output_generation: OutputFileGeneration | None | object = (
+        _CURRENT_ARCHIVE_OUTPUT_GENERATION
+    ),
     dry_run: bool = False,
 ) -> Path:
     """Create a tar archive of the workspace at *root*.
@@ -1281,39 +1941,88 @@ def create_archive(
     output = output.expanduser().absolute()
     if output.is_symlink():
         raise ArchiveError("Archive output cannot be a symbolic link.")
+    if expected_output_generation is _CURRENT_ARCHIVE_OUTPUT_GENERATION:
+        expected_output_generation = regular_file_generation(output)
     for package in bundle_packages or ():
         if output_paths_collide(output, package):
             raise ArchiveError(
                 "Archive output cannot overwrite a bundled package input."
             )
 
-    files = collect_archive_files(root, archive_config, extra_files=extra_files)
-    files = exclude_archive_output(files, output)
-    validate_archive_members_for_create(
-        root=root,
-        files=files,
-        bundle_packages=bundle_packages,
-        regular_members=frozenset(regular_members),
-        virtual_regular_members=frozenset(virtual_regular_members),
-    )
+    if files is None:
+        files = exclude_archive_output(
+            collect_archive_files(root, archive_config, extra_files=extra_files),
+            output,
+        )
+    if root_descriptor is None or dry_run:
+        validate_archive_members_for_create(
+            root=root,
+            files=files,
+            bundle_packages=bundle_packages,
+            regular_members=frozenset(regular_members),
+            virtual_regular_members=frozenset(virtual_regular_members),
+        )
 
     if dry_run:
         return output
 
-    output.parent.mkdir(parents=True, exist_ok=True)
     compression = detect_compression(output)
 
-    with open_tar_for_write(
-        output, compression, archive_config.compression_level
-    ) as tf:
-        add_files_to_tar(
-            tf,
-            root,
-            files,
-            regular_members=frozenset(regular_members),
+    with atomic_binary_writer(
+        output,
+        expected_generation=expected_output_generation,
+    ) as output_stream:
+        hashing_stream = _HashingWriter(output_stream) if capture_sha256 else None
+        tar_output = (
+            cast("BinaryIO", hashing_stream)
+            if hashing_stream is not None
+            else output_stream
         )
-        if bundle_packages:
-            add_packages_to_tar(tf, bundle_packages)
+        with open_tar_for_write(
+            tar_output,
+            compression,
+            archive_config.compression_level,
+        ) as tf:
+            write_limits = _ArchiveWriteLimits()
+            add_files_to_tar(
+                tf,
+                root,
+                files,
+                root_descriptor=root_descriptor,
+                regular_members=frozenset(regular_members),
+                regular_member_hashes=regular_member_hashes,
+                write_limits=write_limits,
+            )
+            if bundle_packages:
+                add_packages_to_tar(
+                    tf,
+                    bundle_packages,
+                    expected_hashes=bundle_hashes,
+                    write_limits=write_limits,
+                )
+            validate_tar_members(tf.getmembers())
+        if capture_output is not None:
+            output_stream.flush()
+            captured = os.fstat(output_stream.fileno())
+            if hashing_stream is not None and (
+                not hashing_stream.sequential
+                or hashing_stream.position != captured.st_size
+                or output_stream.tell() != captured.st_size
+            ):
+                raise ArchiveError(
+                    "Archive output could not be captured as a sequential stream."
+                )
+            capture_output(
+                ArchiveOutputCapture(
+                    sha256=(
+                        hashing_stream.digest.hexdigest()
+                        if hashing_stream is not None
+                        else None
+                    ),
+                    identity=(captured.st_dev, captured.st_ino),
+                    size=captured.st_size,
+                )
+            )
 
     return output
 
@@ -1391,41 +2100,287 @@ def add_files_to_tar(
     root: Path,
     files: list[Path],
     *,
+    root_descriptor: int | None = None,
     regular_members: frozenset[str] = frozenset(),
+    regular_member_hashes: dict[str, str] | None = None,
+    write_limits: _ArchiveWriteLimits | None = None,
 ) -> None:
     """Add workspace *files* to the tar, using paths relative to *root*."""
-    for path in files:
-        arcname = path.relative_to(root).as_posix()
-        if arcname in regular_members:
+    limits = write_limits if write_limits is not None else _ArchiveWriteLimits()
+    publication_root = (
+        nullcontext(root_descriptor)
+        if root_descriptor is not None
+        else anchored_directory(Path(root))
+    )
+    with publication_root as anchored_root:
+        for path in files:
+            arcname = path.relative_to(root).as_posix()
+            add_archive_file_to_tar(
+                tf,
+                path,
+                arcname,
+                root_descriptor=anchored_root,
+                require_regular=arcname in regular_members,
+                expected_sha256=(regular_member_hashes or {}).get(arcname),
+                write_limits=limits,
+            )
+
+
+@contextmanager
+def anchored_archive_member_parent(
+    path: Path,
+    arcname: str,
+    root_descriptor: int | None,
+) -> Iterator[int | None]:
+    """Anchor an archive member parent below the opened workspace root."""
+    if root_descriptor is None:
+        with anchored_directory(path.parent) as parent_descriptor:
+            yield parent_descriptor
+        return
+
+    relative = parse_relative_posix_path(arcname, require_canonical=True)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.dup(root_descriptor)
+    try:
+        for part in relative.parts[:-1]:
+            next_descriptor = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def add_archive_file_to_tar(
+    tf: tarfile.TarFile,
+    path: Path,
+    arcname: str,
+    *,
+    root_descriptor: int | None = None,
+    require_regular: bool = False,
+    expected_sha256: str | None = None,
+    write_limits: _ArchiveWriteLimits | None = None,
+) -> None:
+    """Add one stable regular file or symbolic link without following it."""
+    limits = write_limits if write_limits is not None else _ArchiveWriteLimits()
+    with anchored_archive_member_parent(path, arcname, root_descriptor) as parent:
+        if require_regular:
+            add_regular_file_to_tar(
+                tf,
+                path,
+                arcname,
+                expected_sha256=expected_sha256,
+                parent_descriptor=parent,
+                write_limits=limits,
+            )
+            return
+        try:
+            current = archive_leaf_stat(path, parent)
+        except FileNotFoundError as exc:
+            raise ArchiveError(f"Archive input changed before reading: {path}") from exc
+        if stat.S_ISREG(current.st_mode):
+            add_regular_file_to_tar(
+                tf,
+                path,
+                arcname,
+                parent_descriptor=parent,
+                write_limits=limits,
+            )
+            return
+        if stat.S_ISLNK(current.st_mode):
+            add_symlink_to_tar(
+                tf,
+                path,
+                arcname,
+                parent_descriptor=parent,
+                write_limits=limits,
+            )
+            return
+        raise ArchiveError(f"Cannot archive unsupported file: {path}")
+
+
+def archive_leaf_stat(path: Path, parent_descriptor: int | None) -> os.stat_result:
+    """Stat one archive member leaf without following it."""
+    if parent_descriptor is None:
+        return path.lstat()
+    return os.stat(
+        path.name,
+        dir_fd=parent_descriptor,
+        follow_symlinks=False,
+    )
+
+
+def add_regular_file_to_tar(
+    tf: tarfile.TarFile,
+    path: Path,
+    arcname: str,
+    *,
+    expected_sha256: str | None = None,
+    parent_descriptor: int | None = None,
+    write_limits: _ArchiveWriteLimits | None = None,
+) -> None:
+    """Add one no-follow regular-file generation to *tf*."""
+    limits = write_limits if write_limits is not None else _ArchiveWriteLimits()
+    try:
+        reserved = archive_leaf_stat(path, parent_descriptor)
+    except FileNotFoundError as exc:
+        raise ArchiveError(f"Archive input changed before reading: {path}") from exc
+    if not stat.S_ISREG(reserved.st_mode):
+        raise ArchiveError(f"Cannot archive regular file safely: {path}")
+    reserved_member = tarfile.TarInfo(arcname)
+    reserved_member.size = reserved.st_size
+    limits.reserve(reserved_member)
+    reserved_generation = file_generation(reserved)
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = -1
+    try:
+        try:
+            descriptor = (
+                os.open(path, flags)
+                if parent_descriptor is None
+                else os.open(path.name, flags, dir_fd=parent_descriptor)
+            )
+        except OSError as exc:
+            raise ArchiveError(f"Cannot archive regular file safely: {path}") from exc
+        opened = os.fstat(descriptor)
+        try:
+            current = archive_leaf_stat(path, parent_descriptor)
+        except FileNotFoundError as exc:
+            raise ArchiveError(f"Archive input changed before reading: {path}") from exc
+        opened_generation = file_generation(opened)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or opened_generation != reserved_generation
+            or file_generation(current) != opened_generation
+        ):
+            raise ArchiveError(f"Archive input is not a stable regular file: {path}")
+
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1
             dereference = tf.dereference
             tf.dereference = True
             try:
-                tf.add(str(path), arcname=arcname)
+                member = tf.gettarinfo(fileobj=stream, arcname=arcname)
             finally:
                 tf.dereference = dereference
-        else:
-            tf.add(str(path), arcname=arcname)
-
-
-def add_packages_to_tar(tf: tarfile.TarFile, packages: list[Path]) -> None:
-    """Add conda package archives under the ``packages/`` archive prefix."""
-    for pkg in packages:
-        if pkg.is_symlink() or not pkg.is_file():
-            raise ArchiveError(f"Cannot bundle package: {pkg} is not a regular file.")
-        arcname = f"packages/{pkg.name}"
-        dereference = tf.dereference
-        tf.dereference = True
+            if member is None or not member.isreg():
+                raise ArchiveError(f"Archive input changed before reading: {path}")
+            validate_tar_member(member)
+            if expected_sha256 is None:
+                tf.addfile(member, stream)
+                actual = None
+            else:
+                reader = _HashingReader(stream)
+                tf.addfile(member, reader)
+                actual = reader.digest.hexdigest()
+            final = os.fstat(stream.fileno())
         try:
-            tf.add(str(pkg), arcname=arcname)
-        finally:
-            tf.dereference = dereference
+            current = archive_leaf_stat(path, parent_descriptor)
+        except FileNotFoundError as exc:
+            raise ArchiveError(f"Archive input changed while reading: {path}") from exc
+        if (
+            file_generation(final) != opened_generation
+            or final.st_ctime_ns != opened.st_ctime_ns
+            or not stat.S_ISREG(current.st_mode)
+            or file_generation(current) != opened_generation
+        ):
+            raise ArchiveError(f"Archive input changed while reading: {path}")
+        if expected_sha256 is not None:
+            assert actual is not None
+            if actual != expected_sha256:
+                raise ArchiveHashMismatchError(
+                    path.name,
+                    expected=expected_sha256,
+                    actual=actual,
+                )
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def add_symlink_to_tar(
+    tf: tarfile.TarFile,
+    path: Path,
+    arcname: str,
+    *,
+    parent_descriptor: int | None = None,
+    write_limits: _ArchiveWriteLimits | None = None,
+) -> None:
+    """Add one stable symbolic-link generation without following its target."""
+    try:
+        opened = archive_leaf_stat(path, parent_descriptor)
+        linkname = (
+            os.readlink(path)
+            if parent_descriptor is None
+            else os.readlink(path.name, dir_fd=parent_descriptor)
+        )
+    except (FileNotFoundError, OSError) as exc:
+        raise ArchiveError(f"Cannot archive symbolic link safely: {path}") from exc
+    if not stat.S_ISLNK(opened.st_mode):
+        raise ArchiveError(f"Archive input is not a stable symbolic link: {path}")
+
+    member = tarfile.TarInfo(arcname)
+    member.mode = opened.st_mode
+    member.uid = opened.st_uid
+    member.gid = opened.st_gid
+    member.size = 0
+    member.mtime = opened.st_mtime
+    member.type = tarfile.SYMTYPE
+    member.linkname = linkname
+    try:
+        current = archive_leaf_stat(path, parent_descriptor)
+    except FileNotFoundError as exc:
+        raise ArchiveError(f"Archive input changed before reading: {path}") from exc
+    if (
+        not member.issym()
+        or member.linkname != linkname
+        or file_generation(current) != file_generation(opened)
+    ):
+        raise ArchiveError(f"Archive input changed before reading: {path}")
+    limits = write_limits if write_limits is not None else _ArchiveWriteLimits()
+    limits.reserve(member)
+    tf.addfile(member)
+
+
+def add_packages_to_tar(
+    tf: tarfile.TarFile,
+    packages: list[Path],
+    *,
+    expected_hashes: dict[str, str] | None = None,
+    write_limits: _ArchiveWriteLimits | None = None,
+) -> None:
+    """Add conda package archives under the ``packages/`` archive prefix."""
+    limits = write_limits if write_limits is not None else _ArchiveWriteLimits()
+    for pkg in packages:
+        with anchored_directory(pkg.parent) as parent_descriptor:
+            add_regular_file_to_tar(
+                tf,
+                pkg,
+                f"packages/{pkg.name}",
+                expected_sha256=(expected_hashes or {}).get(pkg.name),
+                parent_descriptor=parent_descriptor,
+                write_limits=limits,
+            )
 
 
 def validate_tar_member(
     member: tarfile.TarInfo,
     target: Path | None = None,
-) -> None:
-    """Raise :class:`ArchivePathTraversalError` if *member* escapes *target*.
+) -> PurePosixPath:
+    """Return the validated path or raise when *member* escapes *target*.
 
     Checks for disallowed file types (device nodes, FIFOs, etc.),
     absolute paths, ``..`` components, and symlink targets.
@@ -1445,7 +2400,7 @@ def validate_tar_member(
         except ValueError:
             raise ArchivePathTraversalError(member.name)
 
-    if member.issym() or member.islnk():
+    if member.issym():
         try:
             link_target = parse_relative_archive_path(
                 member.linkname,
@@ -1454,7 +2409,7 @@ def validate_tar_member(
         except ValueError:
             raise ArchivePathTraversalError(member.name) from None
 
-        base = member_path.parent if member.issym() else PurePosixPath()
+        base = member_path.parent
         normalized_link = posixpath.normpath((base / link_target).as_posix())
         try:
             normalized_path = parse_relative_archive_path(normalized_link)
@@ -1467,6 +2422,7 @@ def validate_tar_member(
                 resolved_link.relative_to(target.resolve())
             except ValueError:
                 raise ArchivePathTraversalError(member.name)
+    return member_path
 
 
 def validate_tar_members(
@@ -1474,110 +2430,591 @@ def validate_tar_members(
     target: Path | None = None,
 ) -> None:
     """Validate the paths and extraction topology of all archive *members*."""
-    seen: dict[tuple[str, ...], tuple[PurePosixPath, tarfile.TarInfo]] = {}
-    descendants: dict[tuple[str, ...], PurePosixPath] = {}
-    materialized_files: set[PurePosixPath] = set()
+    if len(members) > MAX_ARCHIVE_MEMBERS:
+        raise ArchiveError(
+            f"Archive contains more than {MAX_ARCHIVE_MEMBERS:,} members."
+        )
+
+    expanded_bytes = 0
+    path_components = 0
+    children: list[dict[str, int]] = [{}]
+    node_members: dict[int, tarfile.TarInfo] = {}
+    first_descendants: dict[int, tarfile.TarInfo] = {}
+    members_by_path: dict[
+        tuple[str, ...],
+        tuple[PurePosixPath, tarfile.TarInfo],
+    ] = {}
 
     for member in members:
-        validate_tar_member(member, target)
-        member_path = parse_relative_archive_path(member.name)
-        path_parts = member_path.parts
-        if path_parts in seen:
-            raise ArchiveError(f"Archive contains duplicate member: {member.name}")
+        expanded_bytes = validate_tar_member_limits(member, expanded_bytes)
+        member_path = validate_tar_member(member, target)
+        path_key = portable_path_key(member_path)
+        path_components += len(path_key)
+        if path_components > MAX_ARCHIVE_COMPONENTS:
+            raise ArchiveError(
+                "Archive member paths exceed the maximum cumulative component"
+                f" count of {MAX_ARCHIVE_COMPONENTS:,}."
+            )
 
-        for size in range(len(path_parts) - 1, 0, -1):
-            parent = seen.get(path_parts[:size])
-            if parent is not None and not parent[1].isdir():
+        node = 0
+        ancestors: list[int] = []
+        for part in path_key:
+            parent_member = node_members.get(node)
+            if parent_member is not None and not parent_member.isdir():
                 raise ArchiveError(
                     f"Archive member '{member.name}' is nested under"
-                    f" non-directory member '{parent[0].as_posix()}'."
+                    f" non-directory member '{parent_member.name}'."
                 )
+            ancestors.append(node)
+            child = children[node].get(part)
+            if child is None:
+                child = len(children)
+                children[node][part] = child
+                children.append({})
+            node = child
+
+        if node in node_members:
+            raise ArchiveError(f"Archive contains duplicate member: {member.name}")
 
         if not member.isdir():
-            descendant = descendants.get(path_parts)
+            descendant = first_descendants.get(node)
             if descendant is not None:
                 raise ArchiveError(
                     f"Archive member '{member.name}' conflicts with"
-                    f" nested member '{descendant.as_posix()}'."
+                    f" nested member '{descendant.name}'."
                 )
 
-        if member.islnk():
-            link_path = parse_relative_archive_path(posixpath.normpath(member.linkname))
-            if link_path not in materialized_files:
+        node_members[node] = member
+        members_by_path[path_key] = (member_path, member)
+        for ancestor in ancestors:
+            first_descendants.setdefault(ancestor, member)
+    resolved_links: dict[tuple[str, ...], tarfile.TarInfo | None] = {}
+    for member_path, member in members_by_path.values():
+        if not member.issym():
+            continue
+        start_key = portable_path_key(member_path)
+        current_key = start_key
+        chain: list[tuple[str, ...]] = []
+        chain_keys: set[tuple[str, ...]] = set()
+        while current_key not in resolved_links:
+            if current_key in chain_keys:
                 raise ArchiveError(
-                    f"Archive hardlink '{member.name}' refers to an"
-                    " unavailable earlier file."
+                    f"Archive link '{member.name}' contains a reference cycle."
+                )
+            target_entry = members_by_path.get(current_key)
+            if target_entry is None:
+                terminal = None
+                break
+            current_path, current = target_entry
+            if not current.issym():
+                terminal = current
+                break
+            chain_keys.add(current_key)
+            chain.append(current_key)
+            link_target = parse_relative_archive_path(
+                current.linkname,
+                allow_parent=True,
+            )
+            base = current_path.parent
+            target_path = parse_relative_archive_path(
+                posixpath.normpath((base / link_target).as_posix())
+            )
+            current_key = portable_path_key(target_path)
+        else:
+            terminal = resolved_links[current_key]
+        for chain_key in reversed(chain):
+            resolved_links[chain_key] = terminal
+        if terminal is not None and terminal.isreg():
+            expanded_bytes += terminal.size
+            if expanded_bytes > MAX_ARCHIVE_EXPANDED_BYTES:
+                raise ArchiveError(
+                    "Archive regular files and link fallbacks expand beyond the"
+                    f" maximum size of {MAX_ARCHIVE_EXPANDED_BYTES:,} bytes."
                 )
 
-        seen[path_parts] = (member_path, member)
-        for size in range(1, len(path_parts)):
-            descendants.setdefault(path_parts[:size], member_path)
-        if member.isreg() or member.islnk():
-            materialized_files.add(member_path)
+
+def validate_tar_member_limits(
+    member: tarfile.TarInfo,
+    expanded_bytes: int,
+) -> int:
+    """Validate one member's resource limits and return its running byte total."""
+    if (
+        len(member.name.encode("utf-8", errors="surrogateescape"))
+        > MAX_ARCHIVE_PATH_BYTES
+    ):
+        raise ArchiveError(
+            "Archive member path exceeds the maximum length of"
+            f" {MAX_ARCHIVE_PATH_BYTES:,} bytes."
+        )
+    if member.issym():
+        if (
+            len(member.linkname.encode("utf-8", errors="surrogateescape"))
+            > MAX_ARCHIVE_PATH_BYTES
+        ):
+            raise ArchiveError(
+                "Archive member link target exceeds the maximum length of"
+                f" {MAX_ARCHIVE_PATH_BYTES:,} bytes."
+            )
+        if len(PurePosixPath(member.linkname).parts) > MAX_ARCHIVE_PATH_DEPTH:
+            raise ArchiveError(
+                f"Archive member '{member.name}' link target exceeds the maximum"
+                f" path depth of {MAX_ARCHIVE_PATH_DEPTH}."
+            )
+    try:
+        member_path = parse_relative_archive_path(member.name)
+    except ValueError:
+        raise ArchivePathTraversalError(member.name) from None
+    if len(member_path.parts) > MAX_ARCHIVE_PATH_DEPTH:
+        raise ArchiveError(
+            f"Archive member '{member.name}' exceeds the maximum path depth"
+            f" of {MAX_ARCHIVE_PATH_DEPTH}."
+        )
+    if not member.isreg():
+        return expanded_bytes
+    if member.size < 0:
+        raise ArchiveError(f"Archive member '{member.name}' has a negative size.")
+    expanded_bytes += member.size
+    if expanded_bytes > MAX_ARCHIVE_EXPANDED_BYTES:
+        raise ArchiveError(
+            "Archive regular files expand beyond the maximum size of"
+            f" {MAX_ARCHIVE_EXPANDED_BYTES:,} bytes."
+        )
+    return expanded_bytes
+
+
+def read_tar_members(tf: tarfile.TarFile) -> list[tarfile.TarInfo]:
+    """Read archive members while enforcing resource limits before advancing."""
+    members: list[tarfile.TarInfo] = []
+    expanded_bytes = 0
+    while member := tf.next():
+        if len(members) >= MAX_ARCHIVE_MEMBERS:
+            raise ArchiveError(
+                f"Archive contains more than {MAX_ARCHIVE_MEMBERS:,} members."
+            )
+        expanded_bytes = validate_tar_member_limits(member, expanded_bytes)
+        members.append(member)
+    return members
+
+
+@contextmanager
+def open_stable_regular_file(
+    path: Path,
+    *,
+    label: str,
+    maximum_bytes: int | None = None,
+) -> Iterator[BinaryIO]:
+    """Open one anchored no-follow regular-file generation for streaming."""
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = -1
+    try:
+        with anchored_directory(path.parent) as parent_descriptor:
+            try:
+                descriptor = (
+                    os.open(path, flags)
+                    if parent_descriptor is None
+                    else os.open(path.name, flags, dir_fd=parent_descriptor)
+                )
+            except OSError as exc:
+                raise ArchiveError(f"{label} cannot be opened safely: {path}") from exc
+            opened = os.fstat(descriptor)
+            opened_generation = file_generation(opened)
+            try:
+                current = archive_leaf_stat(path, parent_descriptor)
+                live = path.lstat()
+            except FileNotFoundError as exc:
+                raise ArchiveError(f"{label} changed while opening: {path}") from exc
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or not stat.S_ISREG(current.st_mode)
+                or file_generation(current) != opened_generation
+                or not stat.S_ISREG(live.st_mode)
+                or file_generation(live) != opened_generation
+            ):
+                raise ArchiveError(f"{label} is not a stable regular file: {path}")
+            if maximum_bytes is not None and opened.st_size > maximum_bytes:
+                raise ArchiveError(
+                    f"{label} exceeds the maximum size of {maximum_bytes:,} bytes."
+                )
+
+            with os.fdopen(descriptor, "rb") as stream:
+                descriptor = -1
+                try:
+                    yield stream
+                finally:
+                    final = os.fstat(stream.fileno())
+                    try:
+                        current = archive_leaf_stat(path, parent_descriptor)
+                        live = path.lstat()
+                    except FileNotFoundError as exc:
+                        raise ArchiveError(
+                            f"{label} changed while reading: {path}"
+                        ) from exc
+                    if (
+                        file_generation(final) != opened_generation
+                        or final.st_ctime_ns != opened.st_ctime_ns
+                        or not stat.S_ISREG(current.st_mode)
+                        or file_generation(current) != opened_generation
+                        or not stat.S_ISREG(live.st_mode)
+                        or file_generation(live) != opened_generation
+                    ):
+                        raise ArchiveError(f"{label} changed while reading: {path}")
+    except OSError as exc:
+        raise ArchiveError(f"{label} cannot be opened safely: {path}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 @contextmanager
 def open_tar(archive_path: Path) -> Iterator[tarfile.TarFile]:
-    """Open a tar archive, handling zstandard decompression transparently."""
+    """Open one stable archive generation without following filesystem links."""
     compression = detect_compression(archive_path)
-    if compression == "zst" and not tarfile_supports_zstd():
-        with zstd_module().open(archive_path, "rb") as compressed:
-            with tarfile.open(fileobj=compressed, mode="r:") as tf:
-                yield tf
-        return
-    with tarfile.open(  # ty: ignore[no-matching-overload]
-        archive_path, f"r:{compression}"
-    ) as tf:
-        yield tf
+    with open_stable_regular_file(
+        archive_path,
+        label="Archive",
+        maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
+    ) as archive_stream:
+        if compression == "zst" and not tarfile_supports_zstd():
+            with zstd_module().open(archive_stream, "rb") as compressed:
+                with tarfile.open(
+                    fileobj=compressed,
+                    mode="r:",
+                    tarinfo=_BoundedTarInfo,
+                ) as tf:
+                    yield tf
+            return
+        with tarfile.open(  # ty: ignore[no-matching-overload]
+            fileobj=archive_stream,
+            mode=f"r:{compression}",
+            tarinfo=_BoundedTarInfo,
+        ) as tf:
+            yield tf
 
 
 def ensure_extract_target_empty(target: Path) -> None:
-    """Reject archive extraction into non-empty or unsafe targets."""
+    """Require an archive extraction target that does not yet exist."""
     if target.is_symlink():
         raise ArchiveError("Cannot extract archive into an existing symlink target.")
     if not target.exists():
         return
-    if not target.is_dir():
-        raise ArchiveError(
-            "Cannot extract archive into an existing non-directory target."
-        )
+    raise ArchiveError(
+        "Cannot extract archive into an existing target.",
+        hints=["Choose a new target path or remove the existing target first."],
+    )
+
+
+@contextmanager
+def open_archive_member_parent(
+    root_descriptor: int,
+    member_path: PurePosixPath,
+    directories: dict[tuple[str, ...], tuple[int, int]],
+) -> Iterator[int]:
+    """Open a member parent below an anchored empty staging directory."""
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.dup(root_descriptor)
+    parts: list[str] = []
     try:
-        target_has_files = any(target.iterdir())
-    except OSError as exc:
-        raise ArchiveError(
-            f"Cannot inspect target before archive extraction: {target}"
-        ) from exc
-    if target_has_files:
-        raise ArchiveError(
-            "Cannot extract archive into a non-empty target.",
-            hints=["Choose an empty target directory or remove existing files first."],
+        for part in member_path.parts[:-1]:
+            parts.append(part)
+            key = tuple(parts)
+            expected = directories.get(key)
+            if expected is None:
+                try:
+                    os.mkdir(part, 0o700, dir_fd=descriptor)
+                except FileExistsError as exc:
+                    raise ArchiveError(
+                        "Archive extraction staging changed while creating"
+                        f" '{member_path}'."
+                    ) from exc
+            try:
+                next_descriptor = os.open(part, flags, dir_fd=descriptor)
+            except OSError as exc:
+                raise ArchiveError(
+                    f"Archive extraction parent changed for '{member_path}'."
+                ) from exc
+            opened = os.fstat(next_descriptor)
+            identity = opened.st_dev, opened.st_ino
+            if not stat.S_ISDIR(opened.st_mode) or (
+                expected is not None and identity != expected
+            ):
+                os.close(next_descriptor)
+                raise ArchiveError(
+                    f"Archive extraction parent changed for '{member_path}'."
+                )
+            directories.setdefault(key, identity)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def extract_tar_member(
+    tf: tarfile.TarFile,
+    member: tarfile.TarInfo,
+    *,
+    root_descriptor: int,
+    directories: dict[tuple[str, ...], tuple[int, int]],
+) -> None:
+    """Extract one validated member beneath an anchored staging descriptor."""
+    member_path = parse_relative_archive_path(member.name)
+    path_key = tuple(member_path.parts)
+    with open_archive_member_parent(
+        root_descriptor,
+        member_path,
+        directories,
+    ) as parent_descriptor:
+        name = member_path.name
+        if member.isdir():
+            expected = directories.get(path_key)
+            if expected is None:
+                try:
+                    os.mkdir(name, 0o700, dir_fd=parent_descriptor)
+                except FileExistsError as exc:
+                    raise ArchiveError(
+                        f"Archive extraction staging changed at '{member.name}'."
+                    ) from exc
+            opened = os.stat(
+                name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            identity = opened.st_dev, opened.st_ino
+            if not stat.S_ISDIR(opened.st_mode) or (
+                expected is not None and identity != expected
+            ):
+                raise ArchiveError(
+                    f"Archive extraction staging changed at '{member.name}'."
+                )
+            directories.setdefault(path_key, identity)
+            return
+
+        if member.issym():
+            linkname = posixpath.normpath(member.linkname)
+            try:
+                os.symlink(linkname, name, dir_fd=parent_descriptor)
+                current = os.stat(
+                    name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                current_link = os.readlink(name, dir_fd=parent_descriptor)
+            except OSError as exc:
+                raise ArchiveError(
+                    f"Archive extraction staging changed at '{member.name}'."
+                ) from exc
+            if not stat.S_ISLNK(current.st_mode) or current_link != linkname:
+                raise ArchiveError(
+                    f"Archive extraction staging changed at '{member.name}'."
+                )
+            return
+
+        if not member.isreg():
+            raise ArchivePathTraversalError(member.name)
+        source = tf.extractfile(member)
+        if source is None:
+            raise ArchiveError(f"Archive member cannot be read: {member.name}")
+        descriptor = -1
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
         )
+        try:
+            descriptor = os.open(name, flags, 0o600, dir_fd=parent_descriptor)
+            opened = os.fstat(descriptor)
+            identity = opened.st_dev, opened.st_ino
+            remaining = member.size
+            mode = (member.mode or 0) & 0o755
+            if not mode & 0o100:
+                mode &= ~0o111
+            mode |= 0o600
+            with source, os.fdopen(descriptor, "wb") as output:
+                descriptor = -1
+                while remaining:
+                    chunk = source.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise ArchiveError(
+                            f"Archive member changed while reading: {member.name}"
+                        )
+                    output.write(chunk)
+                    remaining -= len(chunk)
+                output.flush()
+                os.fchmod(output.fileno(), mode)
+                final = os.fstat(output.fileno())
+            current = os.stat(
+                name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or (final.st_dev, final.st_ino) != identity
+                or final.st_size != member.size
+                or not stat.S_ISREG(current.st_mode)
+                or (current.st_dev, current.st_ino) != identity
+            ):
+                raise ArchiveError(
+                    f"Archive extraction staging changed at '{member.name}'."
+                )
+        except FileExistsError as exc:
+            raise ArchiveError(
+                f"Archive extraction staging changed at '{member.name}'."
+            ) from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+def extract_tar_members(
+    tf: tarfile.TarFile,
+    members: list[tarfile.TarInfo],
+    target: Path,
+) -> None:
+    """Extract validated members while anchoring every staging write."""
+    with anchored_directory(target) as root_descriptor:
+        if root_descriptor is None:
+            tf.extractall(path=target, members=members, filter="data")
+            return
+        opened_root = os.fstat(root_descriptor)
+        root_identity = opened_root.st_dev, opened_root.st_ino
+        directories: dict[tuple[str, ...], tuple[int, int]] = {(): root_identity}
+        for member in members:
+            extract_tar_member(
+                tf,
+                member,
+                root_descriptor=root_descriptor,
+                directories=directories,
+            )
+        try:
+            live_root = target.lstat()
+        except FileNotFoundError as exc:
+            raise ArchiveError(
+                "Archive extraction staging changed while extracting."
+            ) from exc
+        if (
+            not stat.S_ISDIR(live_root.st_mode)
+            or (live_root.st_dev, live_root.st_ino) != root_identity
+        ):
+            raise ArchiveError("Archive extraction staging changed while extracting.")
 
 
 def extract_archive(archive_path: Path, target: Path) -> Path:
     """Extract *archive_path* into *target* with path traversal protection.
 
-    Every member is validated before extraction. On Python 3.12+ the
-    ``filter="data"`` parameter provides additional defense-in-depth.
+    Every member is validated before extraction. Ownership and unsafe mode
+    bits are discarded on every supported Python version.
     """
     ensure_extract_target_empty(target)
-    target = target.resolve()
+    target = target.expanduser().absolute().resolve(strict=False)
 
-    with open_tar(archive_path) as tf:
-        members = tf.getmembers()
-        validate_tar_members(members, target)
-        target.mkdir(parents=True, exist_ok=True)
-        if hasattr(tarfile, "data_filter"):
-            tf.extractall(path=target, members=members, filter="data")
-        else:
-            tf.extractall(path=target, members=members)
+    with anchored_directory(target.parent, create=True):
+        pass
+    with tempfile.TemporaryDirectory(
+        dir=target.parent,
+        prefix=f".{target.name}.extract-",
+    ) as temporary:
+        staged = Path(temporary) / "workspace"
+        staged.mkdir()
+        staged_identity = staged.lstat()
+        with open_tar(archive_path) as tf:
+            members = read_tar_members(tf)
+            validate_tar_members(members, target)
+            if not hasattr(tarfile, "data_filter"):
+                raise ArchiveError(
+                    "Safe archive extraction requires Python's tar data filter.",
+                    hints=["Update to a current Python 3.10 patch release or newer."],
+                )
+            extract_tar_members(tf, members, staged)
+
+        try:
+            with (
+                anchored_directory(target.parent) as target_descriptor,
+                anchored_directory(staged.parent) as source_descriptor,
+            ):
+                current_staged = archive_leaf_stat(staged, source_descriptor)
+                if not stat.S_ISDIR(current_staged.st_mode) or (
+                    current_staged.st_dev,
+                    current_staged.st_ino,
+                ) != (staged_identity.st_dev, staged_identity.st_ino):
+                    raise ArchiveError(
+                        "Extraction staging directory changed before publication."
+                    )
+                if source_descriptor is None or target_descriptor is None:
+                    rename_noreplace(staged, target)
+                    published = target.lstat()
+                else:
+                    opened_target_parent = os.fstat(target_descriptor)
+                    live_target_parent = target.parent.lstat()
+                    if not stat.S_ISDIR(live_target_parent.st_mode) or (
+                        live_target_parent.st_dev,
+                        live_target_parent.st_ino,
+                    ) != (
+                        opened_target_parent.st_dev,
+                        opened_target_parent.st_ino,
+                    ):
+                        raise ArchiveError(
+                            "Extraction target changed while the archive was staged."
+                        )
+                    try:
+                        rename_noreplace(
+                            staged.name,
+                            target.name,
+                            source_dir_fd=source_descriptor,
+                            destination_dir_fd=target_descriptor,
+                        )
+                    except OSError as exc:
+                        raise ArchiveError(
+                            "Extraction target changed while the archive was staged."
+                        ) from exc
+                    published = os.stat(
+                        target.name,
+                        dir_fd=target_descriptor,
+                        follow_symlinks=False,
+                    )
+                live_target = target.lstat()
+                if (
+                    not stat.S_ISDIR(published.st_mode)
+                    or (published.st_dev, published.st_ino)
+                    != (staged_identity.st_dev, staged_identity.st_ino)
+                    or not stat.S_ISDIR(live_target.st_mode)
+                    or (live_target.st_dev, live_target.st_ino)
+                    != (staged_identity.st_dev, staged_identity.st_ino)
+                ):
+                    raise ArchiveError(
+                        "Extraction target changed while the archive was staged."
+                    )
+        except OSError as exc:
+            raise ArchiveError(
+                "Extraction target changed while the archive was staged."
+            ) from exc
 
     return target
 
 
 def parse_lockfile_packages(lockfile_path: Path) -> list[dict]:
     """Parse the ``packages`` list from a conda lockfile."""
-    data = load_lockfile_data(lockfile_path.read_bytes())
+    data = load_lockfile_data(
+        read_regular_file_bytes(
+            lockfile_path,
+            maximum_bytes=MAX_LOCKFILE_BYTES,
+            label="workspace lockfile",
+        )
+    )
     return data.get("packages", []) or []
 
 
@@ -1586,7 +3023,7 @@ def url_to_filename(url: str) -> str:
     filename = Path(urlsplit(url).path).name
     if not filename or not filename.endswith(CONDA_PACKAGE_SUFFIXES):
         raise ArchiveError(
-            f"Cannot determine conda package filename from URL: {url}",
+            f"Cannot determine conda package filename from URL: {redact_url_text(url)}",
             hints=[
                 "Expected package URLs to end in .conda or .tar.bz2.",
                 "Regenerate conda.lock and retry the archive command.",
@@ -1623,8 +3060,10 @@ def collect_bundle_packages(
                     f"Package filename collision in lockfile: {filename}",
                     hints=[
                         "The archive bundle stores package archives by filename.",
-                        "Regenerate the lockfile or remove one of the colliding"
-                        " packages before bundling.",
+                        (
+                            "Regenerate the lockfile or remove one of the colliding"
+                            " packages before bundling."
+                        ),
                     ],
                 )
             continue
@@ -1664,13 +3103,81 @@ def build_hash_index(lockfile: Path | list[dict]) -> dict[str, str]:
     return index
 
 
-def file_sha256(path: Path) -> str:
-    """Return the hex SHA-256 digest of *path* without reading it all at once."""
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+def file_generation(value: os.stat_result) -> FileGeneration:
+    """Return metadata shared by stable archive reads and receipt publication."""
+    ctime_ns = (
+        getattr(value, "st_birthtime_ns", value.st_ctime_ns)
+        if os.name == "nt"
+        else value.st_ctime_ns
+    )
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mode,
+        value.st_mtime_ns,
+        ctime_ns,
+    )
+
+
+def require_regular_file_generation(
+    path: Path,
+    expected: FileGeneration,
+    *,
+    label: str,
+) -> None:
+    """Require *path* to still name the captured regular-file generation."""
+    with anchored_directory(path.parent) as parent_descriptor:
+        try:
+            current = archive_leaf_stat(path, parent_descriptor)
+            live = path.lstat()
+        except FileNotFoundError as exc:
+            raise ArchiveError(
+                f"{label} changed after it was captured: {path}"
+            ) from exc
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or file_generation(current) != expected
+            or not stat.S_ISREG(live.st_mode)
+            or file_generation(live) != expected
+        ):
+            raise ArchiveError(f"{label} changed after it was captured: {path}")
+
+
+def file_sha256_with_generation(
+    path: Path,
+    *,
+    expected_identity: tuple[int, int] | None = None,
+    maximum_bytes: int | None = None,
+    label: str = "File",
+) -> tuple[str, FileGeneration]:
+    """Hash one no-follow regular-file generation and return its metadata."""
+    with open_stable_regular_file(
+        path,
+        label=label,
+        maximum_bytes=maximum_bytes,
+    ) as stream:
+        opened = os.fstat(stream.fileno())
+        if (
+            expected_identity is not None
+            and (
+                opened.st_dev,
+                opened.st_ino,
+            )
+            != expected_identity
+        ):
+            raise ArchiveError(f"{label} changed while opening: {path}")
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
-    return digest.hexdigest()
+        generation = file_generation(opened)
+    return digest.hexdigest(), generation
+
+
+def file_sha256(path: Path) -> str:
+    """Return the SHA-256 digest of one stable no-follow file generation."""
+    digest, _ = file_sha256_with_generation(path)
+    return digest
 
 
 def verify_package_hashes(
@@ -1690,11 +3197,18 @@ def verify_package_hashes(
                 f"Cannot verify bundled package '{pkg_path.name}'.",
                 hints=[
                     "No SHA256 entry for this package was found in conda.lock.",
-                    "Regenerate conda.lock with a current conda-workspaces version"
-                    " before bundling or priming package caches.",
+                    (
+                        "Regenerate conda.lock with a current conda-workspaces version"
+                        " before bundling or priming package caches."
+                    ),
                 ],
             )
-        actual_hash = file_sha256(pkg_path)
+        try:
+            actual_hash = file_sha256(pkg_path)
+        except ArchiveError as exc:
+            raise ArchiveError(
+                f"Bundled package source cannot be read safely: {pkg_path.name}"
+            ) from exc
         if actual_hash != exp_hash:
             raise ArchiveHashMismatchError(
                 pkg_path.name, expected=exp_hash, actual=actual_hash
@@ -1704,7 +3218,7 @@ def verify_package_hashes(
 def inspect_archive(archive_path: Path) -> dict[str, object]:
     """Validate archive members and return metadata without extracting."""
     with open_tar(archive_path) as tf:
-        members = tf.getmembers()
+        members = read_tar_members(tf)
         validate_tar_members(members)
     manifest_members = [
         member

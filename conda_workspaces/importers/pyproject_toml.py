@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import tomlkit
-
 from ..manifests import find_parser
 from .base import ManifestImporter
 from .serialize import config_to_toml
@@ -13,6 +11,8 @@ from .serialize import config_to_toml
 if TYPE_CHECKING:
     from pathlib import Path
     from typing import ClassVar
+
+    import tomlkit
 
 
 class PyprojectTomlImporter(ManifestImporter):
@@ -23,9 +23,10 @@ class PyprojectTomlImporter(ManifestImporter):
 
     def convert(self, path: Path) -> tomlkit.TOMLDocument:
         parser = find_parser(path)
-        config = parser.parse(path)
-        tasks = parser.parse_tasks(path)
-        data = tomlkit.loads(path.read_text(encoding="utf-8")).unwrap()
+        content = parser.read_manifest_text(path)
+        data = parser.parse_toml_text_with_redacted_errors(content, path).unwrap()
+        config = parser.parse_data_with_redacted_errors(data, path)
+        tasks = parser.parse_tasks_data(data)
         tool = data.get("tool", {})
         conda = tool.get("conda", {})
         source = conda if conda.get("workspace") else tool.get("pixi", {})

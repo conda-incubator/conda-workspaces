@@ -27,7 +27,10 @@ class EnvironmentYmlImporter(ManifestImporter):
 
         ws = tomlkit.table()
         ws.add("name", data.get("name", path.parent.name))
-        ws.add("channels", data.get("channels", ["conda-forge"]))
+        ws.add(
+            "channels",
+            self.redact_channels(data.get("channels", ["conda-forge"])),
+        )
         ws.add("platforms", data.get("platforms", [conda_context.subdir]))
         doc.add("workspace", ws)
 

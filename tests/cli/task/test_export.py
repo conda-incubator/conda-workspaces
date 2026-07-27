@@ -5,15 +5,15 @@ from __future__ import annotations
 import argparse
 from typing import TYPE_CHECKING
 
+import pytest
 from conda.exceptions import CondaSystemExit
 
 from conda_workspaces.cli.task.export import execute_export
+from conda_workspaces.manifests import detect_and_parse_tasks
 from conda_workspaces.manifests.toml import CondaTomlParser
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 export_mod = "conda_workspaces.cli.task.export"
 
@@ -123,3 +123,40 @@ def test_export_overwrite_abort(
     result = execute_export(_export_args(sample_yaml, out_path))
     assert result == 0
     assert out_path.read_text(encoding="utf-8") == "keep me"
+
+
+def test_export_rejects_symlinked_output(
+    sample_yaml: Path,
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside.toml"
+    outside.write_text("keep me", encoding="utf-8")
+    output = tmp_path / "exported.toml"
+    output.symlink_to(outside)
+
+    with pytest.raises(ValueError, match="symbolic link"):
+        execute_export(_export_args(sample_yaml, output))
+
+    assert outside.read_text(encoding="utf-8") == "keep me"
+
+
+def test_export_rejects_output_changed_during_rendering(
+    sample_yaml: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "exported.toml"
+    output.write_text("# original\n", encoding="utf-8")
+    concurrent = "# concurrent\n"
+
+    def replace_output(*args, **kwargs):
+        output.write_text(concurrent, encoding="utf-8")
+        return detect_and_parse_tasks(*args, **kwargs)
+
+    monkeypatch.setattr(f"{export_mod}.detect_and_parse_tasks", replace_output)
+    monkeypatch.setattr(f"{export_mod}.confirm_yn", lambda _message: None)
+
+    with pytest.raises(ValueError, match="changed before writing"):
+        execute_export(_export_args(sample_yaml, output))
+
+    assert output.read_text(encoding="utf-8") == concurrent

@@ -479,6 +479,15 @@ Activation settings are merged across features when composing an
 environment. After `conda workspace install`, environment variables are written to
 the prefix state file (available via `conda activate`) and activation
 scripts are copied to `$PREFIX/etc/conda/activate.d/`.
+Activation state and script destinations must be regular prefix-owned paths.
+Replace linked `conda-meta/state`, `etc/conda`, or `activate.d` entries before
+installing the environment.
+
+Prefix generation checks reject links and replacements that remain visible at
+mutation boundaries. Conda and conda-pypi still receive filesystem paths, so
+these checks are not a sandbox against another process running as the same
+operating-system user that swaps and restores a prefix during one downstream
+call.
 
 ## System requirements
 
@@ -825,6 +834,13 @@ survive untouched (any stale `[tool.conda]` is replaced).
 `conda.toml` and `pixi.toml` keep the default overwrite semantics
 of every other conda exporter.
 
+Manifest exporters preserve representable conda source fields and named,
+credential-free PyPI direct URLs. They fail before writing when a PyPI marker,
+path source, VCS source, or malformed requirement cannot cross conda's
+environment exporter interface without losing meaning. Keep those declarations
+in the source manifest, or replace them with a supported named direct URL or a
+target-specific dependency table.
+
 When the export `--file` is passed without `--format`, the format is
 inferred from the output basename (`conda.toml` → `conda-toml`,
 `pixi.toml` → `pixi-toml`, `pyproject.toml` → `pyproject-toml`, `environment.yml` /
@@ -873,8 +889,8 @@ Extract an archive and install environments in one step:
 conda workspace unarchive my-project.tar.zst --target ./restored --install
 ```
 
-The extraction target must be empty or absent. Existing files are not
-overwritten.
+The extraction target path must be absent. Existing files, links, and
+directories, including empty directories, are not overwritten.
 
 Install one archived environment to a final runtime prefix, optionally
 under a staged filesystem root:

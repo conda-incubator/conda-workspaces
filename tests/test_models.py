@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict, fields
+
 import pytest
 
 from conda_workspaces.exceptions import (
+    EnvironmentNameInvalidError,
     EnvironmentNotFoundError,
     FeatureNotFoundError,
     PlatformError,
@@ -22,6 +25,11 @@ from conda_workspaces.models import (
     TaskDependency,
     TaskOverride,
     WorkspaceConfig,
+    has_url_credentials,
+    redact_channel_name,
+    redact_channel_url,
+    redact_url,
+    redact_url_text,
 )
 
 
@@ -56,6 +64,264 @@ def test_matchspec(spec_str, expected_name, expected_version):
 def test_pypi_dep_str(name, spec, expected):
     dep = PyPIDependency(name=name, spec=spec) if spec else PyPIDependency(name=name)
     assert str(dep) == expected
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("path", "https://user:LEAKME@packages.example.test/private.whl"),
+        ("url", "https://user%3ALEAKME%40packages.example.test/private.whl"),
+        (
+            "git",
+            "https%3A%2F%2Fuser%3ALEAKME%40packages.example.test%2Frepository.git",
+        ),
+        ("path", "https://packages.example.test/path%3Ftoken=LEAKME"),
+        ("spec", "@ https://user%3ALEAKME%40packages.example.test/private.whl"),
+        ("path", "t/INFO-LEAK/private"),
+    ],
+    ids=[
+        "basic-auth-path",
+        "encoded-authority-url",
+        "fully-encoded-git",
+        "encoded-query-path",
+        "encoded-authority-spec",
+        "relative-token-path",
+    ],
+)
+def test_pypi_dependency_rejects_credentials_without_echoing(
+    field: str,
+    value: str,
+) -> None:
+    dependency = PyPIDependency(name="private", **{field: value})
+
+    with pytest.raises(ValueError) as caught:
+        dependency.to_manifest_toml()
+
+    assert "LEAKME" not in str(caught.value)
+    assert "LEAKME" not in str(dependency.redacted())
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (
+            "HTTPS://user:password@packages.example.test/team/channel",
+            "HTTPS://packages.example.test/team/channel",
+        ),
+        (
+            "//user:password@packages.example.test/team/channel?token=secret",
+            "//packages.example.test/team/channel",
+        ),
+        (
+            "https://packages.example.test/%74/secret/team/channel",
+            "https://packages.example.test/team/channel",
+        ),
+        (
+            "https://packages.example.test/t%2Fsecret/team/channel",
+            "https://packages.example.test/team/channel",
+        ),
+        (
+            "https://packages.example.test/t%252Fsecret/team/channel",
+            "https://packages.example.test/team/channel",
+        ),
+        (
+            "https://packages.example.test/t/secret%2FLEAK/team/channel",
+            "https://packages.example.test/team/channel",
+        ),
+        (
+            "https://packages.example.test/%252525252574/secret/team/channel",
+            "<redacted-url>",
+        ),
+        (
+            "https://conda.anaconda.org/HTTPS://user:password@packages.example.test/t/secret/private",
+            "<redacted-url>",
+        ),
+        ("https:///missing-host?token=secret", "<redacted-url>"),
+        ("HTTPS://", "<redacted-url>"),
+        ("//", "<redacted-url>"),
+        ("//?token=secret", "<redacted-url>"),
+        ("https://packages.example.test:bad/channel", "<redacted-url>"),
+        ("//packages.example.test:bad/channel", "<redacted-url>"),
+        (r"https://packages.example.test\evil/channel", "<redacted-url>"),
+        (
+            "git+HTTPS://user:password@packages.example.test/team/repo.git?key=value#ref",
+            "git+HTTPS://packages.example.test/team/repo.git",
+        ),
+        (
+            "https://user%3ALEAKME%40packages.example.test/team/channel",
+            "<redacted-url>",
+        ),
+        (
+            "//user%253ALEAKME%2540packages.example.test/team/channel",
+            "<redacted-url>",
+        ),
+        (
+            "https%3A%2F%2Fuser%3ALEAKME%40packages.example.test%2Fteam%2Fchannel",
+            "<redacted-url>",
+        ),
+        (
+            "https%253A%252F%252Fuser%253ALEAKME%2540packages.example.test%252Fchannel",
+            "<redacted-url>",
+        ),
+        (
+            "https://packages.example.test/path%3Ftoken=LEAKME",
+            "<redacted-url>",
+        ),
+        (
+            "https://packages.example.test/path%2523LEAKME",
+            "<redacted-url>",
+        ),
+        (
+            "https://packages.example.test/safe%20path",
+            "https://packages.example.test/safe%20path",
+        ),
+        (
+            "https%3A%2F%2Fpackages.example.test%2Fsafe%2520path",
+            "https%3A%2F%2Fpackages.example.test%2Fsafe%2520path",
+        ),
+        (
+            "https://user:password@packages.example.test/safe%20path",
+            "https://packages.example.test/safe%20path",
+        ),
+        ("conda-forge", "conda-forge"),
+    ],
+    ids=[
+        "uppercase-basic-auth",
+        "scheme-relative-basic-auth",
+        "encoded-token-segment",
+        "encoded-token-separator",
+        "double-encoded-token-separator",
+        "encoded-token-value-separator",
+        "excessive-encoding",
+        "nested-authenticated-url",
+        "missing-host",
+        "empty-absolute-url",
+        "empty-scheme-relative-url",
+        "hostless-scheme-relative-url",
+        "invalid-port",
+        "scheme-relative-invalid-port",
+        "backslash-host",
+        "git-url",
+        "encoded-authority",
+        "double-encoded-scheme-relative-authority",
+        "fully-encoded-authenticated-url",
+        "double-encoded-authenticated-url",
+        "encoded-query-delimiter",
+        "double-encoded-fragment-delimiter",
+        "safe-encoded-path",
+        "safe-fully-encoded-url",
+        "basic-auth-safe-encoded-path",
+        "channel-name",
+    ],
+)
+def test_redact_url(url: str, expected: str) -> None:
+    redacted = redact_url(url)
+
+    assert redacted == expected
+    assert has_url_credentials(url) is (redacted != url)
+    assert not has_url_credentials(redacted)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected_name", "expected_url"),
+    [
+        (
+            "conda-forge",
+            "conda-forge",
+            "https://conda.anaconda.org/conda-forge",
+        ),
+        (
+            "t/SENSITIVE-VALUE/private",
+            "https://conda.anaconda.org/private",
+            "https://conda.anaconda.org/private",
+        ),
+        (
+            "//user:password@packages.example.test/t/SENSITIVE-VALUE/private",
+            "https://packages.example.test/private",
+            "https://packages.example.test/private",
+        ),
+        (
+            " t/SENSITIVE-VALUE/private",
+            "<redacted-url-value>",
+            "<redacted-url-value>",
+        ),
+        (
+            '"t/SENSITIVE-VALUE/private"',
+            "<redacted-url-value>",
+            "<redacted-url-value>",
+        ),
+    ],
+    ids=[
+        "named",
+        "relative-token",
+        "scheme-relative-auth",
+        "leading-whitespace-relative-token",
+        "quoted-relative-token",
+    ],
+)
+def test_redact_channel_name_and_url(
+    value: str,
+    expected_name: str,
+    expected_url: str,
+) -> None:
+    channel = Channel(value)
+
+    assert redact_channel_name(value) == expected_name
+    assert redact_channel_name(channel) == expected_name
+    assert redact_channel_url(channel) == expected_url
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("https://packages.example.test/channel", False),
+        ("https://user:password@packages.example.test/channel", True),
+        ("https://packages.example.test/t/token/channel", True),
+        ("https://packages.example.test/channel?token=secret", True),
+        ("download https:///missing-host", True),
+        ("t/relative-token/private", True),
+        ("nested/t/relative-token/private", True),
+        ("curl -fsSL t/relative-token/private/file.txt", True),
+        (r"t\relative-token\private", True),
+        (r"nested\t\relative-token\private", True),
+        ("t%2Frelative-token%2Fprivate", True),
+        ("t%5Crelative-token%5Cprivate", True),
+        ("t%252Frelative-token%252Fprivate", True),
+        ("plain manifest value", False),
+    ],
+    ids=[
+        "safe-url",
+        "basic-auth",
+        "token-path",
+        "query",
+        "embedded-malformed-url",
+        "relative-channel-token",
+        "nested-relative-channel-token",
+        "relative-token-in-task-command",
+        "windows-relative-channel-token",
+        "nested-windows-relative-channel-token",
+        "encoded-relative-channel-token",
+        "encoded-windows-relative-channel-token",
+        "double-encoded-relative-channel-token",
+        "plain-value",
+    ],
+)
+def test_has_url_credentials(value: str, expected: bool) -> None:
+    assert has_url_credentials(value) is expected
+
+
+def test_redact_url_text_fails_closed_for_later_relative_token() -> None:
+    value = (
+        "failed https://user:ABSOLUTE-LEAK@packages.example.test/private "
+        "then t/RELATIVE-LEAK/private"
+    )
+
+    redacted = redact_url_text(value)
+
+    assert redacted == "<redacted-url-value>"
+    assert "ABSOLUTE-LEAK" not in redacted
+    assert "RELATIVE-LEAK" not in redacted
+    assert not has_url_credentials(redacted)
 
 
 @pytest.mark.parametrize(
@@ -104,6 +370,61 @@ def test_config_post_init_creates_defaults():
     config = WorkspaceConfig()
     assert "default" in config.features
     assert "default" in config.environments
+
+
+def test_config_manifest_generation_is_not_a_public_dataclass_field() -> None:
+    config = WorkspaceConfig()
+    config._manifest_text = "https://user:password@example.test/private"
+
+    assert "_manifest_text" not in {item.name for item in fields(config)}
+    assert "_accepted_manifest_text" not in repr(asdict(config))
+    assert "password" not in repr(asdict(config))
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "../escape",
+        "bad?name",
+        "bad\x7fname",
+        "bad\x85name",
+        "a" * 256,
+    ],
+    ids=[
+        "parent",
+        "windows-reserved-character",
+        "del-control",
+        "c1-control",
+        "component-too-long",
+    ],
+)
+def test_config_rejects_invalid_environment_names(name: str) -> None:
+    with pytest.raises(EnvironmentNameInvalidError, match="not valid"):
+        WorkspaceConfig(environments={name: Environment(name=name)})
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ("Dev", "dev"),
+        (
+            "caf\N{LATIN SMALL LETTER E WITH ACUTE}",
+            "caf\N{LATIN SMALL LETTER E}\N{COMBINING ACUTE ACCENT}",
+        ),
+    ],
+    ids=["case", "unicode-normalization"],
+)
+def test_config_rejects_portable_environment_name_collisions(
+    first: str,
+    second: str,
+) -> None:
+    with pytest.raises(EnvironmentNameInvalidError, match="conflicts with environment"):
+        WorkspaceConfig(
+            environments={
+                first: Environment(name=first),
+                second: Environment(name=second),
+            }
+        )
 
 
 @pytest.mark.parametrize(

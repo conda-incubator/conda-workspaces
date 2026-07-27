@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -9,8 +10,11 @@ from conda.exceptions import CondaValueError
 from rich.console import Console
 
 from ...exceptions import EnvironmentNotFoundError
-from ...lockfile import generate_lockfile, merge_lockfiles
+from ...lockfile import generate_lockfile, lockfile_path, merge_lockfiles
+from ...paths import output_paths_collide
+from ...publication import WorkspacePublication
 from ...resolver import known_platforms, resolve_all_environments, resolve_environment
+from .. import status
 from . import workspace_context_from_args
 
 if TYPE_CHECKING:
@@ -23,7 +27,10 @@ def execute_lock(args: argparse.Namespace, *, console: Console | None = None) ->
     """Solve workspace environments and write ``conda.lock``."""
     if console is None:
         console = Console(highlight=False)
-    config, ctx = workspace_context_from_args(args)
+    requested_manifest_path = getattr(args, "manifest_file", None)
+    if requested_manifest_path is not None:
+        WorkspacePublication.validate_manifest_path(Path(requested_manifest_path))
+    config, ctx = workspace_context_from_args(args, for_mutation=True)
 
     env_name = getattr(args, "environment", None)
     requested_platforms: list[str] | None = getattr(args, "platform", None) or None
@@ -31,6 +38,10 @@ def execute_lock(args: argparse.Namespace, *, console: Console | None = None) ->
     merge_patterns: list[str] | None = getattr(args, "merge", None) or None
     output_path: Path | None = getattr(args, "output", None)
     dry_run: bool = bool(getattr(args, "dry_run", False))
+    WorkspacePublication.validate_manifest_path(Path(config.manifest_path))
+    publication = (
+        None if dry_run else WorkspacePublication.from_current_manifest(ctx, "lock")
+    )
 
     if merge_patterns:
         if env_name or requested_platforms or skip_unsolvable or output_path:
@@ -71,8 +82,19 @@ def execute_lock(args: argparse.Namespace, *, console: Console | None = None) ->
             "[dim]...[/dim]"
         )
         for fragment in fragments:
-            console.print(f"  [dim]<-[/dim] {fragment}")
-        merge_lockfiles(fragments, ctx, dry_run=dry_run)
+            console.print(f"  [dim]<-[/dim] {status.escape_for_console(fragment)}")
+        publication_guard = (
+            publication.guard() if publication is not None else nullcontext()
+        )
+        with publication_guard:
+            merge_lockfiles(
+                fragments,
+                ctx,
+                dry_run=dry_run,
+                publish_lockfile=(
+                    publication.publish_lockfile if publication is not None else None
+                ),
+            )
         action = "Would update" if dry_run else "Updated"
         console.print(f"[bold cyan]{action}[/bold cyan] [bold]conda.lock[/bold]")
         return 0
@@ -113,33 +135,64 @@ def execute_lock(args: argparse.Namespace, *, console: Console | None = None) ->
 
     def _progress(env: str, platform: str) -> None:
         console.print(
-            f"[bold blue]Locking[/bold blue] [bold]{env}[/bold]"
-            f" for [bold]{platform}[/bold][dim]...[/dim]"
+            "[bold blue]Locking[/bold blue] "
+            f"[bold]{status.escape_for_console(env)}[/bold] for "
+            f"[bold]{status.escape_for_console(platform)}[/bold][dim]...[/dim]"
         )
 
     def _on_skip(env: str, platform: str, exc: SolveError) -> None:
         console.print(
-            f"[bold yellow]Skipping[/bold yellow] [bold]{env}[/bold]"
-            f" on [bold]{platform}[/bold][dim]:[/dim] {exc.reason}"
+            "[bold yellow]Skipping[/bold yellow] "
+            f"[bold]{status.escape_for_console(env)}[/bold] on "
+            f"[bold]{status.escape_for_console(platform)}[/bold][dim]:[/dim] "
+            f"{status.escape_for_console(exc.reason)}"
         )
 
     updating_label = output_path.name if output_path is not None else "conda.lock"
     console.print(
-        f"[bold blue]Updating[/bold blue] [bold]{updating_label}[/bold][dim]...[/dim]"
+        "[bold blue]Updating[/bold blue] "
+        f"[bold]{status.escape_for_console(updating_label)}[/bold][dim]...[/dim]"
     )
-    generate_lockfile(
-        ctx,
-        resolved_envs,
-        config=config,
-        platforms=platforms,
-        progress=_progress,
-        skip_unsolvable=skip_unsolvable,
-        on_skip=_on_skip if skip_unsolvable else None,
-        output_path=output_path,
-        dry_run=dry_run,
+    canonical_path = lockfile_path(ctx)
+    path_equal = output_path is None or output_path.resolve(
+        strict=False
+    ) == canonical_path.resolve(strict=False)
+    if (
+        output_path is not None
+        and not path_equal
+        and output_paths_collide(output_path, canonical_path)
+    ):
+        raise CondaValueError(
+            "--output cannot be a hardlink alias of the workspace conda.lock."
+        )
+    canonical_output = path_equal
+    publication_guard = (
+        publication.guard()
+        if publication is not None and canonical_output
+        else nullcontext()
     )
+    with publication_guard:
+        generate_lockfile(
+            ctx,
+            resolved_envs,
+            config=config,
+            platforms=platforms,
+            progress=_progress,
+            skip_unsolvable=skip_unsolvable,
+            on_skip=_on_skip if skip_unsolvable else None,
+            output_path=output_path,
+            dry_run=dry_run,
+            publish_lockfile=(
+                publication.publish_lockfile
+                if publication is not None and canonical_output
+                else None
+            ),
+        )
     target_label = output_path.name if output_path is not None else "conda.lock"
     action = "Would update" if dry_run else "Updated"
-    console.print(f"[bold cyan]{action}[/bold cyan] [bold]{target_label}[/bold]")
+    console.print(
+        f"[bold cyan]{action}[/bold cyan] "
+        f"[bold]{status.escape_for_console(target_label)}[/bold]"
+    )
 
     return 0

@@ -21,6 +21,8 @@ from ..exceptions import (
     WorkspaceNotFoundError,
     WorkspaceParseError,
 )
+from ..models import redact_url_text
+from ..paths import validate_path_parent
 from .base import ManifestParser
 from .pixi_toml import PixiTomlParser
 from .pyproject_toml import PyprojectTomlParser
@@ -49,6 +51,8 @@ PARSER_BY_FILENAME: dict[str, ManifestParser] = {
 def walk_manifests(
     start_dir: Path,
     predicate: str,
+    *,
+    reject_symlinks: bool = False,
 ) -> Path | None:
     """Walk up from *start_dir* looking for a manifest matching *predicate*.
 
@@ -60,10 +64,30 @@ def walk_manifests(
     while True:
         for fname in _SEARCH_FILES:
             candidate = current / fname
-            if candidate.is_file():
-                parser = PARSER_BY_FILENAME.get(fname)
-                if parser is not None and getattr(parser, predicate)(candidate):
-                    return candidate
+            if not candidate.is_file():
+                continue
+            parser = PARSER_BY_FILENAME.get(fname)
+            if parser is None:
+                continue
+            if reject_symlinks and candidate.is_symlink():
+                try:
+                    selected = getattr(parser, predicate)(candidate)
+                except Exception:
+                    continue
+                if selected:
+                    raise WorkspaceParseError(
+                        candidate,
+                        "symbolic links are not supported for this operation",
+                    )
+                continue
+            try:
+                selected = getattr(parser, predicate)(candidate)
+            except WorkspaceParseError:
+                raise
+            except Exception as exc:
+                raise WorkspaceParseError(candidate, redact_url_text(str(exc))) from exc
+            if selected:
+                return candidate
         parent = current.parent
         if parent == current:
             break
@@ -73,6 +97,8 @@ def walk_manifests(
 
 def detect_workspace_file(
     start_dir: str | Path | None = None,
+    *,
+    reject_symlinks: bool = False,
 ) -> Path:
     """Walk up from *start_dir* to find a workspace manifest.
 
@@ -84,7 +110,11 @@ def detect_workspace_file(
     else:
         start_dir = Path(start_dir)
 
-    result = walk_manifests(start_dir, "has_workspace")
+    result = walk_manifests(
+        start_dir,
+        "has_workspace",
+        reject_symlinks=reject_symlinks,
+    )
     if result is None:
         raise WorkspaceNotFoundError(start_dir)
     return result
@@ -101,20 +131,6 @@ def find_parser(path: Path) -> ManifestParser:
     raise WorkspaceParseError(path, f"No parser available for '{path.name}'")
 
 
-@lru_cache(maxsize=4)
-def cached_parse(path_str: str) -> WorkspaceConfig:
-    """Parse a workspace config from *path_str* (cached by path string)."""
-    path = Path(path_str)
-    parser = find_parser(path)
-    return parser.parse(path)
-
-
-def clear_workspace_manifest_caches() -> None:
-    """Discard path-keyed workspace detection and parsing results."""
-    ManifestParser.read_toml.cache_clear()
-    cached_parse.cache_clear()
-
-
 def detect_and_parse(
     source: str | Path | None = None,
 ) -> tuple[Path, WorkspaceConfig]:
@@ -123,18 +139,32 @@ def detect_and_parse(
     Returns ``(manifest_path, workspace_config)``.
     """
     path = ManifestParser.resolve_source(Path(source or Path.cwd()))
-    config = cached_parse(str(path))
+    try:
+        manifest_text = ManifestParser.read_manifest_text(path)
+    except WorkspaceParseError:
+        raise
+    except Exception as exc:
+        raise WorkspaceParseError(path, redact_url_text(str(exc))) from exc
+    config = find_parser(path).parse_text(path, manifest_text)
     return path, config
 
 
-def detect_task_file(start_dir: Path | None = None) -> Path | None:
+def detect_task_file(
+    start_dir: Path | None = None,
+    *,
+    reject_symlinks: bool = False,
+) -> Path | None:
     """Walk up from *start_dir* looking for a file that contains tasks.
 
     Returns the first match according to ``_SEARCH_FILES``, or ``None``.
     """
     if start_dir is None:
         start_dir = Path.cwd()
-    return walk_manifests(Path(start_dir), "has_tasks")
+    return walk_manifests(
+        Path(start_dir),
+        "has_tasks",
+        reject_symlinks=reject_symlinks,
+    )
 
 
 @lru_cache(maxsize=4)
@@ -168,6 +198,8 @@ def user_task_file() -> Path | None:
 def detect_and_parse_tasks(
     file_path: Path | None = None,
     start_dir: Path | None = None,
+    *,
+    reject_symlinks: bool = False,
 ) -> tuple[Path, dict[str, Task], set[str]]:
     """Detect task files and parse them, merging user-level tasks.
 
@@ -180,9 +212,21 @@ def detect_and_parse_tasks(
     """
     project_path: Path | None = None
     if file_path is not None:
-        project_path = file_path.resolve()
+        if reject_symlinks and file_path.is_symlink():
+            raise WorkspaceParseError(
+                file_path,
+                "symbolic links are not supported for this operation",
+            )
+        if reject_symlinks:
+            project_path = file_path.absolute()
+            validate_path_parent(project_path)
+        else:
+            project_path = file_path.resolve()
     else:
-        project_path = detect_task_file(start_dir)
+        project_path = detect_task_file(
+            start_dir,
+            reject_symlinks=reject_symlinks,
+        )
 
     user_path = user_task_file()
 

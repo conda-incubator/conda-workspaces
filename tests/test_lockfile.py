@@ -25,13 +25,17 @@ from conda.models.match_spec import MatchSpec
 from conda.models.records import PrefixRecord
 from conda_lockfiles.load_yaml import load_yaml
 
+import conda_workspaces.lockfile as lockfile_module
+import conda_workspaces.paths as paths_module
 from conda_workspaces.context import WorkspaceContext
 from conda_workspaces.exceptions import (
+    CondaWorkspacesError,
     LockfileIntegrityError,
     LockfileMergeError,
     LockfileNotFoundError,
     SolveError,
 )
+from conda_workspaces.export import multiplatform_export
 from conda_workspaces.lockfile import (
     ALIASES,
     DEFAULT_FILENAMES,
@@ -39,6 +43,7 @@ from conda_workspaces.lockfile import (
     LOCKFILE_NAME,
     LOCKFILE_VERSION,
     CondaLockLoader,
+    LockfileInstallPlan,
     _SolvedEnvironment,
     check_lockfile_satisfiability,
     generate_lockfile,
@@ -61,8 +66,31 @@ from conda_workspaces.resolver import ResolvedEnvironment, resolve_environment
 
 
 @pytest.fixture
+def race_symlink_on_publish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[Path, Path], list[bool]]:
+    """Replace one output with a symlink immediately before atomic publish."""
+    original_rename = paths_module.rename_noreplace
+
+    def install(output: Path, outside: Path) -> list[bool]:
+        raced = [False]
+
+        def race_rename(*args, **kwargs) -> None:
+            destination = args[1]
+            if Path(destination).name == output.name and not raced[0]:
+                raced[0] = True
+                output.symlink_to(outside)
+            original_rename(*args, **kwargs)
+
+        monkeypatch.setattr(paths_module, "rename_noreplace", race_rename)
+        return raced
+
+    return install
+
+
+@pytest.fixture
 def lockfile_content() -> str:
-    """A ``conda.lock`` body with one env, two platforms, a pypi entry."""
+    """A valid ``conda.lock`` body with one environment and two platforms."""
     return (
         "version: 1\n"
         "environments:\n"
@@ -71,16 +99,18 @@ def lockfile_content() -> str:
         "    - url: https://conda.anaconda.org/conda-forge\n"
         "    packages:\n"
         "      linux-64:\n"
-        "      - conda: https://example.com/python-linux-64.conda\n"
-        "      - pypi: https://pypi.org/simple/requests/\n"
+        "      - conda: https://conda.anaconda.org/conda-forge/linux-64/"
+        "python-linux-64.conda\n"
         "      osx-arm64:\n"
-        "      - conda: https://example.com/python-osx-arm64.conda\n"
+        "      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/"
+        "python-osx-arm64.conda\n"
         "packages:\n"
-        "- conda: https://example.com/python-linux-64.conda\n"
-        "  sha256: abc123\n"
-        "- conda: https://example.com/python-osx-arm64.conda\n"
-        "  sha256: def456\n"
-        "- pypi: https://pypi.org/simple/requests/\n"
+        "- conda: https://conda.anaconda.org/conda-forge/linux-64/"
+        "python-linux-64.conda\n"
+        f"  sha256: {'a' * 64}\n"
+        "- conda: https://conda.anaconda.org/conda-forge/osx-arm64/"
+        "python-osx-arm64.conda\n"
+        f"  sha256: {'b' * 64}\n"
     )
 
 
@@ -90,6 +120,92 @@ def lockfile_with_platforms(tmp_path: Path, lockfile_content: str) -> Path:
     path = tmp_path / LOCKFILE_NAME
     path.write_text(lockfile_content, encoding="utf-8")
     return path
+
+
+@pytest.fixture(
+    params=[
+        pytest.param(
+            {"pypi": "https://files.pythonhosted.org/pkg.whl"},
+            id="external-only",
+        ),
+        pytest.param(
+            {
+                "conda": (
+                    "https://conda.anaconda.org/conda-forge/linux-64/"
+                    "python-3.12.0-hab00c5b_0.conda"
+                ),
+                "pypi": "https://files.pythonhosted.org/pkg.whl",
+            },
+            id="mixed",
+        ),
+    ]
+)
+def non_conda_only_environment_ref(
+    request: pytest.FixtureRequest,
+) -> dict[str, str]:
+    """Return a lock environment ref that is not exactly one conda entry."""
+    return dict(request.param)
+
+
+def test_load_lockfile_data_rejects_size_before_yaml_parsing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+    monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_BYTES", 8)
+    monkeypatch.setattr(
+        lockfile_module.yaml,
+        "load",
+        lambda content: calls.append(content),
+    )
+
+    with pytest.raises(ValueError, match="maximum size"):
+        load_lockfile_data("version: 1\n")
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("content", "boundary", "match"),
+    [
+        ("[]\n", "mapping", "must contain a mapping"),
+        (
+            "version: 1\nenvironments:\n  default:\n    packages: {}\n",
+            "depth",
+            "nesting depth",
+        ),
+        (
+            "version: 1\npackages:\n- one\n- two\n",
+            "collection",
+            "collection",
+        ),
+    ],
+    ids=["mapping", "depth", "collection"],
+)
+def test_load_lockfile_data_enforces_shape_limits(
+    monkeypatch: pytest.MonkeyPatch,
+    content: str,
+    boundary: str,
+    match: str,
+) -> None:
+    if boundary == "depth":
+        monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_DEPTH", 1)
+    elif boundary == "collection":
+        monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_COLLECTION_ITEMS", 1)
+
+    with pytest.raises(ValueError, match=match):
+        load_lockfile_data(content)
+
+
+def test_load_lockfile_data_wraps_parser_recursion_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_parse(stream):
+        raise RecursionError("nested input")
+
+    monkeypatch.setattr(lockfile_module.yaml, "load", fail_parse)
+
+    with pytest.raises(ValueError, match="Invalid lockfile YAML"):
+        load_lockfile_data("version: 1\n")
 
 
 @pytest.fixture
@@ -273,8 +389,14 @@ def fake_records_factory(monkeypatch: pytest.MonkeyPatch):
 @pytest.mark.parametrize(
     ("platform", "expected_url"),
     [
-        ("linux-64", "https://example.com/python-linux-64.conda"),
-        ("osx-arm64", "https://example.com/python-osx-arm64.conda"),
+        (
+            "linux-64",
+            "https://conda.anaconda.org/conda-forge/linux-64/python-linux-64.conda",
+        ),
+        (
+            "osx-arm64",
+            "https://conda.anaconda.org/conda-forge/osx-arm64/python-osx-arm64.conda",
+        ),
     ],
     ids=["linux-64", "osx-arm64"],
 )
@@ -292,15 +414,100 @@ def test_conda_lock_loader_env_for_platform(
     assert env.explicit_packages[0].url == expected_url
 
 
-def test_conda_lock_loader_env_pypi_as_external(
+def test_conda_lock_loader_env_redacts_urls_before_conversion(
+    lockfile_with_platforms: Path,
+    fake_records_factory: list[dict],
+) -> None:
+    data = load_lockfile_data(lockfile_with_platforms.read_bytes())
+    clean_url = data["environments"]["default"]["packages"]["linux-64"][0]["conda"]
+    credential_url = clean_url.replace(
+        "https://conda.anaconda.org/conda-forge",
+        "https://user:password@conda.anaconda.org/t/secret/conda-forge",
+    )
+    data["environments"]["default"]["channels"] = [
+        {"url": ("https://user:password@conda.anaconda.org/t/secret/conda-forge")}
+    ]
+    data["environments"]["default"]["packages"]["linux-64"][0]["conda"] = credential_url
+    data["packages"][0]["conda"] = credential_url
+
+    env = CondaLockLoader(lockfile_with_platforms, data=data).env_for("linux-64")
+
+    assert env.explicit_packages[0].url == clean_url
+    assert [set(call) for call in fake_records_factory] == [{clean_url}]
+    assert "secret" not in repr(fake_records_factory)
+    assert "password" not in repr(fake_records_factory)
+
+
+@pytest.mark.parametrize(
+    "external_ref",
+    [
+        pytest.param(
+            {"pypi": "https://files.pythonhosted.org/pkg.whl"},
+            id="pypi",
+        ),
+        pytest.param(
+            {"pip": "https://files.pythonhosted.org/pkg.whl"},
+            id="pip",
+        ),
+        pytest.param(
+            {"url": "https://files.example/pkg.whl"},
+            id="generic-url",
+        ),
+        pytest.param(
+            {"npm": "https://registry.example/pkg.tgz"},
+            id="unknown-manager",
+        ),
+    ],
+)
+def test_conda_lock_loader_env_rejects_unverifiable_external_refs(
     lockfile_with_platforms: Path,
     fake_records_factory: list,
+    external_ref: dict[str, str],
 ) -> None:
-    loader = CondaLockLoader(lockfile_with_platforms)
-    env = loader.env_for("linux-64")
+    data = load_lockfile_data(lockfile_with_platforms.read_bytes())
+    data["environments"]["default"]["packages"]["linux-64"].append(external_ref)
+    loader = CondaLockLoader(lockfile_with_platforms, data=data)
 
-    assert "pypi" in env.external_packages
-    assert "https://pypi.org/simple/requests/" in env.external_packages["pypi"]
+    with pytest.raises(LockfileIntegrityError) as exc_info:
+        loader.env_for("linux-64")
+
+    assert "cannot be verified from conda.lock" in exc_info.value.reason
+    assert "regenerate the lockfile" in exc_info.value.reason
+    assert "conda workspace install" in exc_info.value.reason
+    assert fake_records_factory == []
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        ("off-channel", "not under any channel"),
+        ("missing-record", "no top-level package record"),
+        ("missing-digest", "missing a sha256 or md5 digest"),
+    ],
+)
+def test_conda_lock_loader_env_validates_package_integrity_before_conversion(
+    lockfile_with_platforms: Path,
+    fake_records_factory: list,
+    mutation: str,
+    match: str,
+) -> None:
+    data = load_lockfile_data(lockfile_with_platforms.read_bytes())
+    ref = data["environments"]["default"]["packages"]["linux-64"][0]
+    original_url = ref["conda"]
+    if mutation == "off-channel":
+        bad_url = "https://attacker.example/linux-64/python-linux-64.conda"
+        ref["conda"] = bad_url
+        data["packages"][0]["conda"] = bad_url
+    elif mutation == "missing-record":
+        data["packages"] = [
+            record for record in data["packages"] if record["conda"] != original_url
+        ]
+    else:
+        del data["packages"][0]["sha256"]
+
+    loader = CondaLockLoader(lockfile_with_platforms, data=data)
+    with pytest.raises(LockfileIntegrityError, match=match):
+        loader.env_for("linux-64")
 
 
 def test_conda_lock_loader_env_uses_context_subdir(
@@ -363,14 +570,175 @@ def test_conda_lock_loader_env_for_errors(
 class _FakePkg:
     """Minimal stand-in for ``PackageRecord`` used by lockfile tests."""
 
-    def __init__(self, name: str, url: str) -> None:
+    def __init__(
+        self,
+        name: str,
+        url: str,
+        sha256: str = "a" * 64,
+        **metadata: object,
+    ) -> None:
         self.name = name
         self.url = url
+        self.sha256 = sha256
+        self.metadata = metadata
 
     def get(self, key: str, default: object = None) -> object:
         if key == "sha256":
-            return "a" * 64
-        return default
+            return self.sha256
+        return self.metadata.get(key, default)
+
+
+def test_conda_lock_loader_compose_redacts_every_serialized_url() -> None:
+    channel = (
+        "HTTPS://channel-user:channel-password@repo.example.test/"
+        "t/channel-token/private?channel-query=secret#channel-fragment"
+    )
+    package_url = (
+        "HTTPS://package-user:package-password@repo.example.test/"
+        "t/package-token/private/linux-64/python-3.12.0-0.conda"
+        "?package-query=secret#package-fragment"
+    )
+    pypi_url = (
+        "HTTPS://pypi-user:pypi-password@files.example.test/t/pypi-token/"
+        "python.whl?pypi-query=secret#pypi-fragment"
+    )
+    environment = _SolvedEnvironment(
+        name="default",
+        platform="linux-64",
+        package_platform="linux-64",
+        config=EnvironmentConfig(channels=(channel,)),
+        explicit_packages=[_FakePkg("python", package_url)],
+        external_packages={"pypi": [pypi_url]},
+    )
+
+    result = CondaLockLoader.compose([environment])
+
+    expected_package_url = (
+        "HTTPS://repo.example.test/private/linux-64/python-3.12.0-0.conda"
+    )
+    assert result["environments"]["default"] == {
+        "channels": [{"url": "HTTPS://repo.example.test/private"}],
+        "packages": {
+            "linux-64": [
+                {"conda": expected_package_url},
+                {"pypi": "HTTPS://files.example.test/python.whl"},
+            ]
+        },
+    }
+    assert result["packages"] == [{"conda": expected_package_url, "sha256": "a" * 64}]
+    serialized = repr(result)
+    for secret in (
+        "channel-user",
+        "channel-password",
+        "channel-token",
+        "channel-query",
+        "channel-fragment",
+        "package-user",
+        "package-password",
+        "package-token",
+        "package-query",
+        "package-fragment",
+        "pypi-user",
+        "pypi-password",
+        "pypi-token",
+        "pypi-query",
+        "pypi-fragment",
+    ):
+        assert secret not in serialized
+
+
+@pytest.mark.parametrize("metadata_field", ["depends", "constrains"])
+def test_conda_lock_loader_compose_redacts_nested_package_metadata(
+    metadata_field: str,
+) -> None:
+    credential = "https://nested-user:LEAKME@evil.example/t/token/pkg"
+    environment = _SolvedEnvironment(
+        name="default",
+        platform="linux-64",
+        package_platform="linux-64",
+        config=EnvironmentConfig(channels=("https://repo.example/channel",)),
+        explicit_packages=[
+            _FakePkg(
+                "python",
+                "https://repo.example/channel/linux-64/python-3.12.0-0.conda",
+                **{metadata_field: [credential]},
+            )
+        ],
+    )
+
+    result = CondaLockLoader.compose([environment])
+    exported = multiplatform_export([environment])
+
+    assert result["packages"][0][metadata_field] == ["https://evil.example/pkg"]
+    assert "LEAKME" not in repr(result)
+    assert "LEAKME" not in exported
+
+
+@pytest.mark.parametrize("metadata_field", ["depends", "constrains"])
+def test_conda_lock_loader_compose_sanitizes_before_metadata_validation(
+    metadata_field: str,
+) -> None:
+    credential = "https://nested-user:LEAKME@evil.example/pkg"
+    environment = _SolvedEnvironment(
+        name="default",
+        platform="linux-64",
+        package_platform="linux-64",
+        config=EnvironmentConfig(channels=("https://repo.example/channel",)),
+        explicit_packages=[
+            _FakePkg(
+                "python",
+                "https://repo.example/channel/linux-64/python-3.12.0-0.conda",
+                **{metadata_field: {credential: "invalid"}},
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        CondaLockLoader.compose([environment])
+
+    assert "credentials in a mapping key" in str(exc_info.value)
+    assert "LEAKME" not in str(exc_info.value)
+    assert "nested-user" not in str(exc_info.value)
+
+
+def test_conda_lock_loader_rejects_metadata_conflicts_after_redaction() -> None:
+    channel = "https://repo.example.test/private"
+    package_path = "/private/linux-64/python-3.12.0-0.conda"
+    environments = [
+        _SolvedEnvironment(
+            name=name,
+            platform="linux-64",
+            package_platform="linux-64",
+            config=EnvironmentConfig(channels=(channel,)),
+            explicit_packages=[
+                _FakePkg(
+                    "python",
+                    f"https://{name}:password@repo.example.test{package_path}",
+                    digest * 64,
+                )
+            ],
+        )
+        for name, digest in (("default", "a"), ("dev", "b"))
+    ]
+
+    with pytest.raises(ValueError, match="Conflicting package metadata"):
+        CondaLockLoader.compose(environments)
+
+
+def test_conda_lock_loader_compose_redacts_relative_channel_token() -> None:
+    environment = _SolvedEnvironment(
+        name="default",
+        platform="linux-64",
+        package_platform="linux-64",
+        config=EnvironmentConfig(channels=("t/SENSITIVE-VALUE/private",)),
+        explicit_packages=[],
+    )
+
+    result = CondaLockLoader.compose([environment])
+
+    assert result["environments"]["default"]["channels"] == [
+        {"url": "https://conda.anaconda.org/private"}
+    ]
 
 
 def test_conda_lock_loader_reconstructs_package_records_from_metadata(
@@ -529,6 +897,91 @@ def test_conda_lock_loader_replace_solutions_preserves_and_canonicalizes(
     assert f"{channel}/noarch/orphan-1.0-0.conda" not in referenced_urls
 
 
+def test_conda_lock_loader_replace_solutions_redacts_legacy_baseline(
+    selective_lock_data: dict,
+) -> None:
+    channel = "https://conda.anaconda.org/conda-forge"
+    clean_pytest = f"{channel}/linux-64/pytest-8.0.0-py_0.conda"
+    credential_channel = (
+        "HTTPS://legacy-user:legacy-password@conda.anaconda.org/"
+        "t/legacy-token/conda-forge?legacy-query=secret#legacy-fragment"
+    )
+    credential_pytest = (
+        "HTTPS://legacy-user:legacy-password@conda.anaconda.org/"
+        "t/legacy-token/conda-forge/linux-64/pytest-8.0.0-py_0.conda"
+        "?legacy-query=secret#legacy-fragment"
+    )
+    test_environment = selective_lock_data["environments"]["test"]
+    test_environment["channels"] = [credential_channel]
+    test_environment["packages"]["linux-64"][0]["conda"] = credential_pytest
+    for record in selective_lock_data["packages"]:
+        if record.get("conda") == clean_pytest:
+            record["conda"] = credential_pytest
+            break
+    baseline = deepcopy(selective_lock_data)
+    certifi = f"{channel}/noarch/certifi-2026.1-pyhd_0.conda"
+    updated = _SolvedEnvironment(
+        name="default",
+        platform="linux-64",
+        package_platform="linux-64",
+        config=EnvironmentConfig(channels=(channel,)),
+        explicit_packages=[
+            _FakePkg(
+                "python",
+                f"{channel}/linux-64/python-3.12.0-h3_0.conda",
+            ),
+            _FakePkg("certifi", certifi),
+        ],
+    )
+
+    result = CondaLockLoader.replace_solutions(selective_lock_data, [updated])
+
+    redacted_pytest = (
+        "HTTPS://conda.anaconda.org/conda-forge/linux-64/pytest-8.0.0-py_0.conda"
+    )
+    assert selective_lock_data == baseline
+    assert result["environments"]["test"]["channels"] == [
+        {"url": "HTTPS://conda.anaconda.org/conda-forge"}
+    ]
+    assert result["environments"]["test"]["packages"]["linux-64"][0] == {
+        "conda": redacted_pytest
+    }
+    assert any(record.get("conda") == redacted_pytest for record in result["packages"])
+    serialized = repr(result)
+    for secret in (
+        "legacy-user",
+        "legacy-password",
+        "legacy-token",
+        "legacy-query",
+        "legacy-fragment",
+    ):
+        assert secret not in serialized
+
+
+def test_conda_lock_loader_redacts_unknown_url_fields() -> None:
+    data = {
+        "version": 1,
+        "metadata": {
+            "mirror": "https://user:password@repo.example/t/token/channel?secret=yes"
+        },
+    }
+
+    result = CondaLockLoader.redact_data_urls(data)
+
+    assert result["metadata"]["mirror"] == "https://repo.example/channel"
+    assert data["metadata"]["mirror"].startswith("https://user:password@")
+
+
+def test_conda_lock_loader_rejects_credentials_in_structured_metadata() -> None:
+    data = {
+        "version": 1,
+        "metadata": {"note": "fetch https://user:password@repo.example/channel"},
+    }
+
+    with pytest.raises(ValueError, match="structured metadata"):
+        CondaLockLoader.redact_data_urls(data)
+
+
 @pytest.fixture
 def fake_solver_factory(monkeypatch: pytest.MonkeyPatch):
     """Replace ``ResolvedEnvironment.solve_for_platform`` with a deterministic stub.
@@ -684,6 +1137,58 @@ def test_write_lockfile_writes_rendered_content(
     assert result.read_text(encoding="utf-8") == "version: 1\n"
 
 
+@pytest.mark.parametrize("mutation", ["rewrite", "replace"])
+def test_write_lockfile_rejects_changed_default_generation(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    ctx = workspace_ctx_factory()
+    output = lockfile_path(ctx)
+    output.write_text("original", encoding="utf-8")
+    concurrent = "concurrent"
+    atomic_write_text = lockfile_module.atomic_write_text
+
+    def replace_before_publication(path: Path, content: str, **kwargs) -> None:
+        if mutation == "rewrite":
+            output.write_text(concurrent, encoding="utf-8")
+        else:
+            replacement = output.with_name("replacement.lock")
+            replacement.write_text(concurrent, encoding="utf-8")
+            replacement.replace(output)
+        atomic_write_text(path, content, **kwargs)
+
+    monkeypatch.setattr(
+        lockfile_module,
+        "atomic_write_text",
+        replace_before_publication,
+    )
+
+    with pytest.raises(ValueError, match="changed before writing"):
+        write_lockfile(ctx, "version: 1\n")
+
+    assert output.read_text(encoding="utf-8") == concurrent
+
+
+def test_write_lockfile_does_not_follow_raced_symlink(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    race_symlink_on_publish: Callable[[Path, Path], list[bool]],
+) -> None:
+    ctx = workspace_ctx_factory()
+    output = tmp_path / LOCKFILE_NAME
+    outside = tmp_path / "outside.lock"
+    outside.write_text("keep\n", encoding="utf-8")
+    raced = race_symlink_on_publish(output, outside)
+
+    with pytest.raises(FileExistsError):
+        write_lockfile(ctx, "version: 1\n")
+
+    assert raced == [True]
+    assert output.is_symlink()
+    assert outside.read_text(encoding="utf-8") == "keep\n"
+
+
 @pytest.mark.parametrize(
     ("envs", "host", "requested_platforms", "expected_pairs"),
     [
@@ -733,6 +1238,56 @@ def test_generate_lockfile_solves_expected_pairs(
     assert f"version: {LOCKFILE_VERSION}" in content
     for env_name, platform in expected_pairs:
         assert f"python-{env_name}-{platform}.conda" in content
+
+
+def test_generate_lockfile_rejects_custom_output_changed_during_rendering(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = workspace_ctx_factory()
+    output = tmp_path / "custom.lock"
+    output.write_text("original", encoding="utf-8")
+    concurrent = "concurrent"
+
+    def replace_output(*args, **kwargs) -> str:
+        output.write_text(concurrent, encoding="utf-8")
+        return "version: 1\nenvironments: {}\npackages: []\n"
+
+    monkeypatch.setattr(lockfile_module, "render_lockfile", replace_output)
+
+    with pytest.raises(ValueError, match="changed before writing"):
+        generate_lockfile(ctx, {}, output_path=output)
+
+    assert output.read_text(encoding="utf-8") == concurrent
+
+
+@pytest.mark.parametrize("explicit_output", [False, True], ids=["default", "explicit"])
+def test_generate_lockfile_rejects_symlink_output_before_solving(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    fake_solver_factory,
+    resolved_envs_factory,
+    explicit_output: bool,
+) -> None:
+    ctx = workspace_ctx_factory(platform="linux-64", env_names=["default"])
+    calls = fake_solver_factory()
+    resolved_envs = resolved_envs_factory(default=["linux-64"])
+    outside = tmp_path / "outside.lock"
+    outside.write_text("keep\n", encoding="utf-8")
+    output = tmp_path / ("fragment.lock" if explicit_output else LOCKFILE_NAME)
+    output.symlink_to(outside)
+
+    with pytest.raises(ValueError, match="symbolic link"):
+        generate_lockfile(
+            ctx,
+            resolved_envs,
+            output_path=output if explicit_output else None,
+        )
+
+    assert calls == []
+    assert output.is_symlink()
+    assert outside.read_text(encoding="utf-8") == "keep\n"
 
 
 @pytest.mark.parametrize("explicit_output", [False, True], ids=["default", "explicit"])
@@ -1309,20 +1864,331 @@ def test_install_from_lockfile(
 
     install_from_lockfile(ctx, "default", dry_run=dry_run)
 
+    assert len(get_records_calls) == 1
+    assert get_records_calls[0] == [
+        f"{python_url}#sha256:{python_sha256}",
+        f"{numpy_url}#{numpy_md5}",
+    ]
     if dry_run:
-        assert get_records_calls == []
         assert install_calls == []
         assert not ctx.env_prefix("default").exists()
     else:
-        assert len(get_records_calls) == 1
-        assert get_records_calls[0] == [
-            f"{python_url}#sha256:{python_sha256}",
-            f"{numpy_url}#{numpy_md5}",
-        ]
         assert len(install_calls) == 1
         assert install_calls[0]["records"] == records_sentinel
         assert install_calls[0]["prefix"] == str(ctx.env_prefix("default"))
         assert install_calls[0]["requested_specs"] == []
+
+
+@pytest.mark.parametrize(
+    "external_ref",
+    [
+        pytest.param(
+            {"pypi": "https://files.pythonhosted.org/pkg.whl"},
+            id="pypi",
+        ),
+        pytest.param(
+            {"pip": "https://files.pythonhosted.org/pkg.whl"},
+            id="pip",
+        ),
+        pytest.param(
+            {"url": "https://files.example/pkg.whl"},
+            id="generic-url",
+        ),
+        pytest.param(
+            {"npm": "https://registry.example/pkg.tgz"},
+            id="unknown-manager",
+        ),
+        pytest.param(
+            {
+                "conda": "https://example.com/channel/linux-64/python.conda",
+                "pypi": "https://files.pythonhosted.org/pkg.whl",
+            },
+            id="mixed-sources",
+        ),
+    ],
+)
+def test_install_from_lockfile_rejects_external_refs_before_fetch(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    monkeypatch: pytest.MonkeyPatch,
+    external_ref: dict[str, str],
+) -> None:
+    ctx = workspace_ctx_factory()
+    (tmp_path / LOCKFILE_NAME).write_text(
+        "version: 1\n"
+        "environments:\n"
+        "  default:\n"
+        "    channels:\n"
+        "    - url: https://example.com/channel\n"
+        "    packages:\n"
+        "      linux-64: []\n"
+        "packages: []\n",
+        encoding="utf-8",
+    )
+    data = load_lockfile_data((tmp_path / LOCKFILE_NAME).read_bytes())
+    data["environments"]["default"]["packages"]["linux-64"] = [external_ref]
+    data["packages"] = [{**external_ref, "sha256": "a" * 64}]
+    fetched: list[list[str]] = []
+    monkeypatch.setattr(
+        "conda.misc.get_package_records_from_explicit",
+        lambda urls: fetched.append(list(urls)) or [],
+    )
+
+    with pytest.raises(LockfileIntegrityError) as exc_info:
+        install_from_lockfile(
+            ctx,
+            "default",
+            lockfile_data=data,
+        )
+
+    assert "cannot be installed exactly" in exc_info.value.reason
+    assert "regenerate the lockfile" in exc_info.value.reason
+    assert fetched == []
+
+
+def test_lockfile_install_plan_reuses_prefetched_records(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = workspace_ctx_factory()
+    (tmp_path / LOCKFILE_NAME).write_text(
+        "version: 1\n"
+        "environments:\n"
+        "  default:\n"
+        "    channels: []\n"
+        "    packages:\n"
+        "      linux-64: []\n"
+        "packages: []\n",
+        encoding="utf-8",
+    )
+    records = [object()]
+    fetches: list[list[str]] = []
+    installs: list[list[object]] = []
+    monkeypatch.setattr(
+        "conda.misc.get_package_records_from_explicit",
+        lambda urls: fetches.append(list(urls)) or records,
+    )
+    monkeypatch.setattr(
+        "conda.misc.install_explicit_packages",
+        lambda **kwargs: installs.append(kwargs["package_cache_records"]),
+    )
+
+    plan = LockfileInstallPlan.prepare(ctx, "default")
+    plan.execute()
+
+    assert fetches == [[]]
+    assert installs == [records]
+
+
+def test_install_from_lockfile_revalidates_workspace_after_package_fetch(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = workspace_ctx_factory()
+    (tmp_path / LOCKFILE_NAME).write_text(
+        "version: 1\n"
+        "environments:\n"
+        "  default:\n"
+        "    channels: []\n"
+        "    packages:\n"
+        "      linux-64: []\n"
+        "packages: []\n",
+        encoding="utf-8",
+    )
+    changed = [False]
+
+    def fetch_records(urls):
+        changed[0] = True
+        return []
+
+    def validate_workspace() -> None:
+        if changed[0]:
+            raise CondaWorkspacesError("workspace root changed")
+
+    mutations: list[str] = []
+    monkeypatch.setattr(
+        "conda.misc.get_package_records_from_explicit",
+        fetch_records,
+    )
+    monkeypatch.setattr(
+        "conda.misc.install_explicit_packages",
+        lambda **kwargs: mutations.append(kwargs["prefix"]),
+    )
+
+    with pytest.raises(CondaWorkspacesError, match="workspace root changed"):
+        install_from_lockfile(
+            ctx,
+            "default",
+            validate_workspace=validate_workspace,
+        )
+
+    assert mutations == []
+    assert not ctx.env_prefix("default").exists()
+
+
+def test_install_from_lockfile_dry_run_builds_requested_and_prune_plan(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = workspace_ctx_factory()
+    ctx.config.features["default"].conda_dependencies = {
+        "python": MatchSpec("python >=3.10")
+    }
+    ctx.config.features["default"].pypi_dependencies = {
+        "local-project": PyPIDependency(
+            name="local-project",
+            path=str(tmp_path),
+            editable=True,
+        )
+    }
+    ctx.config.features["default"].activation_env = {"DEMO": "value"}
+    prefix = ctx.env_prefix("default")
+    (prefix / "conda-meta").mkdir(parents=True)
+    extra = PrefixRecord(
+        name="extra",
+        version="1.0",
+        build="0",
+        build_number=0,
+        channel="https://example.com/channel",
+        subdir="linux-64",
+        fn="extra-1.0-0.conda",
+        url="https://example.com/channel/linux-64/extra-1.0-0.conda",
+        depends=[],
+    )
+    History(str(prefix)).init_log_file()
+    PrefixData(str(prefix)).insert(extra)
+    (tmp_path / LOCKFILE_NAME).write_text(
+        "version: 1\n"
+        "environments:\n"
+        "  default:\n"
+        "    channels: []\n"
+        "    packages:\n"
+        "      linux-64: []\n"
+        "packages: []\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "conda.misc.get_package_records_from_explicit",
+        lambda urls: [],
+    )
+    monkeypatch.setattr(
+        "conda.misc.install_explicit_packages",
+        lambda **kwargs: pytest.fail("dry-run mutated the prefix"),
+    )
+
+    plan = install_from_lockfile(ctx, "default", dry_run=True)
+
+    assert {MatchSpec(spec).name for spec in plan.requested_specs or ()} == {
+        "python",
+        "local-project",
+    }
+    assert plan.prune_setup is not None
+    assert [record.name for record in plan.prune_setup.unlink_precs] == ["extra"]
+    assert PrefixData(str(prefix)).get("extra", None) == extra
+
+
+@pytest.mark.parametrize(
+    "invalid_input",
+    ["activation-symlink", "missing-path-dependency"],
+    ids=["activation", "path-dependency"],
+)
+def test_install_from_lockfile_dry_run_validates_post_install_inputs(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_input: str,
+) -> None:
+    ctx = workspace_ctx_factory()
+    prefix = ctx.env_prefix("default")
+    if invalid_input == "activation-symlink":
+        ctx.config.features["default"].activation_env = {"DEMO": "value"}
+        state = prefix / "conda-meta" / "state"
+        state.parent.mkdir(parents=True)
+        outside = tmp_path / "outside-state"
+        outside.write_text("{}", encoding="utf-8")
+        state.symlink_to(outside)
+        match = "Activation metadata path cannot contain a symlink"
+    else:
+        ctx.config.features["default"].pypi_dependencies = {
+            "missing": PyPIDependency(
+                name="missing",
+                path=str(tmp_path / "missing-project"),
+            )
+        }
+        match = "must be an existing regular directory"
+    (tmp_path / LOCKFILE_NAME).write_text(
+        "version: 1\n"
+        "environments:\n"
+        "  default:\n"
+        "    channels: []\n"
+        "    packages:\n"
+        "      linux-64: []\n"
+        "packages: []\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "conda.misc.get_package_records_from_explicit",
+        lambda urls: [],
+    )
+
+    with pytest.raises((CondaWorkspacesError, SolveError), match=match):
+        install_from_lockfile(ctx, "default", dry_run=True)
+
+
+def test_install_from_lockfile_rejects_parent_replacement_before_conda(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not paths_module.supports_anchored_directory_operations():
+        pytest.skip("descriptor-relative directory operations are unavailable")
+    ctx = workspace_ctx_factory()
+    ctx.envs_dir.mkdir(parents=True)
+    (tmp_path / LOCKFILE_NAME).write_text(
+        "version: 1\n"
+        "environments:\n"
+        "  default:\n"
+        "    channels: []\n"
+        "    packages:\n"
+        "      linux-64: []\n"
+        "packages: []\n",
+        encoding="utf-8",
+    )
+    original_mkdir = os.mkdir
+    detached = ctx.envs_dir.with_name("detached-envs")
+    raced: list[bool] = []
+
+    def replace_parent_before_leaf(
+        path: str | os.PathLike[str],
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        if path == "default" and dir_fd is not None and not raced:
+            raced.append(True)
+            ctx.envs_dir.rename(detached)
+            original_mkdir(ctx.envs_dir)
+        original_mkdir(path, mode, dir_fd=dir_fd)
+
+    mutations: list[str] = []
+    monkeypatch.setattr(lockfile_module.os, "mkdir", replace_parent_before_leaf)
+    monkeypatch.setattr(
+        "conda.misc.get_package_records_from_explicit",
+        lambda urls: [],
+    )
+    monkeypatch.setattr(
+        "conda.misc.install_explicit_packages",
+        lambda **kwargs: mutations.append(kwargs["prefix"]),
+    )
+
+    with pytest.raises(CondaWorkspacesError, match="changed during install"):
+        install_from_lockfile(ctx, "default")
+
+    assert raced == [True]
+    assert mutations == []
 
 
 @pytest.mark.parametrize(
@@ -1413,6 +2279,11 @@ def test_install_from_lockfile_reconciles_prefix_and_requested_specs(
         "conda.misc.install_explicit_packages",
         lambda **kwargs: install_calls.append(kwargs),
     )
+    path_install_calls: list[str] = []
+    monkeypatch.setattr(
+        "conda_workspaces.envs._install_path_deps",
+        lambda prefix, resolved: path_install_calls.append(resolved.name),
+    )
 
     install_from_lockfile(ctx, "default")
 
@@ -1420,6 +2291,7 @@ def test_install_from_lockfile_reconciles_prefix_and_requested_specs(
     assert ("boltons" in installed_names) is candidate_installed
     assert set(History(str(prefix)).get_requested_specs_map()) == expected_requested
     assert set(install_calls[0]["requested_specs"]) == expected_requested
+    assert path_install_calls == ["default"]
 
 
 @pytest.mark.parametrize("dry_run", [False, True], ids=["install", "dry-run"])
@@ -1444,8 +2316,11 @@ def test_install_from_lockfile_rejects_invalid_prefix_before_writes(
     blocked.write_bytes(b"keep")
     prefix = blocked if prefix_setup == "file" else blocked / "environment"
     before = snapshot_tree(tmp_path)
+    expected_error = (
+        CondaWorkspacesError if prefix_setup == "file" else NotADirectoryError
+    )
 
-    with pytest.raises((FileExistsError, NotADirectoryError)):
+    with pytest.raises(expected_error):
         install_from_lockfile(
             ctx,
             "default",
@@ -1454,6 +2329,91 @@ def test_install_from_lockfile_rejects_invalid_prefix_before_writes(
         )
 
     assert snapshot_tree(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    ("package_url", "expected"),
+    [
+        pytest.param(
+            "https://EXAMPLE.com:443/channel/linux-64/package%20name.conda?token=x",
+            True,
+            id="normalized-safe-child",
+        ),
+        pytest.param(
+            "https://example.com/channel/linux-64/../../outside/package.conda",
+            False,
+            id="dot-segments",
+        ),
+        pytest.param(
+            "https://example.com/channel/linux-64/%2e%2e/outside/package.conda",
+            False,
+            id="encoded-dot-segment",
+        ),
+        pytest.param(
+            "https://example.com/channel/linux-64/%252e%252e/outside/package.conda",
+            False,
+            id="double-encoded-dot-segment",
+        ),
+        pytest.param(
+            "https://example.com/channel/linux-64/%2f..%2foutside/package.conda",
+            False,
+            id="encoded-path-separators",
+        ),
+    ],
+)
+def test_url_matches_channel_rejects_path_escapes(
+    package_url: str,
+    expected: bool,
+) -> None:
+    assert (
+        CondaLockLoader.url_matches_channel(
+            package_url,
+            ("https://example.com/channel/linux-64",),
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("record", "detail"),
+    [
+        ({"sha256": "invalid"}, "invalid sha256 digest"),
+        ({"md5": "invalid"}, "invalid md5 digest"),
+        ({}, "missing a sha256 or md5 digest"),
+    ],
+    ids=["sha256", "md5", "missing"],
+)
+def test_digest_integrity_errors_redact_package_credentials(
+    tmp_path: Path,
+    record: dict[str, str],
+    detail: str,
+) -> None:
+    package_url = (
+        "HTTPS://digest-user:digest-password@conda.anaconda.org/"
+        "t/digest-token/private/linux-64/python-3.12.0-0.conda"
+        "?digest-query=secret#digest-fragment"
+    )
+
+    with pytest.raises(LockfileIntegrityError) as exc_info:
+        CondaLockLoader.digest_fragment_for_record(
+            record,
+            package_url,
+            path=tmp_path / LOCKFILE_NAME,
+        )
+
+    assert detail in exc_info.value.reason
+    assert (
+        "HTTPS://conda.anaconda.org/private/linux-64/python-3.12.0-0.conda"
+        in exc_info.value.reason
+    )
+    for secret in (
+        "digest-user",
+        "digest-password",
+        "digest-token",
+        "digest-query",
+        "digest-fragment",
+    ):
+        assert secret not in str(exc_info.value)
 
 
 @pytest.mark.parametrize(
@@ -1470,6 +2430,36 @@ def test_install_from_lockfile_rejects_invalid_prefix_before_writes(
             },
             "not under any channel",
             id="off-channel",
+        ),
+        pytest.param(
+            (
+                "https://example.com/channel/linux-64/../../outside/"
+                "python-3.11.9-hbad_0.tar.bz2"
+            ),
+            {
+                "conda": (
+                    "https://example.com/channel/linux-64/../../outside/"
+                    "python-3.11.9-hbad_0.tar.bz2"
+                ),
+                "sha256": "0" * 64,
+            },
+            "not under any channel",
+            id="channel-path-traversal",
+        ),
+        pytest.param(
+            (
+                "https://example.com/channel/linux-64/%2e%2e/outside/"
+                "python-3.11.9-hbad_0.tar.bz2"
+            ),
+            {
+                "conda": (
+                    "https://example.com/channel/linux-64/%2e%2e/outside/"
+                    "python-3.11.9-hbad_0.tar.bz2"
+                ),
+                "sha256": "0" * 64,
+            },
+            "not under any channel",
+            id="encoded-channel-path-traversal",
         ),
         pytest.param(
             "https://example.com/channel/linux-64/python-3.11.9-hgood_0.tar.bz2",
@@ -1536,13 +2526,75 @@ def test_install_from_lockfile_rejects_unbound_package_refs(
         fake_get_records,
     )
 
-    with pytest.raises(LockfileIntegrityError, match=match):
+    with pytest.raises(LockfileIntegrityError) as exc_info:
         install_from_lockfile(ctx, "default")
 
+    assert match in exc_info.value.reason
     assert get_records_calls == []
 
 
-def test_lockfile_status_rejects_off_channel_package_refs() -> None:
+@pytest.mark.parametrize("metadata_field", ["depends", "constrains"])
+@pytest.mark.parametrize(
+    "metadata_value",
+    [
+        pytest.param(
+            "https://nested-user:LEAKME@evil.example/t/token/pkg",
+            id="direct-url",
+        ),
+        pytest.param(
+            "python >=3.11 from https://nested-user:LEAKME@evil.example/pkg",
+            id="embedded-url",
+        ),
+    ],
+)
+def test_lockfile_status_redacts_nested_metadata_before_validation(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    metadata_field: str,
+    metadata_value: str,
+) -> None:
+    ctx = workspace_ctx_factory()
+    channel = str(Channel("conda-forge"))
+    package_url = f"{channel}/linux-64/python-3.12.0-0.conda"
+    data = {
+        "version": LOCKFILE_VERSION,
+        "environments": {
+            "default": {
+                "channels": [{"url": channel}],
+                "packages": {"linux-64": [{"conda": package_url}]},
+            }
+        },
+        "packages": [
+            {
+                "conda": package_url,
+                "sha256": "a" * 64,
+                metadata_field: [metadata_value],
+            }
+        ],
+    }
+
+    status = check_lockfile_satisfiability(ctx.config, data, "linux-64")
+
+    assert status.status == LockfileStatus.OUT_OF_DATE
+    assert "LEAKME" not in status.reason
+    assert "nested-user" not in status.reason
+    assert "LEAKME" in repr(data)
+
+
+@pytest.mark.parametrize(
+    "package_url",
+    [
+        pytest.param(
+            "https://attacker.example/pkgs/linux-64/python-3.11.9-hbad_0.tar.bz2",
+            id="off-channel",
+        ),
+        pytest.param(
+            "https://conda.anaconda.org/conda-forge/linux-64/../../outside/"
+            "python-3.11.9-hbad_0.tar.bz2",
+            id="channel-path-traversal",
+        ),
+    ],
+)
+def test_lockfile_status_rejects_off_channel_package_refs(package_url: str) -> None:
     """Freshness checks reject the off-channel URL used by the scan PoC."""
     config = WorkspaceConfig(
         name="lock-test",
@@ -1556,7 +2608,6 @@ def test_lockfile_status_rejects_off_channel_package_refs() -> None:
         },
         environments={"default": Environment(name="default")},
     )
-    package_url = "https://attacker.example/pkgs/linux-64/python-3.11.9-hbad_0.tar.bz2"
     lockfile_data = {
         "version": LOCKFILE_VERSION,
         "environments": {
@@ -1572,6 +2623,24 @@ def test_lockfile_status_rejects_off_channel_package_refs() -> None:
 
     assert status.status == LockfileStatus.OUT_OF_DATE
     assert "not under a declared channel" in status.reason
+
+
+def test_lockfile_status_rejects_non_conda_only_package_refs(
+    satisfiability_config_factory,
+    lockfile_data_factory,
+    non_conda_only_environment_ref: dict[str, str],
+) -> None:
+    """Freshness rejects external-only and mixed package references."""
+    config = satisfiability_config_factory(platforms=["linux-64"])
+    data = lockfile_data_factory()
+    data["environments"]["default"]["packages"]["linux-64"].append(
+        non_conda_only_environment_ref
+    )
+
+    status = check_lockfile_satisfiability(config, data, "linux-64")
+
+    assert status.status == LockfileStatus.OUT_OF_DATE
+    assert "must contain exactly one 'conda' entry" in status.reason
 
 
 def test_install_from_lockfile_explicit_prefix_override(
@@ -1937,6 +3006,240 @@ def test_merge_lockfiles_dry_run_preserves_output(
 
     assert result == target
     assert snapshot_tree(ctx.root) == before
+
+
+def test_merge_lockfiles_rejects_output_changed_while_reading_fragments(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    fake_solver_factory,
+    resolved_envs_factory,
+    write_fragment: Callable[[WorkspaceContext, dict, str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = workspace_ctx_factory(env_names=["default"])
+    fake_solver_factory()
+    fragment = write_fragment(
+        ctx,
+        resolved_envs_factory(default=["linux-64"]),
+        "linux-64",
+    )
+    output = lockfile_path(ctx)
+    output.write_text("original", encoding="utf-8")
+    concurrent = "concurrent"
+    read_regular_file_bytes = lockfile_module.read_regular_file_bytes
+    raced = False
+
+    def replace_output(path: Path, *args, **kwargs) -> bytes:
+        nonlocal raced
+        if path == fragment and not raced:
+            output.write_text(concurrent, encoding="utf-8")
+            raced = True
+        return read_regular_file_bytes(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        lockfile_module,
+        "read_regular_file_bytes",
+        replace_output,
+    )
+
+    with pytest.raises(ValueError, match="changed before writing"):
+        merge_lockfiles([fragment], ctx)
+
+    assert raced is True
+    assert output.read_text(encoding="utf-8") == concurrent
+
+
+def test_merge_lockfiles_does_not_follow_raced_symlink(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    fake_solver_factory,
+    resolved_envs_factory,
+    write_fragment: Callable[[WorkspaceContext, dict, str], Path],
+    race_symlink_on_publish: Callable[[Path, Path], list[bool]],
+) -> None:
+    ctx = workspace_ctx_factory(env_names=["default"])
+    fake_solver_factory()
+    resolved_envs = resolved_envs_factory(default=["linux-64"])
+    fragment = write_fragment(ctx, resolved_envs, "linux-64")
+    output = lockfile_path(ctx)
+    outside = tmp_path / "outside.lock"
+    outside.write_text("keep\n", encoding="utf-8")
+    raced = race_symlink_on_publish(output, outside)
+
+    with pytest.raises(FileExistsError):
+        merge_lockfiles([fragment], ctx)
+
+    assert raced == [True]
+    assert output.is_symlink()
+    assert outside.read_text(encoding="utf-8") == "keep\n"
+
+
+def test_merge_lockfiles_rejects_symlinked_fragment(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    fake_solver_factory,
+    resolved_envs_factory,
+    write_fragment: Callable[[WorkspaceContext, dict, str], Path],
+) -> None:
+    ctx = workspace_ctx_factory(env_names=["default"])
+    fake_solver_factory()
+    fragment = write_fragment(
+        ctx,
+        resolved_envs_factory(default=["linux-64"]),
+        "linux-64",
+    )
+    linked_fragment = tmp_path / "linked.lock"
+    linked_fragment.symlink_to(fragment)
+
+    with pytest.raises(LockfileMergeError, match="does not exist"):
+        merge_lockfiles([linked_fragment], ctx)
+
+
+def test_merge_lockfiles_rejects_oversized_fragment(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    fake_solver_factory,
+    resolved_envs_factory,
+    write_fragment: Callable[[WorkspaceContext, dict, str], Path],
+) -> None:
+    ctx = workspace_ctx_factory(env_names=["default"])
+    fake_solver_factory()
+    fragment = write_fragment(
+        ctx,
+        resolved_envs_factory(default=["linux-64"]),
+        "linux-64",
+    )
+    monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_BYTES", 8)
+
+    with pytest.raises(LockfileMergeError, match="cannot be read safely"):
+        merge_lockfiles([fragment], ctx)
+
+
+@pytest.mark.parametrize(
+    ("budget", "match"),
+    [
+        pytest.param("bytes", "aggregate maximum size", id="bytes"),
+        pytest.param("items", "aggregate collection items", id="items"),
+    ],
+)
+def test_merge_lockfiles_enforces_aggregate_fragment_budgets(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    monkeypatch: pytest.MonkeyPatch,
+    budget: str,
+    match: str,
+) -> None:
+    ctx = workspace_ctx_factory()
+    content = "version: 1\nenvironments: {}\npackages: []\n"
+    fragments = [tmp_path / "conda.lock.a", tmp_path / "conda.lock.b"]
+    for fragment in fragments:
+        fragment.write_bytes(content.encode("utf-8"))
+    if budget == "bytes":
+        monkeypatch.setattr(
+            lockfile_module,
+            "MAX_LOCKFILE_BYTES",
+            len(content.encode("utf-8")) + 1,
+        )
+    else:
+        monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_ITEMS", 4)
+
+    with pytest.raises(LockfileMergeError, match=match):
+        merge_lockfiles(fragments, ctx)
+
+
+@pytest.mark.parametrize(
+    ("budget", "match"),
+    [
+        pytest.param("bytes", "Merged lockfile.*maximum size", id="bytes"),
+        pytest.param("items", "Merged lockfile.*collection items", id="items"),
+    ],
+)
+def test_merge_lockfiles_enforces_merged_structure_budgets(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    monkeypatch: pytest.MonkeyPatch,
+    budget: str,
+    match: str,
+) -> None:
+    ctx = workspace_ctx_factory()
+    ctx.config.channels = [
+        Channel(f"https://repo{index}.example.test/a-long-channel-name")
+        for index in range(5)
+    ]
+    content = (
+        "version: 1\n"
+        "environments:\n"
+        "  default:\n"
+        "    channels: []\n"
+        "    packages: {}\n"
+        "packages: []\n"
+    )
+    fragment = tmp_path / "conda.lock.fragment"
+    fragment.write_text(content, encoding="utf-8")
+    if budget == "bytes":
+        monkeypatch.setattr(
+            lockfile_module,
+            "MAX_LOCKFILE_BYTES",
+            len(content.encode("utf-8")) + 10,
+        )
+    else:
+        monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_ITEMS", 12)
+
+    with pytest.raises(LockfileMergeError, match=match):
+        merge_lockfiles([fragment], ctx)
+
+
+def test_merge_lockfiles_redacts_credentialed_fragment_urls(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+) -> None:
+    ctx = workspace_ctx_factory(env_names=["default"])
+    channel = (
+        "https://merge-user:merge-password@conda.anaconda.org/"
+        "t/merge-token/private?merge-query=secret#merge-fragment"
+    )
+    package_url = (
+        "HTTPS://merge-user:merge-password@conda.anaconda.org/"
+        "t/merge-token/private/linux-64/python-3.12.0-0.conda"
+        "?merge-query=secret#merge-fragment"
+    )
+    fragment = tmp_path / "conda.lock.external-linux-64"
+    fragment.write_text(
+        "version: 1\n"
+        "environments:\n"
+        "  external:\n"
+        "    channels:\n"
+        f'    - url: "{channel}"\n'
+        "    packages:\n"
+        "      linux-64:\n"
+        f'      - conda: "{package_url}"\n'
+        "packages:\n"
+        f'- conda: "{package_url}"\n'
+        f"  sha256: {'a' * 64}\n",
+        encoding="utf-8",
+    )
+    load_yaml.cache_clear()
+
+    output = merge_lockfiles([fragment], ctx)
+
+    merged = load_yaml(output)
+    expected_channel = "https://conda.anaconda.org/private"
+    expected_package = (
+        "HTTPS://conda.anaconda.org/private/linux-64/python-3.12.0-0.conda"
+    )
+    assert merged["environments"]["external"] == {
+        "channels": [{"url": expected_channel}],
+        "packages": {"linux-64": [{"conda": expected_package}]},
+    }
+    assert merged["packages"] == [{"conda": expected_package, "sha256": "a" * 64}]
+    content = output.read_text(encoding="utf-8")
+    for secret in (
+        "merge-user",
+        "merge-password",
+        "merge-token",
+        "merge-query",
+        "merge-fragment",
+    ):
+        assert secret not in content
 
 
 def test_merge_lockfiles_validates_output_before_reading_fragments(
@@ -2342,6 +3645,16 @@ packages:
             "not under any declared channel",
             id="off-channel",
         ),
+        pytest.param(
+            "packages:\n"
+            "- conda: https://conda.anaconda.org/conda-forge/linux-64/"
+            "../../outside/demo-1.0-0.tar.bz2\n"
+            f"  sha256: {'0' * 64}\n",
+            "https://conda.anaconda.org/conda-forge/linux-64/"
+            "../../outside/demo-1.0-0.tar.bz2",
+            "not under any declared channel",
+            id="channel-path-traversal",
+        ),
     ],
 )
 def test_merge_lockfiles_rejects_unbound_package_refs(
@@ -2371,6 +3684,44 @@ environments:
     load_yaml.cache_clear()
 
     with pytest.raises(LockfileMergeError, match=match):
+        merge_lockfiles([fragment], ctx)
+
+
+def test_merge_lockfiles_rejects_non_conda_only_package_refs(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    non_conda_only_environment_ref: dict[str, str],
+) -> None:
+    """Merging rejects external-only and mixed package references."""
+    ctx = workspace_ctx_factory(env_names=["default"])
+    package_url = (
+        "https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-hab00c5b_0.conda"
+    )
+    fragment_data = {
+        "version": LOCKFILE_VERSION,
+        "environments": {
+            "default": {
+                "channels": [{"url": str(Channel("conda-forge"))}],
+                "packages": {
+                    "linux-64": [
+                        {"conda": package_url},
+                        non_conda_only_environment_ref,
+                    ]
+                },
+            }
+        },
+        "packages": [{"conda": package_url, "sha256": "a" * 64}],
+    }
+    content = io.StringIO()
+    yaml_dump(fragment_data, content)
+    fragment = tmp_path / "conda.lock.linux-64"
+    fragment.write_text(content.getvalue(), encoding="utf-8")
+    load_yaml.cache_clear()
+
+    with pytest.raises(
+        LockfileMergeError,
+        match="must contain exactly one 'conda' entry",
+    ):
         merge_lockfiles([fragment], ctx)
 
 
@@ -2592,6 +3943,42 @@ def test_satisfiability_rejects_full_match_spec_mismatch(
 
     assert result.status == LockfileStatus.OUT_OF_DATE
     assert "does not satisfy" in result.reason
+
+
+@pytest.mark.parametrize(
+    ("url", "secrets"),
+    [
+        (
+            "https://user:LEAKME@example.test/linux-64/python.conda",
+            ("user", "LEAKME"),
+        ),
+        (
+            "https://example.test/t/LEAKME/linux-64/python.conda?token=SECRET",
+            ("LEAKME", "token=SECRET"),
+        ),
+    ],
+    ids=["userinfo", "token-query"],
+)
+def test_satisfiability_redacts_sensitive_requested_specs(
+    satisfiability_config_factory,
+    lockfile_data_factory,
+    url: str,
+    secrets: tuple[str, ...],
+) -> None:
+    config = satisfiability_config_factory(
+        platforms=["linux-64"],
+        deps={"python": MatchSpec(name="python", url=url)},
+    )
+
+    result = check_lockfile_satisfiability(
+        config,
+        lockfile_data_factory(),
+        "linux-64",
+    )
+
+    assert result.status == LockfileStatus.OUT_OF_DATE
+    assert "python" in result.reason
+    assert all(secret not in result.reason for secret in secrets)
 
 
 @pytest.mark.parametrize(

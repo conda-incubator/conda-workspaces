@@ -17,7 +17,10 @@ from conda_workspaces.context import (
     build_template_context,
     isolated_package_cache,
 )
-from conda_workspaces.exceptions import EnvironmentNameInvalidError
+from conda_workspaces.exceptions import (
+    CondaWorkspacesError,
+    EnvironmentNameInvalidError,
+)
 from conda_workspaces.models import (
     Channel,
     Environment,
@@ -119,6 +122,51 @@ def test_envs_dir(config: WorkspaceConfig) -> None:
     assert ctx.envs_dir == Path(config.root) / ".conda" / "envs"
 
 
+def test_envs_dir_rejects_workspace_escape(config: WorkspaceConfig) -> None:
+    config.envs_dir = "../outside"
+
+    with pytest.raises(CondaWorkspacesError, match="escapes the workspace"):
+        WorkspaceContext(config).envs_dir
+
+
+@pytest.mark.parametrize(
+    "precomputed",
+    [False, True],
+    ids=["initial", "after-first-access"],
+)
+def test_envs_dir_rejects_symlinked_state_directory(
+    config: WorkspaceConfig,
+    tmp_path: Path,
+    precomputed: bool,
+) -> None:
+    ctx = WorkspaceContext(config)
+    if precomputed:
+        assert ctx.envs_dir == Path(config.root) / ".conda" / "envs"
+    state = Path(config.root) / ".conda"
+    target = tmp_path / "state"
+    target.mkdir()
+    state.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(CondaWorkspacesError, match="contains a symlink"):
+        ctx.envs_dir
+
+
+def test_env_prefix_rejects_symlink_inside_envs_dir(
+    config: WorkspaceConfig,
+) -> None:
+    ctx = WorkspaceContext(config)
+    ctx.envs_dir.mkdir(parents=True)
+    target = ctx.envs_dir / "target"
+    target.mkdir()
+    try:
+        (ctx.envs_dir / "linked").symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
+
+    with pytest.raises(CondaWorkspacesError, match="prefix cannot be a symlink"):
+        ctx.env_prefix("linked")
+
+
 @pytest.mark.parametrize(
     "cache_key, value_a, value_b",
     [
@@ -185,6 +233,11 @@ def test_env_prefix(config: WorkspaceConfig, env_name: str) -> None:
         r"nested\env",
         r"C:\outside-prefix",
         "C:outside-prefix",
+        "NUL",
+        "com1.txt",
+        "default.",
+        "default ",
+        "default:stream",
     ],
     ids=[
         "empty",
@@ -198,6 +251,11 @@ def test_env_prefix(config: WorkspaceConfig, env_name: str) -> None:
         "nested-windows",
         "windows-absolute",
         "windows-drive-relative",
+        "windows-device",
+        "windows-device-extension",
+        "windows-trailing-dot",
+        "windows-trailing-space",
+        "windows-alternate-data-stream",
     ],
 )
 def test_env_prefix_rejects_path_like_names(

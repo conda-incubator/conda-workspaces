@@ -44,8 +44,10 @@ class WorkspaceNotFoundError(CondaWorkspacesError):
         super().__init__(
             f"No workspace manifest found in '{search_dir}' or any parent directory.",
             hints=[
-                "Create a conda.toml, pixi.toml, or pyproject.toml"
-                " (with [tool.conda.workspace]) to define a workspace.",
+                (
+                    "Create a conda.toml, pixi.toml, or pyproject.toml"
+                    " (with [tool.conda.workspace]) to define a workspace."
+                ),
             ],
         )
 
@@ -98,13 +100,17 @@ class EnvironmentNotFoundError(CondaWorkspacesError):
 class EnvironmentNameInvalidError(CondaWorkspacesError):
     """The requested environment name cannot map to a workspace-local prefix."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, *, reason: str | None = None) -> None:
         self.name = name
+        detail = f" because {reason}" if reason else ""
         super().__init__(
-            f"Environment name '{name}' is not valid for a project-local prefix.",
+            f"Environment name '{name}' is not valid for a project-local prefix"
+            f"{detail}.",
             hints=[
-                "Use a simple environment name without path separators,"
-                " drive prefixes, or '.'/'..'.",
+                (
+                    "Use a short, unique environment name without reserved"
+                    " characters, path separators, drive prefixes, or '.'/'..'."
+                ),
             ],
         )
 
@@ -216,8 +222,10 @@ class AllTargetsUnsolvableError(CondaWorkspacesError):
         super().__init__(
             "Every (environment, platform) pair failed to solve:\n" + summary,
             hints=[
-                "Fix at least one pair, or re-run without --skip-unsolvable"
-                " to see a single fail-fast error.",
+                (
+                    "Fix at least one pair, or re-run without --skip-unsolvable"
+                    " to see a single fail-fast error."
+                ),
             ],
         )
 
@@ -231,8 +239,10 @@ class ActivationError(CondaWorkspacesError):
         super().__init__(
             f"Failed to activate environment '{environment}': {reason}",
             hints=[
-                f"Ensure the environment is installed:"
-                f" conda workspace install -e {environment}",
+                (
+                    f"Ensure the environment is installed:"
+                    f" conda workspace install -e {environment}"
+                ),
             ],
         )
 
@@ -258,8 +268,10 @@ class LockfileIntegrityError(CondaWorkspacesError):
         super().__init__(
             f"Lockfile '{path}' failed integrity validation: {reason}",
             hints=[
-                "Regenerate the lockfile with 'conda workspace lock'"
-                " before installing from it.",
+                (
+                    "Regenerate the lockfile with 'conda workspace lock'"
+                    " before installing from it."
+                ),
             ],
         )
 
@@ -280,9 +292,11 @@ class LockfileMergeError(CondaWorkspacesError):
             f"Cannot merge lockfile fragments: {reason}",
             hints=hints
             or [
-                "Regenerate the offending fragment with `conda workspace"
-                " lock --platform <subdir> --output conda.lock.<subdir>`"
-                " and re-run the merge.",
+                (
+                    "Regenerate the offending fragment with `conda workspace"
+                    " lock --platform <subdir> --output conda.lock.<subdir>`"
+                    " and re-run the merge."
+                ),
             ],
         )
 
@@ -306,8 +320,10 @@ class LockfileStaleError(CondaWorkspacesError):
         super().__init__(
             msg,
             hints=[
-                "Run 'conda workspace lock' to update it,"
-                " or use --frozen to install anyway.",
+                (
+                    "Run 'conda workspace lock' to update it,"
+                    " or use --frozen to install anyway."
+                ),
             ],
         )
 
@@ -359,8 +375,10 @@ class NoTaskFileError(CondaWorkspacesError):
         super().__init__(
             f"No task file found in '{search_dir}'.",
             hints=[
-                "Create a conda.toml, pixi.toml, or pyproject.toml"
-                " with task definitions.",
+                (
+                    "Create a conda.toml, pixi.toml, or pyproject.toml"
+                    " with task definitions."
+                ),
             ],
         )
 

@@ -99,6 +99,12 @@ aliases](reference/format-aliases.md) for the canonical and alias
 strings accepted by `conda env create --file conda.lock` and
 `conda export --format=...`.
 
+Generated and merged lockfiles remove basic authentication, Anaconda
+`/t/<token>/` path segments, queries, and fragments from channel and package
+URLs. Selective updates also scrub unchanged slices copied from an older
+lockfile. Regenerate an existing credential-bearing `conda.lock`, rotate any
+exposed value, and keep replacement credentials in Conda's local configuration.
+
 ## File formats
 
 ### conda.toml
@@ -259,6 +265,33 @@ The `[workspace]` (or `[project]`) table defines workspace metadata:
 | `channels` | list of strings | Conda channels, in priority order |
 | `platforms` | list of strings or rich platform tables | Supported platforms (e.g. `linux-64`, `osx-arm64`, `{ platform = "linux-64", cuda = "12.0" }`) |
 | `channel-priority` | string | Channel priority mode: `strict`, `flexible`, or `disabled` |
+
+### Channel authentication
+
+Keep credentials out of workspace manifests. Store channel names or
+credential-free channel URLs in `channels`, then configure authentication
+through Conda so credentials remain in local user configuration.
+
+`conda workspace init` and generated `quickstart` workspaces remove basic
+authentication, Anaconda `/t/<token>/` path segments, queries, and fragments
+from inherited channel URLs. This includes relative
+`t/<token>/<channel>` configured values, which become credential-free absolute
+channel URLs. Scheme-relative values such as `//repo.example/conda` become
+explicit HTTPS URLs. Manifest mutation and import commands reject exact package
+and PyPI source URLs containing sensitive values because silently removing them
+could change the selected artifact. A mutation also fails when embedded URL
+credentials remain elsewhere in the manifest.
+
+For an existing workspace, remove embedded credentials from the manifest,
+rotate any value that may have been committed or shared, and configure the
+replacement credential outside the repository. Machine-readable workspace
+information also redacts credentials before returning dependency URLs.
+
+Manifest parsing is limited to 16 MiB, 128 nested collection levels, 100,000
+items in one collection, and 1,000,000 aggregate collection items. Lockfiles use
+the same structural limits with a 128 MiB byte limit, and archive receipts use a
+64 MiB byte limit. Split an oversized trusted document or reduce deeply nested
+and very large collections before retrying.
 
 ## Dependencies
 
@@ -454,6 +487,9 @@ Built-in exclusions always apply regardless of this setting:
 
 Dotenv templates such as `.env.example`, `.env.sample`, `.env.template`,
 and `.env.dist` remain eligible for archives unless excluded explicitly.
+
+Archive inspection and extraction reject GNU sparse tar members. Repack a
+sparse input as ordinary files before using it as a workspace archive.
 
 CLI `--exclude` flags are combined with manifest exclusions. In git
 repos, only tracked files are considered regardless of exclusion
