@@ -118,3 +118,48 @@ inferred from the output basename: `conda.toml` maps to `conda-toml`,
 
 See [Format aliases](../reference/format-aliases.md) for the full alias
 table.
+
+## CycloneDX SBOMs with conda-sboms
+
+[`conda-sboms`](https://github.com/jezdez/conda-sboms) is a separate
+exporter plugin. Install it in the environment that owns the `conda`
+executable, alongside conda-workspaces. conda-workspaces discovers its
+formats through the existing exporter hook. It does not contain a CycloneDX
+writer or depend on conda-sboms.
+
+Export one environment and platform from an existing `conda.lock`:
+
+```console
+conda workspace export \
+  --environment default \
+  --from-lockfile \
+  --platform linux-64 \
+  --format cyclonedx-json-v1.7 \
+  --file exports/default-linux-64.cdx.json
+```
+
+The lockfile supplies exact conda package records, but the current conversion
+does not preserve authoritative top-level requirements from the manifest.
+conda-sboms therefore connects the environment root to inferred graph roots.
+The exporter accepts one platform at a time. A selected lockfile environment
+containing pip or other external packages is currently rejected before the
+exporter runs.
+
+Use an installed prefix when conda history should supply the requested roots:
+
+```console
+conda workspace export \
+  --environment default \
+  --from-prefix \
+  --from-history \
+  --format cyclonedx-json-v1.7 \
+  --file exports/default.cdx.json
+```
+
+The output covers the resolved conda package graph supplied to the exporter.
+It does not establish complete product coverage or Cyber Resilience Act
+conformity. See the
+[conda-sboms workspace guide](https://jezdez.github.io/conda-sboms/how-to/conda-workspaces/)
+for the format's exact behavior and coverage limits. [Issue
+#159](https://github.com/conda-incubator/conda-workspaces/issues/159) tracks
+preserving workspace dependency intent when exporting resolved lock records.
