@@ -127,6 +127,12 @@ executable, alongside conda-workspaces. conda-workspaces discovers its
 formats through the existing exporter hook. It does not contain a CycloneDX
 writer or depend on conda-sboms.
 
+Install the optional exporter next to conda-workspaces:
+
+```console
+python -m pip install conda-sboms
+```
+
 Export one environment and platform from an existing `conda.lock`:
 
 ```console
