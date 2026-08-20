@@ -37,7 +37,8 @@ Each builder reuses an existing primitive where one exists:
   :class:`~conda_workspaces.lockfile.CondaLockLoader`
   ``EnvironmentSpecBase`` plugin (``env_for``), identical to the path
   conda takes when it reads ``--file conda.lock`` through
-  :meth:`Environment.from_cli_with_file_envs`.
+  :meth:`Environment.from_cli_with_file_envs`, with optional manifest
+  requested-package enrichment for consumers that need declared roots.
 * :func:`envs_from_manifest` — the only source without a conda
   equivalent.  Turning a declared-but-unsolved ``conda.toml``
   manifest into an :class:`Environment` is the capability that
@@ -61,7 +62,7 @@ from .exceptions import (
     PlatformError,
 )
 from .lockfile import CondaLockLoader, lockfile_path
-from .models import has_match_spec_url_credentials, redact_channel_name
+from .models import redact_channel_name
 from .resolver import resolve_environment
 
 if TYPE_CHECKING:
@@ -129,14 +130,7 @@ def envs_from_manifest(
         resolved = resolve_environment(config, env_name, platform)
         package_platform = resolved.platform_subdir(platform)
 
-        requested_packages = list(resolved.conda_dependencies.values())
-        for dependency in requested_packages:
-            if has_match_spec_url_credentials(dependency):
-                raise CondaValueError(
-                    f"Conda dependency '{dependency.name or 'package'}' cannot be"
-                    " exported safely. Configure authentication outside the"
-                    " manifest and remove credentials from the package source."
-                )
+        requested_packages = resolved.requested_packages_for_export()
 
         external_packages: dict[str, list[str]] = {}
         pypi_entries: list[str] = []
@@ -202,27 +196,52 @@ def envs_from_lockfile(
     env_name: str,
     *,
     requested_platforms: tuple[str, ...] = (),
+    include_requested_packages: bool = False,
 ) -> list[Environment]:
-    """Implementation backing :meth:`WorkspaceContext.envs_from_lockfile`."""
+    """Load lock environments and optionally add direct manifest requirements."""
     path = lockfile_path(ctx)
     if not path.is_file():
         raise LockfileNotFoundError(env_name, path)
     loader = CondaLockLoader(path)
-    available = loader.available_platforms
+    try:
+        available = loader.platforms_for(env_name)
+    except ValueError as exc:
+        raise LockfileNotFoundError(env_name, path) from exc
     if requested_platforms:
-        unknown = [p for p in requested_platforms if p not in available]
-        if unknown:
-            raise PlatformError(unknown[0], list(available))
-        requested_set = set(requested_platforms)
+        requested_set: set[str] = set()
+        for requested in requested_platforms:
+            if requested not in available:
+                matches = ctx.config.platform_names_for_subdir(requested, available)
+                if len(matches) > 1:
+                    raise CondaValueError(
+                        f"Platform '{requested}' matches multiple lockfile platforms: "
+                        f"{', '.join(sorted(matches))}. Use a declared platform name."
+                    )
+            requested_set.add(ctx.config.resolve_platform_name(requested, available))
         targets = tuple(p for p in available if p in requested_set)
     else:
         targets = available
     if not targets:
         raise LockfileNotFoundError(env_name, path)
     try:
-        return [loader.env_for(platform=p, name=env_name) for p in targets]
+        envs = [
+            loader.env_for(
+                platform=platform,
+                name=env_name,
+                package_platform=ctx.config.platform_subdir(platform),
+                metadata_only=include_requested_packages,
+            )
+            for platform in targets
+        ]
     except ValueError as exc:
         raise LockfileNotFoundError(env_name, path) from exc
+    if include_requested_packages:
+        for platform, env in zip(targets, envs, strict=True):
+            resolved = resolve_environment(ctx.config, env_name, platform)
+            env.requested_packages = resolved.requested_packages_for_export(
+                env.explicit_packages
+            )
+    return envs
 
 
 def resolve_exporter(

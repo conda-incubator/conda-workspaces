@@ -318,6 +318,7 @@ class WorkspaceContext:
         env_name: str,
         *,
         requested_platforms: tuple[str, ...] = (),
+        include_requested_packages: bool = False,
     ) -> list[Environment]:
         """Load ``Environment`` objects from the workspace ``conda.lock``.
 
@@ -329,12 +330,17 @@ class WorkspaceContext:
         When *requested_platforms* is empty, every platform present in
         the lockfile is returned.  Otherwise the list is filtered and
         :class:`PlatformError` is raised for any requested platform the
-        lockfile does not contain.
+        lockfile does not contain. When *include_requested_packages* is true,
+        matching direct conda requirements from the manifest are added
+        to each environment.
         """
         from .export import envs_from_lockfile
 
         return envs_from_lockfile(
-            self, env_name, requested_platforms=requested_platforms
+            self,
+            env_name,
+            requested_platforms=requested_platforms,
+            include_requested_packages=include_requested_packages,
         )
 
 

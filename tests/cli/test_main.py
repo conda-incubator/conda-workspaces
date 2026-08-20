@@ -38,6 +38,7 @@ def test_generate_task_parser_returns_parser() -> None:
         "init",
         "install",
         "lock",
+        "sbom",
         "list",
         "envs",
         "info",
@@ -223,12 +224,63 @@ def test_workspace_parser_separates_manifest_and_export_paths() -> None:
     assert parsed.output == Path("../environment.yml")
 
 
+def test_workspace_sbom_parser_args() -> None:
+    parser = generate_workspace_parser()
+
+    parsed = parser.parse_args(
+        [
+            "sbom",
+            "--environment",
+            "runtime",
+            "--platform",
+            "linux-64",
+            "--from-prefix",
+            "--file",
+            "dist/runtime.cdx.json",
+            "--product-name",
+            "Acme Runtime",
+            "--product-version",
+            "2026.08",
+            "--product-manufacturer",
+            "Acme GmbH",
+            "--product-manufacturer-url",
+            "https://acme.example",
+            "--author-name",
+            "Alice Example",
+            "--author-email",
+            "alice@acme.example",
+            "--author-organization",
+            "Acme Product Security",
+            "--author-organization-url",
+            "https://acme.example/security",
+            "--dry-run",
+            "--json",
+        ]
+    )
+
+    assert parsed.environment == "runtime"
+    assert parsed.platform == "linux-64"
+    assert parsed.from_prefix is True
+    assert parsed.output == Path("dist/runtime.cdx.json")
+    assert parsed.product_name == "Acme Runtime"
+    assert parsed.product_version == "2026.08"
+    assert parsed.product_manufacturer == "Acme GmbH"
+    assert parsed.product_manufacturer_url == "https://acme.example"
+    assert parsed.author_name == "Alice Example"
+    assert parsed.author_email == "alice@acme.example"
+    assert parsed.author_organization == "Acme Product Security"
+    assert parsed.author_organization_url == "https://acme.example/security"
+    assert parsed.dry_run is True
+    assert parsed.json is True
+
+
 @pytest.mark.parametrize(
     "subcmd, module_attr, func_name",
     [
         ("init", "conda_workspaces.cli.workspace.init", "execute_init"),
         ("install", "conda_workspaces.cli.workspace.install", "execute_install"),
         ("lock", "conda_workspaces.cli.workspace.lock", "execute_lock"),
+        ("sbom", "conda_workspaces.cli.workspace.sbom", "execute_sbom"),
         ("list", "conda_workspaces.cli.workspace.list", "execute_list"),
         ("info", "conda_workspaces.cli.workspace.info", "execute_info"),
         ("add", "conda_workspaces.cli.workspace.add", "execute_add"),
@@ -242,6 +294,7 @@ def test_workspace_parser_separates_manifest_and_export_paths() -> None:
         "init",
         "install",
         "lock",
+        "sbom",
         "list",
         "info",
         "add",

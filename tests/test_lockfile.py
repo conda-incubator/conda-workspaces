@@ -359,6 +359,19 @@ def test_conda_lock_loader_available_platforms(
     assert loader.available_platforms == ("linux-64", "osx-arm64")
 
 
+def test_conda_lock_loader_platforms_for_named_environment(
+    lockfile_with_platforms: Path,
+) -> None:
+    data = load_lockfile_data(lockfile_with_platforms.read_bytes())
+    data["environments"]["test"] = {
+        "channels": [],
+        "packages": {"win-64": []},
+    }
+    loader = CondaLockLoader(lockfile_with_platforms, data=data)
+
+    assert loader.platforms_for("test") == ("win-64",)
+
+
 @pytest.fixture
 def fake_records_factory(monkeypatch: pytest.MonkeyPatch):
     """Stub conda-lockfiles' URL -> PackageRecord conversion.
@@ -412,6 +425,45 @@ def test_conda_lock_loader_env_for_platform(
     assert env.platform == platform
     assert len(env.explicit_packages) == 1
     assert env.explicit_packages[0].url == expected_url
+
+
+def test_conda_lock_loader_env_for_rich_platform(
+    lockfile_with_platforms: Path,
+    fake_records_factory: list,
+) -> None:
+    data = load_lockfile_data(lockfile_with_platforms.read_bytes())
+    packages = data["environments"]["default"]["packages"]
+    packages["linux-64-cuda"] = packages.pop("linux-64")
+    loader = CondaLockLoader(lockfile_with_platforms, data=data)
+
+    env = loader.env_for(
+        "linux-64-cuda",
+        package_platform="linux-64",
+    )
+
+    assert env.platform == "linux-64"
+    assert getattr(env, "lock_platform") == "linux-64-cuda"
+    assert len(env.explicit_packages) == 1
+    assert "/linux-64/" in env.explicit_packages[0].url
+
+
+def test_conda_lock_loader_metadata_only_does_not_fetch(
+    lockfile_with_platforms: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_fetch(*args: object, **kwargs: object) -> tuple[()]:
+        raise AssertionError("metadata-only lockfile reads must not fetch packages")
+
+    monkeypatch.setattr(
+        "conda_lockfiles.rattler_lock.v6.records_from_conda_urls",
+        unexpected_fetch,
+    )
+    loader = CondaLockLoader(lockfile_with_platforms)
+
+    env = loader.env_for("linux-64", metadata_only=True)
+
+    assert env.platform == "linux-64"
+    assert len(env.explicit_packages) == 1
 
 
 def test_conda_lock_loader_env_redacts_urls_before_conversion(

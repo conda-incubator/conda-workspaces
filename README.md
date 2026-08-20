@@ -111,6 +111,7 @@ and also provides `cw` and `ct` as shorter aliases.
 | `conda workspace update SPECS...` | Update selected conda roots while preserving constraints |
 | `conda workspace remove SPECS...` | Remove dependencies |
 | `conda workspace export` | Export environments and manifests through conda exporters |
+| `conda workspace sbom` | Export a CycloneDX SBOM through the optional conda-sboms plugin |
 | `conda workspace import FILE` | Import supported project manifests |
 | `conda workspace quickstart SPECS...` | Bootstrap a workspace, install it, and optionally open a shell |
 | `conda workspace shell -e ENV` | Spawn a shell with an environment activated |

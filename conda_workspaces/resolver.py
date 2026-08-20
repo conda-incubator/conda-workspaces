@@ -13,10 +13,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from conda.exceptions import CondaValueError
+
 from .exceptions import (
     PlatformError,
 )
-from .models import redact_url_text
+from .models import has_match_spec_url_credentials, redact_url_text
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -52,6 +54,38 @@ class ResolvedEnvironment:
     def platform_subdir(self, platform: str) -> str:
         """Return the concrete conda subdir for a declared platform name."""
         return self.platform_subdirs.get(platform, platform)
+
+    def requested_packages_for_export(
+        self,
+        exact_packages: Iterable[PackageRecord] | None = None,
+    ) -> list[MatchSpec]:
+        """Return credential-safe direct conda requirements for an export."""
+        requested_packages = list(self.conda_dependencies.values())
+        for dependency in requested_packages:
+            if has_match_spec_url_credentials(dependency):
+                raise CondaValueError(
+                    f"Conda dependency '{dependency.name or 'package'}' cannot be"
+                    " exported safely. Configure authentication outside the"
+                    " manifest and remove credentials from the package source."
+                )
+        if exact_packages is not None:
+            records = tuple(exact_packages)
+            unsatisfied = [
+                dependency
+                for dependency in requested_packages
+                if not (dependency.name or "").startswith("__")
+                and not any(dependency.match(record) for record in records)
+            ]
+            if unsatisfied:
+                requirements = ", ".join(
+                    redact_url_text(str(dependency)) for dependency in unsatisfied
+                )
+                raise CondaValueError(
+                    "Lockfile package records do not satisfy the manifest "
+                    f"requirements: {requirements}. Run 'conda workspace lock' "
+                    "before exporting."
+                )
+        return requested_packages
 
     def resolve_platform_name(
         self,

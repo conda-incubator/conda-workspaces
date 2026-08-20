@@ -518,14 +518,31 @@ class CondaLockLoader(EnvironmentSpecBase):
     @property
     def available_platforms(self) -> tuple[str, ...]:
         """Platforms declared in this lockfile's default environment."""
-        env_data = self._env_data("default")
+        return self.platforms_for()
+
+    def platforms_for(self, name: str = "default") -> tuple[str, ...]:
+        """Return the platforms declared for lockfile environment *name*."""
+        env_data = self._env_data(name)
         return tuple(sorted(env_data.get("packages", {})))
 
-    def env_for(self, platform: str, name: str = "default") -> Environment:
+    def env_for(
+        self,
+        platform: str,
+        name: str = "default",
+        *,
+        package_platform: str | None = None,
+        metadata_only: bool = False,
+    ) -> Environment:
         """Return the conda ``Environment`` for *platform* and *name*.
 
         Raises ``PlatformMismatchError`` if *platform* is not in the
         lockfile or *name* does not identify a declared environment.
+        *package_platform* supplies the backing conda subdir when
+        *platform* is a rich workspace platform name. The returned environment
+        keeps the backing subdir as its conda platform and records the logical
+        lock key separately for round-trip serialization.
+        *metadata_only* reconstructs exact records from the lockfile without
+        accessing the package cache.
         """
         payload = self.redact_data_urls(self._data)
         if payload.get("version") != LOCKFILE_VERSION:
@@ -549,19 +566,58 @@ class CondaLockLoader(EnvironmentSpecBase):
                 subdir=platform,
             )
 
-        self.validate_env_for_conversion(payload, name, platform)
+        self.validate_env_for_conversion(
+            payload,
+            name,
+            platform,
+            package_platform=package_platform,
+        )
 
         # Share rattler-lock v6 conversion with conda-lockfiles via a
         # localised in-memory version byte swap.  Disk file is untouched.
-        from conda_lockfiles.rattler_lock.v6 import (
-            RattlerLockV6,
-            rattler_lock_v6_to_conda_env,
-        )
+        from conda_lockfiles.rattler_lock.v6 import RattlerLockV6
 
+        conversion_platform = package_platform or platform
+        records = None
+        if metadata_only:
+            records = self.package_records_for_env_data(
+                payload,
+                name,
+                platform,
+                package_platform=conversion_platform,
+            )
+        if conversion_platform != platform:
+            packages = payload["environments"][name]["packages"]
+            packages[conversion_platform] = packages[platform]
         payload["version"] = 6
         lockfile_model = RattlerLockV6.model_validate(payload)
-        env = rattler_lock_v6_to_conda_env(lockfile_model, name=name, platform=platform)
+        if records is None:
+            from conda_lockfiles.rattler_lock.v6 import rattler_lock_v6_to_conda_env
+
+            env = rattler_lock_v6_to_conda_env(
+                lockfile_model,
+                name=name,
+                platform=conversion_platform,
+            )
+        else:
+            from conda.models.channel import Channel
+            from conda.models.environment import Environment, EnvironmentConfig
+
+            lock_environment = lockfile_model.environments[name]
+            env = Environment(
+                name=name,
+                platform=conversion_platform,
+                config=EnvironmentConfig(
+                    channels=tuple(
+                        Channel(channel.url).canonical_name
+                        for channel in lock_environment.channels
+                    )
+                ),
+                explicit_packages=records,
+            )
         env.name = name
+        if conversion_platform != platform:
+            setattr(env, "lock_platform", platform)
         return env
 
     def validate_env_for_conversion(
@@ -569,13 +625,15 @@ class CondaLockLoader(EnvironmentSpecBase):
         data: dict[str, Any],
         name: str,
         platform: str,
+        *,
+        package_platform: str | None = None,
     ) -> None:
         """Validate one redacted slice before generic rattler conversion."""
         env_data = data["environments"][name]
         refs = env_data.get("packages", {}).get(platform, ())
         channel_urls = self.channel_urls_for_env_data(
             env_data,
-            platform,
+            package_platform or platform,
             path=self.path,
         )
         try:
@@ -1139,10 +1197,10 @@ class CondaLockLoader(EnvironmentSpecBase):
             # objects through other paths (``conda export`` plugin,
             # tests, third parties).
             env_name = str(env.name or "default")
-            platform = str(env.platform)
-            package_platform = str(getattr(env, "package_platform", platform))
+            platform = str(getattr(env, "lock_platform", env.platform))
+            package_platform = str(getattr(env, "package_platform", env.platform))
             validation_env = env
-            if package_platform != platform:
+            if str(env.platform) != package_platform:
                 validation_env = Environment(
                     name=env_name,
                     platform=package_platform,
