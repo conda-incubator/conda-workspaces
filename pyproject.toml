@@ -138,7 +138,15 @@ python = "3.12.*"
 python = "3.13.*"
 
 [tool.pixi.feature.py314.dependencies]
+cyclonedx-python-lib-with-json-validation = ">=11.12,<12"
 python = "3.14.*"
+
+[tool.pixi.feature.py314.pypi-dependencies]
+conda-sboms = ">=0.3.0"
+
+[tool.pixi.feature.py314.target.linux-64.dependencies]
+cyclonedx-cli = ">=0.33.1,<0.34"
+trivy = ">=0.74,<0.75"
 
 [tool.pixi.feature.docs.dependencies]
 sphinx = ">=7.0"

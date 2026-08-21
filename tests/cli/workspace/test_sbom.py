@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import importlib
+import json
+import os
+import shutil
+import subprocess
 import sys
 import types
 from io import StringIO
@@ -18,6 +23,7 @@ from conda_workspaces.cli.workspace.sbom import execute_sbom
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
 
 _METADATA_DEFAULTS = {
@@ -320,3 +326,107 @@ def test_sbom_without_metadata_uses_generic_exporter_path(
 
     assert execute_sbom(sbom_args()) == 23
     assert callbacks == [None]
+
+
+def test_sbom_from_lockfile_generates_valid_reproducible_cyclonedx(
+    exact_lockfile_export: tuple[Path, str, str],
+    rich_console: Console,
+) -> None:
+    interop = os.environ.get("CONDA_WORKSPACES_SBOM_INTEROP") == "1"
+    if interop:
+        importlib.import_module("conda_sboms")
+    else:
+        pytest.importorskip("conda_sboms")
+    from cyclonedx.schema import SchemaVersion
+    from cyclonedx.validation.json import JsonStrictValidator
+
+    workspace, _, digest = exact_lockfile_export
+    outputs = [workspace / "first.cdx.json", workspace / "second.cdx.json"]
+    for output in outputs:
+        assert (
+            execute_sbom(
+                sbom_args(
+                    platform="linux-64",
+                    output=output,
+                    reproducible=True,
+                    product_name="CLI test workspace",
+                    product_version="1.0.0",
+                ),
+                console=rich_console,
+            )
+            == 0
+        )
+
+    output = outputs[0]
+    assert output.read_bytes() == outputs[1].read_bytes()
+    content = output.read_text(encoding="utf-8")
+    assert JsonStrictValidator(SchemaVersion.V1_7).validate_str(content) is None
+    document = json.loads(content)
+    root = document["metadata"]["component"]
+    component = document["components"][0]
+
+    assert document["specVersion"] == "1.7"
+    assert "timestamp" not in document["metadata"]
+    assert {item["name"]: item["value"] for item in document["metadata"]["properties"]}[
+        "cdx:reproducible"
+    ] == "true"
+    assert (root["name"], root["version"]) == ("CLI test workspace", "1.0.0")
+    assert component["purl"] == (
+        "pkg:conda/python@3.12.0?build=h123_0&channel=conda-forge"
+        "&subdir=linux-64&type=conda"
+    )
+    assert component["hashes"] == [{"alg": "SHA-256", "content": digest}]
+    assert component["licenses"] == [{"license": {"name": "BSD-3-Clause"}}]
+    dependencies = {
+        dependency["ref"]: dependency["dependsOn"]
+        for dependency in document["dependencies"]
+    }
+    assert dependencies[root["bom-ref"]] == [component["bom-ref"]]
+
+    if interop:
+        cyclonedx_cli = shutil.which("cyclonedx-cli")
+        trivy = shutil.which("trivy")
+        assert cyclonedx_cli is not None
+        assert trivy is not None
+        subprocess.run(
+            [
+                cyclonedx_cli,
+                "validate",
+                "--input-file",
+                str(output),
+                "--input-format",
+                "json",
+                "--input-version",
+                "v1_7",
+                "--fail-on-errors",
+            ],
+            check=True,
+        )
+        completed = subprocess.run(
+            [
+                trivy,
+                "sbom",
+                "--scanners",
+                "license",
+                "--offline-scan",
+                "--format",
+                "json",
+                str(output),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        trivy_report = json.loads(completed.stdout)
+        assert trivy_report["SchemaVersion"] == 2
+        assert trivy_report["ArtifactType"] == "cyclonedx"
+        conda_packages = next(
+            result["Packages"]
+            for result in trivy_report["Results"]
+            if result.get("Class") == "lang-pkgs" and result.get("Type") == "conda-pkg"
+        )
+        python_package = next(
+            package for package in conda_packages if package["Name"] == "python"
+        )
+        assert python_package["Identifier"]["PURL"] == component["purl"]
+        assert "BSD-3-Clause" in python_package["Licenses"]

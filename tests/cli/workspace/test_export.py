@@ -10,7 +10,6 @@ import pytest
 import tomlkit
 from conda.common.serialize.yaml import loads as yaml_loads
 from conda.exceptions import CondaValueError
-from conda.models.records import PackageRecord
 from rich.console import Console
 
 import conda_workspaces.cli.workspace.export as export_module
@@ -491,49 +490,6 @@ def test_export_from_lockfile_missing_raises(
 
     with pytest.raises(LockfileNotFoundError):
         execute_export(make_args(_DEFAULTS, from_lockfile=True))
-
-
-@pytest.fixture
-def exact_lockfile_export(
-    pixi_workspace: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> tuple[Path, str, str]:
-    monkeypatch.chdir(pixi_workspace)
-    url = "https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-h123_0.conda"
-    digest = "a" * 64
-    (pixi_workspace / "conda.lock").write_text(
-        "version: 1\n"
-        "environments:\n"
-        "  default:\n"
-        "    channels:\n"
-        "    - url: https://conda.anaconda.org/conda-forge\n"
-        "    packages:\n"
-        "      linux-64:\n"
-        f"      - conda: {url}\n"
-        "packages:\n"
-        f"- conda: {url}\n"
-        f"  sha256: {digest}\n",
-        encoding="utf-8",
-    )
-
-    monkeypatch.setattr(
-        "conda_lockfiles.rattler_lock.v6.records_from_conda_urls",
-        lambda metadata_by_url, **kwargs: tuple(
-            PackageRecord(
-                name="python",
-                version="3.12.0",
-                build="h123_0",
-                build_number=0,
-                channel="https://conda.anaconda.org/conda-forge",
-                subdir="linux-64",
-                fn="python-3.12.0-h123_0.conda",
-                url=package_url,
-                sha256=digest,
-            )
-            for package_url in metadata_by_url
-        ),
-    )
-    return pixi_workspace, url, digest
 
 
 def test_export_manifest_format_from_lockfile_keeps_exact_package(

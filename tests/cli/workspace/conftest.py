@@ -8,10 +8,57 @@ from typing import TYPE_CHECKING
 
 import pytest
 from conda.base.context import reset_context
+from conda.models.records import PackageRecord
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from pathlib import Path
+
+
+@pytest.fixture
+def exact_lockfile_export(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, str, str]:
+    """Create a lockfile whose exact package record needs no archive fetch."""
+    monkeypatch.chdir(pixi_workspace)
+    url = "https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-h123_0.conda"
+    digest = "a" * 64
+    (pixi_workspace / "conda.lock").write_text(
+        "version: 1\n"
+        "environments:\n"
+        "  default:\n"
+        "    channels:\n"
+        "    - url: https://conda.anaconda.org/conda-forge\n"
+        "    packages:\n"
+        "      linux-64:\n"
+        f"      - conda: {url}\n"
+        "packages:\n"
+        f"- conda: {url}\n"
+        f"  sha256: {digest}\n"
+        "  license: BSD-3-Clause\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "conda_lockfiles.rattler_lock.v6.records_from_conda_urls",
+        lambda metadata_by_url, **kwargs: tuple(
+            PackageRecord(
+                name="python",
+                version="3.12.0",
+                build="h123_0",
+                build_number=0,
+                channel="https://conda.anaconda.org/conda-forge",
+                subdir="linux-64",
+                fn="python-3.12.0-h123_0.conda",
+                url=package_url,
+                sha256=digest,
+                license="BSD-3-Clause",
+            )
+            for package_url in metadata_by_url
+        ),
+    )
+    return pixi_workspace, url, digest
 
 
 @pytest.fixture
