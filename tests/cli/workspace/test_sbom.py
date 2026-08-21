@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -332,11 +330,7 @@ def test_sbom_from_lockfile_generates_valid_reproducible_cyclonedx(
     exact_lockfile_export: tuple[Path, str, str],
     rich_console: Console,
 ) -> None:
-    interop = os.environ.get("CONDA_WORKSPACES_SBOM_INTEROP") == "1"
-    if interop:
-        importlib.import_module("conda_sboms")
-    else:
-        pytest.importorskip("conda_sboms")
+    pytest.importorskip("conda_sboms")
     from cyclonedx.schema import SchemaVersion
     from cyclonedx.validation.json import JsonStrictValidator
 
@@ -383,50 +377,49 @@ def test_sbom_from_lockfile_generates_valid_reproducible_cyclonedx(
     }
     assert dependencies[root["bom-ref"]] == [component["bom-ref"]]
 
-    if interop:
-        cyclonedx_cli = shutil.which("cyclonedx-cli")
-        trivy = shutil.which("trivy")
-        assert cyclonedx_cli is not None
-        assert trivy is not None
-        subprocess.run(
-            [
-                cyclonedx_cli,
-                "validate",
-                "--input-file",
-                str(output),
-                "--input-format",
-                "json",
-                "--input-version",
-                "v1_7",
-                "--fail-on-errors",
-            ],
-            check=True,
-        )
-        completed = subprocess.run(
-            [
-                trivy,
-                "sbom",
-                "--scanners",
-                "license",
-                "--offline-scan",
-                "--format",
-                "json",
-                str(output),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        trivy_report = json.loads(completed.stdout)
-        assert trivy_report["SchemaVersion"] == 2
-        assert trivy_report["ArtifactType"] == "cyclonedx"
-        conda_packages = next(
-            result["Packages"]
-            for result in trivy_report["Results"]
-            if result.get("Class") == "lang-pkgs" and result.get("Type") == "conda-pkg"
-        )
-        python_package = next(
-            package for package in conda_packages if package["Name"] == "python"
-        )
-        assert python_package["Identifier"]["PURL"] == component["purl"]
-        assert "BSD-3-Clause" in python_package["Licenses"]
+    cyclonedx_cli = shutil.which("cyclonedx-cli")
+    trivy = shutil.which("trivy")
+    assert cyclonedx_cli is not None
+    assert trivy is not None
+    subprocess.run(
+        [
+            cyclonedx_cli,
+            "validate",
+            "--input-file",
+            str(output),
+            "--input-format",
+            "json",
+            "--input-version",
+            "v1_7",
+            "--fail-on-errors",
+        ],
+        check=True,
+    )
+    completed = subprocess.run(
+        [
+            trivy,
+            "sbom",
+            "--scanners",
+            "license",
+            "--offline-scan",
+            "--format",
+            "json",
+            str(output),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    trivy_report = json.loads(completed.stdout)
+    assert trivy_report["SchemaVersion"] == 2
+    assert trivy_report["ArtifactType"] == "cyclonedx"
+    conda_packages = next(
+        result["Packages"]
+        for result in trivy_report["Results"]
+        if result.get("Class") == "lang-pkgs" and result.get("Type") == "conda-pkg"
+    )
+    python_package = next(
+        package for package in conda_packages if package["Name"] == "python"
+    )
+    assert python_package["Identifier"]["PURL"] == component["purl"]
+    assert "BSD-3-Clause" in python_package["Licenses"]
