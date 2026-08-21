@@ -13,19 +13,18 @@ and conda-workspaces:
 
 ```console
 conda activate base
-conda pypi install conda-sboms
+conda pypi install "conda-sboms>=0.2.0"
 ```
 
 If `conda pypi` is unavailable, install the wheel in that same environment:
 
 ```console
-python -m pip install conda-sboms
+python -m pip install "conda-sboms>=0.2.0"
 ```
 
 Without metadata flags, the command reports the missing
 `cyclonedx-json-v1.7` exporter when the plugin is not installed. Per-export
-metadata flags require a conda-sboms release that includes its public metadata
-API.
+metadata flags require conda-sboms 0.2.0 or newer.
 
 The shortest form reads exact package records for the `default` environment
 from the existing `conda.lock`, selects the host platform, and writes the SBOM

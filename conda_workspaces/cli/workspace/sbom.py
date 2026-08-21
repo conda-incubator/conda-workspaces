@@ -59,7 +59,7 @@ def execute_sbom(
         ).CycloneDXExportMetadata
     except (AttributeError, ImportError) as exc:
         raise CondaValueError(
-            "Per-export metadata requires a newer conda-sboms. Install or upgrade "
+            "Per-export metadata requires conda-sboms >=0.2.0. Install or upgrade "
             "conda-sboms in the environment that owns conda."
         ) from exc
 

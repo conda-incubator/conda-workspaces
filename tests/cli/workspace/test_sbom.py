@@ -225,7 +225,7 @@ def test_sbom_metadata_requires_current_conda_sboms_api(
 
     monkeypatch.setattr(sbom_module, "execute_export", unexpected_export)
 
-    with pytest.raises(CondaValueError, match="conda-sboms"):
+    with pytest.raises(CondaValueError, match=r"conda-sboms >=0\.2\.0"):
         execute_sbom(sbom_args(product_name="Acme Runtime", product_version="2026.08"))
 
 
