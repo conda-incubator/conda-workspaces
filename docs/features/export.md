@@ -4,7 +4,8 @@
 
 `conda workspace sbom` exports one resolved workspace environment as a
 CycloneDX 1.7 JSON software bill of materials. It is a focused interface to the
-optional [`conda-sboms`](https://github.com/jezdez/conda-sboms) exporter. The
+optional [`conda-sboms`](https://github.com/conda-incubator/conda-sboms)
+exporter. The
 SBOM mapping, validation, and serialization stay in conda-sboms rather than
 conda-workspaces.
 
@@ -13,18 +14,19 @@ and conda-workspaces:
 
 ```console
 conda activate base
-conda pypi install "conda-sboms>=0.2.0"
+conda pypi install "conda-sboms>=0.3.0"
 ```
 
 If `conda pypi` is unavailable, install the wheel in that same environment:
 
 ```console
-python -m pip install "conda-sboms>=0.2.0"
+python -m pip install "conda-sboms>=0.3.0"
 ```
 
-Without metadata flags, the command reports the missing
+Without metadata flags or `--reproducible`, the command reports the missing
 `cyclonedx-json-v1.7` exporter when the plugin is not installed. Per-export
-metadata flags require conda-sboms 0.2.0 or newer.
+metadata flags require conda-sboms 0.2.0 or newer. `--reproducible` requires
+conda-sboms 0.3.0 or newer.
 
 The shortest form reads exact package records for the `default` environment
 from the existing `conda.lock`, selects the host platform, and writes the SBOM
@@ -103,10 +105,19 @@ settings for this export. Unspecified flag values remain unset rather than
 being inherited from the active configuration. conda-workspaces does not infer
 a manufacturer or author from the workspace, package records, or channels.
 
-### Reproducible timestamps
+### Reproducible output
 
-conda-sboms uses the current UTC time by default. Set `SOURCE_DATE_EPOCH` to a
-non-negative Unix timestamp when the same inputs must produce a stable
+conda-sboms uses the current UTC time by default. Pass `--reproducible` to omit
+the CycloneDX `metadata.timestamp` field and record
+`cdx:reproducible=true` instead:
+
+```console
+conda workspace sbom --reproducible \
+  --file exports/default.cdx.json
+```
+
+The flag takes precedence over `SOURCE_DATE_EPOCH`, including an invalid value.
+Use `SOURCE_DATE_EPOCH` instead when consumers require a meaningful, stable
 timestamp:
 
 ```console
@@ -114,9 +125,9 @@ SOURCE_DATE_EPOCH=1787184000 conda workspace sbom \
   --file exports/default.cdx.json
 ```
 
-An invalid, negative, or unsupported value fails before output is written.
-Byte-for-byte reproducibility also requires unchanged inputs and the same
-serializer version.
+Without `--reproducible`, an invalid, negative, or unsupported value fails
+before output is written. Byte-for-byte reproducibility also requires unchanged
+inputs and the same conda-sboms and serializer versions.
 
 ### Generic export form
 
@@ -151,7 +162,7 @@ Conda package metadata does not identify every operating-system component or
 dependency vendored or statically linked inside a package. The generated SBOM
 is useful technical documentation, but it does not establish complete product
 coverage or Cyber Resilience Act conformity. See the
-[conda-sboms coverage guide](https://jezdez.github.io/conda-sboms/explanation/coverage-and-compliance/)
+[conda-sboms coverage guide](https://conda-incubator.github.io/conda-sboms/explanation/coverage-and-compliance/)
 for the exact format and compliance boundaries.
 
 ## Generic environment and manifest exports

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+from inspect import signature
 from typing import TYPE_CHECKING
 
 from conda.base.context import context as conda_context
@@ -42,7 +43,8 @@ def execute_sbom(
         "author_organization": args.author_organization,
         "author_organization_url": args.author_organization_url,
     }
-    if not any(value is not None for value in metadata_values.values()):
+    metadata_requested = any(value is not None for value in metadata_values.values())
+    if not metadata_requested and not args.reproducible:
         return execute_export(
             args,
             console=console,
@@ -50,22 +52,50 @@ def execute_sbom(
             host_prefix_only=True,
         )
 
+    requirement = (
+        "Reproducible output requires conda-sboms >=0.3.0. Install or upgrade "
+        "conda-sboms in the environment that owns conda."
+        if args.reproducible
+        else "Per-export metadata requires conda-sboms >=0.2.0. Install or upgrade "
+        "conda-sboms in the environment that owns conda."
+    )
     try:
         CycloneDXExporter = importlib.import_module(
             "conda_sboms.cyclonedx"
         ).CycloneDXExporter
-        CycloneDXExportMetadata = importlib.import_module(
-            "conda_sboms.settings"
-        ).CycloneDXExportMetadata
     except (AttributeError, ImportError) as exc:
-        raise CondaValueError(
-            "Per-export metadata requires conda-sboms >=0.2.0. Install or upgrade "
-            "conda-sboms in the environment that owns conda."
-        ) from exc
+        raise CondaValueError(requirement) from exc
 
-    metadata = CycloneDXExportMetadata(**metadata_values)
+    if args.reproducible:
+        try:
+            supports_reproducible = (
+                "output_reproducible" in signature(CycloneDXExporter).parameters
+            )
+        except (TypeError, ValueError):
+            supports_reproducible = False
+        if not supports_reproducible:
+            raise CondaValueError(requirement)
+
+    metadata = None
+    if metadata_requested:
+        try:
+            CycloneDXExportMetadata = importlib.import_module(
+                "conda_sboms.settings"
+            ).CycloneDXExportMetadata
+        except (AttributeError, ImportError) as exc:
+            raise CondaValueError(
+                "Per-export metadata requires conda-sboms >=0.2.0. Install or "
+                "upgrade conda-sboms in the environment that owns conda."
+            ) from exc
+        metadata = CycloneDXExportMetadata(**metadata_values)
 
     def render(environment: Environment) -> str:
+        if args.reproducible:
+            return CycloneDXExporter(
+                environment,
+                metadata=metadata,
+                output_reproducible=True,
+            ).export()
         return CycloneDXExporter(environment, metadata=metadata).export()
 
     return execute_export(

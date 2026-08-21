@@ -36,6 +36,7 @@ _DEFAULTS = {
     "environment": "default",
     "platform": None,
     "from_prefix": False,
+    "reproducible": False,
     "from_history": False,
     "output": None,
     "dry_run": False,
@@ -130,29 +131,43 @@ def test_sbom_normalizes_and_delegates_export(
 
 
 @pytest.mark.parametrize(
-    "values",
+    ("values", "reproducible"),
     [
-        {
-            "product_name": "Acme Runtime",
-            "product_version": "2026.08",
-            "product_manufacturer": "Acme GmbH",
-            "product_manufacturer_url": "https://acme.example",
-            "author_name": "Alice Example",
-            "author_email": "alice@acme.example",
-            "author_organization": "Acme Product Security",
-            "author_organization_url": "https://acme.example/security",
-        },
-        {"author_name": "Alice Example"},
+        (
+            {
+                "product_name": "Acme Runtime",
+                "product_version": "2026.08",
+                "product_manufacturer": "Acme GmbH",
+                "product_manufacturer_url": "https://acme.example",
+                "author_name": "Alice Example",
+                "author_email": "alice@acme.example",
+                "author_organization": "Acme Product Security",
+                "author_organization_url": "https://acme.example/security",
+            },
+            False,
+        ),
+        ({"author_name": "Alice Example"}, False),
+        ({}, True),
+        (
+            {"product_name": "Acme Runtime", "product_version": "2026.08"},
+            True,
+        ),
     ],
-    ids=["all-fields", "partial-override"],
+    ids=[
+        "all-metadata",
+        "partial-metadata",
+        "reproducible-configured-metadata",
+        "reproducible-explicit-metadata",
+    ],
 )
-def test_sbom_metadata_builds_one_export_callback(
+def test_sbom_options_build_one_export_callback(
     monkeypatch: pytest.MonkeyPatch,
     values: dict[str, str],
+    reproducible: bool,
 ) -> None:
     metadata_values: list[dict[str, str | None]] = []
     metadata_instances: list[object] = []
-    exporter_calls: list[tuple[object, object]] = []
+    exporter_calls: list[tuple[object, object | None, bool]] = []
     delegated_callbacks: list[Callable | None] = []
 
     class FakeMetadata:
@@ -161,16 +176,29 @@ def test_sbom_metadata_builds_one_export_callback(
             metadata_instances.append(self)
 
     class FakeExporter:
-        def __init__(self, environment: object, *, metadata: object) -> None:
-            exporter_calls.append((environment, metadata))
-
         def export(self) -> str:
             return "generated SBOM\n"
+
+    class LegacyExporter(FakeExporter):
+        def __init__(self, environment: object, *, metadata: object) -> None:
+            exporter_calls.append((environment, metadata, False))
+
+    class CurrentExporter(FakeExporter):
+        def __init__(
+            self,
+            environment: object,
+            *,
+            metadata: object | None = None,
+            output_reproducible: bool = False,
+        ) -> None:
+            exporter_calls.append((environment, metadata, output_reproducible))
 
     package = types.ModuleType("conda_sboms")
     package.__path__ = []  # type: ignore[attr-defined]
     cyclonedx = types.ModuleType("conda_sboms.cyclonedx")
-    cyclonedx.CycloneDXExporter = FakeExporter  # type: ignore[attr-defined]
+    cyclonedx.CycloneDXExporter = (  # type: ignore[attr-defined]
+        CurrentExporter if reproducible else LegacyExporter
+    )
     settings = types.ModuleType("conda_sboms.settings")
     settings.CycloneDXExportMetadata = FakeMetadata  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "conda_sboms", package)
@@ -192,14 +220,16 @@ def test_sbom_metadata_builds_one_export_callback(
         return 0
 
     monkeypatch.setattr(sbom_module, "execute_export", execute_export)
-    assert execute_sbom(sbom_args(**values)) == 0
-    assert metadata_values == [{**_METADATA_DEFAULTS, **values}]
+    assert execute_sbom(sbom_args(reproducible=reproducible, **values)) == 0
+    expected_metadata_values = [{**_METADATA_DEFAULTS, **values}] if values else []
+    assert metadata_values == expected_metadata_values
     assert len(delegated_callbacks) == 1
     callback = delegated_callbacks[0]
     assert callback is not None
     environment = object()
     assert callback(environment) == "generated SBOM\n"
-    assert exporter_calls == [(environment, metadata_instances[0])]
+    metadata = metadata_instances[0] if values else None
+    assert exporter_calls == [(environment, metadata, reproducible)]
 
 
 @pytest.mark.parametrize("api", ["missing", "old"], ids=["missing", "old"])
@@ -227,6 +257,41 @@ def test_sbom_metadata_requires_current_conda_sboms_api(
 
     with pytest.raises(CondaValueError, match=r"conda-sboms >=0\.2\.0"):
         execute_sbom(sbom_args(product_name="Acme Runtime", product_version="2026.08"))
+
+
+@pytest.mark.parametrize("api", ["missing", "old"], ids=["missing", "old"])
+def test_sbom_reproducible_requires_current_conda_sboms_api(
+    monkeypatch: pytest.MonkeyPatch,
+    api: str,
+) -> None:
+    if api == "missing":
+        monkeypatch.setitem(sys.modules, "conda_sboms", None)
+        monkeypatch.delitem(sys.modules, "conda_sboms.cyclonedx", raising=False)
+    else:
+
+        class OldExporter:
+            def __init__(
+                self,
+                environment: object,
+                *,
+                metadata: object | None = None,
+            ) -> None:
+                del environment, metadata
+
+        package = types.ModuleType("conda_sboms")
+        package.__path__ = []  # type: ignore[attr-defined]
+        cyclonedx = types.ModuleType("conda_sboms.cyclonedx")
+        cyclonedx.CycloneDXExporter = OldExporter  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "conda_sboms", package)
+        monkeypatch.setitem(sys.modules, "conda_sboms.cyclonedx", cyclonedx)
+
+    def unexpected_export(*args: object, **kwargs: object) -> int:
+        raise AssertionError("export must not run without the reproducible API")
+
+    monkeypatch.setattr(sbom_module, "execute_export", unexpected_export)
+
+    with pytest.raises(CondaValueError, match=r"conda-sboms >=0\.3\.0"):
+        execute_sbom(sbom_args(reproducible=True))
 
 
 def test_sbom_without_metadata_uses_generic_exporter_path(

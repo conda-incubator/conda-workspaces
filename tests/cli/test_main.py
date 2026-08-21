@@ -235,6 +235,7 @@ def test_workspace_sbom_parser_args() -> None:
             "--platform",
             "linux-64",
             "--from-prefix",
+            "--reproducible",
             "--file",
             "dist/runtime.cdx.json",
             "--product-name",
@@ -261,6 +262,7 @@ def test_workspace_sbom_parser_args() -> None:
     assert parsed.environment == "runtime"
     assert parsed.platform == "linux-64"
     assert parsed.from_prefix is True
+    assert parsed.reproducible is True
     assert parsed.output == Path("dist/runtime.cdx.json")
     assert parsed.product_name == "Acme Runtime"
     assert parsed.product_version == "2026.08"
@@ -272,6 +274,7 @@ def test_workspace_sbom_parser_args() -> None:
     assert parsed.author_organization_url == "https://acme.example/security"
     assert parsed.dry_run is True
     assert parsed.json is True
+    assert parser.parse_args(["sbom"]).reproducible is False
 
 
 @pytest.mark.parametrize(

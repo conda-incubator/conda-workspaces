@@ -409,6 +409,12 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         help="Build the SBOM from the installed workspace environment.",
     )
     sbom_parser.add_argument(
+        "--reproducible",
+        action="store_true",
+        default=False,
+        help="Omit the SBOM timestamp for reproducible output.",
+    )
+    sbom_parser.add_argument(
         "--product-name",
         default=None,
         help="Product name for the SBOM root component.",
