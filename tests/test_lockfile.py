@@ -429,7 +429,7 @@ def test_conda_lock_loader_env_for_platform(
 
 def test_conda_lock_loader_env_for_rich_platform(
     lockfile_with_platforms: Path,
-    fake_records_factory: list,
+    fake_records_factory: list[dict[str, object]],
 ) -> None:
     data = load_lockfile_data(lockfile_with_platforms.read_bytes())
     packages = data["environments"]["default"]["packages"]
@@ -449,19 +449,13 @@ def test_conda_lock_loader_env_for_rich_platform(
 
 def test_conda_lock_loader_metadata_only_does_not_fetch(
     lockfile_with_platforms: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    fake_records_factory: list[dict[str, object]],
 ) -> None:
-    def unexpected_fetch(*args: object, **kwargs: object) -> tuple[()]:
-        raise AssertionError("metadata-only lockfile reads must not fetch packages")
-
-    monkeypatch.setattr(
-        "conda_lockfiles.rattler_lock.v6.records_from_conda_urls",
-        unexpected_fetch,
-    )
     loader = CondaLockLoader(lockfile_with_platforms)
 
     env = loader.env_for("linux-64", metadata_only=True)
 
+    assert fake_records_factory == []
     assert env.platform == "linux-64"
     assert len(env.explicit_packages) == 1
 

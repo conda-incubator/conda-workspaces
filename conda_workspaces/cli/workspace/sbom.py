@@ -2,20 +2,22 @@
 
 from __future__ import annotations
 
-import importlib
+import argparse
+import io
+import json
+from contextlib import redirect_stdout
+from importlib import import_module
 from inspect import signature
 from typing import TYPE_CHECKING
 
 from conda.base.context import context as conda_context
 from conda.exceptions import CondaValueError
+from rich.console import Console
 
 from .export import execute_export
 
 if TYPE_CHECKING:
-    import argparse
-
     from conda.models.environment import Environment
-    from rich.console import Console
 
 
 def execute_sbom(
@@ -24,14 +26,18 @@ def execute_sbom(
     console: Console | None = None,
 ) -> int:
     """Export one workspace environment as a CycloneDX 1.7 SBOM."""
+    if console is None:
+        console = Console(highlight=False)
+
+    export_args = argparse.Namespace(**vars(args))
     platform = args.platform or conda_context.subdir
 
-    args.format = "cyclonedx-json-v1.7"
-    args.export_platforms = [platform]
-    args.from_lockfile = not args.from_prefix
-    args.from_history = args.from_prefix
-    args.no_builds = False
-    args.ignore_channels = False
+    export_args.export_platforms = [platform]
+    export_args.from_lockfile = not args.from_prefix
+    export_args.from_history = args.from_prefix
+    export_args.no_builds = False
+    export_args.ignore_channels = False
+    export_args.json = False
 
     metadata_values = {
         "product_name": args.product_name,
@@ -44,64 +50,94 @@ def execute_sbom(
         "author_organization_url": args.author_organization_url,
     }
     metadata_requested = any(value is not None for value in metadata_values.values())
-    if not metadata_requested and not args.reproducible:
-        return execute_export(
-            args,
-            console=console,
-            include_requested_packages=True,
-            host_prefix_only=True,
-        )
-
-    requirement = (
-        "Reproducible output requires conda-sboms >=0.3.0. Install or upgrade "
-        "conda-sboms in the environment that owns conda."
-        if args.reproducible
-        else "Per-export metadata requires conda-sboms >=0.2.0. Install or upgrade "
+    metadata_requirement = (
+        "Per-export metadata requires conda-sboms >=0.2.0. Install or upgrade "
         "conda-sboms in the environment that owns conda."
     )
+    reproducible_requirement = (
+        "Reproducible output requires conda-sboms >=0.3.0. Install or upgrade "
+        "conda-sboms in the environment that owns conda."
+    )
+    base_requirement = (
+        "SBOM export requires conda-sboms >=0.1.1. Install or upgrade conda-sboms "
+        "in the environment that owns conda."
+    )
     try:
-        CycloneDXExporter = importlib.import_module(
-            "conda_sboms.cyclonedx"
-        ).CycloneDXExporter
+        cyclonedx = import_module("conda_sboms.cyclonedx")
+        format_name = str(cyclonedx.FORMAT)
+        export_cyclonedx_json = cyclonedx.export_cyclonedx_json
     except (AttributeError, ImportError) as exc:
+        requirement = base_requirement
+        if metadata_requested:
+            requirement = metadata_requirement
+        if args.reproducible:
+            requirement = reproducible_requirement
         raise CondaValueError(requirement) from exc
 
-    if args.reproducible:
-        try:
-            supports_reproducible = (
-                "output_reproducible" in signature(CycloneDXExporter).parameters
-            )
-        except (TypeError, ValueError):
-            supports_reproducible = False
-        if not supports_reproducible:
-            raise CondaValueError(requirement)
+    export_args.format = format_name
+
+    try:
+        exporter_parameters = signature(export_cyclonedx_json).parameters
+    except (TypeError, ValueError):
+        exporter_parameters = {}
+    if metadata_requested and "metadata" not in exporter_parameters:
+        raise CondaValueError(metadata_requirement)
+    if args.reproducible and "output_reproducible" not in exporter_parameters:
+        raise CondaValueError(reproducible_requirement)
 
     metadata = None
     if metadata_requested:
         try:
-            CycloneDXExportMetadata = importlib.import_module(
+            CycloneDXExportMetadata = import_module(
                 "conda_sboms.settings"
             ).CycloneDXExportMetadata
         except (AttributeError, ImportError) as exc:
-            raise CondaValueError(
-                "Per-export metadata requires conda-sboms >=0.2.0. Install or "
-                "upgrade conda-sboms in the environment that owns conda."
-            ) from exc
+            raise CondaValueError(metadata_requirement) from exc
         metadata = CycloneDXExportMetadata(**metadata_values)
 
     def render(environment: Environment) -> str:
+        export_options: dict[str, object] = {}
+        if metadata_requested:
+            export_options["metadata"] = metadata
         if args.reproducible:
-            return CycloneDXExporter(
-                environment,
-                metadata=metadata,
-                output_reproducible=True,
-            ).export()
-        return CycloneDXExporter(environment, metadata=metadata).export()
+            export_options["output_reproducible"] = True
+        return export_cyclonedx_json(environment, **export_options)
 
-    return execute_export(
-        args,
-        console=console,
-        export_environment=render,
-        include_requested_packages=True,
-        host_prefix_only=True,
+    if not args.json:
+        return execute_export(
+            export_args,
+            console=console,
+            export_environment=render,
+            include_requested_packages=True,
+            host_prefix_only=True,
+        )
+
+    captured_stdout = io.StringIO()
+    nested_console = Console(
+        file=io.StringIO(),
+        highlight=False,
+        force_terminal=False,
+        no_color=True,
     )
+    with redirect_stdout(captured_stdout):
+        result = execute_export(
+            export_args,
+            console=nested_console,
+            export_environment=render,
+            include_requested_packages=True,
+            host_prefix_only=True,
+        )
+    if result != 0:
+        return result
+
+    payload: dict[str, object] = {
+        "success": True,
+        "format": format_name,
+        "environment": args.environment or "default",
+    }
+    if args.output is not None and not args.dry_run:
+        payload["file"] = str(args.output)
+    else:
+        payload["content"] = captured_stdout.getvalue()
+    console.print_json(json.dumps(payload))
+    return 0

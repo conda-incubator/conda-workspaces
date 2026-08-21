@@ -219,6 +219,7 @@ tutorials/archives
 :caption: How-to guides
 
 how-to/index
+how-to/sbom
 how-to/archive-api
 ```
 

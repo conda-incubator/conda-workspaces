@@ -26,6 +26,7 @@ from conda_workspaces.resolver import ResolvedEnvironment
 from ..conftest import make_args
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from conda.models.environment import Environment
@@ -449,23 +450,14 @@ def test_export_workspace_lock_multiplatform(
 
 
 def test_export_workspace_lock_rich_platform_uses_conda_subdir(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    rich_platform_lockfile: Callable[[dict[str, str], tuple[str, ...]], Path],
     export_console: Console,
 ) -> None:
-    (tmp_path / "pixi.toml").write_text(
-        """\
-[workspace]
-name = "rich-platform-export"
-channels = ["conda-forge"]
-platforms = [
-  { name = "linux-64-cuda", platform = "linux-64", cuda = "12.0" },
-]
-""",
-        encoding="utf-8",
+    workspace = rich_platform_lockfile(
+        {"linux-64-cuda": "12.0"},
+        (),
     )
-    monkeypatch.chdir(tmp_path)
-    output = tmp_path / "conda.lock"
+    output = workspace / "conda.lock"
 
     result = execute_export(
         make_args(
@@ -493,10 +485,10 @@ def test_export_from_lockfile_missing_raises(
 
 
 def test_export_manifest_format_from_lockfile_keeps_exact_package(
-    exact_lockfile_export: tuple[Path, str, str],
+    exact_lockfile_export: tuple[Path, str, str, list[dict[str, object]]],
     export_console: Console,
 ) -> None:
-    pixi_workspace, url, digest = exact_lockfile_export
+    pixi_workspace, url, digest, _ = exact_lockfile_export
     output = pixi_workspace / "exported.toml"
 
     execute_export(
@@ -518,20 +510,11 @@ def test_export_manifest_format_from_lockfile_keeps_exact_package(
 
 
 def test_export_callback_keeps_lock_records_and_adds_manifest_requests(
-    exact_lockfile_export: tuple[Path, str, str],
-    monkeypatch: pytest.MonkeyPatch,
+    exact_lockfile_export: tuple[Path, str, str, list[dict[str, object]]],
     export_console: Console,
 ) -> None:
-    pixi_workspace, url, digest = exact_lockfile_export
+    pixi_workspace, url, digest, conversion_calls = exact_lockfile_export
     captured_environments: list[Environment] = []
-
-    def unexpected_fetch(*args: object, **kwargs: object) -> tuple[()]:
-        raise AssertionError("SBOM lockfile export must not fetch package archives")
-
-    monkeypatch.setattr(
-        "conda_lockfiles.rattler_lock.v6.records_from_conda_urls",
-        unexpected_fetch,
-    )
 
     def capture_export(environment: Environment) -> str:
         captured_environments.append(environment)
@@ -553,6 +536,7 @@ def test_export_callback_keeps_lock_records_and_adds_manifest_requests(
     )
 
     assert output.read_text(encoding="utf-8") == "captured\n"
+    assert conversion_calls == []
     assert len(captured_environments) == 1
     environment = captured_environments[0]
     assert len(environment.explicit_packages) == 1
@@ -564,10 +548,10 @@ def test_export_callback_keeps_lock_records_and_adds_manifest_requests(
 
 
 def test_export_callback_rejects_stale_lock_roots(
-    exact_lockfile_export: tuple[Path, str, str],
+    exact_lockfile_export: tuple[Path, str, str, list[dict[str, object]]],
     export_console: Console,
 ) -> None:
-    pixi_workspace, _, _ = exact_lockfile_export
+    pixi_workspace, _, _, _ = exact_lockfile_export
     manifest = pixi_workspace / "pixi.toml"
     manifest.write_text(
         manifest.read_text(encoding="utf-8").replace(
@@ -596,19 +580,10 @@ def test_export_callback_rejects_stale_lock_roots(
 
 
 def test_export_callback_lockfile_dry_run_json_does_not_fetch(
-    exact_lockfile_export: tuple[Path, str, str],
-    monkeypatch: pytest.MonkeyPatch,
+    exact_lockfile_export: tuple[Path, str, str, list[dict[str, object]]],
     export_console: Console,
 ) -> None:
-    pixi_workspace, _, _ = exact_lockfile_export
-
-    def unexpected_fetch(*args: object, **kwargs: object) -> tuple[()]:
-        raise AssertionError("SBOM lockfile export must not fetch package archives")
-
-    monkeypatch.setattr(
-        "conda_lockfiles.rattler_lock.v6.records_from_conda_urls",
-        unexpected_fetch,
-    )
+    pixi_workspace, _, _, conversion_calls = exact_lockfile_export
     output = pixi_workspace / "exported.cdx.json"
 
     result = execute_export(
@@ -627,6 +602,7 @@ def test_export_callback_lockfile_dry_run_json_does_not_fetch(
     )
 
     assert result == 0
+    assert conversion_calls == []
     assert not output.exists()
     payload = json_module.loads(export_console.file.getvalue())
     assert payload == {
@@ -638,32 +614,13 @@ def test_export_callback_lockfile_dry_run_json_does_not_fetch(
 
 
 def test_export_from_lockfile_resolves_rich_platform_subdir(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    rich_platform_lockfile: Callable[[dict[str, str], tuple[str, ...]], Path],
     export_console: Console,
 ) -> None:
-    (tmp_path / "pixi.toml").write_text(
-        """\
-[workspace]
-name = "rich-platform-export"
-channels = []
-platforms = [
-  { name = "linux-64-cuda", platform = "linux-64", cuda = "12.0" },
-]
-""",
-        encoding="utf-8",
+    rich_platform_lockfile(
+        {"linux-64-cuda": "12.0"},
+        ("linux-64-cuda",),
     )
-    (tmp_path / "conda.lock").write_text(
-        "version: 1\n"
-        "environments:\n"
-        "  default:\n"
-        "    channels: []\n"
-        "    packages:\n"
-        "      linux-64-cuda: []\n"
-        "packages: []\n",
-        encoding="utf-8",
-    )
-    monkeypatch.chdir(tmp_path)
     captured_environments: list[Environment] = []
 
     def capture_export(environment: Environment) -> str:
@@ -687,34 +644,14 @@ platforms = [
 
 
 def test_export_from_lockfile_preserves_rich_platform_variants(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    rich_platform_lockfile: Callable[[dict[str, str], tuple[str, ...]], Path],
     export_console: Console,
 ) -> None:
-    (tmp_path / "pixi.toml").write_text(
-        """\
-[workspace]
-name = "rich-platform-export"
-channels = []
-platforms = [
-  { name = "linux-64-cuda", platform = "linux-64", cuda = "12.0" },
-]
-""",
-        encoding="utf-8",
+    workspace = rich_platform_lockfile(
+        {"linux-64-cuda": "12.0"},
+        ("linux-64", "linux-64-cuda"),
     )
-    (tmp_path / "conda.lock").write_text(
-        "version: 1\n"
-        "environments:\n"
-        "  default:\n"
-        "    channels: []\n"
-        "    packages:\n"
-        "      linux-64: []\n"
-        "      linux-64-cuda: []\n"
-        "packages: []\n",
-        encoding="utf-8",
-    )
-    monkeypatch.chdir(tmp_path)
-    output = tmp_path / "roundtrip.lock"
+    output = workspace / "roundtrip.lock"
 
     execute_export(
         make_args(
@@ -734,34 +671,13 @@ platforms = [
 
 
 def test_export_from_lockfile_rejects_ambiguous_rich_platform_subdir(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    rich_platform_lockfile: Callable[[dict[str, str], tuple[str, ...]], Path],
     export_console: Console,
 ) -> None:
-    (tmp_path / "pixi.toml").write_text(
-        """\
-[workspace]
-name = "rich-platform-export"
-channels = []
-platforms = [
-  { name = "linux-64-cuda11", platform = "linux-64", cuda = "11.8" },
-  { name = "linux-64-cuda12", platform = "linux-64", cuda = "12.0" },
-]
-""",
-        encoding="utf-8",
+    rich_platform_lockfile(
+        {"linux-64-cuda11": "11.8", "linux-64-cuda12": "12.0"},
+        ("linux-64-cuda11", "linux-64-cuda12"),
     )
-    (tmp_path / "conda.lock").write_text(
-        "version: 1\n"
-        "environments:\n"
-        "  default:\n"
-        "    channels: []\n"
-        "    packages:\n"
-        "      linux-64-cuda11: []\n"
-        "      linux-64-cuda12: []\n"
-        "packages: []\n",
-        encoding="utf-8",
-    )
-    monkeypatch.chdir(tmp_path)
 
     with pytest.raises(CondaValueError, match="multiple lockfile platforms"):
         execute_export(
@@ -881,13 +797,13 @@ def test_export_from_lockfile_and_from_prefix_are_mutex(
 
 def test_run_exporter_prefers_multiplatform() -> None:
     """A fake exporter with ``multiplatform_export`` receives the full list."""
-    calls: list = []
+    calls: list[list[object]] = []
 
     class FakeExporter:
         name = "fake"
         export = None
 
-        def multiplatform_export(self, envs):
+        def multiplatform_export(self, envs: list[object]) -> str:
             calls.append(list(envs))
             return "MULTI"
 

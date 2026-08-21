@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 def exact_lockfile_export(
     pixi_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> tuple[Path, str, str]:
+) -> tuple[Path, str, str, list[dict[str, object]]]:
     """Create a lockfile whose exact package record needs no archive fetch."""
     monkeypatch.chdir(pixi_workspace)
     url = "https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-h123_0.conda"
@@ -40,9 +40,15 @@ def exact_lockfile_export(
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(
-        "conda_lockfiles.rattler_lock.v6.records_from_conda_urls",
-        lambda metadata_by_url, **kwargs: tuple(
+    conversion_calls: list[dict[str, object]] = []
+
+    def records_from_conda_urls(
+        metadata_by_url: dict[str, object],
+        **kwargs: object,
+    ) -> tuple[PackageRecord, ...]:
+        del kwargs
+        conversion_calls.append(dict(metadata_by_url))
+        return tuple(
             PackageRecord(
                 name="python",
                 version="3.12.0",
@@ -56,9 +62,58 @@ def exact_lockfile_export(
                 license="BSD-3-Clause",
             )
             for package_url in metadata_by_url
-        ),
+        )
+
+    monkeypatch.setattr(
+        "conda_lockfiles.rattler_lock.v6.records_from_conda_urls",
+        records_from_conda_urls,
     )
-    return pixi_workspace, url, digest
+    return pixi_workspace, url, digest, conversion_calls
+
+
+@pytest.fixture
+def rich_platform_lockfile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[dict[str, str], tuple[str, ...]], Path]:
+    """Create a workspace and lockfile with named Linux platform variants."""
+
+    def create(
+        declared_platforms: dict[str, str],
+        locked_platforms: tuple[str, ...],
+    ) -> Path:
+        platform_rows = "\n".join(
+            f'  {{ name = "{name}", platform = "linux-64", cuda = "{cuda}" }},'
+            for name, cuda in declared_platforms.items()
+        )
+        package_rows = "\n".join(
+            f"      {platform}: []" for platform in locked_platforms
+        )
+        (tmp_path / "pixi.toml").write_text(
+            f"""\
+[workspace]
+name = "rich-platform-export"
+channels = []
+platforms = [
+{platform_rows}
+]
+""",
+            encoding="utf-8",
+        )
+        (tmp_path / "conda.lock").write_text(
+            "version: 1\n"
+            "environments:\n"
+            "  default:\n"
+            "    channels: []\n"
+            "    packages:\n"
+            f"{package_rows}\n"
+            "packages: []\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        return tmp_path
+
+    return create
 
 
 @pytest.fixture

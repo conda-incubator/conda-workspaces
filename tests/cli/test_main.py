@@ -144,6 +144,46 @@ def test_workspace_unknown_subcmd_prints_help(
         (["clean", "-e", "test"], "environment", "test"),
         (["activate", "-e", "docs"], "environment", "docs"),
         (["activate"], "environment", "default"),
+        (["sbom", "--environment", "runtime"], "environment", "runtime"),
+        (["sbom", "--platform", "linux-64"], "platform", "linux-64"),
+        (["sbom", "--from-prefix"], "from_prefix", True),
+        (["sbom", "--reproducible"], "reproducible", True),
+        (["sbom"], "reproducible", False),
+        (
+            ["sbom", "--file", "dist/runtime.cdx.json"],
+            "output",
+            Path("dist/runtime.cdx.json"),
+        ),
+        (["sbom", "--product-name", "Acme Runtime"], "product_name", "Acme Runtime"),
+        (["sbom", "--product-version", "2026.08"], "product_version", "2026.08"),
+        (
+            ["sbom", "--product-manufacturer", "Acme GmbH"],
+            "product_manufacturer",
+            "Acme GmbH",
+        ),
+        (
+            ["sbom", "--product-manufacturer-url", "https://acme.example"],
+            "product_manufacturer_url",
+            "https://acme.example",
+        ),
+        (["sbom", "--author-name", "Alice Example"], "author_name", "Alice Example"),
+        (
+            ["sbom", "--author-email", "alice@acme.example"],
+            "author_email",
+            "alice@acme.example",
+        ),
+        (
+            ["sbom", "--author-organization", "Acme Product Security"],
+            "author_organization",
+            "Acme Product Security",
+        ),
+        (
+            ["sbom", "--author-organization-url", "https://acme.example/security"],
+            "author_organization_url",
+            "https://acme.example/security",
+        ),
+        (["sbom", "--dry-run"], "dry_run", True),
+        (["sbom", "--json"], "json", True),
     ],
     ids=[
         "init-format-conda",
@@ -167,6 +207,22 @@ def test_workspace_unknown_subcmd_prints_help(
         "clean-env",
         "activate-named",
         "activate-default",
+        "sbom-environment",
+        "sbom-platform",
+        "sbom-prefix",
+        "sbom-reproducible",
+        "sbom-reproducible-default",
+        "sbom-output",
+        "sbom-product-name",
+        "sbom-product-version",
+        "sbom-manufacturer",
+        "sbom-manufacturer-url",
+        "sbom-author-name",
+        "sbom-author-email",
+        "sbom-author-organization",
+        "sbom-author-organization-url",
+        "sbom-dry-run",
+        "sbom-json",
     ],
 )
 def test_workspace_parser_args(
@@ -222,59 +278,6 @@ def test_workspace_parser_separates_manifest_and_export_paths() -> None:
 
     assert parsed.manifest_file == Path("pixi.toml")
     assert parsed.output == Path("../environment.yml")
-
-
-def test_workspace_sbom_parser_args() -> None:
-    parser = generate_workspace_parser()
-
-    parsed = parser.parse_args(
-        [
-            "sbom",
-            "--environment",
-            "runtime",
-            "--platform",
-            "linux-64",
-            "--from-prefix",
-            "--reproducible",
-            "--file",
-            "dist/runtime.cdx.json",
-            "--product-name",
-            "Acme Runtime",
-            "--product-version",
-            "2026.08",
-            "--product-manufacturer",
-            "Acme GmbH",
-            "--product-manufacturer-url",
-            "https://acme.example",
-            "--author-name",
-            "Alice Example",
-            "--author-email",
-            "alice@acme.example",
-            "--author-organization",
-            "Acme Product Security",
-            "--author-organization-url",
-            "https://acme.example/security",
-            "--dry-run",
-            "--json",
-        ]
-    )
-
-    assert parsed.environment == "runtime"
-    assert parsed.platform == "linux-64"
-    assert parsed.from_prefix is True
-    assert parsed.reproducible is True
-    assert parsed.output == Path("dist/runtime.cdx.json")
-    assert parsed.product_name == "Acme Runtime"
-    assert parsed.product_version == "2026.08"
-    assert parsed.product_manufacturer == "Acme GmbH"
-    assert parsed.product_manufacturer_url == "https://acme.example"
-    assert parsed.author_name == "Alice Example"
-    assert parsed.author_email == "alice@acme.example"
-    assert parsed.author_organization == "Acme Product Security"
-    assert parsed.author_organization_url == "https://acme.example/security"
-    assert parsed.dry_run is True
-    assert parsed.json is True
-    assert parser.parse_args(["sbom"]).reproducible is False
 
 
 @pytest.mark.parametrize(

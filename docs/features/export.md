@@ -1,156 +1,38 @@
 # Export and format interoperability
 
-## CycloneDX SBOMs with conda-sboms
+## CycloneDX SBOM integration
 
 `conda workspace sbom` exports one resolved workspace environment as a
 CycloneDX 1.7 JSON software bill of materials. It is a focused interface to the
 optional [`conda-sboms`](https://github.com/conda-incubator/conda-sboms)
-exporter. The
-SBOM mapping, validation, and serialization stay in conda-sboms rather than
-conda-workspaces.
+package. conda-sboms owns the format name, component mapping, validation, and
+serialization. conda-workspaces selects and prepares the environment.
 
-Install conda-sboms in the same environment that owns the `conda` executable
-and conda-workspaces:
+Lockfile mode combines exact records from `conda.lock` with the selected
+environment's direct conda requirements from the manifest. This lets
+conda-sboms connect the SBOM root to what the workspace declares. The read is
+metadata-only and does not download or extract package archives. It also
+rejects a stale lockfile when an exact record no longer satisfies a direct
+requirement.
 
-```console
-conda activate base
-conda pypi install "conda-sboms>=0.3.0"
-```
+Prefix mode describes the selected installed environment on the host platform.
+It preserves requested roots from conda history rather than replacing them
+with manifest requirements.
 
-If `conda pypi` is unavailable, install the wheel in that same environment:
+Rich workspace platforms can be selected by their declared name or their
+backing conda subdir. A declared name is required when multiple variants share
+one subdir.
 
-```console
-python -m pip install "conda-sboms>=0.3.0"
-```
+The generic `conda workspace export` command can reach the same registered
+CycloneDX exporter. The dedicated SBOM command adds workspace roots, explicit
+product and author metadata, reproducible output, and single-platform source
+selection.
 
-Without metadata flags or `--reproducible`, the command reports the missing
-`cyclonedx-json-v1.7` exporter when the plugin is not installed. Per-export
-metadata flags require conda-sboms 0.2.0 or newer. `--reproducible` requires
+See [](../how-to/sbom.md) for installation and command examples. Per-export
+metadata requires conda-sboms 0.2.0 or newer. Reproducible output requires
 conda-sboms 0.3.0 or newer.
 
-The shortest form reads exact package records for the `default` environment
-from the existing `conda.lock`, selects the host platform, and writes the SBOM
-to standard output:
-
-```console
-conda workspace sbom
-```
-
-Pass `--file` to write the same document to a file, or select another
-environment and platform explicitly:
-
-```console
-conda workspace sbom \
-  --environment test \
-  --platform linux-64 \
-  --file exports/test-linux-64.cdx.json
-```
-
-The command does not solve or update the lockfile. Run `conda workspace lock`
-first when `conda.lock` is missing or stale. It reconstructs package records
-from metadata already stored in the lockfile and does not download or extract
-package archives. A lockfile export combines its exact resolved records with
-the selected environment's direct conda requirements from the manifest. Those
-authoritative requested roots let conda-sboms connect the SBOM root to what the
-workspace declares instead of inferring roots from the resolved dependency
-graph. The command rejects the export when an exact record no longer satisfies
-a direct manifest requirement.
-
-For a rich workspace platform, `--platform` accepts either its declared name
-or its backing conda subdir. For example, a `linux-64-cuda` lock entry backed
-by `linux-64` can be selected with either value. When multiple declared
-platforms share a backing subdir, use the declared name to choose one.
-
-Use `--from-prefix` to inventory the selected installed workspace prefix:
-
-```console
-conda workspace sbom \
-  --environment test \
-  --from-prefix \
-  --file exports/test-installed.cdx.json
-```
-
-Prefix mode uses conda history for requested roots and does not replace them
-with manifest requirements. It supports only the host platform. Passing a
-different `--platform` fails rather than describing the prefix as another
-platform.
-
-### Product and author metadata
-
-Without product metadata, the CycloneDX root describes the selected conda
-environment. Supply identities only when you can establish them for the
-product and the people or organizations responsible for the SBOM:
-
-```console
-conda workspace sbom \
-  --file exports/acme-runtime.cdx.json \
-  --product-name "Acme Runtime" \
-  --product-version "2026.08" \
-  --product-manufacturer "Acme GmbH" \
-  --product-manufacturer-url "https://acme.example" \
-  --author-name "Alice Example" \
-  --author-email "alice@acme.example" \
-  --author-organization "Acme Product Security" \
-  --author-organization-url "https://acme.example/security"
-```
-
-The product name and version must be supplied together. A manufacturer
-requires both product values, and a manufacturer URL requires the manufacturer
-name. An author email requires an author name. An author organization URL
-requires the author organization name.
-
-When no metadata flags are passed, conda-sboms reads its active conda plugin
-settings. Passing any product, manufacturer, or author flag replaces those
-settings for this export. Unspecified flag values remain unset rather than
-being inherited from the active configuration. conda-workspaces does not infer
-a manufacturer or author from the workspace, package records, or channels.
-
-### Reproducible output
-
-conda-sboms uses the current UTC time by default. Pass `--reproducible` to omit
-the CycloneDX `metadata.timestamp` field and record
-`cdx:reproducible=true` instead:
-
-```console
-conda workspace sbom --reproducible \
-  --file exports/default.cdx.json
-```
-
-The flag takes precedence over `SOURCE_DATE_EPOCH`, including an invalid value.
-Use `SOURCE_DATE_EPOCH` instead when consumers require a meaningful, stable
-timestamp:
-
-```console
-SOURCE_DATE_EPOCH=1787184000 conda workspace sbom \
-  --file exports/default.cdx.json
-```
-
-Without `--reproducible`, an invalid, negative, or unsupported value fails
-before output is written. Byte-for-byte reproducibility also requires unchanged
-inputs and the same conda-sboms and serializer versions.
-
-### Generic export form
-
-The SBOM command presets the existing environment exporter path to the
-versioned `cyclonedx-json-v1.7` format and a single platform. The underlying
-exporter is also available through the generic command:
-
-```console
-conda workspace export \
-  --environment default \
-  --from-lockfile \
-  --platform linux-64 \
-  --format cyclonedx-json-v1.7 \
-  --file exports/default-linux-64.cdx.json
-```
-
-The generic command reads product and author values from conda-sboms plugin
-settings. It leaves lockfile roots unchanged, so conda-sboms infers graph roots
-instead of receiving the selected environment's manifest requirements. Use
-`conda workspace sbom` for workspace roots and for explicit metadata flags
-without changing plugin configuration.
-
-### Coverage limits
+### SBOM coverage limits
 
 The current lockfile conversion rejects a selected environment and platform
 that contains pip or other external package references before conda-sboms
