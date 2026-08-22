@@ -49,13 +49,14 @@ from conda_workspaces.exceptions import (
     ArchivePathTraversalError,
     AttestationError,
     CondaWorkspacesError,
+    FileRecoveryError,
 )
 from conda_workspaces.manifests import detect_and_parse
 from conda_workspaces.models import ArchiveConfig
 from conda_workspaces.receipts import ArchiveReceipt
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from typing import Any
 
     from conda_workspaces.receipts import VerifiedArchiveWorkspace
@@ -247,7 +248,7 @@ def signed_receipt_archive(
     payload = created.receipt_path.read_bytes()
     created.receipt_path.unlink()
     attestation_path = WorkspaceArchive.default_attestation_path(created.path)
-    attestation_path.write_text('{"bundle": true}\n', encoding="utf-8")
+    attestation_path.write_bytes(b'{"bundle": true}\n')
     return WorkspaceArchive(created.path, attestation=True), payload
 
 
@@ -2091,26 +2092,38 @@ def test_create_archive_preserves_existing_output_on_write_failure(
     assert output.read_bytes() == b"existing archive"
 
 
-@pytest.mark.parametrize("mutation", ["replace", "rewrite"])
-def test_create_archive_rejects_changed_validated_output_generation(
+@pytest.mark.parametrize(
+    ("mutation", "preserve_generation"),
+    [
+        ("replace", False),
+        ("rewrite", False),
+        ("rewrite", True),
+    ],
+    ids=["replace", "rewrite", "same-generation-rewrite"],
+)
+def test_create_archive_rejects_changed_validated_output(
     project_dir: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     mutation: str,
+    preserve_generation: bool,
 ) -> None:
     output = tmp_path / "workspace.tar.gz"
-    output.write_bytes(b"existing archive")
-    concurrent_content = b"concurrent archive generation"
+    original_content = b"existing archive"
+    concurrent_content = b"changed archive!"
+    output.write_bytes(original_content)
     original_atomic_binary_writer = archive_module.atomic_binary_writer
 
     @contextmanager
-    def mutate_before_write(path: Path, **kwargs):
+    def mutate_before_write(path: Path, **kwargs: Any):
         if mutation == "replace":
             replacement = output.with_name("replacement.tar.gz")
             replacement.write_bytes(concurrent_content)
             replacement.replace(output)
         else:
             output.write_bytes(concurrent_content)
+        if preserve_generation:
+            kwargs["expected_generation"] = paths_module.regular_file_generation(output)
         with original_atomic_binary_writer(path, **kwargs) as stream:
             yield stream
 
@@ -2123,6 +2136,7 @@ def test_create_archive_rejects_changed_validated_output_generation(
     with pytest.raises(ValueError, match="changed before writing"):
         create_archive(project_dir, output, ArchiveConfig())
 
+    assert len(concurrent_content) == len(original_content)
     assert output.read_bytes() == concurrent_content
 
 
@@ -2942,6 +2956,88 @@ def test_workspace_archive_sign_rejects_final_output_replacement(
             assert path.read_bytes() == content
 
 
+@pytest.mark.parametrize(
+    "rewritten_output",
+    ["archive", "receipt"],
+    ids=["archive", "receipt"],
+)
+def test_workspace_archive_sign_binds_existing_output_digests(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rewritten_output: str,
+) -> None:
+    output = tmp_path / "workspace.tar.gz"
+    receipt_path = ArchiveReceipt.default_path(output)
+    existing = {
+        output: b"existing archive",
+        receipt_path: b"existing receipt",
+    }
+    concurrent = {
+        output: b"changed archive!",
+        receipt_path: b"changed receipt!",
+    }
+    for path, content in existing.items():
+        path.write_bytes(content)
+        assert len(concurrent[path]) == len(content)
+    monkeypatch.setattr(
+        attestations_module,
+        "sign_attestation_payload",
+        lambda payload: '{"bundle": true}',
+    )
+
+    target = output if rewritten_output == "archive" else receipt_path
+    if rewritten_output == "archive":
+        original_writer = archive_module.atomic_binary_writer
+
+        @contextmanager
+        def rewrite_archive_before_publication(path: Path, **kwargs):
+            if path == target:
+                target.write_bytes(concurrent[target])
+                kwargs["expected_generation"] = paths_module.regular_file_generation(
+                    target
+                )
+            with original_writer(path, **kwargs) as stream:
+                yield stream
+
+        monkeypatch.setattr(
+            archive_module,
+            "atomic_binary_writer",
+            rewrite_archive_before_publication,
+        )
+    else:
+        original_receipt_write = ArchiveReceipt.write
+
+        def rewrite_receipt_before_publication(
+            self: ArchiveReceipt,
+            path: Path,
+            **kwargs: Any,
+        ) -> Path:
+            target.write_bytes(concurrent[target])
+            kwargs["expected_generation"] = paths_module.regular_file_generation(target)
+            return original_receipt_write(self, path, **kwargs)
+
+        monkeypatch.setattr(
+            ArchiveReceipt,
+            "write",
+            rewrite_receipt_before_publication,
+        )
+
+    with pytest.raises(ArchiveError, match="changed before publication"):
+        WorkspaceArchive.create(
+            workspace=workspace_archive_project,
+            output=output,
+            receipt=True,
+            sign=True,
+        )
+
+    assert target.read_bytes() == concurrent[target]
+    for path, content in existing.items():
+        if path != target:
+            assert path.read_bytes() == content
+    assert not WorkspaceArchive.default_attestation_path(output).exists()
+
+
 def test_require_published_output_rechecks_digest_when_generation_is_unchanged(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2973,38 +3069,128 @@ def test_require_published_output_rechecks_digest_when_generation_is_unchanged(
     assert isinstance(exc_info.value.__cause__, ArchiveHashMismatchError)
 
 
-def test_restore_published_output_removes_marker_after_sync_failure(
+@pytest.mark.parametrize(
+    "previous_content",
+    [None, b"previous archive"],
+    ids=["remove", "restore"],
+)
+@pytest.mark.parametrize(
+    "digest_matches",
+    [True, False],
+    ids=["matching-digest", "mismatched-digest"],
+)
+def test_restore_published_output_requires_matching_digest(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    previous_content: bytes | None,
+    digest_matches: bool,
 ) -> None:
     path = tmp_path / "archive.tar.gz"
-    path.write_bytes(b"published archive")
+    content = b"published archive"
+    path.write_bytes(content)
     generation = paths_module.regular_file_generation(path)
     assert generation is not None
     parent_identity = paths_module.capture_directory_identity(path.parent)
-    original_fsync = paths_module.os.fsync
-    sync_calls = 0
+    backup = None
+    if previous_content is not None:
+        backup = tmp_path / "previous.tar.gz"
+        backup.write_bytes(previous_content)
+    published_content = content if digest_matches else b"different archive"
 
-    def fail_first_directory_sync(descriptor: int) -> None:
-        nonlocal sync_calls
-        sync_calls += 1
-        if sync_calls == 2:
-            raise OSError("directory sync failed")
-        original_fsync(descriptor)
-
-    monkeypatch.setattr(paths_module.os, "fsync", fail_first_directory_sync)
-
-    assert WorkspaceArchive.restore_published_output(
+    restored = WorkspaceArchive.restore_published_output(
         path,
         published_generation=generation,
-        backup=None,
+        published_sha256=hashlib.sha256(published_content).hexdigest(),
+        backup=backup,
         maximum_bytes=1024,
         label="Archive output",
         expected_parent_identity=parent_identity,
     )
 
-    assert sync_calls >= 3
-    assert not path.exists()
+    assert restored is digest_matches
+    if not digest_matches:
+        assert path.read_bytes() == content
+    elif previous_content is None:
+        assert not path.exists()
+    else:
+        assert path.read_bytes() == previous_content
+
+
+@pytest.mark.parametrize("replace", [False, True], ids=["matching", "replaced"])
+def test_remove_created_output_preserves_legacy_signature(
+    tmp_path: Path,
+    replace: bool,
+) -> None:
+    path = tmp_path / "archive.tar.gz"
+    path.write_bytes(b"created archive")
+    current = path.stat()
+    expected = current.st_dev, current.st_ino
+    if replace:
+        replacement = tmp_path / "replacement.tar.gz"
+        replacement.write_bytes(b"replacement archive")
+        replacement.replace(path)
+
+    with pytest.deprecated_call(match="does not bind file content"):
+        WorkspaceArchive.remove_created_output(path, expected)
+
+    assert path.exists() is replace
+
+
+@pytest.mark.parametrize(
+    "previous_content",
+    [None, b"previous archive"],
+    ids=["remove-new", "restore-existing"],
+)
+def test_restore_published_output_reports_recovery_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    previous_content: bytes | None,
+) -> None:
+    path = tmp_path / "archive.tar.gz"
+    recovery = tmp_path / ".archive.tar.gz.recovery.rollback"
+    claimant = b"claimant archive"
+    content = b"published archive"
+    path.write_bytes(content)
+    generation = paths_module.regular_file_generation(path)
+    assert generation is not None
+    parent_identity = paths_module.capture_directory_identity(path.parent)
+    backup = None
+    if previous_content is not None:
+        backup = tmp_path / "previous.tar.gz"
+        backup.write_bytes(previous_content)
+
+    def fail_removal(*args: Any, **kwargs: Any) -> bool:
+        path.rename(recovery)
+        path.write_bytes(claimant)
+        raise FileRecoveryError(path, recovery, "Removal failed.")
+
+    @contextmanager
+    def fail_restore(*args: Any, **kwargs: Any) -> Iterator[io.BytesIO]:
+        yield io.BytesIO()
+        path.rename(recovery)
+        path.write_bytes(claimant)
+        raise FileRecoveryError(path, recovery, "Restore failed.")
+
+    if backup is None:
+        monkeypatch.setattr(archive_module, "remove_file_generation", fail_removal)
+    else:
+        monkeypatch.setattr(archive_module, "atomic_binary_writer", fail_restore)
+
+    with pytest.raises(FileRecoveryError) as exc_info:
+        WorkspaceArchive.restore_published_output(
+            path,
+            published_generation=generation,
+            published_sha256=hashlib.sha256(content).hexdigest(),
+            backup=backup,
+            maximum_bytes=1024,
+            label="Archive output",
+            expected_parent_identity=parent_identity,
+        )
+
+    assert path.read_bytes() == claimant
+    assert recovery.read_bytes() == content
+    assert exc_info.value.recovery_path == recovery
+    if backup is not None:
+        assert backup.read_bytes() == previous_content
 
 
 @pytest.mark.parametrize(
@@ -3041,13 +3227,15 @@ def test_workspace_archive_sign_restores_attestation_after_post_publish_failure(
         self: attestations_module.AttestationOutput,
         content: bytes,
         *,
-        expected_generation,
-    ):
+        expected_generation: Any,
+        expected_sha256: str | None,
+    ) -> tuple[bytes, paths_module.FileGeneration]:
         nonlocal failed
         result = original_publish(
             self,
             content,
             expected_generation=expected_generation,
+            expected_sha256=expected_sha256,
         )
         if not failed:
             failed = True
@@ -3239,6 +3427,68 @@ def test_workspace_archive_attestation_failure_restores_published_outputs(
         )
 
     assert {path: path.read_bytes() for path in existing} == existing
+
+
+def test_workspace_archive_cleanup_reports_recovery_and_continues(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "workspace.tar.gz"
+    receipt_path = ArchiveReceipt.default_path(output)
+    attestation_path = WorkspaceArchive.default_attestation_path(output)
+    recovery = tmp_path / ".workspace.receipt.json.recovery.rollback"
+    claimant = b"claimant receipt\n"
+    monkeypatch.setattr(
+        attestations_module,
+        "sign_attestation_payload",
+        lambda payload: '{"bundle": true}',
+    )
+    original_require = WorkspaceArchive.require_published_output
+    original_remove = archive_module.remove_file_generation
+
+    def fail_final_attestation_validation(
+        cls: type[WorkspaceArchive],
+        path: Path,
+        **kwargs: Any,
+    ) -> None:
+        if kwargs["label"] == "Attestation output":
+            raise ArchiveError("final output validation failed")
+        original_require(path, **kwargs)
+
+    def retain_receipt_recovery(path: Path, *args: Any, **kwargs: Any) -> bool:
+        if path == receipt_path:
+            path.rename(recovery)
+            path.write_bytes(claimant)
+            raise FileRecoveryError(path, recovery, "Receipt removal failed.")
+        return original_remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        WorkspaceArchive,
+        "require_published_output",
+        classmethod(fail_final_attestation_validation),
+    )
+    monkeypatch.setattr(
+        archive_module,
+        "remove_file_generation",
+        retain_receipt_recovery,
+    )
+
+    with pytest.raises(ArchiveError) as exc_info:
+        WorkspaceArchive.create(
+            workspace=workspace_archive_project,
+            output=output,
+            receipt=True,
+            sign=True,
+        )
+
+    message = str(exc_info.value)
+    assert "final output validation failed" in message
+    assert str(recovery) in message
+    assert receipt_path.read_bytes() == claimant
+    assert recovery.is_file()
+    assert not output.exists()
+    assert not attestation_path.exists()
 
 
 def test_workspace_archive_receipt_rejects_replacement_after_write(
@@ -3573,6 +3823,109 @@ def test_workspace_archive_snapshot_rejects_oversized_input(
 
     with pytest.raises(ArchiveError, match="maximum size"):
         WorkspaceArchive.snapshot_archive(source, tmp_path / "snapshot.tar")
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "read",
+        "read1",
+        "readall",
+        "readline",
+        "readinto",
+        "readinto1",
+        "iterate",
+        "peek",
+    ],
+    ids=[
+        "read",
+        "read1",
+        "readall",
+        "readline",
+        "readinto",
+        "readinto1",
+        "iteration",
+        "peek",
+    ],
+)
+def test_open_stable_regular_file_rejects_growth_beyond_maximum(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    source = tmp_path / "archive.tar"
+    source.write_bytes(b"A")
+
+    with pytest.raises(ArchiveError, match="maximum size"):
+        with archive_module.open_stable_regular_file(
+            source,
+            label="Archive",
+            maximum_bytes=1,
+        ) as stream:
+            with source.open("ab") as output:
+                output.write(b"B\n")
+            if operation in {"readinto", "readinto1"}:
+                getattr(stream, operation)(bytearray(3))
+            elif operation == "iterate":
+                next(iter(stream))
+            else:
+                getattr(stream, operation)()
+
+
+@pytest.mark.parametrize(
+    ("stream_content", "match", "snapshot_content"),
+    [
+        (b"BBBB", "changed while it was snapshotted", b"BBBB"),
+        (b"AAAAA", "maximum size", None),
+    ],
+    ids=["same-generation-rewrite", "growth"],
+)
+def test_workspace_archive_snapshot_output_rejects_changed_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream_content: bytes,
+    match: str,
+    snapshot_content: bytes | None,
+) -> None:
+    source = tmp_path / "archive.tar"
+    destination = tmp_path / "snapshot.tar"
+    content = b"AAAA"
+    source.write_bytes(content)
+    generation = paths_module.regular_file_generation(source)
+    assert generation is not None
+
+    @contextmanager
+    def changed_stream(
+        path: Path,
+        *,
+        label: str,
+        maximum_bytes: int | None = None,
+    ) -> Iterator[io.BytesIO]:
+        assert path == source
+        assert label == "Archive"
+        assert maximum_bytes == len(content)
+        yield io.BytesIO(stream_content)
+
+    monkeypatch.setattr(
+        archive_module,
+        "open_stable_regular_file",
+        changed_stream,
+    )
+
+    with pytest.raises(ArchiveError, match=match):
+        WorkspaceArchive.snapshot_output(
+            source,
+            destination,
+            expected_generation=generation,
+            expected_sha256=hashlib.sha256(content).hexdigest(),
+            maximum_bytes=len(content),
+            label="Archive",
+        )
+
+    assert source.read_bytes() == content
+    if snapshot_content is None:
+        assert not destination.exists()
+    else:
+        assert destination.read_bytes() == snapshot_content
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO requires POSIX")

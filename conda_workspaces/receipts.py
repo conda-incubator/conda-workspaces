@@ -23,6 +23,7 @@ from .paths import (
     has_absolute_path_syntax,
     read_regular_file_bytes,
     regular_file_generation,
+    regular_file_sha256,
 )
 
 if TYPE_CHECKING:
@@ -267,6 +268,7 @@ class ArchiveReceipt:
         expected_generation: FileGeneration | None | object = (
             _CURRENT_RECEIPT_GENERATION
         ),
+        expected_sha256: str | None = None,
         expected_parent_identity: DirectoryIdentity | None = None,
         capture_generation: Callable[[FileGeneration], None] | None = None,
     ) -> Path:
@@ -275,6 +277,14 @@ class ArchiveReceipt:
             raise ArchiveError("Receipt output cannot be a symbolic link.")
         if expected_generation is _CURRENT_RECEIPT_GENERATION:
             expected_generation = regular_file_generation(path)
+        if expected_generation is not None and expected_sha256 is None:
+            expected_sha256, hashed_generation = regular_file_sha256(
+                path,
+                label="receipt output",
+                maximum_bytes=MAX_RECEIPT_BYTES,
+            )
+            if hashed_generation != expected_generation:
+                raise ValueError(f"Receipt output changed before writing: {path}")
         self.validate()
         if path.is_symlink():
             raise ArchiveError("Receipt output cannot be a symbolic link.")
@@ -283,6 +293,7 @@ class ArchiveReceipt:
                 path,
                 self.serialized_text(),
                 expected_generation=expected_generation,
+                expected_sha256=expected_sha256,
                 capture_generation=capture_generation,
             )
         else:
@@ -290,6 +301,7 @@ class ArchiveReceipt:
                 path,
                 self.serialized_text(),
                 expected_generation=expected_generation,
+                expected_sha256=expected_sha256,
                 expected_parent_identity=expected_parent_identity,
                 capture_generation=capture_generation,
             )

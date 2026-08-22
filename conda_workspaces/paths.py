@@ -15,6 +15,8 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, cast
 from unicodedata import normalize
 
+from .exceptions import FileRecoveryError
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from typing import BinaryIO
@@ -392,6 +394,7 @@ def regular_file_sha256(
     *,
     directory_descriptor: int | None = None,
     label: str = "file",
+    maximum_bytes: int | None = None,
 ) -> tuple[str, FileGeneration]:
     """Hash one stable no-follow regular file and return its generation."""
     flags = (
@@ -424,11 +427,25 @@ def regular_file_sha256(
             or (current.st_dev, current.st_ino) != identity
         ):
             raise ValueError(f"Cannot hash {label} safely: {path}")
+        if maximum_bytes is not None and opened.st_size > maximum_bytes:
+            raise ValueError(
+                f"{label} exceeds the maximum size of {maximum_bytes:,} bytes"
+            )
         digest = hashlib.sha256()
+        hashed_bytes = 0
         with os.fdopen(descriptor, "rb") as stream:
             descriptor = -1
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            while chunk := stream.read(
+                1024 * 1024
+                if maximum_bytes is None
+                else min(1024 * 1024, maximum_bytes + 1 - hashed_bytes)
+            ):
                 digest.update(chunk)
+                hashed_bytes += len(chunk)
+                if maximum_bytes is not None and hashed_bytes > maximum_bytes:
+                    raise ValueError(
+                        f"{label} exceeds the maximum size of {maximum_bytes:,} bytes"
+                    )
             final = os.fstat(stream.fileno())
         current = current_stat()
         if (
@@ -557,7 +574,9 @@ def remove_file_generation(
 
     The live entry is first moved to an unpredictable quarantine name. A
     mismatched generation is restored with an exclusive rename, or retained at
-    the recovery path when another entry has concurrently claimed *path*.
+    the recovery path when another entry has concurrently claimed *path*. If
+    removing a matching generation fails, it remains at the reported recovery
+    path rather than being reinstalled after validation.
     """
     if (expected_content is None) == (expected_sha256 is None):
         raise ValueError("Provide exactly one expected file content or SHA-256 digest")
@@ -615,6 +634,7 @@ def remove_file_generation(
                     recovery_path,
                     label="quarantined file",
                     directory_descriptor=parent_descriptor,
+                    maximum_bytes=expected_generation[5],
                 )
             except ValueError:
                 quarantined_sha256 = None
@@ -630,9 +650,16 @@ def remove_file_generation(
                     recovery_path.unlink()
                 else:
                     os.unlink(recovery_name, dir_fd=parent_descriptor)
-                    os.fsync(parent_descriptor)
             except FileNotFoundError:
                 return False
+            except OSError as exc:
+                raise FileRecoveryError(
+                    path,
+                    recovery_path,
+                    "File generation could not be removed safely.",
+                ) from exc
+            if parent_descriptor is not None:
+                os.fsync(parent_descriptor)
             require_directory_identity(
                 parent,
                 parent_identity,
@@ -650,9 +677,16 @@ def remove_file_generation(
                     source_dir_fd=parent_descriptor,
                     destination_dir_fd=parent_descriptor,
                 )
-                os.fsync(parent_descriptor)
-        except FileExistsError:
+        except FileNotFoundError:
             return False
+        except (OSError, NotImplementedError) as exc:
+            raise FileRecoveryError(
+                path,
+                recovery_path,
+                "File generation could not be restored safely.",
+            ) from exc
+        if parent_descriptor is not None:
+            os.fsync(parent_descriptor)
         require_directory_identity(
             parent,
             parent_identity,
@@ -669,6 +703,7 @@ def atomic_binary_writer_at(
     display_path: Path,
     expected_identity: FileIdentity | None | object = _ANY_FILE_IDENTITY,
     expected_generation: FileGeneration | None | object = _ANY_FILE_GENERATION,
+    expected_sha256: str | None = None,
     capture_generation: Callable[[FileGeneration], None] | None = None,
 ) -> Iterator[BinaryIO]:
     """Atomically replace a file relative to an already anchored directory."""
@@ -705,9 +740,12 @@ def atomic_binary_writer_at(
             display_path,
             directory_descriptor=directory_descriptor,
             label="existing output",
+            maximum_bytes=initial.st_size,
         )
         if hashed_generation != initial_generation:
             raise ValueError(f"Output path changed before writing: {display_path}")
+    if expected_sha256 is not None and initial_sha256 != expected_sha256:
+        raise ValueError(f"Output path changed before writing: {display_path}")
 
     temporary_name = f".{name}.{secrets.token_hex(16)}.tmp"
     descriptor = -1
@@ -737,6 +775,7 @@ def atomic_binary_writer_at(
             display_path.parent / temporary_name,
             directory_descriptor=directory_descriptor,
             label="staged output",
+            maximum_bytes=written.st_size,
         )
         if temporary_generation[:2] != temporary_identity:
             raise ValueError(f"Output changed while it was staged: {display_path}")
@@ -769,6 +808,7 @@ def atomic_binary_writer_at(
                     source_dir_fd=directory_descriptor,
                     destination_dir_fd=directory_descriptor,
                 )
+                cleanup_temporary = False
             else:
                 if initial_generation is None:
                     raise RuntimeError("Existing output has no captured generation")
@@ -783,35 +823,56 @@ def atomic_binary_writer_at(
             raise ValueError(
                 f"Safe publication is unavailable for this output: {display_path}"
             ) from exc
+        cleanup_temporary = False
+        try:
+            installed = os.stat(
+                name,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            installed = None
+            installed_identity = None
+            installed_sha256 = None
+            installed_generation = None
+        else:
+            installed_identity = installed.st_dev, installed.st_ino
+            try:
+                installed_sha256, installed_generation = regular_file_sha256(
+                    display_path,
+                    directory_descriptor=directory_descriptor,
+                    label="published output",
+                    maximum_bytes=temporary_generation[5],
+                )
+            except ValueError:
+                installed_sha256 = None
+                installed_generation = None
+        installed_matches = (
+            installed_identity == temporary_identity
+            and installed_generation is not None
+            and installed_generation[:-1] == temporary_generation[:-1]
+            and installed_sha256 == temporary_sha256
+        )
         if initial_identity is not None:
             assert initial_generation is not None
+            assert initial is not None
             try:
                 displaced_sha256, displaced_generation = regular_file_sha256(
                     display_path.parent / temporary_name,
                     directory_descriptor=directory_descriptor,
                     label="displaced output",
+                    maximum_bytes=initial.st_size,
                 )
             except ValueError:
                 displaced_sha256 = None
                 displaced_generation = None
-            try:
-                installed = os.stat(
-                    name,
-                    dir_fd=directory_descriptor,
-                    follow_symlinks=False,
-                )
-            except FileNotFoundError:
-                installed_identity = None
-            else:
-                installed_identity = installed.st_dev, installed.st_ino
             displaced_matches = (
                 displaced_generation is not None
                 and displaced_generation[:-1] == initial_generation[:-1]
                 and displaced_sha256 == initial_sha256
-                and installed_identity == temporary_identity
+                and installed_matches
             )
             if not displaced_matches:
-                cleanup_temporary = False
                 recovery = display_path.parent / temporary_name
                 try:
                     _rename_with_flags(
@@ -831,16 +892,23 @@ def atomic_binary_writer_at(
                         dir_fd=directory_descriptor,
                         follow_symlinks=False,
                     )
-                except (OSError, NotImplementedError) as exc:
+                except FileNotFoundError as exc:
+                    cleanup_temporary = True
                     raise ValueError(
-                        "Output path changed during publication. Recovery entry:"
-                        f" {recovery}"
+                        f"Output path changed during publication: {display_path}"
+                    ) from exc
+                except (OSError, NotImplementedError) as exc:
+                    raise FileRecoveryError(
+                        display_path,
+                        recovery,
+                        "Output path changed during publication.",
                     ) from exc
                 try:
                     recovery_sha256, recovery_generation = regular_file_sha256(
                         recovery,
                         directory_descriptor=directory_descriptor,
                         label="publication recovery output",
+                        maximum_bytes=temporary_generation[5],
                     )
                 except ValueError:
                     recovery_sha256 = None
@@ -852,32 +920,121 @@ def atomic_binary_writer_at(
                     and recovery_sha256 == temporary_sha256
                 )
                 if recovery_matches:
-                    os.unlink(temporary_name, dir_fd=directory_descriptor)
-                    recovery_message = ""
-                else:
-                    recovery_message = f" Recovery entry: {recovery}"
+                    try:
+                        os.unlink(temporary_name, dir_fd=directory_descriptor)
+                    except FileNotFoundError:
+                        pass
+                    except OSError as exc:
+                        raise FileRecoveryError(
+                            display_path,
+                            recovery,
+                            "Publication recovery output could not be removed.",
+                        ) from exc
                 restored_message = (
                     ""
                     if (restored.st_dev, restored.st_ino) == initial_identity
                     else " Original output could not be restored."
                 )
+                if not recovery_matches:
+                    raise FileRecoveryError(
+                        display_path,
+                        recovery,
+                        f"Output path changed during publication.{restored_message}",
+                    )
                 raise ValueError(
-                    "Output path changed during publication."
-                    f"{restored_message}{recovery_message}"
+                    f"Output path changed during publication.{restored_message}"
                 )
-            os.unlink(temporary_name, dir_fd=directory_descriptor)
-        published = True
-        final = os.stat(
-            name,
-            dir_fd=directory_descriptor,
-            follow_symlinks=False,
-        )
-        if (final.st_dev, final.st_ino) != temporary_identity:
+        elif not installed_matches:
+            if installed is None:
+                raise ValueError(
+                    f"Output path changed during publication: {display_path}"
+                )
+            if installed_identity != temporary_identity:
+                raise ValueError(
+                    f"Output path changed during publication: {display_path}"
+                )
+            removed = remove_file_generation(
+                display_path,
+                temporary_generation,
+                expected_sha256=temporary_sha256,
+                directory_descriptor=directory_descriptor,
+            )
+            if removed:
+                raise ValueError(
+                    f"Output path changed during publication: {display_path}"
+                )
+            raise FileRecoveryError(
+                display_path,
+                display_path,
+                "Output path changed during publication.",
+            )
+        assert installed_generation is not None
+        try:
+            final = os.stat(
+                name,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            if initial_identity is not None:
+                raise FileRecoveryError(
+                    display_path,
+                    display_path.parent / temporary_name,
+                    "Output path changed during publication.",
+                ) from exc
+            raise
+        if (final.st_dev, final.st_ino) != temporary_identity or file_generation(
+            final
+        ) != installed_generation:
+            if initial_identity is not None:
+                raise FileRecoveryError(
+                    display_path,
+                    display_path.parent / temporary_name,
+                    "Output path changed during publication.",
+                )
             raise ValueError(f"Output path changed during publication: {display_path}")
         if capture_generation is not None:
-            capture_generation(file_generation(final))
+            try:
+                capture_generation(installed_generation)
+            except BaseException as exc:
+                if initial_identity is not None:
+                    raise FileRecoveryError(
+                        display_path,
+                        display_path.parent / temporary_name,
+                        "Published output generation could not be recorded.",
+                    ) from exc
+                try:
+                    remove_file_generation(
+                        display_path,
+                        installed_generation,
+                        expected_sha256=temporary_sha256,
+                        directory_descriptor=directory_descriptor,
+                    )
+                except FileRecoveryError:
+                    raise
+                except (OSError, ValueError) as rollback_error:
+                    raise FileRecoveryError(
+                        display_path,
+                        display_path,
+                        "Published output could not be rolled back after its"
+                        " generation capture failed.",
+                    ) from rollback_error
+                raise
+        if initial_identity is not None:
+            try:
+                os.unlink(temporary_name, dir_fd=directory_descriptor)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                raise FileRecoveryError(
+                    display_path,
+                    display_path.parent / temporary_name,
+                    "Published output recovery could not be removed.",
+                ) from exc
+        published = True
         os.fsync(directory_descriptor)
     finally:
+        active_error = sys.exc_info()[1]
         if descriptor >= 0:
             os.close(descriptor)
         if not published and cleanup_temporary:
@@ -885,6 +1042,59 @@ def atomic_binary_writer_at(
                 os.unlink(temporary_name, dir_fd=directory_descriptor)
             except FileNotFoundError:
                 pass
+            except OSError as exc:
+                cleanup_error = FileRecoveryError(
+                    display_path,
+                    display_path.parent / temporary_name,
+                    "Staged output could not be removed.",
+                )
+                if isinstance(active_error, FileRecoveryError):
+                    raise active_error.combine(
+                        cleanup_error,
+                        reason="Multiple publication recovery entries were retained.",
+                    ) from exc
+                raise cleanup_error from exc
+        elif not published and not cleanup_temporary and initial_identity is not None:
+            try:
+                retained = os.stat(
+                    temporary_name,
+                    dir_fd=directory_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                pass
+            except OSError as inspection_error:
+                retained_error = FileRecoveryError(
+                    display_path,
+                    display_path.parent / temporary_name,
+                    "Publication recovery entry could not be inspected.",
+                )
+                if isinstance(active_error, FileRecoveryError):
+                    raise active_error.combine(
+                        retained_error,
+                        reason="Publication recovery could not be inspected.",
+                    ) from inspection_error
+                raise retained_error from inspection_error
+            else:
+                if stat.S_ISREG(retained.st_mode):
+                    retained_error = FileRecoveryError(
+                        display_path,
+                        display_path.parent / temporary_name,
+                        "Publication failed with a retained recovery entry.",
+                    )
+                    if isinstance(active_error, FileRecoveryError):
+                        if str(retained_error.recovery_path) not in {
+                            str(path) for path in active_error.recovery_paths
+                        }:
+                            raise active_error.combine(
+                                retained_error,
+                                reason=(
+                                    "Multiple publication recovery entries were"
+                                    " retained."
+                                ),
+                            ) from active_error
+                    elif active_error is not None:
+                        raise retained_error from active_error
 
 
 def atomic_write_text_at(
@@ -896,6 +1106,7 @@ def atomic_write_text_at(
     encoding: str = "utf-8",
     expected_identity: FileIdentity | None | object = _ANY_FILE_IDENTITY,
     expected_generation: FileGeneration | None | object = _ANY_FILE_GENERATION,
+    expected_sha256: str | None = None,
     capture_generation: Callable[[FileGeneration], None] | None = None,
 ) -> None:
     """Write text relative to an already anchored directory descriptor."""
@@ -905,6 +1116,7 @@ def atomic_write_text_at(
         display_path=display_path,
         expected_identity=expected_identity,
         expected_generation=expected_generation,
+        expected_sha256=expected_sha256,
         capture_generation=capture_generation,
     ) as stream:
         stream.write(content.encode(encoding))
@@ -970,6 +1182,7 @@ def atomic_write_text(
     encoding: str = "utf-8",
     expected_identity: FileIdentity | None | object = _ANY_FILE_IDENTITY,
     expected_generation: FileGeneration | None | object = _ANY_FILE_GENERATION,
+    expected_sha256: str | None = None,
     expected_parent_identity: DirectoryIdentity | object = _ANY_DIRECTORY_IDENTITY,
     capture_generation: Callable[[FileGeneration], None] | None = None,
 ) -> None:
@@ -978,6 +1191,7 @@ def atomic_write_text(
         path,
         expected_identity=expected_identity,
         expected_generation=expected_generation,
+        expected_sha256=expected_sha256,
         expected_parent_identity=expected_parent_identity,
         capture_generation=capture_generation,
     ) as stream:
@@ -990,6 +1204,7 @@ def atomic_binary_writer(
     *,
     expected_identity: FileIdentity | None | object = _ANY_FILE_IDENTITY,
     expected_generation: FileGeneration | None | object = _ANY_FILE_GENERATION,
+    expected_sha256: str | None = None,
     expected_parent_identity: DirectoryIdentity | object = _ANY_DIRECTORY_IDENTITY,
     capture_generation: Callable[[FileGeneration], None] | None = None,
 ) -> Iterator[BinaryIO]:
@@ -1012,6 +1227,7 @@ def atomic_binary_writer(
                 display_path=path,
                 expected_identity=expected_identity,
                 expected_generation=expected_generation,
+                expected_sha256=expected_sha256,
                 capture_generation=capture_generation,
             ) as stream:
                 yield stream
@@ -1068,6 +1284,7 @@ def atomic_binary_writer(
     if initial_generation is None:
         initial_sha256 = None
     else:
+        assert initial is not None
         if os.name != "nt" and sys.platform not in {"darwin", "linux"}:
             raise NotImplementedError(
                 "Safe replacement is unavailable on this platform"
@@ -1076,10 +1293,13 @@ def atomic_binary_writer(
         initial_sha256, hashed_generation = regular_file_sha256(
             path,
             label="existing output",
+            maximum_bytes=initial.st_size,
         )
         require_directory_identity(parent, fallback_parent_identity)
         if hashed_generation != initial_generation:
             raise ValueError(f"Output path changed before writing: {path}")
+    if expected_sha256 is not None and initial_sha256 != expected_sha256:
+        raise ValueError(f"Output path changed before writing: {path}")
     temp_name = None
     recovery_path: Path | None = None
     try:
@@ -1110,6 +1330,7 @@ def atomic_binary_writer(
         temporary_sha256, temporary_generation = regular_file_sha256(
             Path(temp_name),
             label="staged output",
+            maximum_bytes=written.st_size,
         )
         require_directory_identity(parent, fallback_parent_identity)
         if temporary_generation[:2] != temporary_identity:
@@ -1131,6 +1352,46 @@ def atomic_binary_writer(
             rename_noreplace(temp_name, path)
             require_directory_identity(parent, fallback_parent_identity)
             temp_name = None
+            try:
+                final_sha256, final_generation = regular_file_sha256(
+                    path,
+                    label="published output",
+                    maximum_bytes=temporary_generation[5],
+                )
+            except ValueError:
+                current_output = path.lstat() if path.exists() else None
+                final_sha256 = None
+                final_generation = (
+                    file_generation(current_output)
+                    if current_output is not None
+                    and stat.S_ISREG(current_output.st_mode)
+                    else None
+                )
+            require_directory_identity(parent, fallback_parent_identity)
+            output_matches = (
+                final_generation is not None
+                and final_generation[:2] == temporary_identity
+                and final_generation[:-1] == temporary_generation[:-1]
+                and final_sha256 == temporary_sha256
+            )
+            if not output_matches:
+                if final_generation is None:
+                    raise ValueError(f"Output path changed during publication: {path}")
+                if final_generation[:2] != temporary_identity:
+                    raise ValueError(f"Output path changed during publication: {path}")
+                removed = remove_file_generation(
+                    path,
+                    temporary_generation,
+                    expected_sha256=temporary_sha256,
+                    expected_parent_identity=fallback_parent_identity,
+                )
+                if removed:
+                    raise ValueError(f"Output path changed during publication: {path}")
+                raise FileRecoveryError(
+                    path,
+                    path,
+                    "Output path changed during publication.",
+                )
         else:
             assert initial_generation is not None
             recovery_path = path.with_name(
@@ -1144,6 +1405,7 @@ def atomic_binary_writer(
                 recovery_sha256, recovery_generation = regular_file_sha256(
                     recovery_path,
                     label="displaced output",
+                    maximum_bytes=initial.st_size,
                 )
                 require_directory_identity(parent, fallback_parent_identity)
                 if (
@@ -1159,6 +1421,7 @@ def atomic_binary_writer(
                 final_sha256, final_generation = regular_file_sha256(
                     path,
                     label="published output",
+                    maximum_bytes=temporary_generation[5],
                 )
                 require_directory_identity(parent, fallback_parent_identity)
                 if (
@@ -1168,23 +1431,33 @@ def atomic_binary_writer(
                 ):
                     raise ValueError(f"Output path changed during publication: {path}")
                 if capture_generation is not None:
-                    capture_generation(final_generation)
+                    try:
+                        capture_generation(final_generation)
+                    except BaseException as capture_error:
+                        raise FileRecoveryError(
+                            path,
+                            recovery_path,
+                            "Published output generation could not be recorded.",
+                        ) from capture_error
             except BaseException as exc:
+                if isinstance(exc, FileRecoveryError):
+                    raise
                 try:
                     require_directory_identity(parent, fallback_parent_identity)
                     rename_noreplace(recovery_path, path)
                     require_directory_identity(parent, fallback_parent_identity)
-                except FileExistsError:
+                except FileNotFoundError as restore_exc:
+                    recovery_path = None
                     if isinstance(exc, (OSError, ValueError)):
                         raise ValueError(
-                            "Output path changed during publication. Recovery entry:"
-                            f" {recovery_path}"
-                        ) from exc
+                            f"Output path changed during publication: {path}"
+                        ) from restore_exc
                     raise
                 except (OSError, ValueError) as restore_exc:
-                    raise ValueError(
-                        "Output path changed during publication. Recovery entry:"
-                        f" {recovery_path}"
+                    raise FileRecoveryError(
+                        path,
+                        recovery_path,
+                        "Output path changed during publication.",
                     ) from restore_exc
                 recovery_path = None
                 if isinstance(exc, (OSError, ValueError)):
@@ -1195,12 +1468,15 @@ def atomic_binary_writer(
             try:
                 require_directory_identity(parent, fallback_parent_identity)
                 recovery_path.unlink()
-                require_directory_identity(parent, fallback_parent_identity)
-            except (OSError, ValueError) as exc:
-                raise ValueError(
-                    "Output was published but its recovery entry could not be"
-                    f" removed: {recovery_path}"
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                raise FileRecoveryError(
+                    path,
+                    recovery_path,
+                    "Published output recovery could not be removed.",
                 ) from exc
+            require_directory_identity(parent, fallback_parent_identity)
             recovery_path = None
         final = path.lstat()
         require_directory_identity(parent, fallback_parent_identity)
@@ -1211,12 +1487,33 @@ def atomic_binary_writer(
                 final.st_ino,
             )
             != temporary_identity
+            or file_generation(final) != final_generation
         ):
             raise ValueError(f"Output path changed during publication: {path}")
         if initial is None and capture_generation is not None:
-            capture_generation(file_generation(final))
+            try:
+                capture_generation(final_generation)
+            except BaseException:
+                try:
+                    remove_file_generation(
+                        path,
+                        final_generation,
+                        expected_sha256=temporary_sha256,
+                        expected_parent_identity=fallback_parent_identity,
+                    )
+                except FileRecoveryError:
+                    raise
+                except (OSError, ValueError) as rollback_error:
+                    raise FileRecoveryError(
+                        path,
+                        path,
+                        "Published output could not be rolled back after its"
+                        " generation capture failed.",
+                    ) from rollback_error
+                raise
         require_directory_identity(parent, fallback_parent_identity)
     finally:
+        active_error = sys.exc_info()[1]
         if temp_name is not None:
             try:
                 require_directory_identity(parent, fallback_parent_identity)
@@ -1224,8 +1521,25 @@ def atomic_binary_writer(
                 require_directory_identity(parent, fallback_parent_identity)
             except FileNotFoundError:
                 pass
-            except (OSError, ValueError):
-                pass
+            except OSError as exc:
+                try:
+                    require_directory_identity(parent, fallback_parent_identity)
+                except (OSError, ValueError):
+                    pass
+                else:
+                    cleanup_error = FileRecoveryError(
+                        path,
+                        Path(temp_name),
+                        "Staged output could not be removed.",
+                    )
+                    if isinstance(active_error, FileRecoveryError):
+                        raise active_error.combine(
+                            cleanup_error,
+                            reason=(
+                                "Multiple publication recovery entries were retained."
+                            ),
+                        ) from exc
+                    raise cleanup_error from exc
 
 
 def validate_directory_output(path: Path) -> None:

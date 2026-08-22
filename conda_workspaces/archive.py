@@ -19,6 +19,7 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import warnings
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from io import BytesIO
@@ -41,6 +42,7 @@ from .exceptions import (
     ArchiveHashMismatchError,
     ArchivePathTraversalError,
     AttestationError,
+    FileRecoveryError,
     LockfileNotFoundError,
     LockfileStaleError,
     WorkspaceParseError,
@@ -66,6 +68,7 @@ from .paths import (
     portable_path_key,
     read_regular_file_bytes,
     regular_file_generation,
+    regular_file_sha256,
     remove_file_generation,
     rename_noreplace,
     require_directory_identity,
@@ -296,16 +299,153 @@ class _BoundedTarInfo(tarfile.TarInfo):
     _proc_gnusparse_10 = _reject_sparse
 
 
-class _HashingReader:
+class _BoundedReader:
+    """Reject regular-file reads that advance beyond a byte ceiling."""
+
+    def __init__(
+        self,
+        stream: BinaryIO,
+        *,
+        maximum_bytes: int | None,
+        label: str,
+    ) -> None:
+        self.stream = stream
+        self.maximum_bytes = maximum_bytes
+        self.label = label
+
+    def read(self, size: int = -1) -> bytes:
+        """Read up to *size* bytes without advancing past the ceiling."""
+        return self._read_with_limit(self.stream.read, size)
+
+    def read1(self, size: int = -1) -> bytes:
+        """Read buffered bytes without advancing past the ceiling."""
+        operation = getattr(self.stream, "read1", self.stream.read)
+        return self._read_with_limit(operation, size)
+
+    def readall(self) -> bytes:
+        """Read all remaining bytes without advancing past the ceiling."""
+        return self.read()
+
+    def readline(self, size: int = -1) -> bytes:
+        """Read one line without advancing past the ceiling."""
+        return self._read_with_limit(self.stream.readline, size)
+
+    def readlines(self, hint: int = -1) -> list[bytes]:
+        """Read lines without advancing past the ceiling."""
+        lines: list[bytes] = []
+        total = 0
+        for line in self:
+            lines.append(line)
+            total += len(line)
+            if hint > 0 and total >= hint:
+                break
+        return lines
+
+    def readinto(self, buffer: Any) -> int | None:
+        """Read into *buffer* without advancing past the ceiling."""
+        return self._readinto_with_limit(getattr(self.stream, "readinto", None), buffer)
+
+    def readinto1(self, buffer: Any) -> int | None:
+        """Read buffered bytes into *buffer* below the ceiling."""
+        operation = getattr(self.stream, "readinto1", None)
+        return self._readinto_with_limit(operation, buffer)
+
+    def peek(self, size: int = 0) -> bytes:
+        """Peek only at bytes below the ceiling."""
+        operation = getattr(self.stream, "peek", None)
+        if operation is None:
+            return b""
+        if self.maximum_bytes is None:
+            return operation(size)
+        position, remaining = self._remaining()
+        data = operation(remaining if size <= 0 else min(size, remaining))
+        allowed = self.maximum_bytes - position
+        if len(data) > allowed:
+            raise self._limit_error()
+        return data
+
+    def __iter__(self) -> _BoundedReader:
+        return self
+
+    def __next__(self) -> bytes:
+        line = self.readline()
+        if not line:
+            raise StopIteration
+        return line
+
+    def _read_with_limit(
+        self,
+        operation: Callable[[int], bytes],
+        size: int,
+    ) -> bytes:
+        """Apply the ceiling to one bytes-returning read operation."""
+        if self.maximum_bytes is None:
+            return operation(size)
+        position, remaining = self._remaining()
+        data = operation(remaining if size < 0 else min(size, remaining))
+        if position + len(data) > self.maximum_bytes:
+            raise self._limit_error()
+        return data
+
+    def _readinto_with_limit(
+        self,
+        operation: Callable[[Any], int | None] | None,
+        buffer: Any,
+    ) -> int | None:
+        """Apply the ceiling to one read-into operation."""
+        if operation is None:
+            target = memoryview(buffer)
+            data = self.read(len(target))
+            target[: len(data)] = data
+            return len(data)
+        if self.maximum_bytes is None:
+            return operation(buffer)
+        position, remaining = self._remaining()
+        limited = memoryview(buffer)[:remaining]
+        read = operation(limited)
+        if read is not None and position + read > self.maximum_bytes:
+            raise self._limit_error()
+        return read
+
+    def _remaining(self) -> tuple[int, int]:
+        """Return the current position and one-byte oversize probe."""
+        assert self.maximum_bytes is not None
+        position = self.stream.tell()
+        if position > self.maximum_bytes:
+            raise self._limit_error()
+        return position, self.maximum_bytes + 1 - position
+
+    def _limit_error(self) -> ArchiveError:
+        """Build the stable byte-ceiling error."""
+        assert self.maximum_bytes is not None
+        return ArchiveError(
+            f"{self.label} exceeds the maximum size of {self.maximum_bytes:,} bytes."
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.stream, name)
+
+
+class _HashingReader(_BoundedReader):
     """Hash exactly the bytes consumed while a regular file enters a tar."""
 
-    def __init__(self, stream: BinaryIO) -> None:
-        self.stream = stream
+    def __init__(
+        self,
+        stream: BinaryIO,
+        *,
+        maximum_bytes: int | None = None,
+        label: str = "File",
+    ) -> None:
+        super().__init__(
+            stream,
+            maximum_bytes=maximum_bytes,
+            label=label,
+        )
         self.digest = hashlib.sha256()
 
     def read(self, size: int = -1) -> bytes:
         """Read and hash up to *size* bytes from the underlying stream."""
-        data = self.stream.read(size)
+        data = super().read(size)
         self.digest.update(data)
         return data
 
@@ -609,6 +749,11 @@ class WorkspaceArchive:
 
         archive_output_parent_identity: DirectoryIdentity | None = None
         receipt_output_parent_identity: DirectoryIdentity | None = None
+        receipt_maximum_bytes: int | None = None
+        if needs_receipt and not dry_run:
+            from .receipts import MAX_RECEIPT_BYTES, ArchiveReceipt
+
+            receipt_maximum_bytes = MAX_RECEIPT_BYTES
         if not dry_run:
             archive_output_parent_identity = capture_directory_identity(
                 output_path.parent,
@@ -619,7 +764,18 @@ class WorkspaceArchive:
                     receipt_path.parent,
                     create=True,
                 )
-        archive_output_generation = regular_file_generation(output_path)
+        if dry_run:
+            archive_output_generation = regular_file_generation(output_path)
+            archive_output_sha256 = None
+        else:
+            archive_output_generation, archive_output_sha256 = (
+                cls.capture_output_binding(
+                    output_path,
+                    maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
+                    label="Archive output",
+                    expected_parent_identity=archive_output_parent_identity,
+                )
+            )
         if archive_output_parent_identity is not None:
             require_directory_identity(
                 output_path.parent,
@@ -628,7 +784,19 @@ class WorkspaceArchive:
         if lock:
             validate_file_output(lock_path)
         if receipt_path is not None:
-            receipt_output_generation = regular_file_generation(receipt_path)
+            if dry_run:
+                receipt_output_generation = regular_file_generation(receipt_path)
+                receipt_output_sha256 = None
+            else:
+                assert receipt_maximum_bytes is not None
+                receipt_output_generation, receipt_output_sha256 = (
+                    cls.capture_output_binding(
+                        receipt_path,
+                        maximum_bytes=receipt_maximum_bytes,
+                        label="Receipt output",
+                        expected_parent_identity=receipt_output_parent_identity,
+                    )
+                )
             if receipt_output_parent_identity is not None:
                 require_directory_identity(
                     receipt_path.parent,
@@ -636,6 +804,7 @@ class WorkspaceArchive:
                 )
         else:
             receipt_output_generation = None
+            receipt_output_sha256 = None
         attestation_output = None
         if attestation_path is not None:
             attestation_output = attestations.AttestationOutput.prepare(
@@ -720,7 +889,6 @@ class WorkspaceArchive:
         published_attestation_generation: OutputFileGeneration | None = None
         previous_archive_backup: Path | None = None
         previous_receipt_backup: Path | None = None
-        receipt_maximum_bytes: int | None = None
         expected_receipt_sha256: str | None = None
         expected_attestation_sha256: str | None = None
         captured_archive_output: ArchiveOutputCapture | None = None
@@ -760,7 +928,32 @@ class WorkspaceArchive:
             else:
                 published_receipt_generation = generation
 
-        def remove_failed_outputs() -> None:
+        def remove_failed_outputs(operation_error: BaseException) -> None:
+            cleanup_failures: list[str] = []
+
+            def restore_output(
+                path: Path,
+                *,
+                published_generation: OutputFileGeneration,
+                published_sha256: str,
+                backup: Path | None,
+                maximum_bytes: int,
+                label: str,
+                expected_parent_identity: DirectoryIdentity,
+            ) -> None:
+                try:
+                    cls.restore_published_output(
+                        path,
+                        published_generation=published_generation,
+                        published_sha256=published_sha256,
+                        backup=backup,
+                        maximum_bytes=maximum_bytes,
+                        label=label,
+                        expected_parent_identity=expected_parent_identity,
+                    )
+                except (ArchiveError, FileRecoveryError, OSError, ValueError) as exc:
+                    cleanup_failures.append(f"{label} cleanup failed: {exc}")
+
             if (
                 attestation_output is not None
                 and attestation_output.published_content is not None
@@ -768,15 +961,22 @@ class WorkspaceArchive:
             ):
                 try:
                     attestation_output.restore()
-                except AttestationError:
-                    pass
+                except (
+                    AttestationError,
+                    FileRecoveryError,
+                    OSError,
+                    ValueError,
+                ) as exc:
+                    cleanup_failures.append(f"Attestation output cleanup failed: {exc}")
             if published_receipt_generation is not None:
                 assert receipt_path is not None
                 assert receipt_maximum_bytes is not None
                 assert receipt_output_parent_identity is not None
-                cls.restore_published_output(
+                assert expected_receipt_sha256 is not None
+                restore_output(
                     receipt_path,
                     published_generation=published_receipt_generation,
+                    published_sha256=expected_receipt_sha256,
                     backup=previous_receipt_backup,
                     maximum_bytes=receipt_maximum_bytes,
                     label="Receipt output",
@@ -788,21 +988,27 @@ class WorkspaceArchive:
                 and created_receipt_content is not None
             ):
                 assert receipt_path is not None
+                assert receipt_maximum_bytes is not None
                 assert receipt_output_parent_identity is not None
-                try:
-                    remove_file_generation(
-                        receipt_path,
-                        created_receipt_generation,
-                        expected_content=created_receipt_content,
-                        expected_parent_identity=receipt_output_parent_identity,
-                    )
-                except (OSError, ValueError):
-                    pass
+                restore_output(
+                    receipt_path,
+                    published_generation=created_receipt_generation,
+                    published_sha256=hashlib.sha256(
+                        created_receipt_content
+                    ).hexdigest(),
+                    backup=None,
+                    maximum_bytes=receipt_maximum_bytes,
+                    label="Receipt output",
+                    expected_parent_identity=receipt_output_parent_identity,
+                )
             if published_archive_generation is not None:
                 assert archive_output_parent_identity is not None
-                cls.restore_published_output(
+                assert captured_archive_output is not None
+                assert captured_archive_output.sha256 is not None
+                restore_output(
                     output_path,
                     published_generation=published_archive_generation,
+                    published_sha256=captured_archive_output.sha256,
                     backup=previous_archive_backup,
                     maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
                     label="Archive output",
@@ -814,25 +1020,32 @@ class WorkspaceArchive:
                 and created_output_sha256 is not None
             ):
                 assert archive_output_parent_identity is not None
-                try:
-                    remove_file_generation(
-                        output_path,
-                        created_output_generation,
-                        expected_sha256=created_output_sha256,
-                        expected_parent_identity=archive_output_parent_identity,
-                    )
-                except (OSError, ValueError):
-                    pass
+                restore_output(
+                    output_path,
+                    published_generation=created_output_generation,
+                    published_sha256=created_output_sha256,
+                    backup=None,
+                    maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
+                    label="Archive output",
+                    expected_parent_identity=archive_output_parent_identity,
+                )
+            if cleanup_failures:
+                raise ArchiveError(
+                    f"{operation_error}\nArchive output cleanup was incomplete.",
+                    hints=cleanup_failures,
+                ) from operation_error
 
         @contextmanager
         def guarded_archive_outputs() -> Iterator[None]:
             try:
                 with publication_guard:
                     yield
-            except BaseException:
-                remove_failed_outputs()
-                if staging_directory is not None:
-                    staging_directory.cleanup()
+            except BaseException as operation_error:
+                try:
+                    remove_failed_outputs(operation_error)
+                finally:
+                    if staging_directory is not None:
+                        staging_directory.cleanup()
                 raise
 
         with guarded_archive_outputs():
@@ -987,6 +1200,9 @@ class WorkspaceArchive:
                     expected_output_generation=(
                         None if staging_root is not None else archive_output_generation
                     ),
+                    expected_output_sha256=(
+                        None if staging_root is not None else archive_output_sha256
+                    ),
                     dry_run=dry_run,
                 )
                 if not dry_run:
@@ -1037,9 +1253,7 @@ class WorkspaceArchive:
                             expected=captured_archive_output.sha256,
                             actual=live_archive_sha256,
                         )
-                    from .receipts import MAX_RECEIPT_BYTES, ArchiveReceipt
-
-                    receipt_maximum_bytes = MAX_RECEIPT_BYTES
+                    assert receipt_maximum_bytes is not None
                     receipt_obj = ArchiveReceipt.build_from_captured(
                         archive_name=output_path.name,
                         archive_sha256=captured_archive_output.sha256,
@@ -1093,6 +1307,7 @@ class WorkspaceArchive:
                             output_path,
                             previous_archive_backup,
                             expected_generation=archive_output_generation,
+                            expected_sha256=archive_output_sha256,
                             maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
                             label="Previous archive output",
                             expected_parent_identity=archive_output_parent_identity,
@@ -1103,7 +1318,8 @@ class WorkspaceArchive:
                             archive_path,
                             output_path,
                             expected_generation=archive_output_generation,
-                            expected_sha256=captured_archive_output.sha256,
+                            expected_destination_sha256=archive_output_sha256,
+                            published_sha256=captured_archive_output.sha256,
                             maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
                             label="Archive output",
                             expected_parent_identity=archive_output_parent_identity,
@@ -1125,6 +1341,7 @@ class WorkspaceArchive:
                             receipt_path,
                             previous_receipt_backup,
                             expected_generation=receipt_output_generation,
+                            expected_sha256=receipt_output_sha256,
                             maximum_bytes=receipt_maximum_bytes,
                             label="Previous receipt output",
                             expected_parent_identity=receipt_output_parent_identity,
@@ -1136,6 +1353,7 @@ class WorkspaceArchive:
                         receipt_obj.write(
                             receipt_path,
                             expected_generation=receipt_output_generation,
+                            expected_sha256=receipt_output_sha256,
                             expected_parent_identity=receipt_output_parent_identity,
                             capture_generation=capture_receipt_publication,
                         )
@@ -1176,6 +1394,8 @@ class WorkspaceArchive:
                 if staging_root is not None:
                     assert archive_output_parent_identity is not None
                     assert published_archive_generation is not None
+                    assert captured_archive_output is not None
+                    assert captured_archive_output.sha256 is not None
                     cls.require_published_output(
                         output_path,
                         expected_generation=published_archive_generation,
@@ -2381,13 +2601,60 @@ class WorkspaceArchive:
     @staticmethod
     def snapshot_archive(source: Path, destination: Path) -> None:
         """Copy one no-follow archive generation into private staging."""
-        WorkspaceArchive.snapshot_output(
+        parent_identity = capture_directory_identity(source.parent)
+        sha256, archive_generation = file_sha256_with_generation(
             source,
-            destination,
-            expected_generation=None,
             maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
             label="Archive",
         )
+        require_directory_identity(source.parent, parent_identity)
+        require_regular_file_generation(
+            source,
+            archive_generation,
+            label="Archive",
+        )
+        generation = regular_file_generation(source)
+        if generation is None:
+            raise ArchiveError(f"Archive changed before it was snapshotted: {source}")
+        WorkspaceArchive.snapshot_output(
+            source,
+            destination,
+            expected_generation=generation,
+            expected_sha256=sha256,
+            maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
+            label="Archive",
+            expected_parent_identity=parent_identity,
+        )
+
+    @staticmethod
+    def capture_output_binding(
+        path: Path,
+        *,
+        maximum_bytes: int,
+        label: str,
+        expected_parent_identity: DirectoryIdentity | None = None,
+    ) -> tuple[OutputFileGeneration | None, str | None]:
+        """Bind an existing output generation to its exact SHA-256 digest."""
+        try:
+            if expected_parent_identity is not None:
+                require_directory_identity(path.parent, expected_parent_identity)
+            generation = regular_file_generation(path)
+            if generation is None:
+                if expected_parent_identity is not None:
+                    require_directory_identity(path.parent, expected_parent_identity)
+                return None, None
+            sha256, hashed_generation = regular_file_sha256(
+                path,
+                label=label,
+                maximum_bytes=maximum_bytes,
+            )
+            if hashed_generation != generation:
+                raise ValueError(f"{label} changed while it was captured: {path}")
+            if expected_parent_identity is not None:
+                require_directory_identity(path.parent, expected_parent_identity)
+        except (OSError, ValueError) as exc:
+            raise ArchiveError(f"{label} cannot be captured safely: {path}") from exc
+        return hashed_generation, sha256
 
     @staticmethod
     def snapshot_output(
@@ -2395,6 +2662,7 @@ class WorkspaceArchive:
         destination: Path,
         *,
         expected_generation: OutputFileGeneration | None,
+        expected_sha256: str | None,
         maximum_bytes: int,
         label: str,
         expected_parent_identity: DirectoryIdentity | None = None,
@@ -2410,6 +2678,11 @@ class WorkspaceArchive:
                 raise ArchiveError(
                     f"{label} changed before it was snapshotted: {source}"
                 )
+            if expected_generation is not None and expected_sha256 is None:
+                raise ValueError(
+                    f"{label} snapshot requires the captured SHA-256 digest"
+                )
+            copied_sha256: str | None = None
             with atomic_binary_writer(
                 destination,
                 expected_identity=None,
@@ -2431,10 +2704,30 @@ class WorkspaceArchive:
                         raise ArchiveError(
                             f"{label} changed before it was snapshotted: {source}"
                         )
-                    shutil.copyfileobj(
+                    hashing_input = _HashingReader(
                         input_stream,
+                        maximum_bytes=maximum_bytes,
+                        label=label,
+                    )
+                    shutil.copyfileobj(
+                        hashing_input,
                         output_stream,
                         length=1024 * 1024,
+                    )
+                    copied_sha256 = hashing_input.digest.hexdigest()
+            if expected_sha256 is not None and copied_sha256 != expected_sha256:
+                raise ArchiveError(
+                    f"{label} changed while it was snapshotted: {source}"
+                )
+            if copied_sha256 is not None:
+                backup_sha256, _ = regular_file_sha256(
+                    destination,
+                    label=f"{label} rollback snapshot",
+                    maximum_bytes=maximum_bytes,
+                )
+                if backup_sha256 != copied_sha256:
+                    raise ArchiveError(
+                        f"{label} rollback snapshot changed: {destination}"
                     )
             if (
                 expected_generation is not None
@@ -2509,7 +2802,8 @@ class WorkspaceArchive:
         destination: Path,
         *,
         expected_generation: OutputFileGeneration | None,
-        expected_sha256: str,
+        expected_destination_sha256: str | None,
+        published_sha256: str,
         maximum_bytes: int,
         label: str,
         expected_parent_identity: DirectoryIdentity,
@@ -2526,6 +2820,7 @@ class WorkspaceArchive:
             with atomic_binary_writer(
                 destination,
                 expected_generation=expected_generation,
+                expected_sha256=expected_destination_sha256,
                 expected_parent_identity=expected_parent_identity,
                 capture_generation=capture_publication,
             ) as output_stream:
@@ -2535,7 +2830,11 @@ class WorkspaceArchive:
                     maximum_bytes=maximum_bytes,
                 ) as input_stream:
                     shutil.copyfileobj(
-                        input_stream,
+                        _BoundedReader(
+                            input_stream,
+                            maximum_bytes=maximum_bytes,
+                            label=f"Staged {label.lower()}",
+                        ),
                         output_stream,
                         length=1024 * 1024,
                     )
@@ -2549,7 +2848,7 @@ class WorkspaceArchive:
             ) from exc
         output_generation, archive_generation = cls.capture_published_output(
             destination,
-            expected_sha256=expected_sha256,
+            expected_sha256=published_sha256,
             maximum_bytes=maximum_bytes,
             label=label,
             expected_parent_identity=expected_parent_identity,
@@ -2564,17 +2863,19 @@ class WorkspaceArchive:
         path: Path,
         *,
         published_generation: OutputFileGeneration,
+        published_sha256: str,
         backup: Path | None,
         maximum_bytes: int,
         label: str,
         expected_parent_identity: DirectoryIdentity,
     ) -> bool:
-        """Restore or remove a publication only while its generation matches."""
-        try:
-            if backup is not None:
+        """Restore or remove a publication while its generation and digest match."""
+        if backup is not None:
+            try:
                 with atomic_binary_writer(
                     path,
                     expected_generation=published_generation,
+                    expected_sha256=published_sha256,
                     expected_parent_identity=expected_parent_identity,
                 ) as output_stream:
                     with open_stable_regular_file(
@@ -2583,36 +2884,35 @@ class WorkspaceArchive:
                         maximum_bytes=maximum_bytes,
                     ) as input_stream:
                         shutil.copyfileobj(
-                            input_stream,
+                            _BoundedReader(
+                                input_stream,
+                                maximum_bytes=maximum_bytes,
+                                label=f"Previous {label.lower()}",
+                            ),
                             output_stream,
                             length=1024 * 1024,
                         )
-                return True
-
-            marker_generations: list[OutputFileGeneration] = []
-            try:
-                with atomic_binary_writer(
-                    path,
-                    expected_generation=published_generation,
-                    expected_parent_identity=expected_parent_identity,
-                    capture_generation=marker_generations.append,
-                ) as output_stream:
-                    pass
-            except (OSError, ValueError):
-                if not marker_generations:
-                    return False
-            if len(marker_generations) != 1:
-                raise ArchiveError(f"{label} rollback marker was not captured: {path}")
-            if not remove_file_generation(
-                path,
-                marker_generations[0],
-                expected_content=b"",
-                expected_parent_identity=expected_parent_identity,
-            ):
+            except FileRecoveryError:
+                raise
+            except ValueError:
                 return False
-            return not path.exists() and not path.is_symlink()
-        except (ArchiveError, OSError, ValueError):
-            return False
+            except OSError as exc:
+                raise ArchiveError(
+                    f"{label} cannot be restored safely: {path}. {exc}"
+                ) from exc
+            return True
+
+        try:
+            return remove_file_generation(
+                path,
+                published_generation,
+                expected_sha256=published_sha256,
+                expected_parent_identity=expected_parent_identity,
+            )
+        except (OSError, ValueError) as exc:
+            raise ArchiveError(
+                f"{label} cannot be removed safely: {path}. {exc}"
+            ) from exc
 
     @classmethod
     def require_published_output(
@@ -2642,6 +2942,37 @@ class WorkspaceArchive:
             raise
         except (OSError, ValueError) as exc:
             raise ArchiveError(f"{label} changed after publication: {path}") from exc
+
+    @staticmethod
+    def remove_created_output(path: Path, expected: tuple[int, int]) -> None:
+        """Remove an output by its legacy device and inode identity.
+
+        This compatibility method cannot distinguish an in-place rewrite. New
+        code should use :func:`remove_file_generation` with a content binding.
+        """
+        warnings.warn(
+            "WorkspaceArchive.remove_created_output() is deprecated because"
+            " device and inode identity does not bind file content. Use"
+            " remove_file_generation().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        try:
+            with anchored_directory(path.parent) as parent_descriptor:
+                if parent_descriptor is None:
+                    current = path.lstat()
+                    if (current.st_dev, current.st_ino) == expected:
+                        path.unlink()
+                    return
+                current = os.stat(
+                    path.name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                if (current.st_dev, current.st_ino) == expected:
+                    os.unlink(path.name, dir_fd=parent_descriptor)
+        except FileNotFoundError:
+            return
 
 
 def is_absolute_runtime_prefix(prefix: str) -> bool:
@@ -2941,6 +3272,7 @@ def create_archive(
     expected_output_generation: OutputFileGeneration | None | object = (
         _CURRENT_ARCHIVE_OUTPUT_GENERATION
     ),
+    expected_output_sha256: str | None = None,
     dry_run: bool = False,
 ) -> Path:
     """Create a tar archive of the workspace at *root*.
@@ -2954,6 +3286,20 @@ def create_archive(
         raise ArchiveError("Archive output cannot be a symbolic link.")
     if expected_output_generation is _CURRENT_ARCHIVE_OUTPUT_GENERATION:
         expected_output_generation = regular_file_generation(output)
+    if (
+        expected_output_generation is not None
+        and expected_output_sha256 is None
+        and not dry_run
+    ):
+        expected_output_sha256, hashed_generation = regular_file_sha256(
+            output,
+            label="archive output",
+            maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
+        )
+        if hashed_generation != expected_output_generation:
+            raise ArchiveError(
+                f"Archive output changed before it was created: {output}"
+            )
     for package in bundle_packages or ():
         if output_paths_collide(output, package):
             raise ArchiveError(
@@ -2983,12 +3329,14 @@ def create_archive(
         atomic_binary_writer(
             output,
             expected_generation=expected_output_generation,
+            expected_sha256=expected_output_sha256,
             capture_generation=capture_publication,
         )
         if expected_output_parent_identity is None
         else atomic_binary_writer(
             output,
             expected_generation=expected_output_generation,
+            expected_sha256=expected_output_sha256,
             expected_parent_identity=expected_output_parent_identity,
             capture_generation=capture_publication,
         )
@@ -3666,9 +4014,23 @@ def open_stable_regular_file(
 
             with os.fdopen(descriptor, "rb") as stream:
                 descriptor = -1
+                bounded_stream = (
+                    stream
+                    if maximum_bytes is None
+                    else cast(
+                        "BinaryIO",
+                        _BoundedReader(
+                            stream,
+                            maximum_bytes=maximum_bytes,
+                            label=label,
+                        ),
+                    )
+                )
                 try:
-                    yield stream
-                finally:
+                    yield bounded_stream
+                except BaseException:
+                    raise
+                else:
                     final = os.fstat(stream.fileno())
                     try:
                         current = archive_leaf_stat(path, parent_descriptor)
@@ -3702,8 +4064,16 @@ def open_tar(archive_path: Path) -> Iterator[tarfile.TarFile]:
         label="Archive",
         maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
     ) as archive_stream:
+        bounded_archive_stream = cast(
+            "BinaryIO",
+            _BoundedReader(
+                archive_stream,
+                maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
+                label="Archive",
+            ),
+        )
         if compression == "zst" and not tarfile_supports_zstd():
-            with zstd_module().open(archive_stream, "rb") as compressed:
+            with zstd_module().open(bounded_archive_stream, "rb") as compressed:
                 with tarfile.open(
                     fileobj=compressed,
                     mode="r:",
@@ -3712,7 +4082,7 @@ def open_tar(archive_path: Path) -> Iterator[tarfile.TarFile]:
                     yield tf
             return
         with tarfile.open(  # ty: ignore[no-matching-overload]
-            fileobj=archive_stream,
+            fileobj=bounded_archive_stream,
             mode=f"r:{compression}",
             tarinfo=_BoundedTarInfo,
         ) as tf:
@@ -4189,11 +4559,15 @@ def file_sha256_with_generation(
             != expected_identity
         ):
             raise ArchiveError(f"{label} changed while opening: {path}")
-        digest = hashlib.sha256()
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
+        reader = _HashingReader(
+            stream,
+            maximum_bytes=maximum_bytes,
+            label=label,
+        )
+        for _chunk in iter(lambda: reader.read(1024 * 1024), b""):
+            pass
         generation = file_generation(opened)
-    return digest.hexdigest(), generation
+    return reader.digest.hexdigest(), generation
 
 
 def file_sha256(path: Path) -> str:

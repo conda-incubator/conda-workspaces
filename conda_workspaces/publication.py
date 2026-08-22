@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 from contextlib import contextmanager, nullcontext
@@ -12,7 +13,7 @@ from typing import TYPE_CHECKING
 from conda.base.context import context as conda_context
 from conda.gateways.disk.lock import LOCK_BYTE, lock
 
-from .exceptions import CondaWorkspacesError
+from .exceptions import CondaWorkspacesError, FileRecoveryError
 from .lockfile import MAX_LOCKFILE_BYTES, lockfile_path, validate_lockfile_output
 from .manifests.base import MAX_MANIFEST_BYTES, ManifestParser
 from .paths import (
@@ -267,15 +268,27 @@ class WorkspacePublication:
         return file_generation(current)
 
     def _capture_lockfile_generation(self) -> None:
-        """Bind publication to the current canonical lockfile generation."""
+        """Bind publication to the current canonical lockfile bytes."""
         path = lockfile_path(self.ctx)
         try:
             generation = self._lockfile_generation_at_root()
+            content = None
+            if generation is not None:
+                content, captured_generation = read_regular_file_bytes_with_generation(
+                    path,
+                    maximum_bytes=MAX_LOCKFILE_BYTES,
+                    label="workspace lockfile",
+                    directory_descriptor=self._root_descriptor,
+                )
+                if captured_generation != generation:
+                    raise ValueError(
+                        f"Workspace lockfile changed while it was captured: {path}"
+                    )
         except (OSError, ValueError) as exc:
             raise CondaWorkspacesError(
                 f"Workspace lockfile cannot be inspected safely: {path}"
             ) from exc
-        self._lockfile_content = None
+        self._lockfile_content = content
         self._lockfile_generation = generation
         self._lockfile_generation_captured = True
 
@@ -532,6 +545,9 @@ class WorkspacePublication:
         expected_generation = self._manifest_generation
         if expected_generation is None:
             raise RuntimeError("Workspace manifest generation was not captured")
+        if self._manifest_content is None:
+            raise RuntimeError("Workspace manifest content was not captured")
+        expected_sha256 = hashlib.sha256(self._manifest_content).hexdigest()
         if self.updated_text != self.original_text:
             try:
                 if self._root_descriptor is None:
@@ -539,6 +555,7 @@ class WorkspacePublication:
                         self.manifest_path,
                         self.updated_text,
                         expected_generation=expected_generation,
+                        expected_sha256=expected_sha256,
                     )
                 else:
                     atomic_write_text_at(
@@ -547,6 +564,7 @@ class WorkspacePublication:
                         self.updated_text,
                         display_path=self.manifest_path,
                         expected_generation=expected_generation,
+                        expected_sha256=expected_sha256,
                     )
             except ValueError as exc:
                 raise CondaWorkspacesError(
@@ -649,11 +667,17 @@ class WorkspacePublication:
             if self._root_descriptor is None:
                 validate_lockfile_output(self.ctx, path)
             try:
+                expected_sha256 = (
+                    hashlib.sha256(self._lockfile_content).hexdigest()
+                    if self._lockfile_content is not None
+                    else None
+                )
                 if self._root_descriptor is None:
                     atomic_write_text(
                         path,
                         content,
                         expected_generation=expected_lock_generation,
+                        expected_sha256=expected_sha256,
                         capture_generation=self._capture_lockfile_publication,
                     )
                 else:
@@ -663,6 +687,7 @@ class WorkspacePublication:
                         content,
                         display_path=path,
                         expected_generation=expected_lock_generation,
+                        expected_sha256=expected_sha256,
                         capture_generation=self._capture_lockfile_publication,
                     )
             except ValueError as exc:
@@ -711,12 +736,27 @@ class WorkspacePublication:
         published_content = content.encode("utf-8")
         try:
             self.publish_lockfile(content)
-        except BaseException:
-            self.restore_failed_lockfile_publication(
-                previous_content=previous_content,
-                previous_generation=previous_generation,
-                published_content=published_content,
-            )
+        except BaseException as publication_error:
+            try:
+                self.restore_failed_lockfile_publication(
+                    previous_content=previous_content,
+                    previous_generation=previous_generation,
+                    published_content=published_content,
+                )
+            except FileRecoveryError as recovery_error:
+                if isinstance(publication_error, FileRecoveryError):
+                    raise publication_error.combine(
+                        recovery_error,
+                        reason=(
+                            "Lockfile publication and rollback retained recovery"
+                            " entries."
+                        ),
+                    ) from recovery_error
+                raise
+            except BaseException as recovery_error:
+                if isinstance(publication_error, FileRecoveryError):
+                    raise publication_error from recovery_error
+                raise
             raise
         if self._lockfile_content is None or self._lockfile_generation is None:
             raise RuntimeError("Published lockfile generation was not captured")
@@ -728,8 +768,22 @@ class WorkspacePublication:
         )
         try:
             yield rollback
-        except BaseException:
-            self.restore_lockfile(rollback)
+        except BaseException as operation_error:
+            try:
+                self.restore_lockfile(rollback)
+            except FileRecoveryError as recovery_error:
+                if isinstance(operation_error, FileRecoveryError):
+                    raise operation_error.combine(
+                        recovery_error,
+                        reason=(
+                            "Lockfile operation and rollback retained recovery entries."
+                        ),
+                    ) from recovery_error
+                raise
+            except BaseException as recovery_error:
+                if isinstance(operation_error, FileRecoveryError):
+                    raise operation_error from recovery_error
+                raise
             raise
 
     def restore_failed_lockfile_publication(
@@ -810,7 +864,7 @@ class WorkspacePublication:
                 )
             except (OSError, ValueError) as exc:
                 raise CondaWorkspacesError(
-                    f"Workspace lockfile cannot be restored safely: {path}"
+                    f"Workspace lockfile cannot be restored safely: {path}. {exc}"
                 ) from exc
             if not removed:
                 return False
@@ -818,11 +872,13 @@ class WorkspacePublication:
             self._lockfile_generation = None
             self._lockfile_generation_captured = True
             return True
+        published_sha256 = hashlib.sha256(rollback.published_content).hexdigest()
         try:
             if self._root_descriptor is None:
                 with atomic_binary_writer(
                     path,
                     expected_generation=rollback.published_generation,
+                    expected_sha256=published_sha256,
                 ) as stream:
                     stream.write(rollback.previous_content)
             else:
@@ -831,10 +887,17 @@ class WorkspacePublication:
                     path.name,
                     display_path=path,
                     expected_generation=rollback.published_generation,
+                    expected_sha256=published_sha256,
                 ) as stream:
                     stream.write(rollback.previous_content)
+        except FileRecoveryError:
+            raise
         except ValueError:
             return False
+        except OSError as exc:
+            raise CondaWorkspacesError(
+                f"Workspace lockfile cannot be restored safely: {path}. {exc}"
+            ) from exc
         try:
             restored_content, restored_generation = (
                 read_regular_file_bytes_with_generation(
