@@ -29,7 +29,37 @@ from conda_workspaces.paths import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from typing import Any
+
+
+@pytest.fixture
+def intercept_file_removal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[Callable[[Path], None]], None]:
+    original_os_unlink = paths_mod.os.unlink
+    original_path_unlink = Path.unlink
+
+    def install(callback: Callable[[Path], None]) -> None:
+        def intercept_os_unlink(
+            candidate: str | os.PathLike[str],
+            *,
+            dir_fd: int | None = None,
+        ) -> None:
+            callback(Path(os.fspath(candidate)))
+            original_os_unlink(candidate, dir_fd=dir_fd)
+
+        def intercept_path_unlink(
+            candidate: Path,
+            missing_ok: bool = False,
+        ) -> None:
+            callback(candidate)
+            original_path_unlink(candidate, missing_ok=missing_ok)
+
+        monkeypatch.setattr(paths_mod.os, "unlink", intercept_os_unlink)
+        monkeypatch.setattr(Path, "unlink", intercept_path_unlink)
+
+    return install
 
 
 @pytest.mark.parametrize(
@@ -799,6 +829,7 @@ def test_atomic_write_text_rejects_staged_mutation_before_publication(
 def test_atomic_write_text_fallback_preserves_existing_output_races(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    intercept_file_removal: Callable[[Callable[[Path], None]], None],
     race: str | None,
     retain_staged: bool,
 ) -> None:
@@ -840,21 +871,14 @@ def test_atomic_write_text_fallback_preserves_existing_output_races(
 
     monkeypatch.setattr(paths_mod, "rename_noreplace", race_publication)
     if retain_staged:
-        original_unlink = paths_mod.os.unlink
 
-        def retain_staged_output(
-            candidate: str | os.PathLike[str],
-            *,
-            dir_fd: int | None = None,
-        ) -> None:
-            candidate_path = Path(os.fspath(candidate))
-            if candidate_path.name.startswith(
-                f".{path.name}."
-            ) and candidate_path.name.endswith(".tmp"):
+        def retain_staged_output(candidate: Path) -> None:
+            if candidate.name.startswith(f".{path.name}.") and candidate.name.endswith(
+                ".tmp"
+            ):
                 raise PermissionError("injected staged cleanup failure")
-            original_unlink(candidate, dir_fd=dir_fd)
 
-        monkeypatch.setattr(paths_mod.os, "unlink", retain_staged_output)
+        intercept_file_removal(retain_staged_output)
 
     if race is None:
         atomic_write_text(path, "new")
@@ -990,6 +1014,7 @@ def test_atomic_binary_writer_rejects_expected_digest_mismatch(tmp_path: Path) -
 def test_atomic_binary_writer_reports_retained_recovery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    intercept_file_removal: Callable[[Callable[[Path], None]], None],
     anchored: bool,
 ) -> None:
     if anchored and not supports_anchored_directory_operations():
@@ -1002,40 +1027,19 @@ def test_atomic_binary_writer_reports_retained_recovery(
     path = tmp_path / "output.txt"
     original_content = b"original"
     path.write_bytes(original_content)
-    original_os_unlink = paths_mod.os.unlink
-    original_path_unlink = Path.unlink
     recovery_suffix = ".tmp" if anchored else ".rollback"
     removal_attempts = 0
 
-    def raise_for_recovery_removal(
-        candidate: str | os.PathLike[str],
-    ) -> None:
+    def reject_recovery_removal(candidate: Path) -> None:
         nonlocal removal_attempts
-        candidate_name = Path(os.fspath(candidate)).name
-        if candidate_name.startswith(f".{path.name}.") and candidate_name.endswith(
+        if candidate.name.startswith(f".{path.name}.") and candidate.name.endswith(
             recovery_suffix
         ):
             removal_attempts += 1
             if removal_attempts == 1:
                 raise PermissionError("injected recovery removal failure")
 
-    def reject_os_recovery_removal(
-        candidate: str | os.PathLike[str],
-        *,
-        dir_fd: int | None = None,
-    ) -> None:
-        raise_for_recovery_removal(candidate)
-        original_os_unlink(candidate, dir_fd=dir_fd)
-
-    def reject_path_recovery_removal(
-        candidate: Path,
-        missing_ok: bool = False,
-    ) -> None:
-        raise_for_recovery_removal(candidate)
-        original_path_unlink(candidate, missing_ok=missing_ok)
-
-    monkeypatch.setattr(paths_mod.os, "unlink", reject_os_recovery_removal)
-    monkeypatch.setattr(Path, "unlink", reject_path_recovery_removal)
+    intercept_file_removal(reject_recovery_removal)
 
     with pytest.raises(FileRecoveryError) as exc_info:
         atomic_write_text(path, "published")
@@ -1320,7 +1324,7 @@ def test_remove_file_generation_preserves_concurrent_claimant(
 )
 def test_remove_file_generation_preserves_recovery_after_removal_failure(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    intercept_file_removal: Callable[[Callable[[Path], None]], None],
     claimant: bytes | None,
     binding: str,
 ) -> None:
@@ -1329,28 +1333,21 @@ def test_remove_file_generation_preserves_recovery_after_removal_failure(
     path.write_bytes(expected_content)
     generation = regular_file_generation(path)
     assert generation is not None
-    original_unlink = paths_mod.os.unlink
     failed = False
 
-    def fail_quarantine_removal(
-        candidate: str | os.PathLike[str],
-        *,
-        dir_fd: int | None = None,
-    ) -> None:
+    def fail_quarantine_removal(candidate: Path) -> None:
         nonlocal failed
-        candidate_name = Path(os.fspath(candidate)).name
         if (
             not failed
-            and candidate_name.startswith(f".{path.name}.")
-            and candidate_name.endswith(".rollback")
+            and candidate.name.startswith(f".{path.name}.")
+            and candidate.name.endswith(".rollback")
         ):
             failed = True
             if claimant is not None:
                 path.write_bytes(claimant)
             raise PermissionError("injected quarantine removal failure")
-        original_unlink(candidate, dir_fd=dir_fd)
 
-    monkeypatch.setattr(paths_mod.os, "unlink", fail_quarantine_removal)
+    intercept_file_removal(fail_quarantine_removal)
 
     bound_content = expected_content if binding == "content" else None
     expected_sha256 = (
