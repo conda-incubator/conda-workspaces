@@ -218,15 +218,7 @@ def test_sbom_options_build_one_export_callback(
             metadata_values.append(values)
             metadata_instances.append(self)
 
-    def legacy_export(
-        environment: object,
-        *,
-        metadata: object | None = None,
-    ) -> str:
-        exporter_calls.append((environment, metadata, False))
-        return "generated SBOM\n"
-
-    def current_export(
+    def export_cyclonedx_json(
         environment: object,
         *,
         metadata: object | None = None,
@@ -237,7 +229,7 @@ def test_sbom_options_build_one_export_callback(
 
     conda_sboms_modules["conda_sboms.cyclonedx"] = SimpleNamespace(
         FORMAT="cyclonedx-json-v1.7",
-        export_cyclonedx_json=current_export if reproducible else legacy_export,
+        export_cyclonedx_json=export_cyclonedx_json,
     )
     conda_sboms_modules["conda_sboms.settings"] = SimpleNamespace(
         CycloneDXExportMetadata=FakeMetadata
@@ -260,66 +252,30 @@ def test_sbom_options_build_one_export_callback(
 
 
 @pytest.mark.parametrize(
-    ("options", "api", "requirement"),
+    ("values", "cyclonedx_available"),
     [
-        ({}, "missing", r"conda-sboms >=0\.1\.1"),
+        ({}, False),
         (
             {"product_name": "Acme Runtime", "product_version": "2026.08"},
-            "missing",
-            r"conda-sboms >=0\.2\.0",
+            True,
         ),
-        (
-            {"product_name": "Acme Runtime", "product_version": "2026.08"},
-            "old",
-            r"conda-sboms >=0\.2\.0",
-        ),
-        (
-            {"product_name": "Acme Runtime", "product_version": "2026.08"},
-            "missing-settings",
-            r"conda-sboms >=0\.2\.0",
-        ),
-        ({"reproducible": True}, "missing", r"conda-sboms >=0\.3\.0"),
-        ({"reproducible": True}, "old", r"conda-sboms >=0\.3\.0"),
     ],
-    ids=[
-        "missing-base-api",
-        "missing-metadata-api",
-        "old-metadata-exporter",
-        "missing-metadata-settings",
-        "missing-reproducible-api",
-        "old-reproducible-exporter",
-    ],
+    ids=["missing-cyclonedx", "missing-settings"],
 )
-def test_sbom_options_require_current_conda_sboms_api(
+def test_sbom_requires_conda_sboms_0_3_0(
     conda_sboms_modules: dict[str, SimpleNamespace],
     recorded_export_calls: list[_ExportCall],
-    options: dict[str, object],
-    api: str,
-    requirement: str,
+    values: dict[str, object],
+    cyclonedx_available: bool,
 ) -> None:
-    def old_export(environment: object) -> str:
-        del environment
-        return "generated SBOM\n"
-
-    def current_export(
-        environment: object,
-        *,
-        metadata: object | None = None,
-        output_reproducible: bool = False,
-    ) -> str:
-        del environment, metadata, output_reproducible
-        return "generated SBOM\n"
-
-    if api != "missing":
+    if cyclonedx_available:
         conda_sboms_modules["conda_sboms.cyclonedx"] = SimpleNamespace(
             FORMAT="cyclonedx-json-v1.7",
-            export_cyclonedx_json=(
-                current_export if api == "missing-settings" else old_export
-            ),
+            export_cyclonedx_json=lambda environment, **kwargs: str(environment),
         )
 
-    with pytest.raises(CondaValueError, match=requirement):
-        execute_sbom(make_args(_DEFAULTS, **options))
+    with pytest.raises(CondaValueError, match=r"conda-sboms >=0\.3\.0"):
+        execute_sbom(make_args(_DEFAULTS, **values))
 
     assert recorded_export_calls == []
 

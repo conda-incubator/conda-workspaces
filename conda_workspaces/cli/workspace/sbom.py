@@ -7,7 +7,6 @@ import io
 import json
 from contextlib import redirect_stdout
 from importlib import import_module
-from inspect import signature
 from typing import TYPE_CHECKING
 
 from conda.base.context import context as conda_context
@@ -50,35 +49,18 @@ def execute_sbom(
         "author_organization_url": args.author_organization_url,
     }
     metadata_requested = any(value is not None for value in metadata_values.values())
-    install_hint = (
-        "Install or upgrade conda-sboms in the environment where conda is installed."
+    requirement = (
+        "SBOM export requires conda-sboms >=0.3.0. "
+        "Install or upgrade it in the environment where conda is installed."
     )
-    metadata_requirement = (
-        f"Per-export metadata requires conda-sboms >=0.2.0. {install_hint}"
-    )
-    reproducible_requirement = (
-        f"Reproducible output requires conda-sboms >=0.3.0. {install_hint}"
-    )
-    base_requirement = f"SBOM export requires conda-sboms >=0.1.1. {install_hint}"
     try:
         cyclonedx = import_module("conda_sboms.cyclonedx")
         format_name = str(cyclonedx.FORMAT)
         export_cyclonedx_json = cyclonedx.export_cyclonedx_json
     except (AttributeError, ImportError) as exc:
-        requirement = base_requirement
-        if metadata_requested:
-            requirement = metadata_requirement
-        if args.reproducible:
-            requirement = reproducible_requirement
         raise CondaValueError(requirement) from exc
 
     export_args.format = format_name
-
-    exporter_parameters = signature(export_cyclonedx_json).parameters
-    if metadata_requested and "metadata" not in exporter_parameters:
-        raise CondaValueError(metadata_requirement)
-    if args.reproducible and "output_reproducible" not in exporter_parameters:
-        raise CondaValueError(reproducible_requirement)
 
     metadata = None
     if metadata_requested:
@@ -87,16 +69,15 @@ def execute_sbom(
                 "conda_sboms.settings"
             ).CycloneDXExportMetadata
         except (AttributeError, ImportError) as exc:
-            raise CondaValueError(metadata_requirement) from exc
+            raise CondaValueError(requirement) from exc
         metadata = CycloneDXExportMetadata(**metadata_values)
 
     def render(environment: Environment) -> str:
-        export_options: dict[str, object] = {}
-        if metadata_requested:
-            export_options["metadata"] = metadata
-        if args.reproducible:
-            export_options["output_reproducible"] = True
-        return export_cyclonedx_json(environment, **export_options)
+        return export_cyclonedx_json(
+            environment,
+            metadata=metadata,
+            output_reproducible=args.reproducible,
+        )
 
     if not args.json:
         return execute_export(

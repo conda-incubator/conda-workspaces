@@ -26,9 +26,8 @@ The generic `conda workspace export` command can use the same CycloneDX
 exporter. Use `conda workspace sbom` when you need workspace roots, product or
 author metadata, reproducible output, or an explicit lockfile or prefix source.
 
-See [](../how-to/sbom.md) for installation and command examples. Per-export
-metadata requires conda-sboms 0.2.0 or newer. Reproducible output requires
-conda-sboms 0.3.0 or newer.
+See [](../how-to/sbom.md) for installation and command examples.
+`conda workspace sbom` requires conda-sboms 0.3.0 or newer.
 
 ### SBOM coverage limits
 
