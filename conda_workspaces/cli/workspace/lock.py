@@ -9,8 +9,14 @@ from typing import TYPE_CHECKING
 from conda.exceptions import CondaValueError
 from rich.console import Console
 
+from ...attestations import (
+    AttestationOutput,
+    default_attestation_path,
+    sign_workspace_snapshot,
+)
 from ...exceptions import EnvironmentNotFoundError
 from ...lockfile import generate_lockfile, lockfile_path, merge_lockfiles
+from ...manifests import find_parser
 from ...paths import output_paths_collide
 from ...publication import WorkspacePublication
 from ...resolver import known_platforms, resolve_all_environments, resolve_environment
@@ -38,10 +44,59 @@ def execute_lock(args: argparse.Namespace, *, console: Console | None = None) ->
     merge_patterns: list[str] | None = getattr(args, "merge", None) or None
     output_path: Path | None = getattr(args, "output", None)
     dry_run: bool = bool(getattr(args, "dry_run", False))
+    sign: bool = bool(getattr(args, "sign", False))
+    attestation_path: Path | None = getattr(args, "attestation", None)
+    canonical_path = lockfile_path(ctx)
+    if attestation_path is not None and not sign:
+        raise CondaValueError("--attestation requires --sign.")
+    if sign and (env_name or requested_platforms or skip_unsolvable):
+        raise CondaValueError("--sign only supports the complete canonical conda.lock.")
+    if (
+        sign
+        and output_path is not None
+        and output_path.resolve(strict=False) != canonical_path.resolve(strict=False)
+    ):
+        raise CondaValueError(
+            "--sign cannot be combined with a noncanonical --output path."
+        )
     WorkspacePublication.validate_manifest_path(Path(config.manifest_path))
     publication = (
         None if dry_run else WorkspacePublication.from_current_manifest(ctx, "lock")
     )
+    manifest_path = Path(config.manifest_path)
+    manifest_format = find_parser(manifest_path).exporter_format
+    sidecar = attestation_path or default_attestation_path(canonical_path)
+    if sign and dry_run:
+        AttestationOutput.prepare(
+            sidecar,
+            protected_paths=(manifest_path, canonical_path),
+        )
+
+    def publish_lockfile(content: str) -> None:
+        if publication is None:
+            raise RuntimeError("Lockfile publication is unavailable during dry-run")
+        if not sign:
+            publication.publish_lockfile(content)
+            return
+        snapshot = publication.snapshot_with_lockfile_bytes(
+            manifest_format,
+            content.encode("utf-8"),
+        )
+        output = AttestationOutput.prepare(
+            sidecar,
+            protected_paths=(snapshot.manifest_path, snapshot.lockfile_path),
+            directory_descriptor=(
+                publication.guarded_root_descriptor
+                if sidecar.parent.absolute() == ctx.root.absolute()
+                else None
+            ),
+            create_parent=True,
+        )
+        bundle_json = sign_workspace_snapshot(snapshot)
+        with publication.reversible_lockfile_publication(content):
+            publication.validate_snapshot(snapshot)
+            with output.reversible_write(bundle_json):
+                publication.validate_snapshot(snapshot)
 
     if merge_patterns:
         if env_name or requested_platforms or skip_unsolvable or output_path:
@@ -92,7 +147,7 @@ def execute_lock(args: argparse.Namespace, *, console: Console | None = None) ->
                 ctx,
                 dry_run=dry_run,
                 publish_lockfile=(
-                    publication.publish_lockfile if publication is not None else None
+                    publish_lockfile if publication is not None else None
                 ),
             )
         action = "Would update" if dry_run else "Updated"
@@ -153,7 +208,6 @@ def execute_lock(args: argparse.Namespace, *, console: Console | None = None) ->
         "[bold blue]Updating[/bold blue] "
         f"[bold]{status.escape_for_console(updating_label)}[/bold][dim]...[/dim]"
     )
-    canonical_path = lockfile_path(ctx)
     path_equal = output_path is None or output_path.resolve(
         strict=False
     ) == canonical_path.resolve(strict=False)
@@ -183,7 +237,7 @@ def execute_lock(args: argparse.Namespace, *, console: Console | None = None) ->
             output_path=output_path,
             dry_run=dry_run,
             publish_lockfile=(
-                publication.publish_lockfile
+                publish_lockfile
                 if publication is not None and canonical_output
                 else None
             ),

@@ -8,12 +8,13 @@ import json
 import shutil
 import subprocess
 import sys
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 import pytest
 
+import conda_workspaces.attestations as attestations_mod
 import conda_workspaces.publication as publication_mod
 from conda_workspaces.context import WorkspaceContext
 from conda_workspaces.manifests import detect_and_parse
@@ -252,6 +253,41 @@ def replace_publication_writer(
         monkeypatch.setattr(publication_mod, "atomic_write_text_at", write_at)
 
     return replace
+
+
+@pytest.fixture
+def fail_attestation_writer_after_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[], None]:
+    """Make the first attestation writer publish successfully and then fail."""
+    original_write = attestations_mod.atomic_binary_writer
+    original_write_at = attestations_mod.atomic_binary_writer_at
+
+    def activate() -> None:
+        failed = False
+
+        def fail_once() -> None:
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise OSError("atomic writer failed after publication")
+
+        @contextmanager
+        def write(*args, **kwargs):
+            with original_write(*args, **kwargs) as stream:
+                yield stream
+            fail_once()
+
+        @contextmanager
+        def write_at(*args, **kwargs):
+            with original_write_at(*args, **kwargs) as stream:
+                yield stream
+            fail_once()
+
+        monkeypatch.setattr(attestations_mod, "atomic_binary_writer", write)
+        monkeypatch.setattr(attestations_mod, "atomic_binary_writer_at", write_at)
+
+    return activate
 
 
 @pytest.fixture

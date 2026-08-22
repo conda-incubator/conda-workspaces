@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
+import conda_workspaces.paths as paths_mod
 import conda_workspaces.publication as publication_mod
 from conda_workspaces.context import WorkspaceContext
 from conda_workspaces.exceptions import CondaWorkspacesError
@@ -15,7 +17,6 @@ from conda_workspaces.publication import WorkspacePublication
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
 
 @pytest.fixture
@@ -233,6 +234,220 @@ def test_publish_lockfile_rejects_changed_read_generation(
 
     assert lock_path.read_text(encoding="utf-8") == "concurrent generation"
     assert publication_manifest.read_text(encoding="utf-8") == original_text
+
+
+def test_publish_lockfile_refreshes_exact_snapshot(
+    publication_manifest: Path,
+    make_publication: Callable[..., WorkspacePublication],
+) -> None:
+    publication = make_publication(publication_manifest)
+    lock_path = publication_manifest.with_name("conda.lock")
+    lock_path.write_text("old lock", encoding="utf-8")
+    rendered = "version: 1\nenvironments: {}\npackages: []\n"
+
+    with publication.guard():
+        publication.publish_lockfile(rendered)
+        snapshot = publication.snapshot("conda-toml")
+
+    assert snapshot.manifest_path == publication_manifest
+    assert snapshot.manifest_name == "conda.toml"
+    assert snapshot.manifest_bytes == publication_manifest.read_bytes()
+    assert snapshot.manifest_format == "conda-toml"
+    assert snapshot.lockfile_path == lock_path
+    assert snapshot.lockfile_name == "conda.lock"
+    assert snapshot.lockfile_bytes == rendered.encode("utf-8")
+
+
+@pytest.mark.parametrize(
+    "previous_content",
+    [None, b"\xffprevious lockfile\n"],
+    ids=["missing", "existing-exact-bytes"],
+)
+def test_reversible_lockfile_publication_restores_previous_state(
+    publication_manifest: Path,
+    make_publication: Callable[..., WorkspacePublication],
+    previous_content: bytes | None,
+) -> None:
+    publication = make_publication(publication_manifest)
+    lock_path = publication_manifest.with_name("conda.lock")
+    if previous_content is not None:
+        lock_path.write_bytes(previous_content)
+    rendered = "version: 1\nenvironments: {}\npackages: []\n"
+
+    with publication.guard():
+        with pytest.raises(RuntimeError, match="sidecar failed"):
+            with publication.reversible_lockfile_publication(rendered) as rollback:
+                assert rollback.previous_content == previous_content
+                assert (rollback.previous_generation is None) is (
+                    previous_content is None
+                )
+                assert rollback.published_content == rendered.encode("utf-8")
+                assert lock_path.read_bytes() == rollback.published_content
+                raise RuntimeError("sidecar failed")
+
+    if previous_content is None:
+        assert not lock_path.exists()
+    else:
+        assert lock_path.read_bytes() == previous_content
+
+
+@pytest.mark.parametrize(
+    "previous_content",
+    [None, b"previous lockfile\n"],
+    ids=["missing", "existing"],
+)
+def test_reversible_lockfile_publication_restores_post_write_failure(
+    publication_manifest: Path,
+    make_publication: Callable[..., WorkspacePublication],
+    monkeypatch: pytest.MonkeyPatch,
+    previous_content: bytes | None,
+) -> None:
+    publication = make_publication(publication_manifest)
+    lock_path = publication_manifest.with_name("conda.lock")
+    if previous_content is not None:
+        lock_path.write_bytes(previous_content)
+    rendered = "version: 1\nenvironments: {}\npackages: []\n"
+    original_read = publication_mod.read_regular_file_bytes_with_generation
+    failed = False
+
+    def fail_first_post_write_capture(*args, **kwargs):
+        nonlocal failed
+        if publication._lockfile_publication_generation is not None and not failed:
+            failed = True
+            raise ValueError("post-write capture failed")
+        return original_read(*args, **kwargs)
+
+    monkeypatch.setattr(
+        publication_mod,
+        "read_regular_file_bytes_with_generation",
+        fail_first_post_write_capture,
+    )
+
+    with publication.guard():
+        with pytest.raises(CondaWorkspacesError, match="during publication"):
+            with publication.reversible_lockfile_publication(rendered):
+                pass
+
+    assert failed is True
+    if previous_content is None:
+        assert not lock_path.exists()
+    else:
+        assert lock_path.read_bytes() == previous_content
+
+
+@pytest.mark.parametrize(
+    "concurrent_content",
+    [
+        b"version: 1\nenvironments: {}\npackages: []\n",
+        b"concurrent replacement\n",
+    ],
+    ids=["same-bytes", "different-bytes"],
+)
+def test_reversible_lockfile_publication_preserves_remove_race(
+    publication_manifest: Path,
+    make_publication: Callable[..., WorkspacePublication],
+    monkeypatch: pytest.MonkeyPatch,
+    concurrent_content: bytes,
+) -> None:
+    publication = make_publication(publication_manifest)
+    lock_path = publication_manifest.with_name("conda.lock")
+    rendered = "version: 1\nenvironments: {}\npackages: []\n"
+    original_rename = paths_mod.rename_noreplace
+    raced = False
+
+    def replace_before_quarantine(*args, **kwargs) -> None:
+        nonlocal raced
+        source = Path(args[0])
+        if source.name == lock_path.name and not raced:
+            replacement = lock_path.with_name("concurrent.lock")
+            replacement.write_bytes(concurrent_content)
+            replacement.replace(lock_path)
+            raced = True
+        original_rename(*args, **kwargs)
+
+    monkeypatch.setattr(paths_mod, "rename_noreplace", replace_before_quarantine)
+
+    with publication.guard():
+        with pytest.raises(RuntimeError, match="sidecar failed"):
+            with publication.reversible_lockfile_publication(rendered):
+                raise RuntimeError("sidecar failed")
+
+    assert raced is True
+    assert lock_path.read_bytes() == concurrent_content
+
+
+def test_reversible_lockfile_publication_keeps_successful_generation(
+    publication_manifest: Path,
+    make_publication: Callable[..., WorkspacePublication],
+) -> None:
+    publication = make_publication(publication_manifest)
+    lock_path = publication_manifest.with_name("conda.lock")
+    lock_path.write_bytes(b"previous lockfile")
+    rendered = "version: 1\nenvironments: {}\npackages: []\n"
+
+    with publication.guard():
+        with publication.reversible_lockfile_publication(rendered) as rollback:
+            assert rollback.published_generation != rollback.previous_generation
+
+    assert lock_path.read_bytes() == rendered.encode("utf-8")
+
+
+@pytest.mark.parametrize(
+    "previous_content",
+    [None, b"previous lockfile"],
+    ids=["missing", "existing"],
+)
+@pytest.mark.parametrize(
+    "mutation",
+    ["replace-with-same-bytes", "rewrite-with-different-bytes"],
+)
+def test_reversible_lockfile_publication_preserves_concurrent_generation(
+    publication_manifest: Path,
+    make_publication: Callable[..., WorkspacePublication],
+    previous_content: bytes | None,
+    mutation: str,
+) -> None:
+    publication = make_publication(publication_manifest)
+    lock_path = publication_manifest.with_name("conda.lock")
+    if previous_content is not None:
+        lock_path.write_bytes(previous_content)
+    rendered = "version: 1\nenvironments: {}\npackages: []\n"
+    rendered_bytes = rendered.encode("utf-8")
+    concurrent_content = rendered_bytes
+
+    with publication.guard():
+        with pytest.raises(RuntimeError, match="sidecar failed"):
+            with publication.reversible_lockfile_publication(rendered):
+                if mutation == "replace-with-same-bytes":
+                    replacement = lock_path.with_name("replacement.lock")
+                    replacement.write_bytes(rendered_bytes)
+                    replacement.replace(lock_path)
+                else:
+                    concurrent_content = b"concurrent lockfile"
+                    lock_path.write_bytes(concurrent_content)
+                raise RuntimeError("sidecar failed")
+
+    assert lock_path.read_bytes() == concurrent_content
+
+
+@pytest.mark.parametrize("target", ["manifest", "lockfile"])
+def test_validate_snapshot_rejects_generation_change(
+    publication_manifest: Path,
+    make_publication: Callable[..., WorkspacePublication],
+    target: str,
+) -> None:
+    publication = make_publication(publication_manifest)
+    lock_path = publication_manifest.with_name("conda.lock")
+    lock_path.write_text("stable lock", encoding="utf-8")
+
+    with publication.guard():
+        snapshot = publication.snapshot("conda-toml")
+        path = publication_manifest if target == "manifest" else lock_path
+        replacement = path.with_name(f"replacement-{path.name}")
+        replacement.write_bytes(path.read_bytes())
+        replacement.replace(path)
+        with pytest.raises(CondaWorkspacesError, match=f"{target} changed"):
+            publication.validate_snapshot(snapshot)
 
 
 @pytest.mark.parametrize("mutation", ["replace", "rewrite"])

@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Added `conda workspace attest` and `conda workspace verify` for conda-sigstore
+  workspace attestations. `lock --sign` signs the canonical workspace state,
+  `archive --sign` signs the archive receipt, and `--verify` gates locked
+  installs and archive extraction on an expected signer. (#112)
 - Allow lock satisfiability checks to select one environment's package requirements while retaining workspace declaration checks.
 - Add public lock environment discovery, concrete platform inference and source-preserving selection without package downloads.
 - Preserve embedded build numbers and support named-only locks when reconstructing metadata-only environments.
