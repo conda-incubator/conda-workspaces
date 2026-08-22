@@ -332,6 +332,35 @@ def test_workspace_dispatches_to_subcommand(
     assert calls == [subcmd]
 
 
+def test_workspace_sbom_owns_json_output(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = {
+        "success": True,
+        "format": "cyclonedx-json-v1.7",
+        "environment": "default",
+        "content": "{}\n",
+    }
+
+    def export_sbom(args: argparse.Namespace) -> int:
+        assert args.json is True
+        print(json.dumps(payload))
+        return 0
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sbom.execute_sbom",
+        export_sbom,
+    )
+
+    result = execute_workspace(argparse.Namespace(subcmd="sbom", json=True))
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert json.loads(captured.out) == payload
+    assert captured.err == ""
+
+
 @pytest.mark.usefixtures("reset_conda_context")
 @pytest.mark.parametrize(
     ("subcmd", "module_attr", "func_name"),

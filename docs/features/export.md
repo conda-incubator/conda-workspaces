@@ -1,32 +1,30 @@
 # Export and format interoperability
 
-## CycloneDX SBOM integration
+## CycloneDX SBOMs
 
-`conda workspace sbom` exports one resolved workspace environment as a
-CycloneDX 1.7 JSON software bill of materials. It is a focused interface to the
-optional [`conda-sboms`](https://github.com/conda-incubator/conda-sboms)
-package. conda-sboms owns the format name, component mapping, validation, and
-serialization. conda-workspaces selects and prepares the environment.
+`conda workspace sbom` exports one workspace environment as a CycloneDX 1.7
+JSON software bill of materials. conda-workspaces selects the environment and
+its requested roots. The optional
+[`conda-sboms`](https://github.com/conda-incubator/conda-sboms) package maps the
+packages to CycloneDX components, validates the document, and serializes it.
 
-Lockfile mode combines exact records from `conda.lock` with the selected
-environment's direct conda requirements from the manifest. This lets
-conda-sboms connect the SBOM root to what the workspace declares. The read is
-metadata-only and does not download or extract package archives. It also
-rejects a stale lockfile when an exact record no longer satisfies a direct
-requirement.
+By default, the command reads exact package records from `conda.lock` and the
+selected environment's direct conda requirements from the manifest. Those
+requirements become dependencies of the SBOM root component. No package
+archives are downloaded or extracted. If an exact record no longer satisfies a
+direct requirement, the command stops and asks you to update the lockfile.
 
-Prefix mode describes the selected installed environment on the host platform.
-It preserves requested roots from conda history rather than replacing them
-with manifest requirements.
+With `--from-prefix`, the command describes the selected installed environment
+on the host platform. Requested roots come from conda history rather than the
+manifest.
 
-Rich workspace platforms can be selected by their declared name or their
-backing conda subdir. A declared name is required when multiple variants share
-one subdir.
+Named workspace platforms can be selected by their declared name or their
+backing conda subdir. Use the declared name when multiple variants share one
+subdir.
 
-The generic `conda workspace export` command can reach the same registered
-CycloneDX exporter. The dedicated SBOM command adds workspace roots, explicit
-product and author metadata, reproducible output, and single-platform source
-selection.
+The generic `conda workspace export` command can use the same CycloneDX
+exporter. Use `conda workspace sbom` when you need workspace roots, product or
+author metadata, reproducible output, or an explicit lockfile or prefix source.
 
 See [](../how-to/sbom.md) for installation and command examples. Per-export
 metadata requires conda-sboms 0.2.0 or newer. Reproducible output requires
@@ -34,18 +32,17 @@ conda-sboms 0.3.0 or newer.
 
 ### SBOM coverage limits
 
-The current lockfile conversion rejects a selected environment and platform
-that contains pip or other external package references before conda-sboms
-runs. Prefix history may also omit detected pip packages. The SBOM therefore
-describes the resolved conda package graph supplied to the exporter, not every
-component present in a workspace or installed prefix.
+Lockfile export stops before conda-sboms runs when the selected environment and
+platform include pip or other external package references. Prefix history can
+also omit detected pip packages. The resulting SBOM covers the conda package
+graph passed to the exporter, not every component in the workspace or prefix.
 
 Conda package metadata does not identify every operating-system component or
 dependency vendored or statically linked inside a package. The generated SBOM
 is useful technical documentation, but it does not establish complete product
 coverage or Cyber Resilience Act conformity. See the
 [conda-sboms coverage guide](https://conda-incubator.github.io/conda-sboms/explanation/coverage-and-compliance/)
-for the exact format and compliance boundaries.
+for details about format coverage and compliance limits.
 
 ## Generic environment and manifest exports
 

@@ -13,7 +13,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 from conda.base.context import context as conda_context
+from conda.core.prefix_data import PrefixData
 from conda.exceptions import CondaValueError
+from conda.history import History
+from conda.models.match_spec import MatchSpec
+from conda.models.records import PrefixRecord
 from rich.console import Console
 
 import conda_workspaces.cli.workspace.sbom as sbom_module
@@ -370,6 +374,63 @@ def test_sbom_json_output(
         document = json.loads(payload["content"])
         assert document["specVersion"] == "1.7"
         assert "timestamp" not in document["metadata"]
+
+
+def test_sbom_from_prefix_uses_installed_records_and_history_roots(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_workspace_env: Callable[..., Path],
+    rich_console: Console,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    prefix = tmp_workspace_env(pixi_workspace, "default")
+    package_url = (
+        "https://conda.anaconda.org/conda-forge/"
+        f"{conda_context.subdir}/python-3.12.0-h123_0.conda"
+    )
+    PrefixData(str(prefix)).insert(
+        PrefixRecord(
+            name="python",
+            version="3.12.0",
+            build="h123_0",
+            build_number=0,
+            channel="https://conda.anaconda.org/conda-forge",
+            subdir=conda_context.subdir,
+            fn="python-3.12.0-h123_0.conda",
+            url=package_url,
+            sha256="c" * 64,
+            license="BSD-3-Clause",
+            depends=[],
+        )
+    )
+    history = History(str(prefix))
+    history.init_log_file()
+    history.write_specs(update_specs=(MatchSpec("python >=3.10"),))
+    output = pixi_workspace / "installed.cdx.json"
+
+    assert (
+        execute_sbom(
+            make_args(
+                _DEFAULTS,
+                from_prefix=True,
+                output=output,
+                reproducible=True,
+            ),
+            console=rich_console,
+        )
+        == 0
+    )
+
+    document = json.loads(output.read_text(encoding="utf-8"))
+    root = document["metadata"]["component"]
+    component = document["components"][0]
+    dependencies = {
+        dependency["ref"]: dependency["dependsOn"]
+        for dependency in document["dependencies"]
+    }
+    assert (component["name"], component["version"]) == ("python", "3.12.0")
+    assert f"subdir={conda_context.subdir}" in component["purl"]
+    assert dependencies[root["bom-ref"]] == [component["bom-ref"]]
 
 
 def test_sbom_from_lockfile_generates_valid_reproducible_cyclonedx(

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 import tomlkit
+from conda.common.serialize.yaml import dump as yaml_dump
 from conda.common.serialize.yaml import loads as yaml_loads
 from conda.exceptions import CondaValueError
 from rich.console import Console
@@ -509,9 +510,19 @@ def test_export_manifest_format_from_lockfile_keeps_exact_package(
     assert package["sha256"] == digest
 
 
+@pytest.mark.parametrize(
+    ("environment_name", "expected_packages"),
+    [
+        ("default", {"python"}),
+        ("test", {"pytest", "python"}),
+    ],
+    ids=["default", "named"],
+)
 def test_export_callback_keeps_lock_records_and_adds_manifest_requests(
     exact_lockfile_export: tuple[Path, str, str, list[dict[str, object]]],
     export_console: Console,
+    environment_name: str,
+    expected_packages: set[str],
 ) -> None:
     pixi_workspace, url, digest, conversion_calls = exact_lockfile_export
     captured_environments: list[Environment] = []
@@ -526,6 +537,7 @@ def test_export_callback_keeps_lock_records_and_adds_manifest_requests(
         make_args(
             _DEFAULTS,
             output=output,
+            environment=environment_name,
             format="conda-toml",
             from_lockfile=True,
             export_platforms=["linux-64"],
@@ -539,12 +551,48 @@ def test_export_callback_keeps_lock_records_and_adds_manifest_requests(
     assert conversion_calls == []
     assert len(captured_environments) == 1
     environment = captured_environments[0]
-    assert len(environment.explicit_packages) == 1
-    assert environment.explicit_packages[0].url == url
-    assert environment.explicit_packages[0].sha256 == digest
-    assert len(environment.requested_packages) == 1
-    assert environment.requested_packages[0].name == "python"
-    assert str(environment.requested_packages[0].version) == ">=3.10"
+    assert environment.name == environment_name
+    assert {
+        package.name for package in environment.explicit_packages
+    } == expected_packages
+    python = next(
+        package for package in environment.explicit_packages if package.name == "python"
+    )
+    assert python.url == url
+    assert python.sha256 == digest
+    assert {
+        package.name for package in environment.requested_packages
+    } == expected_packages
+    requested_python = next(
+        package
+        for package in environment.requested_packages
+        if package.name == "python"
+    )
+    assert str(requested_python.version) == ">=3.10"
+
+
+def test_export_from_lockfile_missing_named_environment_raises(
+    exact_lockfile_export: tuple[Path, str, str, list[dict[str, object]]],
+    export_console: Console,
+) -> None:
+    workspace, _, _, _ = exact_lockfile_export
+    lockfile = workspace / "conda.lock"
+    data = yaml_loads(lockfile.read_text(encoding="utf-8"))
+    del data["environments"]["test"]
+    rendered = StringIO()
+    yaml_dump(data, rendered)
+    lockfile.write_text(rendered.getvalue(), encoding="utf-8")
+
+    with pytest.raises(LockfileNotFoundError, match="test"):
+        execute_export(
+            make_args(
+                _DEFAULTS,
+                environment="test",
+                from_lockfile=True,
+                export_platforms=["linux-64"],
+            ),
+            console=export_console,
+        )
 
 
 def test_export_callback_rejects_stale_lock_roots(
@@ -636,6 +684,7 @@ def test_export_from_lockfile_resolves_rich_platform_subdir(
         ),
         console=export_console,
         export_environment=capture_export,
+        include_requested_packages=True,
     )
 
     assert len(captured_environments) == 1

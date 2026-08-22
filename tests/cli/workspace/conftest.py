@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from conda.base.context import reset_context
+from conda.models.dist import Dist
 from conda.models.records import PackageRecord
 
 if TYPE_CHECKING:
@@ -24,6 +25,10 @@ def exact_lockfile_export(
     monkeypatch.chdir(pixi_workspace)
     url = "https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-h123_0.conda"
     digest = "a" * 64
+    pytest_url = (
+        "https://conda.anaconda.org/conda-forge/noarch/pytest-8.3.0-pyhd8ed1ab_0.conda"
+    )
+    pytest_digest = "b" * 64
     (pixi_workspace / "conda.lock").write_text(
         "version: 1\n"
         "environments:\n"
@@ -33,10 +38,20 @@ def exact_lockfile_export(
         "    packages:\n"
         "      linux-64:\n"
         f"      - conda: {url}\n"
+        "  test:\n"
+        "    channels:\n"
+        "    - url: https://conda.anaconda.org/conda-forge\n"
+        "    packages:\n"
+        "      linux-64:\n"
+        f"      - conda: {url}\n"
+        f"      - conda: {pytest_url}\n"
         "packages:\n"
         f"- conda: {url}\n"
         f"  sha256: {digest}\n"
-        "  license: BSD-3-Clause\n",
+        "  license: BSD-3-Clause\n"
+        f"- conda: {pytest_url}\n"
+        f"  sha256: {pytest_digest}\n"
+        "  license: MIT\n",
         encoding="utf-8",
     )
 
@@ -48,21 +63,23 @@ def exact_lockfile_export(
     ) -> tuple[PackageRecord, ...]:
         del kwargs
         conversion_calls.append(dict(metadata_by_url))
-        return tuple(
-            PackageRecord(
-                name="python",
-                version="3.12.0",
-                build="h123_0",
-                build_number=0,
-                channel="https://conda.anaconda.org/conda-forge",
-                subdir="linux-64",
-                fn="python-3.12.0-h123_0.conda",
-                url=package_url,
-                sha256=digest,
-                license="BSD-3-Clause",
+        records = []
+        for package_url, metadata in metadata_by_url.items():
+            dist = Dist(package_url)
+            records.append(
+                PackageRecord.from_objects(
+                    metadata,
+                    name=dist.name,
+                    version=dist.version,
+                    build=dist.build_string,
+                    build_number=dist.build_number,
+                    channel=dist.channel,
+                    subdir=dist.subdir,
+                    fn=dist.to_filename(),
+                    url=package_url,
+                )
             )
-            for package_url in metadata_by_url
-        )
+        return tuple(records)
 
     monkeypatch.setattr(
         "conda_lockfiles.rattler_lock.v6.records_from_conda_urls",

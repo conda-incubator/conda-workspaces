@@ -50,18 +50,16 @@ def execute_sbom(
         "author_organization_url": args.author_organization_url,
     }
     metadata_requested = any(value is not None for value in metadata_values.values())
+    install_hint = (
+        "Install or upgrade conda-sboms in the environment where conda is installed."
+    )
     metadata_requirement = (
-        "Per-export metadata requires conda-sboms >=0.2.0. Install or upgrade "
-        "conda-sboms in the environment that owns conda."
+        f"Per-export metadata requires conda-sboms >=0.2.0. {install_hint}"
     )
     reproducible_requirement = (
-        "Reproducible output requires conda-sboms >=0.3.0. Install or upgrade "
-        "conda-sboms in the environment that owns conda."
+        f"Reproducible output requires conda-sboms >=0.3.0. {install_hint}"
     )
-    base_requirement = (
-        "SBOM export requires conda-sboms >=0.1.1. Install or upgrade conda-sboms "
-        "in the environment that owns conda."
-    )
+    base_requirement = f"SBOM export requires conda-sboms >=0.1.1. {install_hint}"
     try:
         cyclonedx = import_module("conda_sboms.cyclonedx")
         format_name = str(cyclonedx.FORMAT)
@@ -76,10 +74,7 @@ def execute_sbom(
 
     export_args.format = format_name
 
-    try:
-        exporter_parameters = signature(export_cyclonedx_json).parameters
-    except (TypeError, ValueError):
-        exporter_parameters = {}
+    exporter_parameters = signature(export_cyclonedx_json).parameters
     if metadata_requested and "metadata" not in exporter_parameters:
         raise CondaValueError(metadata_requirement)
     if args.reproducible and "output_reproducible" not in exporter_parameters:
@@ -120,15 +115,13 @@ def execute_sbom(
         no_color=True,
     )
     with redirect_stdout(captured_stdout):
-        result = execute_export(
+        execute_export(
             export_args,
             console=nested_console,
             export_environment=render,
             include_requested_packages=True,
             host_prefix_only=True,
         )
-    if result != 0:
-        return result
 
     payload: dict[str, object] = {
         "success": True,
