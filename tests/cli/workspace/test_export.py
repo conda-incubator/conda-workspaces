@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 import tomlkit
+from conda.common.serialize.yaml import dump as yaml_dump
 from conda.common.serialize.yaml import loads as yaml_loads
 from conda.exceptions import CondaValueError
 from rich.console import Console
@@ -26,7 +27,10 @@ from conda_workspaces.resolver import ResolvedEnvironment
 from ..conftest import make_args
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
+
+    from conda.models.environment import Environment
 
 
 _DEFAULTS = {
@@ -447,23 +451,14 @@ def test_export_workspace_lock_multiplatform(
 
 
 def test_export_workspace_lock_rich_platform_uses_conda_subdir(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    rich_platform_lockfile: Callable[[dict[str, str], tuple[str, ...]], Path],
     export_console: Console,
 ) -> None:
-    (tmp_path / "pixi.toml").write_text(
-        """\
-[workspace]
-name = "rich-platform-export"
-channels = ["conda-forge"]
-platforms = [
-  { name = "linux-64-cuda", platform = "linux-64", cuda = "12.0" },
-]
-""",
-        encoding="utf-8",
+    workspace = rich_platform_lockfile(
+        {"linux-64-cuda": "12.0"},
+        (),
     )
-    monkeypatch.chdir(tmp_path)
-    output = tmp_path / "conda.lock"
+    output = workspace / "conda.lock"
 
     result = execute_export(
         make_args(
@@ -491,41 +486,10 @@ def test_export_from_lockfile_missing_raises(
 
 
 def test_export_manifest_format_from_lockfile_keeps_exact_package(
-    pixi_workspace: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    exact_lockfile_export: tuple[Path, str, str, list[dict[str, object]]],
     export_console: Console,
 ) -> None:
-    monkeypatch.chdir(pixi_workspace)
-    url = "https://conda.anaconda.org/conda-forge/linux-64/python-3.12.0-h123_0.conda"
-    digest = "a" * 64
-    (pixi_workspace / "conda.lock").write_text(
-        "version: 1\n"
-        "environments:\n"
-        "  default:\n"
-        "    channels:\n"
-        "    - url: https://conda.anaconda.org/conda-forge\n"
-        "    packages:\n"
-        "      linux-64:\n"
-        f"      - conda: {url}\n"
-        "packages:\n"
-        f"- conda: {url}\n"
-        f"  sha256: {digest}\n",
-        encoding="utf-8",
-    )
-
-    class FakeRecord:
-        name = "python"
-        sha256 = digest
-
-        def __init__(self, package_url: str) -> None:
-            self.url = package_url
-
-    monkeypatch.setattr(
-        "conda_lockfiles.rattler_lock.v6.records_from_conda_urls",
-        lambda metadata_by_url, **kwargs: tuple(
-            FakeRecord(package_url) for package_url in metadata_by_url
-        ),
-    )
+    pixi_workspace, url, digest, _ = exact_lockfile_export
     output = pixi_workspace / "exported.toml"
 
     execute_export(
@@ -546,12 +510,330 @@ def test_export_manifest_format_from_lockfile_keeps_exact_package(
     assert package["sha256"] == digest
 
 
+@pytest.mark.parametrize(
+    ("environment_name", "expected_packages"),
+    [
+        ("default", {"python"}),
+        ("test", {"pytest", "python"}),
+    ],
+    ids=["default", "named"],
+)
+def test_export_callback_keeps_lock_records_and_adds_manifest_requests(
+    exact_lockfile_export: tuple[Path, str, str, list[dict[str, object]]],
+    export_console: Console,
+    environment_name: str,
+    expected_packages: set[str],
+) -> None:
+    pixi_workspace, url, digest, conversion_calls = exact_lockfile_export
+    captured_environments: list[Environment] = []
+
+    def capture_export(environment: Environment) -> str:
+        captured_environments.append(environment)
+        return "captured"
+
+    output = pixi_workspace / "exported.toml"
+
+    execute_export(
+        make_args(
+            _DEFAULTS,
+            output=output,
+            environment=environment_name,
+            format="conda-toml",
+            from_lockfile=True,
+            export_platforms=["linux-64"],
+        ),
+        console=export_console,
+        export_environment=capture_export,
+        include_requested_packages=True,
+    )
+
+    assert output.read_text(encoding="utf-8") == "captured\n"
+    assert conversion_calls == []
+    assert len(captured_environments) == 1
+    environment = captured_environments[0]
+    assert environment.name == environment_name
+    assert {
+        package.name for package in environment.explicit_packages
+    } == expected_packages
+    python = next(
+        package for package in environment.explicit_packages if package.name == "python"
+    )
+    assert python.url == url
+    assert python.sha256 == digest
+    assert {
+        package.name for package in environment.requested_packages
+    } == expected_packages
+    requested_python = next(
+        package
+        for package in environment.requested_packages
+        if package.name == "python"
+    )
+    assert str(requested_python.version) == ">=3.10"
+
+
+def test_export_from_lockfile_missing_named_environment_raises(
+    exact_lockfile_export: tuple[Path, str, str, list[dict[str, object]]],
+    export_console: Console,
+) -> None:
+    workspace, _, _, _ = exact_lockfile_export
+    lockfile = workspace / "conda.lock"
+    data = yaml_loads(lockfile.read_text(encoding="utf-8"))
+    del data["environments"]["test"]
+    rendered = StringIO()
+    yaml_dump(data, rendered)
+    lockfile.write_text(rendered.getvalue(), encoding="utf-8")
+
+    with pytest.raises(LockfileNotFoundError, match="test"):
+        execute_export(
+            make_args(
+                _DEFAULTS,
+                environment="test",
+                from_lockfile=True,
+                export_platforms=["linux-64"],
+            ),
+            console=export_console,
+        )
+
+
+def test_export_callback_rejects_stale_lock_roots(
+    exact_lockfile_export: tuple[Path, str, str, list[dict[str, object]]],
+    export_console: Console,
+) -> None:
+    pixi_workspace, _, _, _ = exact_lockfile_export
+    manifest = pixi_workspace / "pixi.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            'python = ">=3.10"',
+            'python = ">=3.13"',
+        ),
+        encoding="utf-8",
+    )
+    output = pixi_workspace / "exported.toml"
+
+    with pytest.raises(CondaValueError, match="do not satisfy"):
+        execute_export(
+            make_args(
+                _DEFAULTS,
+                output=output,
+                format="conda-toml",
+                from_lockfile=True,
+                export_platforms=["linux-64"],
+            ),
+            console=export_console,
+            export_environment=lambda environment: environment.name,
+            include_requested_packages=True,
+        )
+
+    assert not output.exists()
+
+
+def test_export_callback_lockfile_dry_run_json_does_not_fetch(
+    exact_lockfile_export: tuple[Path, str, str, list[dict[str, object]]],
+    export_console: Console,
+) -> None:
+    pixi_workspace, _, _, conversion_calls = exact_lockfile_export
+    output = pixi_workspace / "exported.cdx.json"
+
+    result = execute_export(
+        make_args(
+            _DEFAULTS,
+            output=output,
+            format="conda-toml",
+            from_lockfile=True,
+            export_platforms=["linux-64"],
+            dry_run=True,
+            json=True,
+        ),
+        console=export_console,
+        export_environment=lambda _: '{"bomFormat": "CycloneDX"}',
+        include_requested_packages=True,
+    )
+
+    assert result == 0
+    assert conversion_calls == []
+    assert not output.exists()
+    payload = json_module.loads(export_console.file.getvalue())
+    assert payload == {
+        "success": True,
+        "format": "conda-toml",
+        "environment": "default",
+        "content": '{"bomFormat": "CycloneDX"}\n',
+    }
+
+
+def test_export_from_lockfile_resolves_rich_platform_subdir(
+    rich_platform_lockfile: Callable[[dict[str, str], tuple[str, ...]], Path],
+    export_console: Console,
+) -> None:
+    rich_platform_lockfile(
+        {"linux-64-cuda": "12.0"},
+        ("linux-64-cuda",),
+    )
+    captured_environments: list[Environment] = []
+
+    def capture_export(environment: Environment) -> str:
+        captured_environments.append(environment)
+        return "captured"
+
+    execute_export(
+        make_args(
+            _DEFAULTS,
+            format="conda-toml",
+            from_lockfile=True,
+            export_platforms=["linux-64"],
+        ),
+        console=export_console,
+        export_environment=capture_export,
+        include_requested_packages=True,
+    )
+
+    assert len(captured_environments) == 1
+    assert captured_environments[0].platform == "linux-64"
+    assert getattr(captured_environments[0], "lock_platform") == "linux-64-cuda"
+
+
+def test_export_from_lockfile_preserves_rich_platform_variants(
+    rich_platform_lockfile: Callable[[dict[str, str], tuple[str, ...]], Path],
+    export_console: Console,
+) -> None:
+    workspace = rich_platform_lockfile(
+        {"linux-64-cuda": "12.0"},
+        ("linux-64", "linux-64-cuda"),
+    )
+    output = workspace / "roundtrip.lock"
+
+    execute_export(
+        make_args(
+            _DEFAULTS,
+            output=output,
+            format="conda-workspaces-lock-v1",
+            from_lockfile=True,
+        ),
+        console=export_console,
+    )
+
+    data = yaml_loads(output.read_text(encoding="utf-8"))
+    assert set(data["environments"]["default"]["packages"]) == {
+        "linux-64",
+        "linux-64-cuda",
+    }
+
+
+def test_export_from_lockfile_rejects_ambiguous_rich_platform_subdir(
+    rich_platform_lockfile: Callable[[dict[str, str], tuple[str, ...]], Path],
+    export_console: Console,
+) -> None:
+    rich_platform_lockfile(
+        {"linux-64-cuda11": "11.8", "linux-64-cuda12": "12.0"},
+        ("linux-64-cuda11", "linux-64-cuda12"),
+    )
+
+    with pytest.raises(CondaValueError, match="multiple lockfile platforms"):
+        execute_export(
+            make_args(
+                _DEFAULTS,
+                format="conda-toml",
+                from_lockfile=True,
+                export_platforms=["linux-64"],
+            ),
+            console=export_console,
+        )
+
+
 def test_export_from_prefix_not_installed_raises(
     pixi_workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(pixi_workspace)
     with pytest.raises(EnvironmentNotInstalledError):
         execute_export(make_args(_DEFAULTS, from_prefix=True))
+
+
+@pytest.mark.parametrize(
+    ("requested_platform", "accepted"),
+    [("host-variant", True), ("foreign-variant", False)],
+    ids=["rich-host", "foreign"],
+)
+def test_export_host_prefix_only_resolves_backing_subdir(
+    monkeypatch: pytest.MonkeyPatch,
+    export_console: Console,
+    requested_platform: str,
+    accepted: bool,
+) -> None:
+    host_platform = "host-subdir"
+    prefix_calls: list[tuple[str, ...]] = []
+
+    class FakeConfig:
+        environments = {"default": object()}
+
+        def platform_subdir(self, platform: str) -> str:
+            return {
+                "host-variant": host_platform,
+                "foreign-variant": "foreign-subdir",
+            }.get(platform, platform)
+
+    class FakeContext:
+        platform = host_platform
+
+        def envs_from_prefix(
+            self,
+            env_name: str,
+            *,
+            requested_platforms: tuple[str, ...],
+            from_history: bool,
+            no_builds: bool,
+            ignore_channels: bool,
+        ) -> list[object]:
+            del env_name, from_history, no_builds, ignore_channels
+            prefix_calls.append(requested_platforms)
+            return [object()]
+
+    monkeypatch.setattr(
+        export_module,
+        "workspace_context_from_args",
+        lambda _: (FakeConfig(), FakeContext()),
+    )
+    args = make_args(
+        _DEFAULTS,
+        format="conda-toml",
+        from_prefix=True,
+        export_platforms=[requested_platform],
+    )
+
+    if accepted:
+        result = execute_export(
+            args,
+            console=export_console,
+            export_environment=lambda _: "captured",
+            host_prefix_only=True,
+        )
+
+        assert result == 0
+        assert prefix_calls == [(host_platform,)]
+    else:
+        with pytest.raises(CondaValueError, match="host platform"):
+            execute_export(
+                args,
+                console=export_console,
+                export_environment=lambda _: "captured",
+                host_prefix_only=True,
+            )
+
+        assert prefix_calls == []
+
+
+def test_export_callback_rejects_multiple_platforms(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    export_console: Console,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+
+    with pytest.raises(CondaValueError, match="single-environment export callback"):
+        execute_export(
+            make_args(_DEFAULTS, format="conda-toml"),
+            console=export_console,
+            export_environment=lambda _: "captured",
+        )
 
 
 def test_export_from_lockfile_and_from_prefix_are_mutex(
@@ -564,13 +846,13 @@ def test_export_from_lockfile_and_from_prefix_are_mutex(
 
 def test_run_exporter_prefers_multiplatform() -> None:
     """A fake exporter with ``multiplatform_export`` receives the full list."""
-    calls: list = []
+    calls: list[list[object]] = []
 
     class FakeExporter:
         name = "fake"
         export = None
 
-        def multiplatform_export(self, envs):
+        def multiplatform_export(self, envs: list[object]) -> str:
             calls.append(list(envs))
             return "MULTI"
 

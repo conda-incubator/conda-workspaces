@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from conda.models.records import PackageRecord
 
 from conda_workspaces.exceptions import EnvironmentNotFoundError, PlatformError
 from conda_workspaces.models import (
@@ -13,10 +14,35 @@ from conda_workspaces.models import (
     WorkspaceConfig,
 )
 from conda_workspaces.resolver import (
+    ResolvedEnvironment,
     known_platforms,
     resolve_all_environments,
     resolve_environment,
 )
+
+
+def test_requested_packages_for_export_does_not_require_virtual_lock_records() -> None:
+    resolved = ResolvedEnvironment(
+        name="default",
+        conda_dependencies={
+            "python": MatchSpec("python >=3.10"),
+            "__osx": MatchSpec("__osx >=13"),
+        },
+    )
+    records = [
+        PackageRecord(
+            name="python",
+            version="3.12.0",
+            build="0",
+            build_number=0,
+            channel="conda-forge",
+            subdir="osx-arm64",
+        )
+    ]
+
+    requested = resolved.requested_packages_for_export(records)
+
+    assert [package.name for package in requested] == ["python", "__osx"]
 
 
 @pytest.mark.parametrize(

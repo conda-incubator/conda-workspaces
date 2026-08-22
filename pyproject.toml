@@ -120,10 +120,15 @@ ty = ">=0.0.1a7"
 pre-commit = ">=4.0"
 
 [tool.pixi.feature.test.dependencies]
+cyclonedx-cli = ">=0.33.1,<0.34"
 pytest = ">=8.0"
 pytest-cov = ">=4.0"
 tomlkit = ">=0.13,!=0.15.0"
 platformdirs = ">=3.0"
+trivy = ">=0.74,<0.75"
+
+[tool.pixi.feature.test.pypi-dependencies]
+conda-sboms = ">=0.3.0"
 
 [tool.pixi.feature.py310.dependencies]
 python = "3.10.*"

@@ -28,15 +28,26 @@ from . import workspace_context_from_args
 
 if TYPE_CHECKING:
     import argparse
+    from collections.abc import Callable
     from pathlib import Path
+
+    from conda.models.environment import Environment
 
 
 def execute_export(
     args: argparse.Namespace,
     *,
     console: Console | None = None,
+    export_environment: Callable[[Environment], str] | None = None,
+    include_requested_packages: bool = False,
+    host_prefix_only: bool = False,
 ) -> int:
-    """Build :class:`Environment` objects and hand them to the selected exporter."""
+    """Build environments and hand them to the selected exporter.
+
+    A supplied *export_environment* renders one environment directly.
+    *include_requested_packages* enriches lockfile input with manifest roots.
+    *host_prefix_only* rejects cross-platform prefix extrapolation.
+    """
     if console is None:
         console = Console(highlight=False)
 
@@ -59,11 +70,20 @@ def execute_export(
         )
 
     requested_platforms: tuple[str, ...] = tuple(args.export_platforms or ())
+    if args.from_prefix and host_prefix_only:
+        for platform in requested_platforms:
+            if config.platform_subdir(platform) != ctx.platform:
+                raise CondaValueError(
+                    "Installed-prefix SBOM export only supports the host platform "
+                    f"'{ctx.platform}', not '{platform}'."
+                )
+        requested_platforms = (ctx.platform,)
 
     if args.from_lockfile:
         envs = ctx.envs_from_lockfile(
             env_name,
             requested_platforms=requested_platforms,
+            include_requested_packages=include_requested_packages,
         )
     elif args.from_prefix:
         envs = ctx.envs_from_prefix(
@@ -84,12 +104,20 @@ def execute_export(
         file_path=args.output,
     )
 
+    if len(envs) > 1 and export_environment is not None:
+        raise CondaValueError(
+            "Multiple platforms are not supported by a single-environment "
+            "export callback."
+        )
     if len(envs) > 1 and not exporter.multiplatform_export:
         raise CondaValueError(
             f"Multiple platforms are not supported for the '{exporter.name}' exporter."
         )
 
-    content = run_exporter(exporter, envs)
+    if export_environment is None:
+        content = run_exporter(exporter, envs)
+    else:
+        content = export_environment(envs[0]).rstrip() + "\n"
 
     json_output: bool = args.json
 

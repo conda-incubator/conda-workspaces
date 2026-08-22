@@ -1,5 +1,50 @@
 # Export and format interoperability
 
+## CycloneDX SBOMs
+
+`conda workspace sbom` exports one workspace environment as a CycloneDX 1.7
+JSON software bill of materials. conda-workspaces selects the environment and
+its requested roots. The optional
+[`conda-sboms`](https://github.com/conda-incubator/conda-sboms) package maps the
+packages to CycloneDX components, validates the document, and serializes it.
+
+By default, the command reads exact package records from `conda.lock` and the
+selected environment's direct conda requirements from the manifest. Those
+requirements become dependencies of the SBOM root component. No package
+archives are downloaded or extracted. If an exact record no longer satisfies a
+direct requirement, the command stops and asks you to update the lockfile.
+
+With `--from-prefix`, the command describes the selected installed environment
+on the host platform. Requested roots come from conda history rather than the
+manifest.
+
+Named workspace platforms can be selected by their declared name or their
+backing conda subdir. Use the declared name when multiple variants share one
+subdir.
+
+The generic `conda workspace export` command can use the same CycloneDX
+exporter. Use `conda workspace sbom` when you need workspace roots, product or
+author metadata, reproducible output, or an explicit lockfile or prefix source.
+
+See [](../how-to/sbom.md) for installation and command examples.
+`conda workspace sbom` requires conda-sboms 0.3.0 or newer.
+
+### SBOM coverage limits
+
+Lockfile export stops before conda-sboms runs when the selected environment and
+platform include pip or other external package references. Prefix history can
+also omit detected pip packages. The resulting SBOM covers the conda package
+graph passed to the exporter, not every component in the workspace or prefix.
+
+Conda package metadata does not identify every operating-system component or
+dependency vendored or statically linked inside a package. The generated SBOM
+is useful technical documentation, but it does not establish complete product
+coverage or Cyber Resilience Act conformity. See the
+[conda-sboms coverage guide](https://conda-incubator.github.io/conda-sboms/explanation/coverage-and-compliance/)
+for details about format coverage and compliance limits.
+
+## Generic environment and manifest exports
+
 `conda workspace export` converts a workspace environment into any
 format registered through conda's `conda_environment_exporters` plugin
 hook. The same exporter surface is available through `conda export`, so

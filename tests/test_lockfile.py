@@ -359,6 +359,19 @@ def test_conda_lock_loader_available_platforms(
     assert loader.available_platforms == ("linux-64", "osx-arm64")
 
 
+def test_conda_lock_loader_platforms_for_named_environment(
+    lockfile_with_platforms: Path,
+) -> None:
+    data = load_lockfile_data(lockfile_with_platforms.read_bytes())
+    data["environments"]["test"] = {
+        "channels": [],
+        "packages": {"win-64": []},
+    }
+    loader = CondaLockLoader(lockfile_with_platforms, data=data)
+
+    assert loader.platforms_for("test") == ("win-64",)
+
+
 @pytest.fixture
 def fake_records_factory(monkeypatch: pytest.MonkeyPatch):
     """Stub conda-lockfiles' URL -> PackageRecord conversion.
@@ -412,6 +425,35 @@ def test_conda_lock_loader_env_for_platform(
     assert env.platform == platform
     assert len(env.explicit_packages) == 1
     assert env.explicit_packages[0].url == expected_url
+
+
+@pytest.mark.parametrize(
+    ("metadata_only", "expected_calls"),
+    [(False, 1), (True, 0)],
+    ids=["generic", "metadata-only"],
+)
+def test_conda_lock_loader_env_for_rich_platform(
+    lockfile_with_platforms: Path,
+    fake_records_factory: list[dict[str, object]],
+    metadata_only: bool,
+    expected_calls: int,
+) -> None:
+    data = load_lockfile_data(lockfile_with_platforms.read_bytes())
+    packages = data["environments"]["default"]["packages"]
+    packages["linux-64-cuda"] = packages.pop("linux-64")
+    loader = CondaLockLoader(lockfile_with_platforms, data=data)
+
+    env = loader.env_for(
+        "linux-64-cuda",
+        package_platform="linux-64",
+        metadata_only=metadata_only,
+    )
+
+    assert len(fake_records_factory) == expected_calls
+    assert env.platform == "linux-64"
+    assert getattr(env, "lock_platform") == "linux-64-cuda"
+    assert len(env.explicit_packages) == 1
+    assert "/linux-64/" in env.explicit_packages[0].url
 
 
 def test_conda_lock_loader_env_redacts_urls_before_conversion(

@@ -376,6 +376,85 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         ),
     )
 
+    sbom_parser = sub.add_parser(
+        "sbom",
+        help="Export a CycloneDX SBOM for a workspace environment.",
+        add_help=False,
+    )
+    add_parser_help(sbom_parser)
+    add_output_and_prompt_options(sbom_parser)
+    sbom_parser.add_argument(
+        "-e",
+        "--environment",
+        default="default",
+        help="Environment to export (default: default).",
+    )
+    sbom_parser.add_argument(
+        "--platform",
+        default=None,
+        help="Platform to export (default: current conda platform).",
+    )
+    sbom_parser.add_argument(
+        "-f",
+        "--file",
+        type=Path,
+        default=None,
+        dest="output",
+        help="Write output to this file (default: stdout).",
+    )
+    sbom_parser.add_argument(
+        "--from-prefix",
+        action="store_true",
+        default=False,
+        help="Build the SBOM from the installed workspace environment.",
+    )
+    sbom_parser.add_argument(
+        "--reproducible",
+        action="store_true",
+        default=False,
+        help="Omit the SBOM timestamp for reproducible output.",
+    )
+    sbom_parser.add_argument(
+        "--product-name",
+        default=None,
+        help="Product name for the SBOM root component.",
+    )
+    sbom_parser.add_argument(
+        "--product-version",
+        default=None,
+        help="Product version for the SBOM root component.",
+    )
+    sbom_parser.add_argument(
+        "--product-manufacturer",
+        default=None,
+        help="Organization that manufactured the product.",
+    )
+    sbom_parser.add_argument(
+        "--product-manufacturer-url",
+        default=None,
+        help="URL for the product manufacturer.",
+    )
+    sbom_parser.add_argument(
+        "--author-name",
+        default=None,
+        help="Person who authored the SBOM.",
+    )
+    sbom_parser.add_argument(
+        "--author-email",
+        default=None,
+        help="Email address for the SBOM author.",
+    )
+    sbom_parser.add_argument(
+        "--author-organization",
+        default=None,
+        help="Organization that authored the SBOM.",
+    )
+    sbom_parser.add_argument(
+        "--author-organization-url",
+        default=None,
+        help="URL for the SBOM author organization.",
+    )
+
     list_parser = sub.add_parser(
         "list",
         help="List packages in a workspace environment.",
@@ -916,6 +995,10 @@ def _dispatch_workspace(args: argparse.Namespace, subcmd: str) -> int:
         from .workspace.export import execute_export
 
         return execute_export(args)
+    elif subcmd == "sbom":
+        from .workspace.sbom import execute_sbom
+
+        return execute_sbom(args)
     elif subcmd == "list":
         from .workspace.list import execute_list
 

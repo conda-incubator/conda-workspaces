@@ -21,6 +21,19 @@ returns its workspace, environment, manifest, added specs, and shell
 state. `init`, `activate`, `run`, and `shell` tolerate a global
 `--json` flag but intentionally emit no structured result.
 
+`conda workspace sbom --json` returns `success`, `format`, and `environment`.
+It adds `content` when writing to stdout or previewing a file with `--dry-run`.
+After a file is written, it returns the path in `file` instead:
+
+```json
+{
+  "success": true,
+  "format": "cyclonedx-json-v1.7",
+  "environment": "default",
+  "file": "exports/default.cdx.json"
+}
+```
+
 ### Workspace snapshot
 
 `conda workspace info --json` returns the workspace metadata and lock

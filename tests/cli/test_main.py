@@ -38,6 +38,7 @@ def test_generate_task_parser_returns_parser() -> None:
         "init",
         "install",
         "lock",
+        "sbom",
         "list",
         "envs",
         "info",
@@ -143,6 +144,46 @@ def test_workspace_unknown_subcmd_prints_help(
         (["clean", "-e", "test"], "environment", "test"),
         (["activate", "-e", "docs"], "environment", "docs"),
         (["activate"], "environment", "default"),
+        (["sbom", "--environment", "runtime"], "environment", "runtime"),
+        (["sbom", "--platform", "linux-64"], "platform", "linux-64"),
+        (["sbom", "--from-prefix"], "from_prefix", True),
+        (["sbom", "--reproducible"], "reproducible", True),
+        (["sbom"], "reproducible", False),
+        (
+            ["sbom", "--file", "dist/runtime.cdx.json"],
+            "output",
+            Path("dist/runtime.cdx.json"),
+        ),
+        (["sbom", "--product-name", "Acme Runtime"], "product_name", "Acme Runtime"),
+        (["sbom", "--product-version", "2026.08"], "product_version", "2026.08"),
+        (
+            ["sbom", "--product-manufacturer", "Acme GmbH"],
+            "product_manufacturer",
+            "Acme GmbH",
+        ),
+        (
+            ["sbom", "--product-manufacturer-url", "https://acme.example"],
+            "product_manufacturer_url",
+            "https://acme.example",
+        ),
+        (["sbom", "--author-name", "Alice Example"], "author_name", "Alice Example"),
+        (
+            ["sbom", "--author-email", "alice@acme.example"],
+            "author_email",
+            "alice@acme.example",
+        ),
+        (
+            ["sbom", "--author-organization", "Acme Product Security"],
+            "author_organization",
+            "Acme Product Security",
+        ),
+        (
+            ["sbom", "--author-organization-url", "https://acme.example/security"],
+            "author_organization_url",
+            "https://acme.example/security",
+        ),
+        (["sbom", "--dry-run"], "dry_run", True),
+        (["sbom", "--json"], "json", True),
     ],
     ids=[
         "init-format-conda",
@@ -166,6 +207,22 @@ def test_workspace_unknown_subcmd_prints_help(
         "clean-env",
         "activate-named",
         "activate-default",
+        "sbom-environment",
+        "sbom-platform",
+        "sbom-prefix",
+        "sbom-reproducible",
+        "sbom-reproducible-default",
+        "sbom-output",
+        "sbom-product-name",
+        "sbom-product-version",
+        "sbom-manufacturer",
+        "sbom-manufacturer-url",
+        "sbom-author-name",
+        "sbom-author-email",
+        "sbom-author-organization",
+        "sbom-author-organization-url",
+        "sbom-dry-run",
+        "sbom-json",
     ],
 )
 def test_workspace_parser_args(
@@ -229,6 +286,7 @@ def test_workspace_parser_separates_manifest_and_export_paths() -> None:
         ("init", "conda_workspaces.cli.workspace.init", "execute_init"),
         ("install", "conda_workspaces.cli.workspace.install", "execute_install"),
         ("lock", "conda_workspaces.cli.workspace.lock", "execute_lock"),
+        ("sbom", "conda_workspaces.cli.workspace.sbom", "execute_sbom"),
         ("list", "conda_workspaces.cli.workspace.list", "execute_list"),
         ("info", "conda_workspaces.cli.workspace.info", "execute_info"),
         ("add", "conda_workspaces.cli.workspace.add", "execute_add"),
@@ -242,6 +300,7 @@ def test_workspace_parser_separates_manifest_and_export_paths() -> None:
         "init",
         "install",
         "lock",
+        "sbom",
         "list",
         "info",
         "add",
@@ -271,6 +330,35 @@ def test_workspace_dispatches_to_subcommand(
     result = execute_workspace(args)
     assert result == 0
     assert calls == [subcmd]
+
+
+def test_workspace_sbom_owns_json_output(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = {
+        "success": True,
+        "format": "cyclonedx-json-v1.7",
+        "environment": "default",
+        "content": "{}\n",
+    }
+
+    def export_sbom(args: argparse.Namespace) -> int:
+        assert args.json is True
+        print(json.dumps(payload))
+        return 0
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sbom.execute_sbom",
+        export_sbom,
+    )
+
+    result = execute_workspace(argparse.Namespace(subcmd="sbom", json=True))
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert json.loads(captured.out) == payload
+    assert captured.err == ""
 
 
 @pytest.mark.usefixtures("reset_conda_context")
