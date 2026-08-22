@@ -26,7 +26,7 @@ from conda_workspaces.attestations import (
     verify_attestation_bundle,
     verify_workspace_snapshot,
 )
-from conda_workspaces.exceptions import AttestationError
+from conda_workspaces.exceptions import AttestationError, FileRecoveryError
 from conda_workspaces.publication import WorkspaceSnapshot
 
 if TYPE_CHECKING:
@@ -506,12 +506,14 @@ def test_attestation_output_preserves_publication_recovery_path(
     prepared = AttestationOutput.prepare(output, maximum_bytes=1024)
 
     def fail_publication(*args, **kwargs):
-        raise ValueError(f"Output changed. Recovery entry: {recovery}")
+        raise FileRecoveryError(output, recovery, "Output changed.")
 
     monkeypatch.setattr(AttestationOutput, "_publish_content", fail_publication)
 
-    with pytest.raises(AttestationError, match=str(recovery)):
+    with pytest.raises(FileRecoveryError) as exc_info:
         prepared.write('{"bundle":true}')
+
+    assert exc_info.value.recovery_path == recovery
 
 
 def test_attestation_output_rejects_parent_replacement_during_signing(
@@ -636,6 +638,39 @@ def test_attestation_output_reversible_write_preserves_concurrent_replacement(
             raise RuntimeError("later failure")
 
     assert output.read_bytes() == b"concurrent bundle\n"
+
+
+def test_attestation_output_reversible_write_aggregates_recovery_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "bundle.json"
+    operation_recovery = tmp_path / "operation.rollback"
+    rollback_recovery = tmp_path / "restore.rollback"
+    operation_recovery.write_bytes(b"operation recovery")
+    rollback_recovery.write_bytes(b"rollback recovery")
+    prepared = AttestationOutput.prepare(output, maximum_bytes=1024)
+
+    def fail_restore(self: AttestationOutput) -> bool:
+        assert self is prepared
+        raise FileRecoveryError(output, rollback_recovery, "Rollback failed.")
+
+    monkeypatch.setattr(AttestationOutput, "restore", fail_restore)
+
+    with pytest.raises(FileRecoveryError) as exc_info:
+        with prepared.reversible_write('{"bundle":true}'):
+            raise FileRecoveryError(
+                output,
+                operation_recovery,
+                "Later operation failed.",
+            )
+
+    assert exc_info.value.recovery_paths == (
+        operation_recovery,
+        rollback_recovery,
+    )
+    assert "Later operation failed" in str(exc_info.value)
+    assert "Rollback failed" in str(exc_info.value)
 
 
 @pytest.mark.parametrize(

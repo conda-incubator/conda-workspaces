@@ -36,6 +36,45 @@ class CondaWorkspacesError(CondaError):
         super().__init__(full)
 
 
+class FileRecoveryError(CondaWorkspacesError):
+    """A failed file transaction retained bytes at a recovery path."""
+
+    def __init__(
+        self,
+        target_path: str | Path,
+        recovery_path: str | Path,
+        reason: str,
+        *,
+        additional_recovery_paths: tuple[str | Path, ...] = (),
+    ) -> None:
+        self.target_path = target_path
+        self.recovery_path = recovery_path
+        self.reason = reason
+        self.recovery_paths = (recovery_path, *additional_recovery_paths)
+        entries = " ".join(f"Recovery entry: {entry}" for entry in self.recovery_paths)
+        super().__init__(f"{reason} {entries}")
+
+    def combine(
+        self,
+        other: FileRecoveryError,
+        *,
+        reason: str,
+    ) -> FileRecoveryError:
+        """Return one error that discloses both retained recovery sets."""
+        paths = list(self.recovery_paths)
+        known = {str(path) for path in paths}
+        for path in other.recovery_paths:
+            if str(path) not in known:
+                paths.append(path)
+                known.add(str(path))
+        return FileRecoveryError(
+            self.target_path,
+            paths[0],
+            f"{reason} Original failures: {self.reason} {other.reason}",
+            additional_recovery_paths=tuple(paths[1:]),
+        )
+
+
 class AttestationError(CondaWorkspacesError):
     """A workspace or archive attestation could not be created or verified."""
 

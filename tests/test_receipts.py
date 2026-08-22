@@ -145,28 +145,42 @@ def test_archive_receipt_from_payload_rejects_invalid_statement(
         ArchiveReceipt.from_payload(payload)
 
 
-@pytest.mark.parametrize("mutation", ["replace", "rewrite"])
-def test_archive_receipt_rejects_changed_validated_output_generation(
+@pytest.mark.parametrize(
+    ("mutation", "preserve_generation"),
+    [
+        ("replace", False),
+        ("rewrite", False),
+        ("rewrite", True),
+    ],
+    ids=["replace", "rewrite", "same-generation-rewrite"],
+)
+def test_archive_receipt_rejects_changed_validated_output(
     receipt_workspace: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     mutation: str,
+    preserve_generation: bool,
 ) -> None:
     archive_path = tmp_path / "workspace.tar.gz"
     create_archive(receipt_workspace, archive_path, ArchiveConfig())
     receipt_path = ArchiveReceipt.default_path(archive_path)
-    receipt_path.write_text("existing receipt", encoding="utf-8")
-    concurrent_content = "concurrent receipt generation"
+    original_content = b"existing receipt"
+    concurrent_content = b"changed receipt!"
+    receipt_path.write_bytes(original_content)
     receipt = build_receipt(receipt_workspace, archive_path)
     original_atomic_write_text = receipts_module.atomic_write_text
 
-    def mutate_before_write(path: Path, content: str, **kwargs) -> None:
+    def mutate_before_write(path: Path, content: str, **kwargs: Any) -> None:
         if mutation == "replace":
             replacement = receipt_path.with_name("replacement.receipt.json")
-            replacement.write_text(concurrent_content, encoding="utf-8")
+            replacement.write_bytes(concurrent_content)
             replacement.replace(receipt_path)
         else:
-            receipt_path.write_text(concurrent_content, encoding="utf-8")
+            receipt_path.write_bytes(concurrent_content)
+        if preserve_generation:
+            kwargs["expected_generation"] = receipts_module.regular_file_generation(
+                receipt_path
+            )
         original_atomic_write_text(path, content, **kwargs)
 
     monkeypatch.setattr(
@@ -178,7 +192,8 @@ def test_archive_receipt_rejects_changed_validated_output_generation(
     with pytest.raises(ValueError, match="changed before writing"):
         receipt.write(receipt_path)
 
-    assert receipt_path.read_text(encoding="utf-8") == concurrent_content
+    assert len(concurrent_content) == len(original_content)
+    assert receipt_path.read_bytes() == concurrent_content
 
 
 @pytest.mark.parametrize("mutation", ["replace", "rewrite"])

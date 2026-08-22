@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, cast
 
 from conda.base.context import context as conda_context
 
-from .exceptions import AttestationError
+from .exceptions import AttestationError, FileRecoveryError
 from .lockfile import FORMAT as LOCKFILE_FORMAT
 from .manifests.base import ManifestParser
 from .paths import (
@@ -266,6 +266,11 @@ class AttestationOutput:
             published, published_generation = self._publish_content(
                 content_bytes,
                 expected_generation=self.generation,
+                expected_sha256=(
+                    hashlib.sha256(self.previous_content).hexdigest()
+                    if self.previous_content is not None
+                    else None
+                ),
             )
             if (
                 published != content_bytes
@@ -287,12 +292,27 @@ class AttestationOutput:
         try:
             written = self.write(bundle_json)
             yield written
-        except BaseException:
+        except BaseException as operation_error:
             if (
                 self.published_content is not None
                 and self.published_generation is not None
             ):
-                self.restore()
+                try:
+                    self.restore()
+                except FileRecoveryError as recovery_error:
+                    if isinstance(operation_error, FileRecoveryError):
+                        raise operation_error.combine(
+                            recovery_error,
+                            reason=(
+                                "Attestation publication and rollback retained"
+                                " recovery entries."
+                            ),
+                        ) from recovery_error
+                    raise
+                except BaseException as recovery_error:
+                    if isinstance(operation_error, FileRecoveryError):
+                        raise operation_error from recovery_error
+                    raise
             raise
 
     def restore(self) -> bool:
@@ -332,6 +352,7 @@ class AttestationOutput:
             restored_content, restored_generation = self._publish_content(
                 self.previous_content,
                 expected_generation=self.published_generation,
+                expected_sha256=hashlib.sha256(self.published_content).hexdigest(),
             )
             if restored_content != self.previous_content:
                 return False
@@ -349,6 +370,7 @@ class AttestationOutput:
         content: bytes,
         *,
         expected_generation: FileGeneration | None,
+        expected_sha256: str | None,
     ) -> tuple[bytes, FileGeneration]:
         """Publish and recapture exact output bytes through the prepared parent."""
         if self.parent_identity is None:
@@ -369,6 +391,7 @@ class AttestationOutput:
                 self.path.name,
                 display_path=self.path,
                 expected_generation=expected_generation,
+                expected_sha256=expected_sha256,
                 capture_generation=capture_publication,
             ) as stream:
                 stream.write(content)
@@ -395,6 +418,7 @@ class AttestationOutput:
                 with atomic_binary_writer(
                     target,
                     expected_generation=expected_generation,
+                    expected_sha256=expected_sha256,
                     expected_parent_identity=self.parent_identity,
                     capture_generation=capture_publication,
                 ) as stream:
@@ -405,6 +429,7 @@ class AttestationOutput:
                     self.path.name,
                     display_path=self.path,
                     expected_generation=expected_generation,
+                    expected_sha256=expected_sha256,
                     capture_generation=capture_publication,
                 ) as stream:
                     stream.write(content)
