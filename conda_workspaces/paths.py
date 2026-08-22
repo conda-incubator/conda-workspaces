@@ -1478,6 +1478,8 @@ def atomic_binary_writer(
                 ) from exc
             require_directory_identity(parent, fallback_parent_identity)
             recovery_path = None
+        if final_generation is None:
+            raise RuntimeError("Published output has no captured generation")
         final = path.lstat()
         require_directory_identity(parent, fallback_parent_identity)
         if (
