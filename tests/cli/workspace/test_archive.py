@@ -13,6 +13,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 from conda.base.context import context
+from conda_sigstore.evidence import SignerIdentity
+from conda_sigstore.statements import InTotoStatement
+from conda_sigstore.verification import VerifiedStatement
 from rich.console import Console
 
 from conda_workspaces.archive import (
@@ -29,7 +32,7 @@ from conda_workspaces.cli.workspace.archive import (
     execute_unarchive,
     warn_staging_prefix_references,
 )
-from conda_workspaces.exceptions import ArchiveError
+from conda_workspaces.exceptions import ArchiveError, CondaWorkspacesError
 from conda_workspaces.models import ArchiveConfig
 from conda_workspaces.receipts import ArchiveReceipt
 
@@ -47,6 +50,8 @@ _ARCHIVE_DEFAULTS = {
     "lock": False,
     "exclude": None,
     "receipt": None,
+    "sign": False,
+    "attestation": None,
     "dry_run": False,
     "json": False,
 }
@@ -62,6 +67,10 @@ _UNARCHIVE_DEFAULTS = {
     "dest": None,
     "receipt": None,
     "require_sha256": False,
+    "verify": False,
+    "attestation": None,
+    "cert_identity": None,
+    "cert_oidc_issuer": None,
     "dry_run": False,
     "json": False,
 }
@@ -471,6 +480,36 @@ def test_execute_archive_receipt_path(
     }
 
 
+def test_execute_archive_signs_external_receipt(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import conda_workspaces.attestations as attestations_module
+
+    monkeypatch.chdir(archive_workspace)
+    output = tmp_path / "test.tar.gz"
+    signed_payloads: list[bytes] = []
+    monkeypatch.setattr(
+        attestations_module,
+        "sign_attestation_payload",
+        lambda payload: signed_payloads.append(payload) or '{"bundle": true}',
+    )
+    stream = StringIO()
+
+    result = execute_archive(
+        make_args(_ARCHIVE_DEFAULTS, output=output, sign=True),
+        console=Console(file=stream, width=200, highlight=False),
+    )
+
+    assert result == 0
+    assert len(signed_payloads) == 1
+    ArchiveReceipt.from_payload(signed_payloads[0]).verify_archive(output)
+    assert output.with_name(f"{output.name}.sigstore.json").is_file()
+    assert "Created" in stream.getvalue()
+    assert "attestation" in stream.getvalue()
+
+
 def test_execute_archive_receipt_path_cannot_be_archive_path(
     archive_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -636,6 +675,102 @@ def test_execute_unarchive_receipt_default_path(
     assert result == 0
     assert (target / "conda.toml").is_file()
     assert "Verified" in console.file.getvalue()
+
+
+def test_execute_unarchive_verifies_signed_receipt(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import conda_workspaces.attestations as attestations_module
+
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "test.tar.gz"
+    payloads: list[bytes] = []
+    monkeypatch.setattr(
+        attestations_module,
+        "sign_attestation_payload",
+        lambda payload: payloads.append(payload) or '{"bundle": true}',
+    )
+    execute_archive(
+        make_args(_ARCHIVE_DEFAULTS, output=archive, sign=True),
+        console=Console(file=StringIO(), width=200, highlight=False),
+    )
+    verified_bundles: list[bytes] = []
+    authenticated_signer = SignerIdentity(
+        "https://example.test/workflow.yml",
+        "https://issuer.example.test",
+    )
+
+    def verify(bundle: bytes) -> VerifiedStatement:
+        assert bundle == b'{"bundle": true}\n'
+        verified_bundles.append(bundle)
+        payload = payloads[0]
+        return VerifiedStatement(
+            statement=InTotoStatement.from_payload(payload),
+            payload=payload,
+            signer=authenticated_signer,
+            timestamps=(),
+        )
+
+    monkeypatch.setattr(attestations_module, "verify_attestation_bundle", verify)
+    target = tmp_path / "extracted"
+    stream = StringIO()
+
+    result = execute_unarchive(
+        make_args(
+            _UNARCHIVE_DEFAULTS,
+            archive_path=archive,
+            target=target,
+            verify=True,
+            cert_identity="https://example.test/workflow.yml",
+            cert_oidc_issuer="https://issuer.example.test",
+        ),
+        console=Console(file=stream, width=200, highlight=False),
+    )
+
+    assert result == 0
+    assert verified_bundles == [b'{"bundle": true}\n']
+    assert (target / "conda.toml").is_file()
+    assert "Verified" in stream.getvalue()
+    assert "attestation" in stream.getvalue()
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"attestation": Path("bundle.json")},
+        {"cert_identity": "identity", "cert_oidc_issuer": "issuer"},
+        {"cert_identity": ""},
+        {"verify": True},
+        {"verify": True, "cert_identity": "identity"},
+    ],
+    ids=[
+        "attestation",
+        "signer-policy",
+        "empty-signer-option",
+        "missing-policy",
+        "partial-policy",
+    ],
+)
+def test_execute_unarchive_rejects_unpaired_verification_options(
+    options: dict[str, object],
+    tmp_path: Path,
+) -> None:
+    args = make_args(
+        _UNARCHIVE_DEFAULTS,
+        archive_path=tmp_path / "workspace.tar.gz",
+        **options,
+    )
+
+    with pytest.raises(
+        CondaWorkspacesError,
+        match="require|supplied together",
+    ):
+        execute_unarchive(
+            args,
+            console=Console(file=StringIO(), width=200, highlight=False),
+        )
 
 
 @pytest.mark.parametrize("dry_run", [False, True], ids=["extract", "dry-run"])

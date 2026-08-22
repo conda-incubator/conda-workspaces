@@ -17,7 +17,7 @@ from .exceptions import ArchiveError, ArchiveHashMismatchError
 from .lockfile import MAX_LOCKFILE_BYTES, load_lockfile_data, load_lockfile_path
 from .manifests.base import MAX_MANIFEST_BYTES
 from .models import has_url_credentials, redact_url_text
-from .parsing import read_limited_text, validate_document_limits
+from .parsing import decode_limited_text, read_limited_text, validate_document_limits
 from .paths import (
     atomic_write_text,
     has_absolute_path_syntax,
@@ -26,12 +26,12 @@ from .paths import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
     from pathlib import Path
     from typing import Any, Final
 
     from .models import ArchiveConfig
-    from .paths import FileGeneration
+    from .paths import DirectoryIdentity, FileGeneration
 
 _CURRENT_RECEIPT_GENERATION = object()
 
@@ -58,6 +58,16 @@ PACKAGE_RECORD_FIELDS = (
     "sha256",
     "md5",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedArchiveWorkspace:
+    """Exact workspace files accepted by archive receipt verification."""
+
+    manifest_name: str
+    manifest_bytes: bytes
+    lockfile_name: str
+    lockfile_bytes: bytes
 
 
 @dataclass(frozen=True)
@@ -166,6 +176,34 @@ class ArchiveReceipt:
     @classmethod
     def load(cls, path: Path) -> ArchiveReceipt:
         """Load a receipt JSON file, rejecting ambiguous duplicate keys."""
+        try:
+            content = read_limited_text(
+                path,
+                maximum_bytes=MAX_RECEIPT_BYTES,
+                label="Receipt JSON",
+            )
+        except OSError as exc:
+            raise ArchiveError(f"Receipt not found: {path}") from exc
+        except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+            raise ArchiveError(f"Invalid receipt: {exc}") from exc
+        return cls._from_text(content, invalid_json=f"Invalid receipt JSON: {path}")
+
+    @classmethod
+    def from_payload(cls, payload: bytes | str) -> ArchiveReceipt:
+        """Parse a verified in-toto payload as an archive receipt."""
+        try:
+            content = decode_limited_text(
+                payload,
+                maximum_bytes=MAX_RECEIPT_BYTES,
+                label="Receipt payload",
+            )
+        except (UnicodeDecodeError, UnicodeEncodeError, ValueError) as exc:
+            raise ArchiveError(f"Invalid receipt: {exc}") from exc
+        return cls._from_text(content, invalid_json="Invalid receipt payload JSON.")
+
+    @classmethod
+    def _from_text(cls, content: str, *, invalid_json: str) -> ArchiveReceipt:
+        """Parse one size-bounded receipt document."""
 
         def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
             result: dict[str, object] = {}
@@ -176,19 +214,10 @@ class ArchiveReceipt:
             return result
 
         try:
-            data = json.loads(
-                read_limited_text(
-                    path,
-                    maximum_bytes=MAX_RECEIPT_BYTES,
-                    label="Receipt JSON",
-                ),
-                object_pairs_hook=unique_object,
-            )
-        except OSError as exc:
-            raise ArchiveError(f"Receipt not found: {path}") from exc
+            data = json.loads(content, object_pairs_hook=unique_object)
         except json.JSONDecodeError as exc:
-            raise ArchiveError(f"Invalid receipt JSON: {path}") from exc
-        except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+            raise ArchiveError(invalid_json) from exc
+        except RecursionError as exc:
             raise ArchiveError(f"Invalid receipt: {exc}") from exc
 
         if not isinstance(data, dict):
@@ -238,6 +267,8 @@ class ArchiveReceipt:
         expected_generation: FileGeneration | None | object = (
             _CURRENT_RECEIPT_GENERATION
         ),
+        expected_parent_identity: DirectoryIdentity | None = None,
+        capture_generation: Callable[[FileGeneration], None] | None = None,
     ) -> Path:
         """Write the receipt as stable JSON."""
         if path.is_symlink():
@@ -247,11 +278,21 @@ class ArchiveReceipt:
         self.validate()
         if path.is_symlink():
             raise ArchiveError("Receipt output cannot be a symbolic link.")
-        atomic_write_text(
-            path,
-            self.serialized_text(),
-            expected_generation=expected_generation,
-        )
+        if expected_parent_identity is None:
+            atomic_write_text(
+                path,
+                self.serialized_text(),
+                expected_generation=expected_generation,
+                capture_generation=capture_generation,
+            )
+        else:
+            atomic_write_text(
+                path,
+                self.serialized_text(),
+                expected_generation=expected_generation,
+                expected_parent_identity=expected_parent_identity,
+                capture_generation=capture_generation,
+            )
         return path
 
     def serialized_text(self) -> str:
@@ -487,8 +528,8 @@ class ArchiveReceipt:
         extracted_dir: Path,
         *,
         require_sha256: bool = False,
-    ) -> None:
-        """Verify extracted manifest, lockfile, and lockfile package records."""
+    ) -> VerifiedArchiveWorkspace:
+        """Verify and return the exact extracted workspace subject bytes."""
         manifest_name, lockfile_name = self.workspace_paths
         manifest_path = self.path_under(
             extracted_dir,
@@ -501,7 +542,7 @@ class ArchiveReceipt:
             "workspace lockfile",
         )
 
-        self.verified_subject_bytes(
+        manifest_content = self.verified_subject_bytes(
             manifest_name,
             manifest_path,
             maximum_bytes=MAX_MANIFEST_BYTES,
@@ -524,6 +565,12 @@ class ArchiveReceipt:
             environment_prefixes=expected.environment_names(),
         )
         expected.compare(actual, require_sha256=require_sha256)
+        return VerifiedArchiveWorkspace(
+            manifest_name=manifest_name,
+            manifest_bytes=manifest_content,
+            lockfile_name=lockfile_name,
+            lockfile_bytes=lockfile_content,
+        )
 
 
 @dataclass(frozen=True)

@@ -21,6 +21,14 @@ returns its workspace, environment, manifest, added specs, and shell
 state. `init`, `activate`, `run`, and `shell` tolerate a global
 `--json` flag but intentionally emit no structured result.
 
+`attest --json` returns `success` and the `sidecar` path. `verify --json`
+returns the checked sidecar, manifest, lockfile, predicate type, authenticated
+signer, and timestamps. `verified` is `true` after successful verification.
+`authorized` is `true` when a supplied signer policy matches and `null` when no
+policy was supplied. See
+[Workspace attestation reference](workspace-attestations.md) for the exact
+objects.
+
 `conda workspace sbom --json` returns `success`, `format`, and `environment`.
 It adds `content` when writing to stdout or previewing a file with `--dry-run`.
 After a file is written, it returns the path in `file` instead:

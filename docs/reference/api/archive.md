@@ -6,4 +6,7 @@ installing workspace archives.
 ```{eval-rst}
 .. automodule:: conda_workspaces.archive
    :members: WorkspaceArchive, WorkspaceArchiveExtractResult, WorkspaceArchiveInstallResult
+
+.. autoclass:: conda_workspaces.receipts.VerifiedArchiveWorkspace
+   :members:
 ```

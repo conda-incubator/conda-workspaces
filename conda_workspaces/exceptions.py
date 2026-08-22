@@ -36,6 +36,10 @@ class CondaWorkspacesError(CondaError):
         super().__init__(full)
 
 
+class AttestationError(CondaWorkspacesError):
+    """A workspace or archive attestation could not be created or verified."""
+
+
 class WorkspaceNotFoundError(CondaWorkspacesError):
     """No workspace manifest was found in *search_dir* or its parents."""
 

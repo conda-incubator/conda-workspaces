@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Added `conda workspace attest` and `conda workspace verify` for conda-sigstore
+  workspace attestations. `lock --sign` signs the canonical workspace state,
+  `archive --sign` signs the archive receipt, and `--verify` gates locked
+  installs and archive extraction on an expected signer.
 - Added `conda workspace sbom` to export one locked or installed workspace environment as a CycloneDX 1.7 JSON SBOM through the optional conda-sboms plugin. Lockfile mode adds validated manifest dependency roots, prefix mode keeps conda history roots, metadata flags set product, manufacturer, and author identities per export, and `--reproducible` omits unstable timestamps.
 
 ## 0.8.0 — 2026-07-27

@@ -170,7 +170,8 @@ def test_clean_prompt_encodes_installed_environment_controls(
         record_and_abort,
     )
 
-    result = execute_clean(make_args(_DEFAULTS), console=rich_console)
+    with conda_context._override("always_yes", False):
+        result = execute_clean(make_args(_DEFAULTS), console=rich_console)
 
     assert result == 0
     assert prompts == [r"Remove unsafe\x85name environments?"]
@@ -197,7 +198,8 @@ def test_clean_prompt_abort(
     monkeypatch.setattr("conda_workspaces.envs.unregister_env", lambda path: None)
 
     args = make_args(_DEFAULTS, environment=env_arg)
-    result = execute_clean(args)
+    with conda_context._override("always_yes", False):
+        result = execute_clean(args)
     assert result == 0
     assert (pixi_workspace / ".conda" / "envs" / "default" / "conda-meta").is_dir()
 

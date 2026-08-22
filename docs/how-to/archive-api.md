@@ -83,10 +83,12 @@ before reading its target. It refuses credentials embedded in the manifest or
 existing lockfile, then binds the approved manifest, lockfile, and package bytes
 to the bytes written into the archive. Remove and rotate embedded credentials,
 regenerate `conda.lock`, and configure replacement authentication through Conda
-outside the repository. Bundle and receipt lock inputs are read under the
-workspace publication guard, archive output is published atomically, and a
-receipt failure removes a new archive output but keeps a generated canonical
-lockfile that was already published successfully.
+outside the repository. Bundle and receipt lock inputs are read while workspace
+publication is locked. An existing archive output is replaced only if it has not
+changed. A receipt failure removes a new archive output but keeps a generated
+canonical lockfile that was already published successfully. On Windows, an
+interrupted replacement can leave the destination absent and the prior output in
+a uniquely named `.rollback` file beside it.
 
 Extract into a target path that does not exist yet:
 
@@ -154,13 +156,22 @@ installation:
 ```python
 from pathlib import Path
 
+from conda_workspaces.receipts import VerifiedArchiveWorkspace
+
 
 def install_handler(
     workspace: Path,
     environment: str | None,
     prefix: Path | None,
     target_prefix_override: str | None,
+    *,
+    verified_workspace: VerifiedArchiveWorkspace | None = None,
 ) -> int:
+    if verified_workspace is not None:
+        print(
+            verified_workspace.manifest_name,
+            verified_workspace.lockfile_name,
+        )
     print(workspace, environment, prefix, target_prefix_override)
     return 0
 
@@ -174,9 +185,12 @@ archive.install(
 )
 ```
 
-The handler receives the extracted workspace path, the selected
-environment, the physical install prefix, and the runtime prefix override
-when staging under `dest`.
+The handler receives the extracted workspace path, the selected environment,
+the physical install prefix, and the runtime prefix override when staging under
+`dest`. When a receipt or signed receipt verifies the archive, the
+`verified_workspace` keyword argument contains the exact manifest and lockfile bytes
+that passed verification. A custom handler must accept and consume this argument
+instead of reopening those files from the extracted workspace.
 
 ## API reference
 

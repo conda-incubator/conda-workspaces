@@ -90,6 +90,14 @@ Portable workspace archives with source files, manifests, optional
 lockfiles and package bundles, receipts, and verified extraction.
 :::
 
+:::{grid-item-card} {octicon}`verified` Workspace attestations
+:link: features/attestations
+:link-type: doc
+
+Sigstore attestations for the exact workspace manifest and canonical lockfile,
+with signer checks for locked installs.
+:::
+
 :::{grid-item-card} {octicon}`server` Local environments and CI
 :link: features/ci
 :link-type: doc
@@ -122,5 +130,6 @@ features/environments
 features/locking
 features/export
 features/archives
+features/attestations
 features/ci
 ```
