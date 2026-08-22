@@ -1002,14 +1002,13 @@ def test_atomic_binary_writer_reports_retained_recovery(
     path = tmp_path / "output.txt"
     original_content = b"original"
     path.write_bytes(original_content)
-    original_unlink = paths_mod.os.unlink
+    original_os_unlink = paths_mod.os.unlink
+    original_path_unlink = Path.unlink
     recovery_suffix = ".tmp" if anchored else ".rollback"
     removal_attempts = 0
 
-    def reject_recovery_removal(
+    def raise_for_recovery_removal(
         candidate: str | os.PathLike[str],
-        *,
-        dir_fd: int | None = None,
     ) -> None:
         nonlocal removal_attempts
         candidate_name = Path(os.fspath(candidate)).name
@@ -1019,9 +1018,24 @@ def test_atomic_binary_writer_reports_retained_recovery(
             removal_attempts += 1
             if removal_attempts == 1:
                 raise PermissionError("injected recovery removal failure")
-        original_unlink(candidate, dir_fd=dir_fd)
 
-    monkeypatch.setattr(paths_mod.os, "unlink", reject_recovery_removal)
+    def reject_os_recovery_removal(
+        candidate: str | os.PathLike[str],
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        raise_for_recovery_removal(candidate)
+        original_os_unlink(candidate, dir_fd=dir_fd)
+
+    def reject_path_recovery_removal(
+        candidate: Path,
+        missing_ok: bool = False,
+    ) -> None:
+        raise_for_recovery_removal(candidate)
+        original_path_unlink(candidate, missing_ok=missing_ok)
+
+    monkeypatch.setattr(paths_mod.os, "unlink", reject_os_recovery_removal)
+    monkeypatch.setattr(Path, "unlink", reject_path_recovery_removal)
 
     with pytest.raises(FileRecoveryError) as exc_info:
         atomic_write_text(path, "published")
