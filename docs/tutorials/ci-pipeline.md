@@ -320,7 +320,7 @@ accumulate:
 
 ```bash
 # Remove all workspace environments
-rm -rf .conda/envs/
+conda workspace clean --yes
 
 # Or remove conda's package cache
 conda clean --all -y

@@ -133,14 +133,25 @@ def test_workspace_unknown_subcmd_prints_help(
         (["install", "-e", "test"], "environment", "test"),
         (["install", "--force-reinstall"], "force_reinstall", True),
         (["envs", "--installed"], "installed", True),
+        (["envs", "--orphans"], "orphans", True),
         (["info", "-e", "test"], "environment", "test"),
         (["info", "--packages"], "packages", True),
         (["info"], "environment", None),
         (["add", "--pypi", "requests"], "pypi", True),
         (["add", "--feature", "dev", "numpy"], "feature", "dev"),
+        (["add", "-e", "dev"], "specs", []),
+        (
+            ["add", "-e", "dev", "--with-feature", "test", "--with-feature", "lint"],
+            "with_feature",
+            ["test", "lint"],
+        ),
+        (["add", "-e", "dev", "--no-default-feature"], "no_default_feature", True),
         (["update", "--feature", "dev", "numpy"], "feature", "dev"),
         (["update", "--no-install", "numpy"], "no_install", True),
         (["remove", "--pypi", "requests"], "pypi", True),
+        (["remove", "-e", "test"], "specs", []),
+        (["remove", "-e", "test", "--all"], "all", True),
+        (["remove", "-e", "test", "--yes"], "yes", True),
         (["clean", "-e", "test"], "environment", "test"),
         (["activate", "-e", "docs"], "environment", "docs"),
         (["activate"], "environment", "default"),
@@ -196,14 +207,21 @@ def test_workspace_unknown_subcmd_prints_help(
         "install-env",
         "install-force",
         "envs-installed",
+        "envs-orphans",
         "info-named",
         "info-packages",
         "info-default",
         "add-pypi",
         "add-feature",
+        "add-empty-environment",
+        "add-with-features",
+        "add-no-default-feature",
         "update-feature",
         "update-no-install",
         "remove-pypi",
+        "remove-empty-environment",
+        "remove-all-environment",
+        "remove-yes-independent",
         "clean-env",
         "activate-named",
         "activate-default",
@@ -231,6 +249,13 @@ def test_workspace_parser_args(
     parser = generate_workspace_parser()
     parsed = parser.parse_args(args)
     assert getattr(parsed, expected_attr) == expected_value
+
+
+def test_workspace_envs_filters_are_mutually_exclusive() -> None:
+    parser = generate_workspace_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["envs", "--installed", "--orphans"])
 
 
 @pytest.mark.parametrize("subcmd", ["add", "update", "remove"])

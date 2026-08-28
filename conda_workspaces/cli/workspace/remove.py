@@ -1,4 +1,4 @@
-"""``conda workspace remove`` — remove dependencies from the manifest."""
+"""``conda workspace remove`` — remove dependencies or an environment."""
 
 from __future__ import annotations
 
@@ -7,12 +7,18 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import tomlkit
+from conda.cli.common import is_active_prefix
+from conda.reporters import confirm_yn
 from rich.console import Console
 
 from ...context import WorkspaceContext
+from ...envs import remove_environment
 from ...exceptions import CondaWorkspacesError
-from ...manifests import detect_workspace_file, find_parser
+from ...lockfile import lockfile_path, render_lockfile, validate_lockfile_output
+from ...manifests import detect_task_file, detect_workspace_file, find_parser
+from ...paths import output_paths_collide
 from ...publication import WorkspacePublication
+from ...resolver import resolve_all_environments
 from .. import status
 from . import workspace_manifest_path_from_args
 from .dependencies import (
@@ -32,7 +38,7 @@ if TYPE_CHECKING:
 
 
 def execute_remove(args: argparse.Namespace, *, console: Console | None = None) -> int:
-    """Remove dependencies from the workspace manifest."""
+    """Remove dependencies or a complete environment from the workspace."""
     if console is None:
         console = Console(highlight=False)
     dry_run = getattr(args, "dry_run", False)
@@ -50,6 +56,37 @@ def execute_remove(args: argparse.Namespace, *, console: Console | None = None) 
     feature = getattr(args, "feature", None)
     environment = getattr(args, "environment", None)
     platform = getattr(args, "platform", None)
+    remove_all = getattr(args, "all", False)
+    if remove_all:
+        incompatible = [
+            option
+            for enabled, option in (
+                (bool(specs), "package specs"),
+                (feature is not None, "--feature"),
+                (platform is not None, "--platform"),
+                (is_pypi, "--pypi"),
+                (getattr(args, "no_install", False), "--no-install"),
+                (
+                    getattr(args, "no_lockfile_update", False),
+                    "--no-lockfile-update",
+                ),
+                (getattr(args, "force_reinstall", False), "--force-reinstall"),
+            )
+            if enabled
+        ]
+        if environment is None:
+            raise CondaWorkspacesError(
+                "--all requires -e/--environment to select an environment."
+            )
+        if incompatible:
+            raise CondaWorkspacesError(
+                "--all cannot be combined with " + ", ".join(incompatible) + "."
+            )
+    elif not specs:
+        raise CondaWorkspacesError(
+            "Package names are required unless --all removes a complete environment.",
+            hints=["Pass both '-e NAME' and '--all' to remove an environment."],
+        )
     location = DependencyLocation.from_selectors(
         feature=feature,
         environment=environment,
@@ -62,6 +99,177 @@ def execute_remove(args: argparse.Namespace, *, console: Console | None = None) 
     dep_key = "pypi-dependencies" if is_pypi else "dependencies"
 
     source, namespace = workspace_toml_source(doc, manifest_path, create=False)
+    if remove_all:
+        assert environment is not None
+        if source is None:
+            raise CondaWorkspacesError(
+                f"Environment '{environment}' is not defined in the workspace."
+            )
+        reject_legacy_default_feature(source)
+        current = parser.parse_data_with_redacted_errors(doc.unwrap(), manifest_path)
+        current.get_environment(environment)
+        if environment == "default":
+            raise CondaWorkspacesError(
+                "The implicit 'default' environment cannot be removed.",
+                hints=[
+                    (
+                        "Remove its dependencies or change its explicit declaration"
+                        " instead."
+                    )
+                ],
+            )
+
+        task_manifest_path = detect_task_file(
+            manifest_path.parent,
+            reject_symlinks=True,
+        )
+        project_task_sets = [parser.parse_tasks_data(doc.unwrap())]
+        if task_manifest_path is not None and not output_paths_collide(
+            task_manifest_path,
+            manifest_path,
+        ):
+            project_task_sets.append(
+                find_parser(task_manifest_path).parse_tasks(task_manifest_path)
+            )
+        references: list[str] = []
+        for project_tasks in project_task_sets:
+            for task_name, task in project_tasks.items():
+                if task.default_environment == environment:
+                    references.append(
+                        f"Task '{task_name}' sets default-environment to"
+                        f" '{environment}'."
+                    )
+                for index, dependency in enumerate(task.depends_on):
+                    if dependency.environment == environment:
+                        references.append(
+                            f"Task '{task_name}' depends-on entry {index + 1} selects"
+                            f" environment '{environment}'."
+                        )
+                for target, override in (task.platforms or {}).items():
+                    for index, dependency in enumerate(override.depends_on or []):
+                        if dependency.environment == environment:
+                            references.append(
+                                f"Task '{task_name}' target '{target}' depends-on"
+                                f" entry {index + 1} selects environment"
+                                f" '{environment}'."
+                            )
+        if references:
+            raise CondaWorkspacesError(
+                f"Environment '{environment}' is still referenced by workspace tasks.",
+                hints=references,
+            )
+
+        environments = source.get("environments")
+        if environments is None or environment not in environments:
+            raise CondaWorkspacesError(
+                f"Environment '{environment}' has no removable manifest declaration."
+            )
+        del environments[environment]
+        parser.validate_no_url_credentials(
+            doc.unwrap(),
+            manifest_path,
+            content=tomlkit.dumps(doc),
+        )
+        config = parser.parse_data_with_redacted_errors(doc.unwrap(), manifest_path)
+        updated_text = tomlkit.dumps(doc)
+        ctx = WorkspaceContext(config)
+        prefix = ctx.env_prefix(environment)
+        if is_active_prefix(str(prefix)):
+            raise CondaWorkspacesError(
+                f"Environment '{environment}' is active and cannot be removed.",
+                hints=["Deactivate it and run the command again."],
+            )
+
+        envs_identity = ctx.envs_dir_identity()
+        prefix_identity = next(
+            (
+                identity
+                for installed_prefix, identity in ctx.iter_installed_prefixes()
+                if installed_prefix.name == environment
+            ),
+            None,
+        )
+        if ctx.envs_dir_identity() != envs_identity:
+            raise CondaWorkspacesError(
+                "Workspace environments directory changed while it was inspected."
+            )
+
+        publication = WorkspacePublication(
+            ctx,
+            manifest_path,
+            original_text,
+            updated_text,
+            "environment removal",
+        )
+        publication_context = nullcontext() if dry_run else publication.guard()
+        with publication_context:
+            validate_lockfile_output(ctx, lockfile_path(ctx))
+            rendered_lockfile = render_lockfile(
+                ctx,
+                resolve_all_environments(config),
+                config=config,
+                dry_run=dry_run,
+            )
+
+            escaped_name = status.escape_for_console(environment)
+            manifest_entry = (
+                "["
+                + ".".join(
+                    str(tomlkit.key(key))
+                    for key in (*namespace, "environments", environment)
+                )
+                + "]"
+            )
+            action = "Would remove" if dry_run else "Removing"
+            console.print(
+                f"[bold cyan]{action}[/bold cyan] [bold]{escaped_name}[/bold]"
+                " environment"
+            )
+            console.print(
+                "Manifest entry: "
+                f"[bold]{status.escape_for_console(manifest_entry)}[/bold] in "
+                f"[bold]{status.escape_for_console(manifest_path.name)}[/bold]"
+            )
+            console.print(
+                "Lock records: all platforms for "
+                f"[bold]{escaped_name}[/bold] in [bold]conda.lock[/bold]"
+            )
+            prefix_state = (
+                "installed" if prefix_identity is not None else "not installed"
+            )
+            console.print(
+                f"Prefix: [bold]{status.escape_for_console(prefix)}[/bold]"
+                f" ({prefix_state})"
+            )
+
+            if dry_run:
+                return 0
+
+            if prefix_identity is not None:
+                if envs_identity is None:
+                    raise CondaWorkspacesError(
+                        "Workspace environments directory changed while it was"
+                        " inspected."
+                    )
+                confirm_yn(
+                    f"Remove {status.escape_for_console(environment)} environment?",
+                    default="no",
+                    dry_run=False,
+                )
+                publication.validate_manifest_generation()
+                remove_environment(
+                    ctx,
+                    environment,
+                    expected_envs_identity=envs_identity,
+                    expected_prefix_identity=prefix_identity,
+                )
+            publication.publish_lockfile(rendered_lockfile)
+
+        console.print(
+            f"[bold cyan]Removed[/bold cyan] [bold]{escaped_name}[/bold] environment"
+        )
+        return 0
+
     if source is not None:
         reject_legacy_default_feature(source)
         current = parser.parse_data_with_redacted_errors(doc.unwrap(), manifest_path)

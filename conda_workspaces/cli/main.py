@@ -476,11 +476,18 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
     )
     add_parser_help(envs_parser)
     add_output_and_prompt_options(envs_parser)
-    envs_parser.add_argument(
+    envs_filter = envs_parser.add_mutually_exclusive_group()
+    envs_filter.add_argument(
         "--installed",
         action="store_true",
         default=False,
         help="Only show installed environments.",
+    )
+    envs_filter.add_argument(
+        "--orphans",
+        action="store_true",
+        default=False,
+        help="Only show installed environments not declared in the manifest.",
     )
 
     info_parser = sub.add_parser(
@@ -524,7 +531,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
 
     add_parser_cmd = sub.add_parser(
         "add",
-        help="Add a dependency to the workspace.",
+        help="Add a dependency or environment to the workspace.",
         add_help=False,
         parents=[dependency_location_parser],
     )
@@ -532,8 +539,27 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
     add_output_and_prompt_options(add_parser_cmd)
     add_parser_cmd.add_argument(
         "specs",
-        nargs="+",
-        help="Package specs to add (e.g. 'numpy>=1.24').",
+        nargs="*",
+        help=(
+            "Package specs to add (e.g. 'numpy>=1.24'). Omit specs with"
+            " --environment to declare a new environment."
+        ),
+    )
+    add_parser_cmd.add_argument(
+        "--with-feature",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help=(
+            "Compose a feature into a newly declared environment. May be passed"
+            " more than once."
+        ),
+    )
+    add_parser_cmd.add_argument(
+        "--no-default-feature",
+        action="store_true",
+        default=False,
+        help="Exclude the default feature from a newly declared environment.",
     )
     add_parser_cmd.add_argument(
         "--pypi",
@@ -588,7 +614,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
 
     rm_parser = sub.add_parser(
         "remove",
-        help="Remove a dependency from the workspace.",
+        help="Remove a dependency or environment from the workspace.",
         add_help=False,
         parents=[dependency_location_parser],
     )
@@ -596,8 +622,14 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
     add_output_and_prompt_options(rm_parser)
     rm_parser.add_argument(
         "specs",
-        nargs="+",
-        help="Package names to remove.",
+        nargs="*",
+        help="Package names to remove, omitted with --all.",
+    )
+    rm_parser.add_argument(
+        "--all",
+        action="store_true",
+        default=False,
+        help="Remove the complete environment selected with -e/--environment.",
     )
     rm_parser.add_argument(
         "--pypi",
