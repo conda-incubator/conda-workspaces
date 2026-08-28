@@ -15,7 +15,7 @@ package manager, just workspaces and tasks on top of the tools you already use.
 :::{tab-item} conda
 
 ```bash
-conda install -c conda-forge conda-workspaces
+conda install -n base conda-forge::conda-workspaces
 ```
 
 :::
@@ -29,6 +29,10 @@ pixi global install conda-workspaces
 :::
 
 ::::
+
+Both methods provide the `cw` and `ct` shortcut commands. Installing into
+conda's base environment also registers the `conda workspace` and
+`conda task` plugin subcommands.
 
 ## Define a workspace
 

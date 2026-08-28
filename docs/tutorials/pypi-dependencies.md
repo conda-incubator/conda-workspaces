@@ -19,7 +19,7 @@ PyPI dependency support requires two conda packages and a channel
 configuration:
 
 ```bash
-conda install conda-pypi conda-rattler-solver
+conda install -n base conda-forge::conda-pypi conda-forge::conda-rattler-solver
 conda config --set solver rattler
 conda config --append channels conda-pypi
 ```
@@ -158,7 +158,7 @@ publish the package to a channel that conda can solve from.
 Install it:
 
 ```bash
-conda install conda-pypi
+conda install -n base conda-forge::conda-pypi
 ```
 
 ### "conda-rattler-solver is not installed"
@@ -166,7 +166,7 @@ conda install conda-pypi
 Since conda-pypi 0.9.0, the solver backend is a separate package:
 
 ```bash
-conda install conda-rattler-solver
+conda install -n base conda-forge::conda-rattler-solver
 ```
 
 ### Solve failures with PyPI packages

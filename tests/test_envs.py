@@ -1122,6 +1122,7 @@ def test_build_pypi_specs_no_conda_pypi(
 
     assert specs == []
     assert "conda-pypi is not installed" in caplog.text
+    assert "conda install -n base conda-forge::conda-pypi" in caplog.text
 
 
 def test_build_pypi_specs_no_rattler_solver(
@@ -1146,6 +1147,7 @@ def test_build_pypi_specs_no_rattler_solver(
 
     assert len(specs) == 1
     assert "conda-rattler-solver is not installed" in caplog.text
+    assert "conda install -n base conda-forge::conda-rattler-solver" in caplog.text
 
 
 def test_install_path_deps_no_conda_pypi(
