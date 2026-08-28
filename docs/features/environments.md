@@ -45,6 +45,52 @@ and does not support cross-environment version coordination. Each
 environment is solved independently.
 :::
 
+## Environment lifecycle
+
+A managed environment has a declaration in the manifest, records in
+`conda.lock`, and an optional installed prefix. The environment commands keep
+these states distinct:
+
+| Command | Manifest declaration | Lock records | Installed prefix |
+| --- | --- | --- | --- |
+| `workspace add -e NAME` | Add | Refresh | Install |
+| `workspace install -e NAME` | Keep | Refresh or validate | Synchronize |
+| `workspace clean -e NAME` | Keep | Keep | Remove |
+| `workspace remove -e NAME --all` | Remove | Refresh | Remove |
+
+Use `--no-install` or `--no-lockfile-update` with `workspace add` to stop
+before the corresponding later state. `--dry-run` previews the complete change
+without writing any of the three states.
+
+Declare an environment that composes existing features with repeatable
+`--with-feature` options:
+
+```bash
+conda workspace add -e checks --with-feature test --with-feature docs
+```
+
+Each feature name must already be declared. The default feature is inherited
+unless `--no-default-feature` is passed. An environment with that option and
+no `--with-feature` values is a valid empty environment declaration.
+
+Whole-environment removal requires `-e NAME --all`. Package specs and package
+location selectors cannot be combined with `--all`. `--yes` skips the prefix
+deletion prompt, but never selects whole-environment removal. Shared features
+remain declared after an environment that composes them is removed.
+
+Removal stops before changing the manifest or lockfile when the environment is
+active or referenced by a task. Update every reported task reference first.
+The `default` environment cannot be removed because it is implicit when the
+manifest has no environment declarations.
+
+List installed prefixes that no longer have a manifest declaration, then
+remove an exact orphan safely:
+
+```bash
+conda workspace envs --orphans
+conda workspace clean -e old-name
+```
+
 ## Features
 
 Features are composable groups of dependencies, channels, and settings.

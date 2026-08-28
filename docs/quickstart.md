@@ -216,6 +216,55 @@ conda workspace init
 # or: conda workspace init --format pyproject
 ```
 
+## Add and remove environments
+
+Declare a named environment without adding a package:
+
+```bash
+conda workspace add -e docs
+```
+
+This adds the environment to the manifest, refreshes the complete
+`conda.lock`, and installs `.conda/envs/docs`. A named environment inherits
+the default feature. Compose existing features or create an environment with
+no features when needed:
+
+```bash
+conda workspace add -e test-only --with-feature test
+conda workspace add -e isolated --no-default-feature
+```
+
+`--with-feature` is repeatable. Both options apply only while declaring a new
+environment. Supplying package specs keeps the existing behavior and adds
+private dependencies to the selected environment:
+
+```bash
+conda workspace add -e docs sphinx myst-parser
+```
+
+Running `add -e NAME` without specs for an environment that is already
+declared is an error. Use `conda workspace install -e NAME` to synchronize its
+prefix instead.
+
+Remove a complete named environment explicitly with `--all`:
+
+```bash
+conda workspace remove -e docs --all
+```
+
+This removes its manifest declaration, all of its `conda.lock` records, and
+its installed prefix. The command rejects the `default` environment, an
+active environment, and environments referenced by tasks. It confirms before
+deleting an installed prefix. Pass `--yes` to skip that confirmation, but
+`--yes` does not replace the required `--all` flag.
+
+To remove only the generated prefix while keeping the declaration and lock
+records, use:
+
+```bash
+conda workspace clean -e docs
+```
+
 ## Install environments
 
 ```bash
@@ -282,6 +331,10 @@ changed, the install fails:
 ```bash
 conda workspace install --locked
 ```
+
+Freshness also requires the manifest and lockfile to contain exactly the same
+environment names. A lockfile that still contains a removed environment is
+stale.
 
 Use `--frozen` to install from the lockfile as-is, without checking
 freshness:
@@ -432,7 +485,12 @@ you to exit and re-run `conda workspace shell` when that happens.
 conda workspace list              # packages in default env
 conda workspace list -e test      # packages in test env
 conda workspace envs              # list defined environments
+conda workspace envs --orphans    # list installed, undeclared prefixes
 ```
+
+An orphan can remain after an interrupted removal or a manual manifest edit.
+Inspect its exact path with `envs --orphans`, then remove only that prefix with
+`conda workspace clean -e NAME`.
 
 ## Workspace overview
 

@@ -17,7 +17,7 @@ import conda_workspaces.publication as publication_mod
 from conda_workspaces.cli.workspace.add import execute_add
 from conda_workspaces.cli.workspace.dependencies import DependencyLocation
 from conda_workspaces.cli.workspace.remove import execute_remove
-from conda_workspaces.exceptions import CondaWorkspacesError
+from conda_workspaces.exceptions import CondaWorkspacesError, FeatureNotFoundError
 from conda_workspaces.manifests import find_parser
 from conda_workspaces.resolver import ResolvedEnvironment
 
@@ -38,6 +38,8 @@ _DEFAULTS = {
     "feature": None,
     "environment": None,
     "platform": None,
+    "with_feature": [],
+    "no_default_feature": False,
     "no_install": False,
     # Most of the existing tests only care about the manifest edit; skip the
     # solve/install/lock pipeline by default and opt in where needed.
@@ -603,13 +605,15 @@ name = "no-tool"
     ],
     ids=["conda-toml", "pixi-toml", "pyproject-conda", "pyproject-pixi"],
 )
+@pytest.mark.parametrize("specs", [[], ["numpy"]], ids=["empty", "dependency"])
 def test_add_environment_auto_creates_env_entry(
     tmp_path: Path,
     filename: str,
     namespace: str,
     root_keys: tuple[str, ...],
+    specs: list[str],
 ) -> None:
-    """Adding to an undefined environment auto-creates the env entry."""
+    """Targeting an undefined environment creates its declaration."""
     prefix = f"{namespace}." if namespace else ""
     project = '[project]\nname = "add-test"\n\n' if namespace else ""
     path = tmp_path / filename
@@ -627,7 +631,7 @@ python = ">=3.10"
     args = make_args(
         _DEFAULTS,
         manifest_file=path,
-        specs=["numpy"],
+        specs=specs,
         environment="newenv",
     )
     result = execute_add(args)
@@ -637,8 +641,157 @@ python = ">=3.10"
     root = doc
     for key in root_keys:
         root = root[key]
-    assert root["environments"]["newenv"]["dependencies"]["numpy"] == "*"
+    assert root["environments"]["default"] == []
+    environment = root["environments"]["newenv"]
+    if specs:
+        assert environment["dependencies"]["numpy"] == "*"
+    else:
+        assert environment.unwrap() == {}
     assert "feature" not in root
+    config = find_parser(path).parse(path)
+    assert set(config.environments) == {"default", "newenv"}
+
+
+@pytest.mark.parametrize(
+    ("with_features", "no_default_feature", "expected_dependencies"),
+    [
+        ([], False, {"python"}),
+        (["test", "test"], False, {"python", "pytest"}),
+        ([], True, set()),
+        (["test"], True, {"pytest"}),
+    ],
+    ids=["default", "feature", "isolated-empty", "isolated-feature"],
+)
+def test_add_environment_creation_options(
+    declaration_toml: Path,
+    with_features: list[str],
+    no_default_feature: bool,
+    expected_dependencies: set[str],
+) -> None:
+    args = make_args(
+        _DEFAULTS,
+        manifest_file=declaration_toml,
+        environment="newenv",
+        with_feature=with_features,
+        no_default_feature=no_default_feature,
+    )
+
+    assert execute_add(args) == 0
+
+    config = find_parser(declaration_toml).parse(declaration_toml)
+    environment = config.environments["newenv"]
+    assert environment.features == list(dict.fromkeys(with_features))
+    assert environment.no_default_feature is no_default_feature
+    assert set(config.merged_conda_dependencies(environment)) == expected_dependencies
+
+    doc = tomlkit.loads(declaration_toml.read_text(encoding="utf-8"))
+    assert "newenv" not in doc.get("feature", {})
+    if no_default_feature:
+        assert doc["environments"]["newenv"]["no-default-feature"] is True
+
+
+@pytest.mark.parametrize("platform", [None, "linux-64"], ids=["all", "platform"])
+def test_add_environment_with_dependency_accepts_creation_options(
+    declaration_toml: Path,
+    platform: str | None,
+) -> None:
+    args = make_args(
+        _DEFAULTS,
+        manifest_file=declaration_toml,
+        specs=["coverage"],
+        environment="newenv",
+        platform=platform,
+        with_feature=["test"],
+        no_default_feature=True,
+    )
+
+    assert execute_add(args) == 0
+
+    config = find_parser(declaration_toml).parse(declaration_toml)
+    environment = config.environments["newenv"]
+    assert environment.features == ["test"]
+    assert environment.no_default_feature is True
+    assert set(config.merged_conda_dependencies(environment, platform)) == {
+        "pytest",
+        "coverage",
+    }
+
+
+def test_add_existing_environment_without_specs_preserves_manifest(
+    declaration_toml: Path,
+) -> None:
+    before = declaration_toml.read_bytes()
+    args = make_args(
+        _DEFAULTS,
+        manifest_file=declaration_toml,
+        environment="qa",
+    )
+
+    with pytest.raises(CondaWorkspacesError, match="already defined") as exc_info:
+        execute_add(args)
+
+    assert declaration_toml.read_bytes() == before
+    assert any("install -e qa" in hint for hint in exc_info.value.hints)
+
+
+@pytest.mark.parametrize(
+    "extra_kwargs",
+    [
+        {},
+        {"feature": "test"},
+        {"environment": "newenv", "pypi": True},
+        {"environment": "newenv", "platform": "linux-64"},
+    ],
+    ids=["no-selector", "feature", "pypi", "platform"],
+)
+def test_add_without_specs_rejects_non_creation_forms(
+    declaration_toml: Path,
+    extra_kwargs: dict[str, object],
+) -> None:
+    before = declaration_toml.read_bytes()
+    args = make_args(_DEFAULTS, manifest_file=declaration_toml, **extra_kwargs)
+
+    with pytest.raises(CondaWorkspacesError):
+        execute_add(args)
+
+    assert declaration_toml.read_bytes() == before
+
+
+@pytest.mark.parametrize("specs", [[], ["coverage"]], ids=["empty", "dependency"])
+def test_add_creation_options_reject_existing_environment(
+    declaration_toml: Path,
+    specs: list[str],
+) -> None:
+    before = declaration_toml.read_bytes()
+    args = make_args(
+        _DEFAULTS,
+        manifest_file=declaration_toml,
+        specs=specs,
+        environment="qa",
+        with_feature=["test"],
+    )
+
+    with pytest.raises(CondaWorkspacesError):
+        execute_add(args)
+
+    assert declaration_toml.read_bytes() == before
+
+
+def test_add_environment_rejects_unknown_feature(
+    declaration_toml: Path,
+) -> None:
+    before = declaration_toml.read_bytes()
+    args = make_args(
+        _DEFAULTS,
+        manifest_file=declaration_toml,
+        environment="newenv",
+        with_feature=["missing"],
+    )
+
+    with pytest.raises(FeatureNotFoundError, match="Feature 'missing'"):
+        execute_add(args)
+
+    assert declaration_toml.read_bytes() == before
 
 
 @pytest.fixture
@@ -1588,6 +1741,56 @@ def stub_sync(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], dict]]:
         "conda_workspaces.cli.workspace.remove.sync_environments", fake_sync
     )
     return calls
+
+
+@pytest.mark.parametrize(
+    ("extra_kwargs", "manifest_changed", "expected_flags"),
+    [
+        (
+            {},
+            True,
+            {"no_install": False, "force_reinstall": False, "dry_run": False},
+        ),
+        (
+            {"no_install": True},
+            True,
+            {"no_install": True, "force_reinstall": False, "dry_run": False},
+        ),
+        (
+            {"dry_run": True},
+            False,
+            {"no_install": False, "force_reinstall": False, "dry_run": True},
+        ),
+    ],
+    ids=["install", "no-install", "dry-run"],
+)
+def test_add_environment_without_specs_syncs_new_environment(
+    sync_workspace: Path,
+    stub_sync: list[tuple[list[str], dict]],
+    extra_kwargs: dict[str, bool],
+    manifest_changed: bool,
+    expected_flags: dict[str, bool],
+) -> None:
+    before = sync_workspace.read_bytes()
+    args = make_args(
+        _DEFAULTS,
+        manifest_file=sync_workspace,
+        environment="newenv",
+        with_feature=["test"],
+        no_lockfile_update=False,
+        **extra_kwargs,
+    )
+
+    assert execute_add(args) == 0
+
+    assert len(stub_sync) == 1
+    env_names, flags = stub_sync[0]
+    assert env_names == ["newenv"]
+    assert flags == {**expected_flags, "prune": False}
+    assert (sync_workspace.read_bytes() != before) is manifest_changed
+    if manifest_changed:
+        config = find_parser(sync_workspace).parse(sync_workspace)
+        assert config.environments["newenv"].features == ["test"]
 
 
 @pytest.mark.parametrize(

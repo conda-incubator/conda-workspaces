@@ -30,6 +30,13 @@ class EnvironmentRow(TypedDict):
     installed: bool
 
 
+class OrphanEnvironmentRow(TypedDict):
+    """Display row for ``conda workspace envs --orphans``."""
+
+    name: str
+    prefix: str
+
+
 def package_table(packages: list[PackageRow]) -> Table:
     """Return the shared Rich table for installed package records."""
     table = Table(show_edge=False, pad_edge=False)
@@ -56,7 +63,15 @@ def execute_list(args: argparse.Namespace, *, console: Console | None = None) ->
 
     if getattr(args, "envs", False):
         installed_only = getattr(args, "installed", False)
-        return _list_environments(config, ctx, console, json_output, installed_only)
+        orphaned_only = getattr(args, "orphans", False)
+        return _list_environments(
+            config,
+            ctx,
+            console,
+            json_output,
+            installed_only,
+            orphaned_only,
+        )
 
     env_name = getattr(args, "environment", "default")
     return _list_packages(config, ctx, env_name, console, json_output)
@@ -100,9 +115,34 @@ def _list_environments(
     console: Console,
     json_output: bool,
     installed_only: bool,
+    orphaned_only: bool,
 ) -> int:
     """List environments defined in the workspace."""
     installed = set(list_installed_environments(ctx))
+
+    if orphaned_only:
+        orphan_rows: list[OrphanEnvironmentRow] = [
+            {
+                "name": name,
+                "prefix": str(ctx.env_prefix(name)),
+            }
+            for name in sorted(installed - config.environments.keys())
+        ]
+        if json_output:
+            console.print_json(json.dumps(orphan_rows))
+        elif not orphan_rows:
+            console.print("No orphaned environments installed.")
+        else:
+            table = Table(show_edge=False, pad_edge=False)
+            table.add_column("Name")
+            table.add_column("Prefix")
+            for row in orphan_rows:
+                table.add_row(
+                    status.escape_for_console(row["name"]),
+                    status.escape_for_console(row["prefix"]),
+                )
+            console.print(table)
+        return 0
 
     rows: list[EnvironmentRow] = []
     for name, env in sorted(config.environments.items()):

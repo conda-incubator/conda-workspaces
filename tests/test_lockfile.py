@@ -4292,7 +4292,7 @@ def test_satisfiability_uses_resolved_environment_platforms() -> None:
     assert result.reason == ""
 
 
-def test_satisfiability_ignores_extra_lockfile_envs(
+def test_satisfiability_rejects_extra_lockfile_envs(
     satisfiability_config_factory, lockfile_data_factory
 ) -> None:
     config = satisfiability_config_factory()
@@ -4310,5 +4310,6 @@ def test_satisfiability_ignores_extra_lockfile_envs(
         },
     }
     result = check_lockfile_satisfiability(config, data, "linux-64")
-    assert result.status == LockfileStatus.UP_TO_DATE
-    assert result.reason == ""
+    assert result.status == LockfileStatus.OUT_OF_DATE
+    assert "'extra'" in result.reason
+    assert "not declared in the manifest" in result.reason

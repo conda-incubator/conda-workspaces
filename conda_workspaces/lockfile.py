@@ -261,6 +261,17 @@ def check_lockfile_satisfiability(
     from .resolver import resolve_environment
 
     lock_envs = lockfile_data.get("environments", {})
+    extra_envs = sorted(set(lock_envs) - set(config.environments))
+    if extra_envs:
+        names = ", ".join(f"'{name}'" for name in extra_envs)
+        return LockfileStatus(
+            status=_stale,
+            reason=(
+                f"Environment{'' if len(extra_envs) == 1 else 's'} {names} "
+                f"{'is' if len(extra_envs) == 1 else 'are'} present in the "
+                "lockfile but not declared in the manifest"
+            ),
+        )
     for env_name, env_obj in config.environments.items():
         if env_name not in lock_envs:
             return LockfileStatus(
