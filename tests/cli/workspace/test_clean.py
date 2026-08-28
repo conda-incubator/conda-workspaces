@@ -49,6 +49,23 @@ def test_clean_single_environment(
     assert "Removed" in capsys.readouterr().out
 
 
+def test_clean_single_orphaned_environment(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_workspace_env: CreateWorkspaceEnv,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    _stub_confirm_and_unregister(monkeypatch)
+    prefix = tmp_workspace_env(pixi_workspace, "orphan")
+
+    result = execute_clean(make_args(_DEFAULTS, environment="orphan"))
+
+    assert result == 0
+    assert not prefix.exists()
+    assert "Removed" in capsys.readouterr().out
+
+
 def test_clean_all_environments(
     pixi_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -283,11 +300,25 @@ def test_clean_rejects_envs_directory_changed_during_confirmation(
     assert (envs_dir / "post-confirmation.txt").read_bytes() == b"preserve replacement"
 
 
-def test_clean_undefined_environment(
-    pixi_workspace: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "prefix_kind",
+    ["missing", "not-an-environment"],
+    ids=["missing", "invalid-prefix"],
+)
+def test_clean_rejects_undefined_non_environment(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prefix_kind: str,
 ) -> None:
-    """clean with an undefined env raises EnvironmentNotFoundError."""
     monkeypatch.chdir(pixi_workspace)
+    if prefix_kind == "not-an-environment":
+        prefix = pixi_workspace / ".conda" / "envs" / "nonexistent"
+        prefix.mkdir(parents=True)
+        (prefix / "keep.txt").write_bytes(b"keep")
+
     args = make_args(_DEFAULTS, environment="nonexistent")
     with pytest.raises(EnvironmentNotFoundError, match="not defined"):
         execute_clean(args)
+
+    if prefix_kind == "not-an-environment":
+        assert (prefix / "keep.txt").read_bytes() == b"keep"

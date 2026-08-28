@@ -1,4 +1,4 @@
-"""``conda workspace add`` — add dependencies to the workspace manifest."""
+"""``conda workspace add`` — add dependencies or an environment."""
 
 from __future__ import annotations
 
@@ -9,12 +9,15 @@ from typing import TYPE_CHECKING
 import tomlkit
 from conda.exceptions import InvalidMatchSpec
 from conda.models.match_spec import MatchSpec
+from conda.utils import quote_for_shell
 from rich.console import Console
-from tomlkit.items import InlineTable
+from tomlkit.items import InlineTable, Table
 
 from ...context import WorkspaceContext
+from ...exceptions import CondaWorkspacesError, FeatureNotFoundError
 from ...manifests import detect_workspace_file, find_parser
 from ...manifests.toml import WorkspaceDependencyResolver
+from ...models import Environment
 from ...publication import WorkspacePublication
 from ...resolver import resolve_environment
 from .. import status
@@ -31,11 +34,9 @@ from .sync import affected_environments, sync_environments
 if TYPE_CHECKING:
     import argparse
 
-    from tomlkit.items import Table
-
 
 def execute_add(args: argparse.Namespace, *, console: Console | None = None) -> int:
-    """Add dependencies to the workspace manifest."""
+    """Add dependencies or declare a new workspace environment."""
     if console is None:
         console = Console(highlight=False)
     dry_run = getattr(args, "dry_run", False)
@@ -53,6 +54,8 @@ def execute_add(args: argparse.Namespace, *, console: Console | None = None) -> 
     feature = getattr(args, "feature", None)
     environment = getattr(args, "environment", None)
     platform = getattr(args, "platform", None)
+    with_features = list(dict.fromkeys(getattr(args, "with_feature", []) or []))
+    no_default_feature = getattr(args, "no_default_feature", False)
     location = DependencyLocation.from_selectors(
         feature=feature,
         environment=environment,
@@ -74,12 +77,54 @@ def execute_add(args: argparse.Namespace, *, console: Console | None = None) -> 
     current = parser.parse_data_with_redacted_errors(
         doc.unwrap(), validation_manifest_path
     )
+    creating_environment = (
+        environment is not None and environment not in current.environments
+    )
+    if not specs:
+        if environment is None:
+            raise CondaWorkspacesError(
+                "Package specs are required unless a new environment is selected.",
+                hints=["Pass '-e NAME' to declare a new environment."],
+            )
+        if not creating_environment:
+            command = ["conda", "workspace"]
+            if selected_manifest_path is not None:
+                command.extend(("--file", str(selected_manifest_path)))
+            command.extend(("install", "-e", environment))
+            raise CondaWorkspacesError(
+                f"Environment '{environment}' is already defined in the workspace.",
+                hints=[f"Run '{quote_for_shell(*command)}' to synchronize it."],
+            )
+        if is_pypi or platform is not None:
+            options = []
+            if is_pypi:
+                options.append("--pypi")
+            if platform is not None:
+                options.append("--platform")
+            raise CondaWorkspacesError(
+                f"{' and '.join(options)} can only be used when adding package specs."
+            )
+    if (with_features or no_default_feature) and environment is None:
+        raise CondaWorkspacesError(
+            "--with-feature and --no-default-feature require --environment."
+        )
+    if (with_features or no_default_feature) and not creating_environment:
+        raise CondaWorkspacesError(
+            "--with-feature and --no-default-feature can only be used when"
+            " declaring a new environment."
+        )
+    for feature_name in with_features:
+        if feature_name not in current.features:
+            assert environment is not None
+            raise FeatureNotFoundError(feature_name, environment)
     location.validate_platform(current, source)
     added_names = _add_to_toml(
         source,
         specs,
         dep_key,
         location,
+        with_features=with_features,
+        no_default_feature=no_default_feature,
         dry_run=dry_run,
         console=console,
     )
@@ -133,15 +178,16 @@ def execute_add(args: argparse.Namespace, *, console: Console | None = None) -> 
     )
     publication_context = nullcontext() if dry_run else publication.guard()
     with publication_context:
-        label = "PyPI" if is_pypi else "conda"
-        n = len(specs)
-        noun = "dependency" if n == 1 else "dependencies"
-        action = "Would add" if dry_run else "Added"
-        console.print(
-            f"[bold cyan]{action}[/bold cyan] {n} {label} {noun}"
-            f" to {status.escape_for_console(location.display_name)} in [bold]"
-            f"{status.escape_for_console(manifest_path.name)}[/bold]"
-        )
+        if specs:
+            label = "PyPI" if is_pypi else "conda"
+            n = len(specs)
+            noun = "dependency" if n == 1 else "dependencies"
+            action = "Would add" if dry_run else "Added"
+            console.print(
+                f"[bold cyan]{action}[/bold cyan] {n} {label} {noun}"
+                f" to {status.escape_for_console(location.display_name)} in [bold]"
+                f"{status.escape_for_console(manifest_path.name)}[/bold]"
+            )
         warning_console = (
             Console(stderr=True, highlight=False)
             if getattr(args, "json", False)
@@ -187,10 +233,18 @@ def _add_to_toml(
     dep_key: str,
     location: DependencyLocation,
     *,
+    with_features: list[str],
+    no_default_feature: bool,
     dry_run: bool,
     console: Console,
 ) -> list[str]:
     """Add deps to a pixi.toml or conda.toml document."""
+    environments = doc.get("environments")
+    if (
+        location.environment not in (None, Environment.DEFAULT_NAME)
+        and not environments
+    ):
+        ensure_child_table(doc, "environments")[Environment.DEFAULT_NAME] = []
     target, created_environment = location.ensure_table(doc)
     if location.feature is not None:
         envs = ensure_child_table(doc, "environments")
@@ -204,11 +258,21 @@ def _add_to_toml(
                 f" [bold]{location.feature}[/bold] environment"
             )
     elif created_environment:
+        assert location.environment is not None
+        environment = ensure_child_table(doc, "environments")[location.environment]
+        assert isinstance(environment, (Table, InlineTable))
+        if with_features:
+            environment["features"] = with_features
+        if no_default_feature:
+            environment["no-default-feature"] = True
         action = "Would create" if dry_run else "Created"
         console.print(
             f"[bold cyan]{action}[/bold cyan]"
             f" [bold]{location.environment}[/bold] environment"
         )
+
+    if not specs:
+        return []
 
     deps = target.get(dep_key)
     if deps is None:

@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 _DEFAULTS = {
     "manifest_file": None,
     "installed": False,
+    "orphans": False,
     "json": False,
     "envs": False,
     "environment": "default",
@@ -72,6 +73,36 @@ def test_list_installed_with_env(
     out = rich_console.file.getvalue()
     assert "default" in out
     assert "test" not in out
+
+
+@pytest.mark.parametrize("json_flag", [False, True], ids=["text", "json"])
+def test_list_orphaned_environments(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rich_console: Console,
+    tmp_workspace_env: CreateWorkspaceEnv,
+    json_flag: bool,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    tmp_workspace_env(pixi_workspace, "default")
+    orphan = tmp_workspace_env(pixi_workspace, "orphan")
+    unrelated = pixi_workspace / ".conda" / "envs" / "not-an-environment"
+    unrelated.mkdir()
+
+    result = execute_list(
+        make_args(_DEFAULTS, envs=True, orphans=True, json=json_flag),
+        console=rich_console,
+    )
+
+    assert result == 0
+    out = rich_console.file.getvalue()
+    if json_flag:
+        assert json.loads(out) == [{"name": "orphan", "prefix": str(orphan)}]
+    else:
+        assert "orphan" in out
+        assert str(orphan) in out
+        assert "default" not in out
+        assert "not-an-environment" not in out
 
 
 def test_list_json_output(

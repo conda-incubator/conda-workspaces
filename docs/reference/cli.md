@@ -34,6 +34,41 @@ After a file is written, it returns the path in `file` instead:
 }
 ```
 
+### Importing manifests
+
+Without `-e/--environment`, `conda workspace import SOURCE` converts a
+supported source manifest into a complete new `conda.toml`. It does not merge
+with an existing workspace, update `conda.lock`, or install an environment.
+Use `-o/--output` to select another output path. The global `--file` option is
+not accepted in this conversion mode.
+
+Use `-e/--environment` to import one `environment.yml` or `environment.yaml`
+as a new named environment in an existing workspace:
+
+```bash
+conda workspace import -e test environment.yml
+conda workspace --file path/to/pixi.toml import -e test environment.yml
+```
+
+The positional path is always the source. The global `--file` option selects
+the exact `conda.toml`, `pixi.toml`, or supported `pyproject.toml` to modify.
+`-o/--output` cannot be combined with `-e/--environment`.
+
+The imported conda and PyPI dependencies are private to the new environment,
+which does not inherit the workspace's default dependencies. If the source
+omits `channels` or `platforms`, the new environment uses the workspace
+values. An explicit channel list must match the workspace channels in the
+same normalized order, and the `nodefaults` marker is rejected. An explicit
+platform list must match the declared workspace platform names.
+
+Named import updates the complete `conda.lock` and installs the new environment
+by default. `--no-install` updates the manifest and complete lockfile without
+changing a prefix. `--no-lockfile-update` updates only the manifest.
+`--force-reinstall` permits replacement of an existing inactive target prefix
+and cannot be combined with either opt-out. Use `--dry-run` to validate and
+solve the prospective workspace without writing the manifest, lockfile, or
+prefix.
+
 ### Workspace snapshot
 
 `conda workspace info --json` returns the workspace metadata and lock

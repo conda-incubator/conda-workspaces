@@ -29,11 +29,7 @@ def execute_clean(args: argparse.Namespace, *, console: Console | None = None) -
 
     try:
         if env_name:
-            if env_name not in config.environments:
-                raise EnvironmentNotFoundError(
-                    env_name, list(config.environments.keys())
-                )
-
+            declared = env_name in config.environments
             envs_identity = ctx.envs_dir_identity()
             prefix_identity = next(
                 (
@@ -48,6 +44,10 @@ def execute_clean(args: argparse.Namespace, *, console: Console | None = None) -
                     "Workspace environments directory changed while it was inspected."
                 )
             if prefix_identity is None:
+                if not declared:
+                    raise EnvironmentNotFoundError(
+                        env_name, list(config.environments.keys())
+                    )
                 console.print(
                     f"[bold]{status.escape_for_console(env_name)}[/bold]"
                     " environment is not installed."

@@ -40,7 +40,12 @@ over. Environments are real conda prefixes you can inspect with
 
 ## Migrating an environment.yml
 
-The fastest way to migrate is the built-in import command:
+![environment import demo](../../../demos/import.gif)
+
+### Create a workspace from environment.yml
+
+To create a workspace from one `environment.yml`, run the import command
+without `-e/--environment`:
 
 ```bash
 conda workspace import environment.yml
@@ -49,7 +54,9 @@ conda workspace import environment.yml
 This reads your `environment.yml` and writes a `conda.toml` with the
 equivalent workspace configuration. Use `--dry-run` to preview the
 output without writing a file, or `-o custom.toml` to choose a
-different output path.
+different output path. This form converts the complete source manifest. It
+does not merge with an existing workspace, update `conda.lock`, or install an
+environment. The global `--file` option is not accepted in this mode.
 
 The importer preserves representable conda channel, build, subdir, hash, and
 credential-free direct URL fields, along with PyPI extras. It rejects embedded
@@ -95,6 +102,56 @@ Then install:
 ```bash
 conda workspace install
 ```
+
+### Add environment.yml to an existing workspace
+
+To add a complete `environment.yml` as a new named workspace environment, pass
+the target name with `-e/--environment`:
+
+```bash
+conda workspace import -e data environment.yml
+```
+
+The command adds private conda dependencies under
+`[environments.data.dependencies]` and private PyPI dependencies under
+`[environments.data.pypi-dependencies]`. The environment does not inherit the
+workspace's default dependencies. The command-line name is authoritative, so
+a different `name:` in the YAML does not rename the workspace environment.
+The target name must be new and cannot be `default`.
+
+Named import accepts only `environment.yml` and `environment.yaml`. To select
+an exact target manifest, put the global `--file` option before `import`:
+
+```bash
+conda workspace --file path/to/pixi.toml import -e data environment.yml
+```
+
+If the YAML omits `channels` or `platforms`, the imported environment uses the
+workspace values. If it declares channels, they must match the workspace
+channels in the same credential-safe normalized order. Declared platforms
+must match the workspace's declared platform names. Channels, platforms,
+channel priority, and rich-platform requirements remain workspace settings.
+The `nodefaults` channel marker cannot be represented by a named workspace
+environment and must be removed before import.
+
+A YAML `prefix:` is ignored with a warning because workspace environments live
+under `.conda/envs/`. Named import rejects `variables:` and unknown top-level
+keys instead of dropping configuration it cannot represent.
+
+By default, named import refreshes the complete lockfile and installs the new
+environment. Use these options to control that lifecycle:
+
+| Option | Result |
+|---|---|
+| No lifecycle option | Update the manifest and complete lockfile, then install the new environment |
+| `--no-install` | Update the manifest and complete lockfile without changing a prefix |
+| `--no-lockfile-update` | Update only the manifest |
+| `--force-reinstall` | Replace an existing inactive target prefix after validation |
+| `--dry-run` | Parse, validate, and solve without writing the manifest, lockfile, or prefix |
+
+An existing target prefix requires `--force-reinstall`. The active prefix
+cannot be replaced. `--force-reinstall` cannot be combined with `--no-install`
+or `--no-lockfile-update`.
 
 ## Lockfiles: reproducibility built in
 
