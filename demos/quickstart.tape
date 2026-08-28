@@ -7,7 +7,7 @@ Hide
 Type `eval "$(pixi shell-hook -s bash -e dev)"`
 Enter
 Wait /\)/
-Type `export PS1="$DEMO_PS1" && mkdir -p /tmp/.demo-home && echo 'PS1="$ "' > /tmp/.demo-home/.bash_profile && export HOME=/tmp/.demo-home`
+Type `export PS1="$DEMO_PS1" && mkdir -p /tmp/.demo-home && echo 'PS1="$ "' > /tmp/.demo-home/.bash_profile && export HOME=/tmp/.demo-home && export PYTHONWARNINGS=ignore::SyntaxWarning`
 Enter
 Wait /\$/
 Type "rm -rf /tmp/my-project && mkdir -p /tmp/my-project && cd /tmp/my-project"
@@ -27,7 +27,7 @@ Enter
 Wait /\$/
 Sleep 1s
 
-Type "# Add deps: each 'add' installs and refreshes conda.lock"
+Type "# Add dependencies, then declare a named environment"
 Enter
 Sleep 500ms
 
@@ -36,7 +36,7 @@ Enter
 Wait /\$/
 Sleep 1s
 
-Type@80ms `conda workspace add -e test "pytest>=8.0"`
+Type@80ms "conda workspace add -e test"
 Enter
 Wait /\$/
 Sleep 1s
