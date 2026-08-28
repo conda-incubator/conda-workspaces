@@ -14,7 +14,11 @@ from conda_workspaces.cli.workspace.sync import (
     affected_environments,
     sync_environments,
 )
-from conda_workspaces.exceptions import EnvironmentNotFoundError, PlatformError
+from conda_workspaces.exceptions import (
+    CondaWorkspacesError,
+    EnvironmentNotFoundError,
+    PlatformError,
+)
 from conda_workspaces.models import Environment, Feature, WorkspaceConfig
 
 _RENDERED_LOCK = """\
@@ -234,6 +238,96 @@ def test_sync_pipeline_respects_flags(
         **flags,
     )
     assert sync_calls == expected_calls
+
+
+def test_sync_threads_required_absence_to_install_preflight(
+    captured_console: Console,
+    fake_ctx,
+    monkeypatch: pytest.MonkeyPatch,
+    replace_lockfile_install_plan,
+) -> None:
+    prepare_calls: dict[str, dict[str, object]] = {}
+
+    def validate_workspace() -> None:
+        pass
+
+    def record_prepare(
+        phase: str,
+        _ctx: object,
+        name: str,
+        kwargs: dict[str, object],
+    ) -> None:
+        if phase == "prepare":
+            prepare_calls[name] = kwargs
+
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.sync",
+        record_prepare,
+    )
+    monkeypatch.setattr(
+        sync_module,
+        "render_lockfile",
+        lambda *args, **kwargs: _RENDERED_LOCK,
+    )
+
+    sync_environments(
+        _config(default={}, imported={}),
+        fake_ctx,
+        ["default", "imported"],
+        dry_run=True,
+        require_absent_prefixes=["imported"],
+        validate_workspace=validate_workspace,
+        console=captured_console,
+    )
+
+    assert prepare_calls["default"]["require_absent"] is False
+    assert prepare_calls["imported"]["require_absent"] is True
+    assert prepare_calls["default"]["validate_workspace"] is validate_workspace
+    assert prepare_calls["imported"]["validate_workspace"] is validate_workspace
+
+
+@pytest.mark.parametrize("prefix_exists", [False, True], ids=["absent", "present"])
+def test_sync_requires_selected_prefixes_absent_without_install(
+    captured_console: Console,
+    fake_ctx,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    prefix_exists: bool,
+) -> None:
+    prefix = tmp_path / "envs" / "default"
+    if prefix_exists:
+        prefix.mkdir(parents=True)
+    monkeypatch.setattr(fake_ctx, "env_prefix", lambda _name: prefix)
+    monkeypatch.setattr(
+        sync_module,
+        "render_lockfile",
+        lambda *args, **kwargs: _RENDERED_LOCK,
+    )
+    published: list[str] = []
+
+    if prefix_exists:
+        with pytest.raises(CondaWorkspacesError, match="prefix already exists"):
+            sync_environments(
+                _config(default={}),
+                fake_ctx,
+                ["default"],
+                no_install=True,
+                publish_lockfile=published.append,
+                require_absent_prefixes=["default"],
+                console=captured_console,
+            )
+    else:
+        sync_environments(
+            _config(default={}),
+            fake_ctx,
+            ["default"],
+            no_install=True,
+            publish_lockfile=published.append,
+            require_absent_prefixes=["default"],
+            console=captured_console,
+        )
+
+    assert published == ([] if prefix_exists else [_RENDERED_LOCK])
 
 
 def test_sync_lock_failure_prevents_prefix_install(
@@ -459,6 +553,7 @@ def test_force_dry_run_validates_rendered_lock_without_removal(
             "update_names": None,
             "prune": False,
             "replace_existing": True,
+            "require_absent": False,
             "validate_workspace": None,
         }
     ]
@@ -573,6 +668,7 @@ def test_sync_selective_update_threads_host_and_lock_targets(
             "update_names": {"python"},
             "prune": False,
             "replace_existing": False,
+            "require_absent": False,
             "validate_workspace": None,
         },
         {
@@ -585,6 +681,7 @@ def test_sync_selective_update_threads_host_and_lock_targets(
             "update_names": {"python"},
             "prune": False,
             "replace_existing": False,
+            "require_absent": False,
             "validate_workspace": None,
         },
     ]

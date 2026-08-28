@@ -13,6 +13,8 @@ import pytest
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from conda.models.records import PackageRecord
+
     from tests.conftest import SnapshotTree
 
 from conda.base.constants import UpdateModifier
@@ -2130,6 +2132,47 @@ def test_lockfile_install_plan_reuses_prefetched_records(
 
     assert fetches == [[]]
     assert installs == [records]
+
+
+@pytest.mark.parametrize(
+    "appearance",
+    ["before", "during"],
+    ids=["before-preflight", "during-package-fetch"],
+)
+def test_lockfile_install_plan_requires_absent_prefix(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    monkeypatch: pytest.MonkeyPatch,
+    appearance: str,
+) -> None:
+    ctx = workspace_ctx_factory()
+    (tmp_path / LOCKFILE_NAME).write_text(
+        "version: 1\n"
+        "environments:\n"
+        "  default:\n"
+        "    channels: []\n"
+        "    packages:\n"
+        "      linux-64: []\n"
+        "packages: []\n",
+        encoding="utf-8",
+    )
+    prefix = ctx.env_prefix("default")
+    if appearance == "before":
+        prefix.mkdir(parents=True)
+
+    def fetch(_urls: list[str]) -> list[PackageRecord]:
+        if appearance == "before":
+            pytest.fail("fetched packages for an existing prefix")
+        prefix.mkdir(parents=True)
+        return []
+
+    monkeypatch.setattr(
+        "conda.misc.get_package_records_from_explicit",
+        fetch,
+    )
+
+    with pytest.raises(CondaWorkspacesError, match="prefix already exists"):
+        LockfileInstallPlan.prepare(ctx, "default", require_absent=True)
 
 
 def test_install_from_lockfile_revalidates_workspace_after_package_fetch(

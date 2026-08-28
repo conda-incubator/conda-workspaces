@@ -554,6 +554,18 @@ class WorkspaceConfig:
                 sorted(KNOWN_SUBDIRS),
             )
 
+    def validate_new_environment_name(self, name: str) -> None:
+        """Reject a new environment name that collides on portable filesystems."""
+        if not is_path_segment(name):
+            raise EnvironmentNameInvalidError(name)
+        key = portable_path_key(PurePosixPath(name))
+        for existing in self.environments:
+            if portable_path_key(PurePosixPath(existing)) == key:
+                raise EnvironmentNameInvalidError(
+                    name,
+                    reason=f"it conflicts with environment '{existing}'",
+                )
+
     @staticmethod
     def default_system_requirements_for_subdir(subdir: str) -> dict[str, str]:
         """Return Pixi's default rich-platform requirements for *subdir*."""

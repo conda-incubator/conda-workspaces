@@ -112,7 +112,8 @@ and also provides `cw` and `ct` as shorter aliases.
 | `conda workspace remove SPECS...` | Remove dependencies |
 | `conda workspace export` | Export environments and manifests through conda exporters |
 | `conda workspace sbom` | Export a CycloneDX SBOM through the optional conda-sboms plugin |
-| `conda workspace import FILE` | Import supported project manifests |
+| `conda workspace import FILE` | Convert a supported manifest into a new `conda.toml` |
+| `conda workspace import -e ENV environment.yml` | Add a named environment to an existing workspace |
 | `conda workspace quickstart SPECS...` | Bootstrap a workspace, install it, and optionally open a shell |
 | `conda workspace shell -e ENV` | Spawn a shell with an environment activated |
 | `conda workspace activate -e ENV` | Print activation instructions |

@@ -7,7 +7,7 @@ Hide
 Type `eval "$(pixi shell-hook -s bash -e dev)"`
 Enter
 Wait /\)/
-Type `export PS1="$DEMO_PS1" && mkdir -p /tmp/.demo-home && echo 'PS1="$ "' > /tmp/.demo-home/.bash_profile && export HOME=/tmp/.demo-home`
+Type `export PS1="$DEMO_PS1" && mkdir -p /tmp/.demo-home && echo 'PS1="$ "' > /tmp/.demo-home/.bash_profile && export HOME=/tmp/.demo-home && export PYTHONWARNINGS=ignore::SyntaxWarning`
 Enter
 Wait /\$/
 Type `FIXTURES=$(pwd)/demos/fixtures`
@@ -24,7 +24,7 @@ Enter
 Wait /\$/
 Show
 
-Type "# Import an environment.yml into a conda.toml workspace"
+Type "# Convert an environment.yml into a new workspace"
 Enter
 Sleep 500ms
 
@@ -44,6 +44,39 @@ Wait /\$/
 Sleep 4s
 
 Hide
+Type `cp "$FIXTURES/import-named-env.yml" environment.yml`
+Enter
+Wait /\$/
+Type "clear"
+Enter
+Wait /\$/
+Show
+
+Type "# Add another environment.yml as a named environment"
+Enter
+Sleep 500ms
+
+Type@80ms "bat environment.yml"
+Enter
+Wait /\$/
+Sleep 3s
+
+Type@80ms "conda workspace import -e test environment.yml"
+Enter
+Wait /\$/
+Sleep 2s
+
+Type@80ms "bat conda.toml"
+Enter
+Wait /\$/
+Sleep 4s
+
+Type@80ms "conda workspace envs"
+Enter
+Wait /\$/
+Sleep 3s
+
+Hide
 Type "rm conda.toml"
 Enter
 Wait /\$/
@@ -55,7 +88,7 @@ Enter
 Wait /\$/
 Show
 
-Type "# Import an anaconda-project.yml"
+Type "# Convert an anaconda-project.yml"
 Enter
 Sleep 500ms
 

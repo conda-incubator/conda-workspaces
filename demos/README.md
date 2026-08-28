@@ -17,7 +17,7 @@ Animated terminal demos recorded with [VHS](https://github.com/charmbracelet/vhs
 | `multi-platform` | Cross-platform locking and the `--platform` flag |
 | `multi-env` | Multiple environments from one manifest |
 | `pixi-compat` | Use an existing pixi.toml with conda-workspaces |
-| `import` | Import environment.yml and anaconda-project.yml into conda.toml |
+| `import` | Convert source manifests and add environment.yml as a named environment |
 | `shell` | Open an interactive shell in a workspace environment |
 | `archives` | Create and extract workspace archives |
 | `archives-receipt` | Create a workspace archive receipt and verify extraction |
