@@ -11,8 +11,10 @@ import pytest
 from conda.exceptions import CondaValueError
 from rich.console import Console
 
+from conda_workspaces.attestations import AttestationOutput
 from conda_workspaces.cli.workspace.lock import execute_lock
 from conda_workspaces.exceptions import (
+    AttestationError,
     CondaWorkspacesError,
     EnvironmentNotFoundError,
     PlatformError,
@@ -21,6 +23,8 @@ from conda_workspaces.exceptions import (
 from ..conftest import make_args
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from tests.conftest import SnapshotTree
 
 _DEFAULTS = {
@@ -31,7 +35,11 @@ _DEFAULTS = {
     "merge": None,
     "output": None,
     "dry_run": False,
+    "sign": False,
+    "attestation": None,
 }
+
+_RENDERED_LOCK = "version: 1\nenvironments: {}\npackages: []\n"
 
 
 @pytest.fixture
@@ -121,6 +129,308 @@ def test_lock_envs(
     assert capture_generate_lockfile[0]["output_path"] == output_path
     assert capture_generate_lockfile[0]["dry_run"] is dry_run
     assert output_fragment in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("mode", ["generate", "merge"], ids=["generate", "merge"])
+def test_lock_signs_exact_canonical_publication(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    signed: list[bytes] = []
+
+    def publish(*args, publish_lockfile=None, **kwargs) -> None:
+        assert publish_lockfile is not None
+        publish_lockfile(_RENDERED_LOCK)
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.lock.generate_lockfile",
+        publish,
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.lock.merge_lockfiles",
+        publish,
+    )
+
+    def sign(snapshot) -> str:
+        signed.append(snapshot.lockfile_bytes)
+        return '{"bundle":true}'
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.lock.sign_workspace_snapshot",
+        sign,
+    )
+    fragment = pixi_workspace / "fragment.lock"
+    fragment.write_text(_RENDERED_LOCK, encoding="utf-8")
+
+    assert (
+        execute_lock(
+            make_args(
+                _DEFAULTS,
+                sign=True,
+                merge=[str(fragment)] if mode == "merge" else None,
+            )
+        )
+        == 0
+    )
+
+    assert (pixi_workspace / "conda.lock").read_text(encoding="utf-8") == (
+        _RENDERED_LOCK
+    )
+    assert (pixi_workspace / "conda.lock.sigstore.json").read_text(
+        encoding="utf-8"
+    ) == '{"bundle":true}\n'
+    assert signed == [_RENDERED_LOCK.encode("utf-8")]
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        pytest.param(
+            {"attestation": Path("bundle.json")},
+            id="attestation-without-sign",
+        ),
+        pytest.param(
+            {
+                "sign": True,
+                "environment": "default",
+                "output": Path("fragment.lock"),
+            },
+            id="environment",
+        ),
+        pytest.param(
+            {
+                "sign": True,
+                "platform": ["linux-64"],
+                "output": Path("fragment.lock"),
+            },
+            id="platform",
+        ),
+        pytest.param(
+            {
+                "sign": True,
+                "skip_unsolvable": True,
+                "output": Path("fragment.lock"),
+            },
+            id="skip-unsolvable",
+        ),
+        pytest.param(
+            {"sign": True, "output": Path("fragment.lock")},
+            id="noncanonical-output",
+        ),
+    ],
+)
+def test_lock_rejects_invalid_signing_combinations(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capture_generate_lockfile: list[dict],
+    options: dict[str, object],
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+
+    with pytest.raises(CondaValueError, match="--attestation|--sign"):
+        execute_lock(make_args(_DEFAULTS, **options))
+
+    assert capture_generate_lockfile == []
+
+
+def test_lock_sign_dry_run_validates_without_signing(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capture_generate_lockfile: list[dict],
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    sidecar = pixi_workspace / "conda.lock.sigstore.json"
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.lock.sign_workspace_snapshot",
+        lambda snapshot: pytest.fail("requested OIDC during dry-run"),
+    )
+
+    assert execute_lock(make_args(_DEFAULTS, sign=True, dry_run=True)) == 0
+    assert not sidecar.exists()
+    assert len(capture_generate_lockfile) == 1
+
+
+@pytest.mark.parametrize(
+    "unsafe_output",
+    ["manifest", "lockfile", "hardlink", "symlink"],
+    ids=["manifest", "lockfile", "hardlink", "symlink"],
+)
+def test_lock_sign_dry_run_rejects_unsafe_attestation_output(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capture_generate_lockfile: list[dict],
+    unsafe_output: str,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    manifest = pixi_workspace / "pixi.toml"
+    lockfile = pixi_workspace / "conda.lock"
+    sidecar = pixi_workspace / "bundle.sigstore.json"
+    if unsafe_output == "manifest":
+        sidecar = manifest
+    elif unsafe_output == "lockfile":
+        sidecar = lockfile
+    elif unsafe_output == "hardlink":
+        lockfile.write_text("previous lock", encoding="utf-8")
+        sidecar.hardlink_to(lockfile)
+    else:
+        sidecar.symlink_to(pixi_workspace / "elsewhere.json")
+
+    with pytest.raises(AttestationError, match="Attestation output"):
+        execute_lock(
+            make_args(
+                _DEFAULTS,
+                sign=True,
+                attestation=sidecar,
+                dry_run=True,
+            )
+        )
+
+    assert capture_generate_lockfile == []
+
+
+@pytest.mark.parametrize(
+    ("failure", "message", "expected_sidecar"),
+    [
+        pytest.param(
+            "sign",
+            "signing failed",
+            "previous bundle\n",
+            id="signing",
+        ),
+        pytest.param(
+            "publish",
+            "changed before publication",
+            "concurrent bundle\n",
+            id="publication",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "previous_lock",
+    ["previous lock\n", None],
+    ids=["existing-lock", "missing-lock"],
+)
+def test_lock_sign_failure_restores_previous_lock_and_preserves_sidecar(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    message: str,
+    expected_sidecar: str,
+    previous_lock: str | None,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    lockfile = pixi_workspace / "conda.lock"
+    sidecar = pixi_workspace / "conda.lock.sigstore.json"
+    if previous_lock is not None:
+        lockfile.write_text(previous_lock, encoding="utf-8")
+    sidecar.write_text("previous bundle\n", encoding="utf-8")
+
+    def publish(*args, publish_lockfile=None, **kwargs) -> None:
+        assert publish_lockfile is not None
+        publish_lockfile(_RENDERED_LOCK)
+
+    def sign(snapshot) -> str:
+        assert snapshot.lockfile_bytes == _RENDERED_LOCK.encode("utf-8")
+        if failure == "sign":
+            raise AttestationError("signing failed")
+        sidecar.write_text("concurrent bundle\n", encoding="utf-8")
+        return '{"bundle":true}'
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.lock.generate_lockfile",
+        publish,
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.lock.sign_workspace_snapshot",
+        sign,
+    )
+
+    with pytest.raises(AttestationError, match=message):
+        execute_lock(make_args(_DEFAULTS, sign=True))
+
+    if previous_lock is None:
+        assert not lockfile.exists()
+    else:
+        assert lockfile.read_text(encoding="utf-8") == previous_lock
+    assert sidecar.read_text(encoding="utf-8") == expected_sidecar
+
+
+@pytest.mark.parametrize(
+    "previous_lock",
+    ["previous lock\n", None],
+    ids=["existing-lock", "missing-lock"],
+)
+@pytest.mark.parametrize(
+    "previous_sidecar",
+    ["previous bundle\n", None],
+    ids=["existing-sidecar", "missing-sidecar"],
+)
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        ("input-change", "manifest changed"),
+        ("writer-after-publication", "changed before publication"),
+    ],
+    ids=["input-change", "writer-after-publication"],
+)
+def test_lock_sign_restores_outputs_after_sidecar_publication_failure(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    previous_lock: str | None,
+    previous_sidecar: str | None,
+    failure: str,
+    message: str,
+    fail_attestation_writer_after_publication: Callable[[], None],
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    manifest = pixi_workspace / "pixi.toml"
+    lockfile = pixi_workspace / "conda.lock"
+    sidecar = pixi_workspace / "conda.lock.sigstore.json"
+    if previous_lock is not None:
+        lockfile.write_text(previous_lock, encoding="utf-8")
+    if previous_sidecar is not None:
+        sidecar.write_text(previous_sidecar, encoding="utf-8")
+
+    def publish(*args, publish_lockfile=None, **kwargs) -> None:
+        assert publish_lockfile is not None
+        publish_lockfile(_RENDERED_LOCK)
+
+    original_write = AttestationOutput.write
+
+    def write_then_change_manifest(
+        output: AttestationOutput,
+        bundle_json: str,
+    ) -> Path:
+        written = original_write(output, bundle_json)
+        manifest.write_text("[workspace]\nname = 'concurrent'\n", encoding="utf-8")
+        return written
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.lock.generate_lockfile",
+        publish,
+    )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.lock.sign_workspace_snapshot",
+        lambda snapshot: '{"bundle":true}',
+    )
+    if failure == "input-change":
+        monkeypatch.setattr(AttestationOutput, "write", write_then_change_manifest)
+    else:
+        fail_attestation_writer_after_publication()
+
+    with pytest.raises(CondaWorkspacesError, match=message):
+        execute_lock(make_args(_DEFAULTS, sign=True))
+
+    if previous_lock is None:
+        assert not lockfile.exists()
+    else:
+        assert lockfile.read_text(encoding="utf-8") == previous_lock
+    if previous_sidecar is None:
+        assert not sidecar.exists()
+    else:
+        assert sidecar.read_text(encoding="utf-8") == previous_sidecar
 
 
 @pytest.mark.parametrize(

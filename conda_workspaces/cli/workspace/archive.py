@@ -12,12 +12,15 @@ from ...archive import (
     WorkspaceArchiveInstallResult,
     scan_prefix_references,
 )
+from ...attestations import SignerPolicy
 from ...exceptions import ArchiveError
 from .. import status
 from . import workspace_manifest_path_from_args
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from ...receipts import VerifiedArchiveWorkspace
 
 
 def warn_staging_prefix_references(
@@ -81,6 +84,8 @@ def execute_archive(
         bundle=args.bundle,
         exclude=tuple(args.exclude or ()),
         receipt=getattr(args, "receipt", None),
+        sign=getattr(args, "sign", False),
+        attestation=getattr(args, "attestation", None),
         dry_run=dry_run,
     )
 
@@ -91,6 +96,13 @@ def execute_archive(
     status.message(console, action, "archive", str(archive.path))
     if archive.receipt_path is not None:
         status.message(console, action, "receipt", str(archive.receipt_path))
+    if archive.attestation_path is not None:
+        status.message(
+            console,
+            action,
+            "attestation",
+            str(archive.attestation_path),
+        )
     return 0
 
 
@@ -104,7 +116,17 @@ def install_from_archive_cli(
         environment: str | None,
         prefix: Path | None,
         target_prefix_override: str | None,
+        *,
+        verified_workspace: VerifiedArchiveWorkspace | None = None,
     ) -> int:
+        if verified_workspace is not None:
+            return WorkspaceArchive.install_from_lockfile(
+                workspace,
+                environment,
+                prefix,
+                target_prefix_override,
+                verified_workspace=verified_workspace,
+            )
         from .install import execute_install
 
         install_args = argparse.Namespace(
@@ -144,9 +166,32 @@ def execute_unarchive(
             hints=["Pass --install when using a staging destination."],
         )
 
+    verify_attestation = getattr(args, "verify", False)
+    attestation_path = getattr(args, "attestation", None)
+    cert_identity = getattr(args, "cert_identity", None)
+    cert_oidc_issuer = getattr(args, "cert_oidc_issuer", None)
+    has_signer_option = cert_identity is not None or cert_oidc_issuer is not None
+    if attestation_path is not None and not verify_attestation:
+        raise ArchiveError("--attestation requires --verify.")
+    if has_signer_option and not verify_attestation:
+        raise ArchiveError("--cert-identity and --cert-oidc-issuer require --verify.")
+    expected_signer = None
+    if verify_attestation:
+        expected_signer = SignerPolicy.from_values(
+            cert_identity,
+            cert_oidc_issuer,
+        )
+        if expected_signer is None:
+            raise ArchiveError(
+                "--verify requires --cert-identity and --cert-oidc-issuer."
+            )
+
     archive = WorkspaceArchive(
         args.archive_path,
         receipt=getattr(args, "receipt", None),
+        attestation=(
+            attestation_path if attestation_path is not None else verify_attestation
+        ),
     )
 
     preparing = "Inspecting" if dry_run else "Extracting"
@@ -167,6 +212,8 @@ def execute_unarchive(
             dest=getattr(args, "dest", None),
             require_sha256=getattr(args, "require_sha256", False),
             prime_cache=not args.no_install,
+            verify_attestation=verify_attestation,
+            expected_signer=expected_signer,
             install_handler=install_from_archive_cli(console),
             dry_run=dry_run,
         )
@@ -175,6 +222,8 @@ def execute_unarchive(
             target=args.target,
             require_sha256=getattr(args, "require_sha256", False),
             prime_cache=not args.no_install,
+            verify_attestation=verify_attestation,
+            expected_signer=expected_signer,
             dry_run=dry_run,
         )
 
@@ -182,8 +231,15 @@ def execute_unarchive(
         status.message(console, "Verified", "archive", str(archive.path.name))
     action = "Would extract" if dry_run else "Extracted"
     status.message(console, action, "archive", str(result.target))
-    if result.verified:
+    if result.receipt_path is not None:
         status.message(console, "Verified", "receipt", str(result.receipt_path))
+    if result.attestation_verified:
+        status.message(
+            console,
+            "Verified",
+            "attestation",
+            str(result.attestation_path),
+        )
 
     if result.info["has_packages"]:
         console.print(

@@ -74,6 +74,7 @@ and task running inside the conda CLI without switching tools.
 - Multi-environment support with composable features
 - Project-local environments in `.conda/envs/`
 - Lockfile generation (`conda.lock`) using a rattler-lock-derived schema for reproducible installs
+- Optional Sigstore attestations for the workspace manifest and canonical lockfile
 - Workspace archives with optional receipt verification for portable handoff
 - Per-platform dependency overrides via `[target.<platform>]`
 - PyPI dependencies translated and resolved alongside conda packages via conda-pypi
@@ -104,6 +105,8 @@ and also provides `cw` and `ct` as shorter aliases.
 | `conda workspace install` | Create/update workspace environments |
 | `conda workspace install --locked` | Install from lockfile (skip solving) |
 | `conda workspace lock` | Generate/update `conda.lock` |
+| `conda workspace attest` | Sign the workspace manifest and canonical lockfile |
+| `conda workspace verify` | Verify a workspace attestation and optionally authorize its signer |
 | `conda workspace list` | List packages in an environment |
 | `conda workspace envs` | List defined environments |
 | `conda workspace info` | Show workspace or environment details |
@@ -143,6 +146,7 @@ everything including its own solver, see [pixi](https://pixi.sh).
 - [`conda.toml` specification](https://conda-incubator.github.io/conda-workspaces/reference/conda-toml-spec/)
 - [JSON schema](https://github.com/conda-incubator/conda-workspaces/blob/main/schema/conda-toml-1.schema.json)
 - [Archive receipt schema](https://github.com/conda-incubator/conda-workspaces/blob/main/schema/workspace-archive-receipt-1.schema.json)
+- [Workspace attestation reference](https://conda-incubator.github.io/conda-workspaces/reference/workspace-attestations/)
 
 ## Demos
 

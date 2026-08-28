@@ -18,6 +18,7 @@ from conda_workspaces.cli.main import (
     generate_task_parser,
     generate_workspace_parser,
 )
+from conda_workspaces.exceptions import AttestationError
 
 
 def test_generate_workspace_parser_returns_parser() -> None:
@@ -38,6 +39,8 @@ def test_generate_task_parser_returns_parser() -> None:
         "init",
         "install",
         "lock",
+        "attest",
+        "verify",
         "sbom",
         "list",
         "envs",
@@ -132,6 +135,37 @@ def test_workspace_unknown_subcmd_prints_help(
         ),
         (["install", "-e", "test"], "environment", "test"),
         (["install", "--force-reinstall"], "force_reinstall", True),
+        (["install", "--locked", "--verify"], "verify", True),
+        (["lock", "--sign"], "sign", True),
+        (
+            ["lock", "--sign", "--attestation", "dist/conda.lock.sigstore.json"],
+            "attestation",
+            Path("dist/conda.lock.sigstore.json"),
+        ),
+        (
+            ["attest", "--attestation", "dist/conda.lock.sigstore.json"],
+            "attestation",
+            Path("dist/conda.lock.sigstore.json"),
+        ),
+        (["attest", "--dry-run"], "dry_run", True),
+        (["attest", "--json"], "json", True),
+        (
+            [
+                "verify",
+                "--cert-identity",
+                "release@example.com",
+                "--cert-oidc-issuer",
+                "https://issuer.example",
+            ],
+            "cert_identity",
+            "release@example.com",
+        ),
+        (
+            ["verify", "--attestation", "dist/conda.lock.sigstore.json"],
+            "attestation",
+            Path("dist/conda.lock.sigstore.json"),
+        ),
+        (["verify", "--json"], "json", True),
         (["envs", "--installed"], "installed", True),
         (["envs", "--orphans"], "orphans", True),
         (["info", "-e", "test"], "environment", "test"),
@@ -206,6 +240,15 @@ def test_workspace_unknown_subcmd_prints_help(
         "quickstart-override-channels",
         "install-env",
         "install-force",
+        "install-verify",
+        "lock-sign",
+        "lock-attestation",
+        "attest-attestation",
+        "attest-dry-run",
+        "attest-json",
+        "verify-identity",
+        "verify-attestation",
+        "verify-json",
         "envs-installed",
         "envs-orphans",
         "info-named",
@@ -311,6 +354,8 @@ def test_workspace_parser_separates_manifest_and_export_paths() -> None:
         ("init", "conda_workspaces.cli.workspace.init", "execute_init"),
         ("install", "conda_workspaces.cli.workspace.install", "execute_install"),
         ("lock", "conda_workspaces.cli.workspace.lock", "execute_lock"),
+        ("attest", "conda_workspaces.cli.workspace.attest", "execute_attest"),
+        ("verify", "conda_workspaces.cli.workspace.attest", "execute_verify"),
         ("sbom", "conda_workspaces.cli.workspace.sbom", "execute_sbom"),
         ("list", "conda_workspaces.cli.workspace.list", "execute_list"),
         ("info", "conda_workspaces.cli.workspace.info", "execute_info"),
@@ -325,6 +370,8 @@ def test_workspace_parser_separates_manifest_and_export_paths() -> None:
         "init",
         "install",
         "lock",
+        "attest",
+        "verify",
         "sbom",
         "list",
         "info",
@@ -357,33 +404,87 @@ def test_workspace_dispatches_to_subcommand(
     assert calls == [subcmd]
 
 
-def test_workspace_sbom_owns_json_output(
+@pytest.mark.parametrize(
+    ("subcmd", "module_attr", "func_name", "payload"),
+    [
+        (
+            "sbom",
+            "conda_workspaces.cli.workspace.sbom",
+            "execute_sbom",
+            {
+                "success": True,
+                "format": "cyclonedx-json-v1.7",
+                "environment": "default",
+                "content": "{}\n",
+            },
+        ),
+        (
+            "attest",
+            "conda_workspaces.cli.workspace.attest",
+            "execute_attest",
+            {
+                "success": True,
+                "sidecar": "/workspace/conda.lock.sigstore.json",
+            },
+        ),
+        (
+            "verify",
+            "conda_workspaces.cli.workspace.attest",
+            "execute_verify",
+            {
+                "success": True,
+                "verified": True,
+                "authorized": True,
+                "sidecar": "/workspace/conda.lock.sigstore.json",
+                "manifest": "/workspace/conda.toml",
+                "lockfile": "/workspace/conda.lock",
+                "predicate_type": "https://example.test/workspace/v1",
+                "signer": {
+                    "identity": "release@example.com",
+                    "issuer": "https://issuer.example",
+                    "timestamps": [],
+                },
+            },
+        ),
+    ],
+    ids=["sbom", "attest", "verify"],
+)
+def test_workspace_data_commands_own_json_output(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    subcmd: str,
+    module_attr: str,
+    func_name: str,
+    payload: dict[str, object],
 ) -> None:
-    payload = {
-        "success": True,
-        "format": "cyclonedx-json-v1.7",
-        "environment": "default",
-        "content": "{}\n",
-    }
-
-    def export_sbom(args: argparse.Namespace) -> int:
+    def emit_result(args: argparse.Namespace) -> int:
         assert args.json is True
         print(json.dumps(payload))
         return 0
 
-    monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.sbom.execute_sbom",
-        export_sbom,
-    )
+    module = importlib.import_module(module_attr)
+    monkeypatch.setattr(module, func_name, emit_result)
 
-    result = execute_workspace(argparse.Namespace(subcmd="sbom", json=True))
+    result = execute_workspace(argparse.Namespace(subcmd=subcmd, json=True))
 
     captured = capsys.readouterr()
     assert result == 0
     assert json.loads(captured.out) == payload
     assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["attest", "--identity-token", "secret"],
+        ["lock", "--sign", "--identity-token", "secret"],
+        ["archive", "--sign", "--identity-token", "secret"],
+    ],
+    ids=["attest", "lock", "archive"],
+)
+def test_workspace_signing_rejects_identity_token_argument(argv: list[str]) -> None:
+    with pytest.raises(SystemExit):
+        generate_workspace_parser().parse_args(argv)
 
 
 @pytest.mark.usefixtures("reset_conda_context")
@@ -506,6 +607,32 @@ def test_workspace_json_errors_do_not_leak_stdout(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+@pytest.mark.usefixtures("reset_conda_context")
+def test_workspace_error_renders_publication_recovery_path(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    recovery = Path("/workspace/.conda.lock.sigstore.json.recovery.rollback")
+
+    def fail(args: argparse.Namespace) -> int:
+        del args
+        raise AttestationError(f"Publication failed. Recovery entry: {recovery}")
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.attest.execute_attest",
+        fail,
+    )
+    args = argparse.Namespace(subcmd="attest", json=False)
+    reset_context(argparse_args=args)
+
+    result = execute_workspace(args)
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert captured.out == ""
+    assert str(recovery) in captured.err
 
 
 @pytest.mark.usefixtures("reset_conda_context")

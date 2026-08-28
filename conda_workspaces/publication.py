@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 from contextlib import contextmanager, nullcontext
@@ -12,15 +13,20 @@ from typing import TYPE_CHECKING
 from conda.base.context import context as conda_context
 from conda.gateways.disk.lock import LOCK_BYTE, lock
 
-from .exceptions import CondaWorkspacesError
+from .exceptions import CondaWorkspacesError, FileRecoveryError
 from .lockfile import MAX_LOCKFILE_BYTES, lockfile_path, validate_lockfile_output
 from .manifests.base import MAX_MANIFEST_BYTES, ManifestParser
 from .paths import (
     anchored_directory,
+    atomic_binary_writer,
+    atomic_binary_writer_at,
     atomic_write_text,
     atomic_write_text_at,
+    file_generation,
+    parse_relative_posix_path,
     read_regular_file_bytes_with_generation,
     regular_file_generation,
+    remove_file_generation,
 )
 
 if TYPE_CHECKING:
@@ -29,6 +35,64 @@ if TYPE_CHECKING:
 
     from .context import WorkspaceContext
     from .paths import FileGeneration
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceSnapshot:
+    """Exact manifest and canonical lockfile bytes accepted under a guard."""
+
+    manifest_path: Path
+    manifest_name: str
+    manifest_bytes: bytes
+    manifest_format: str
+    lockfile_path: Path
+    lockfile_name: str
+    lockfile_bytes: bytes
+
+    @classmethod
+    def from_bytes(
+        cls,
+        *,
+        root: Path,
+        manifest_path: Path,
+        manifest_bytes: bytes,
+        manifest_format: str,
+        lockfile_path: Path,
+        lockfile_bytes: bytes,
+    ) -> WorkspaceSnapshot:
+        """Build a snapshot after validating workspace-relative input names."""
+        try:
+            manifest_name = parse_relative_posix_path(
+                manifest_path.relative_to(root).as_posix(),
+                require_canonical=True,
+            ).as_posix()
+            lockfile_name = parse_relative_posix_path(
+                lockfile_path.relative_to(root).as_posix(),
+                require_canonical=True,
+            ).as_posix()
+        except ValueError as exc:
+            raise CondaWorkspacesError(
+                "Workspace attestation inputs must be below the workspace root."
+            ) from exc
+        return cls(
+            manifest_path=manifest_path,
+            manifest_name=manifest_name,
+            manifest_bytes=manifest_bytes,
+            manifest_format=manifest_format,
+            lockfile_path=lockfile_path,
+            lockfile_name=lockfile_name,
+            lockfile_bytes=lockfile_bytes,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LockfileRollback:
+    """Exact lockfile generations surrounding one reversible publication."""
+
+    previous_content: bytes | None
+    previous_generation: FileGeneration | None
+    published_content: bytes
+    published_generation: FileGeneration
 
 
 @dataclass
@@ -53,6 +117,7 @@ class WorkspacePublication:
         init=False,
         repr=False,
     )
+    _manifest_content: bytes | None = field(default=None, init=False, repr=False)
     _lockfile_content: bytes | None = field(default=None, init=False, repr=False)
     _lockfile_generation: FileGeneration | None = field(
         default=None,
@@ -60,6 +125,11 @@ class WorkspacePublication:
         repr=False,
     )
     _lockfile_generation_captured: bool = field(default=False, init=False, repr=False)
+    _lockfile_publication_generation: FileGeneration | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
 
     @property
     def lock_path(self) -> Path:
@@ -123,7 +193,19 @@ class WorkspacePublication:
                 "Workspace manifest changed while the "
                 f"{self.operation} was being prepared. Retry the {self.operation}."
             )
+        if self._manifest_generation is not None and (
+            generation != self._manifest_generation
+            or (
+                self._manifest_content is not None
+                and current_content != self._manifest_content
+            )
+        ):
+            raise CondaWorkspacesError(
+                "Workspace manifest changed while the "
+                f"{self.operation} was being prepared. Retry the {self.operation}."
+            )
         self._manifest_generation = generation
+        self._manifest_content = current_content
 
     def _validate_lock_identity(
         self,
@@ -168,41 +250,45 @@ class WorkspacePublication:
                 f"Workspace publication lock changed while opening: {self.lock_path}"
             )
 
+    def _lockfile_generation_at_root(self) -> FileGeneration | None:
+        """Return the canonical lockfile generation below the guarded root."""
+        path = lockfile_path(self.ctx)
+        if self._root_descriptor is None:
+            return regular_file_generation(path)
+        try:
+            current = os.stat(
+                path.name,
+                dir_fd=self._root_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISREG(current.st_mode):
+            raise ValueError(f"Workspace lockfile is not a regular file: {path}")
+        return file_generation(current)
+
     def _capture_lockfile_generation(self) -> None:
-        """Bind publication to the current canonical lockfile generation."""
+        """Bind publication to the current canonical lockfile bytes."""
         path = lockfile_path(self.ctx)
         try:
-            if self._root_descriptor is None:
-                generation = regular_file_generation(path)
-            else:
-                try:
-                    current = os.stat(
-                        path.name,
-                        dir_fd=self._root_descriptor,
-                        follow_symlinks=False,
-                    )
-                except FileNotFoundError:
-                    generation = None
-                else:
-                    if not stat.S_ISREG(current.st_mode):
-                        raise ValueError(
-                            f"Workspace lockfile is not a regular file: {path}"
-                        )
-                    generation = (
-                        current.st_dev,
-                        current.st_ino,
-                        current.st_mode,
-                        current.st_uid,
-                        current.st_gid,
-                        current.st_size,
-                        current.st_mtime_ns,
-                        current.st_ctime_ns,
+            generation = self._lockfile_generation_at_root()
+            content = None
+            if generation is not None:
+                content, captured_generation = read_regular_file_bytes_with_generation(
+                    path,
+                    maximum_bytes=MAX_LOCKFILE_BYTES,
+                    label="workspace lockfile",
+                    directory_descriptor=self._root_descriptor,
+                )
+                if captured_generation != generation:
+                    raise ValueError(
+                        f"Workspace lockfile changed while it was captured: {path}"
                     )
         except (OSError, ValueError) as exc:
             raise CondaWorkspacesError(
                 f"Workspace lockfile cannot be inspected safely: {path}"
             ) from exc
-        self._lockfile_content = None
+        self._lockfile_content = content
         self._lockfile_generation = generation
         self._lockfile_generation_captured = True
 
@@ -459,6 +545,9 @@ class WorkspacePublication:
         expected_generation = self._manifest_generation
         if expected_generation is None:
             raise RuntimeError("Workspace manifest generation was not captured")
+        if self._manifest_content is None:
+            raise RuntimeError("Workspace manifest content was not captured")
+        expected_sha256 = hashlib.sha256(self._manifest_content).hexdigest()
         if self.updated_text != self.original_text:
             try:
                 if self._root_descriptor is None:
@@ -466,6 +555,7 @@ class WorkspacePublication:
                         self.manifest_path,
                         self.updated_text,
                         expected_generation=expected_generation,
+                        expected_sha256=expected_sha256,
                     )
                 else:
                     atomic_write_text_at(
@@ -474,12 +564,15 @@ class WorkspacePublication:
                         self.updated_text,
                         display_path=self.manifest_path,
                         expected_generation=expected_generation,
+                        expected_sha256=expected_sha256,
                     )
             except ValueError as exc:
                 raise CondaWorkspacesError(
-                    "Workspace manifest changed before publication."
+                    f"Workspace manifest changed before publication. {exc}"
                 ) from exc
             self.started = True
+            self._manifest_generation = None
+            self._manifest_content = None
             self.validate_manifest_generation()
         else:
             self.started = True
@@ -498,6 +591,9 @@ class WorkspacePublication:
         )
         if self._lockfile_generation_captured and (
             generation != self._lockfile_generation
+            or (
+                self._lockfile_content is not None and content != self._lockfile_content
+            )
         ):
             raise CondaWorkspacesError(
                 "Workspace lockfile changed while it was being read."
@@ -509,6 +605,8 @@ class WorkspacePublication:
 
     def publish_lockfile(self, content: str) -> None:
         """Publish the staged manifest and rendered lockfile together."""
+        content_bytes = content.encode("utf-8")
+        self._lockfile_publication_generation = None
         publication_guard = nullcontext() if self._guarded else self.guard()
         with publication_guard:
             self.validate_manifest_generation()
@@ -569,11 +667,18 @@ class WorkspacePublication:
             if self._root_descriptor is None:
                 validate_lockfile_output(self.ctx, path)
             try:
+                expected_sha256 = (
+                    hashlib.sha256(self._lockfile_content).hexdigest()
+                    if self._lockfile_content is not None
+                    else None
+                )
                 if self._root_descriptor is None:
                     atomic_write_text(
                         path,
                         content,
                         expected_generation=expected_lock_generation,
+                        expected_sha256=expected_sha256,
+                        capture_generation=self._capture_lockfile_publication,
                     )
                 else:
                     atomic_write_text_at(
@@ -582,12 +687,276 @@ class WorkspacePublication:
                         content,
                         display_path=path,
                         expected_generation=expected_lock_generation,
+                        expected_sha256=expected_sha256,
+                        capture_generation=self._capture_lockfile_publication,
                     )
             except ValueError as exc:
                 raise CondaWorkspacesError(
-                    "Workspace lockfile changed before publication."
+                    f"Workspace lockfile changed before publication. {exc}"
                 ) from exc
             if self._root_descriptor is not None:
                 if self._guard_identity_validator is not None:
                     self._guard_identity_validator()
             self.started = True
+            try:
+                published_content, published_generation = (
+                    read_regular_file_bytes_with_generation(
+                        path,
+                        maximum_bytes=MAX_LOCKFILE_BYTES,
+                        label="workspace lockfile",
+                        directory_descriptor=self._root_descriptor,
+                    )
+                )
+            except ValueError as exc:
+                raise CondaWorkspacesError(
+                    "Workspace lockfile changed during publication."
+                ) from exc
+            if published_content != content_bytes:
+                raise CondaWorkspacesError(
+                    "Workspace lockfile changed during publication."
+                )
+            self._lockfile_content = published_content
+            self._lockfile_generation = published_generation
+            self._lockfile_generation_captured = True
+
+    @contextmanager
+    def reversible_lockfile_publication(
+        self,
+        content: str,
+    ) -> Iterator[LockfileRollback]:
+        """Publish *content* and restore the prior lockfile on failure."""
+        if not self._guarded:
+            raise RuntimeError("Workspace publication guard is not held")
+        if self._lockfile_generation is None:
+            previous_content = None
+            previous_generation = None
+        else:
+            previous_content = self.read_lockfile_bytes()
+            previous_generation = self._lockfile_generation
+        published_content = content.encode("utf-8")
+        try:
+            self.publish_lockfile(content)
+        except BaseException as publication_error:
+            try:
+                self.restore_failed_lockfile_publication(
+                    previous_content=previous_content,
+                    previous_generation=previous_generation,
+                    published_content=published_content,
+                )
+            except FileRecoveryError as recovery_error:
+                if isinstance(publication_error, FileRecoveryError):
+                    raise publication_error.combine(
+                        recovery_error,
+                        reason=(
+                            "Lockfile publication and rollback retained recovery"
+                            " entries."
+                        ),
+                    ) from recovery_error
+                raise
+            except BaseException as recovery_error:
+                if isinstance(publication_error, FileRecoveryError):
+                    raise publication_error from recovery_error
+                raise
+            raise
+        if self._lockfile_content is None or self._lockfile_generation is None:
+            raise RuntimeError("Published lockfile generation was not captured")
+        rollback = LockfileRollback(
+            previous_content=previous_content,
+            previous_generation=previous_generation,
+            published_content=self._lockfile_content,
+            published_generation=self._lockfile_generation,
+        )
+        try:
+            yield rollback
+        except BaseException as operation_error:
+            try:
+                self.restore_lockfile(rollback)
+            except FileRecoveryError as recovery_error:
+                if isinstance(operation_error, FileRecoveryError):
+                    raise operation_error.combine(
+                        recovery_error,
+                        reason=(
+                            "Lockfile operation and rollback retained recovery entries."
+                        ),
+                    ) from recovery_error
+                raise
+            except BaseException as recovery_error:
+                if isinstance(operation_error, FileRecoveryError):
+                    raise operation_error from recovery_error
+                raise
+            raise
+
+    def restore_failed_lockfile_publication(
+        self,
+        *,
+        previous_content: bytes | None,
+        previous_generation: FileGeneration | None,
+        published_content: bytes,
+    ) -> bool:
+        """Restore a lockfile written before its final capture failed."""
+        published_generation = self._lockfile_publication_generation
+        if published_generation is None:
+            return False
+        path = lockfile_path(self.ctx)
+        try:
+            current_content, current_generation = (
+                read_regular_file_bytes_with_generation(
+                    path,
+                    maximum_bytes=MAX_LOCKFILE_BYTES,
+                    label="workspace lockfile",
+                    directory_descriptor=self._root_descriptor,
+                )
+            )
+        except (OSError, ValueError):
+            return False
+        if (
+            current_content != published_content
+            or current_generation != published_generation
+        ):
+            self._lockfile_content = current_content
+            self._lockfile_generation = current_generation
+            return False
+        return self.restore_lockfile(
+            LockfileRollback(
+                previous_content=previous_content,
+                previous_generation=previous_generation,
+                published_content=published_content,
+                published_generation=published_generation,
+            )
+        )
+
+    def _capture_lockfile_publication(self, generation: FileGeneration) -> None:
+        """Record the exact generation created by the publication writer."""
+        self._lockfile_publication_generation = generation
+
+    def restore_lockfile(self, rollback: LockfileRollback) -> bool:
+        """Restore *rollback* unless the published lockfile was replaced."""
+        if not self._guarded:
+            raise RuntimeError("Workspace publication guard is not held")
+        if self._guard_identity_validator is not None:
+            self._guard_identity_validator()
+        path = lockfile_path(self.ctx)
+        try:
+            current_content, current_generation = (
+                read_regular_file_bytes_with_generation(
+                    path,
+                    maximum_bytes=MAX_LOCKFILE_BYTES,
+                    label="workspace lockfile",
+                    directory_descriptor=self._root_descriptor,
+                )
+            )
+        except ValueError:
+            return False
+        if (
+            current_content != rollback.published_content
+            or current_generation != rollback.published_generation
+        ):
+            self._lockfile_content = current_content
+            self._lockfile_generation = current_generation
+            return False
+        if rollback.previous_content is None:
+            try:
+                removed = remove_file_generation(
+                    path,
+                    rollback.published_generation,
+                    expected_content=rollback.published_content,
+                    directory_descriptor=self._root_descriptor,
+                )
+            except (OSError, ValueError) as exc:
+                raise CondaWorkspacesError(
+                    f"Workspace lockfile cannot be restored safely: {path}. {exc}"
+                ) from exc
+            if not removed:
+                return False
+            self._lockfile_content = None
+            self._lockfile_generation = None
+            self._lockfile_generation_captured = True
+            return True
+        published_sha256 = hashlib.sha256(rollback.published_content).hexdigest()
+        try:
+            if self._root_descriptor is None:
+                with atomic_binary_writer(
+                    path,
+                    expected_generation=rollback.published_generation,
+                    expected_sha256=published_sha256,
+                ) as stream:
+                    stream.write(rollback.previous_content)
+            else:
+                with atomic_binary_writer_at(
+                    self._root_descriptor,
+                    path.name,
+                    display_path=path,
+                    expected_generation=rollback.published_generation,
+                    expected_sha256=published_sha256,
+                ) as stream:
+                    stream.write(rollback.previous_content)
+        except FileRecoveryError:
+            raise
+        except ValueError:
+            return False
+        except OSError as exc:
+            raise CondaWorkspacesError(
+                f"Workspace lockfile cannot be restored safely: {path}. {exc}"
+            ) from exc
+        try:
+            restored_content, restored_generation = (
+                read_regular_file_bytes_with_generation(
+                    path,
+                    maximum_bytes=MAX_LOCKFILE_BYTES,
+                    label="workspace lockfile",
+                    directory_descriptor=self._root_descriptor,
+                )
+            )
+        except ValueError:
+            return False
+        self._lockfile_content = restored_content
+        self._lockfile_generation = restored_generation
+        return restored_content == rollback.previous_content
+
+    def read_manifest_bytes(self) -> bytes:
+        """Read one exact manifest snapshot from the guarded workspace root."""
+        if not self._guarded:
+            raise RuntimeError("Workspace publication guard is not held")
+        self.validate_manifest_generation()
+        if self._manifest_content is None:
+            raise RuntimeError("Workspace manifest content was not captured")
+        return self._manifest_content
+
+    def snapshot(self, manifest_format: str) -> WorkspaceSnapshot:
+        """Capture exact manifest and canonical lockfile bytes under the guard."""
+        if not self._guarded:
+            raise RuntimeError("Workspace publication guard is not held")
+        return self.snapshot_with_lockfile_bytes(
+            manifest_format,
+            self.read_lockfile_bytes(),
+        )
+
+    def snapshot_with_lockfile_bytes(
+        self,
+        manifest_format: str,
+        lockfile_bytes: bytes,
+    ) -> WorkspaceSnapshot:
+        """Combine exact consumed lock bytes with the guarded manifest snapshot."""
+        if not self._guarded:
+            raise RuntimeError("Workspace publication guard is not held")
+        manifest_bytes = self.read_manifest_bytes()
+        lock_path = lockfile_path(self.ctx)
+        return WorkspaceSnapshot.from_bytes(
+            root=self.ctx.root,
+            manifest_path=self.manifest_path,
+            manifest_bytes=manifest_bytes,
+            manifest_format=manifest_format,
+            lockfile_path=lock_path,
+            lockfile_bytes=lockfile_bytes,
+        )
+
+    def validate_snapshot(self, snapshot: WorkspaceSnapshot) -> None:
+        """Require a captured snapshot to remain the live guarded workspace."""
+        if self.read_manifest_bytes() != snapshot.manifest_bytes:
+            raise CondaWorkspacesError(
+                "Workspace manifest changed while its attestation was prepared."
+            )
+        if self.read_lockfile_bytes() != snapshot.lockfile_bytes:
+            raise CondaWorkspacesError(
+                "Workspace lockfile changed while its attestation was prepared."
+            )

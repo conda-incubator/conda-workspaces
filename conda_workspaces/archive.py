@@ -10,6 +10,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import importlib
+import inspect
 import json
 import os
 import posixpath
@@ -18,6 +19,7 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import warnings
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from io import BytesIO
@@ -34,10 +36,13 @@ from conda.models.match_spec import MatchSpec
 from conda.models.records import PackageRecord
 from conda_lockfiles.load_yaml import load_yaml
 
+from . import attestations
 from .exceptions import (
     ArchiveError,
     ArchiveHashMismatchError,
     ArchivePathTraversalError,
+    AttestationError,
+    FileRecoveryError,
     LockfileNotFoundError,
     LockfileStaleError,
     WorkspaceParseError,
@@ -55,6 +60,7 @@ from .paths import (
     anchored_directory,
     atomic_binary_writer,
     atomic_write_text,
+    capture_directory_identity,
     has_absolute_path_syntax,
     is_path_segment,
     output_paths_collide,
@@ -62,7 +68,10 @@ from .paths import (
     portable_path_key,
     read_regular_file_bytes,
     regular_file_generation,
+    regular_file_sha256,
+    remove_file_generation,
     rename_noreplace,
+    require_directory_identity,
     validate_directory_output,
     validate_file_output,
 )
@@ -72,10 +81,12 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from typing import Any, BinaryIO, Final
 
+    from .attestations import SignerPolicy
     from .context import WorkspaceContext
     from .models import ArchiveConfig
+    from .paths import DirectoryIdentity
     from .paths import FileGeneration as OutputFileGeneration
-    from .receipts import ArchiveReceipt
+    from .receipts import ArchiveReceipt, VerifiedArchiveWorkspace
 
 ARCHIVE_SUFFIXES: tuple[str, ...] = (
     ".tar.zst",
@@ -288,16 +299,153 @@ class _BoundedTarInfo(tarfile.TarInfo):
     _proc_gnusparse_10 = _reject_sparse
 
 
-class _HashingReader:
+class _BoundedReader:
+    """Reject regular-file reads that advance beyond a byte ceiling."""
+
+    def __init__(
+        self,
+        stream: BinaryIO,
+        *,
+        maximum_bytes: int | None,
+        label: str,
+    ) -> None:
+        self.stream = stream
+        self.maximum_bytes = maximum_bytes
+        self.label = label
+
+    def read(self, size: int = -1) -> bytes:
+        """Read up to *size* bytes without advancing past the ceiling."""
+        return self._read_with_limit(self.stream.read, size)
+
+    def read1(self, size: int = -1) -> bytes:
+        """Read buffered bytes without advancing past the ceiling."""
+        operation = getattr(self.stream, "read1", self.stream.read)
+        return self._read_with_limit(operation, size)
+
+    def readall(self) -> bytes:
+        """Read all remaining bytes without advancing past the ceiling."""
+        return self.read()
+
+    def readline(self, size: int = -1) -> bytes:
+        """Read one line without advancing past the ceiling."""
+        return self._read_with_limit(self.stream.readline, size)
+
+    def readlines(self, hint: int = -1) -> list[bytes]:
+        """Read lines without advancing past the ceiling."""
+        lines: list[bytes] = []
+        total = 0
+        for line in self:
+            lines.append(line)
+            total += len(line)
+            if hint > 0 and total >= hint:
+                break
+        return lines
+
+    def readinto(self, buffer: Any) -> int | None:
+        """Read into *buffer* without advancing past the ceiling."""
+        return self._readinto_with_limit(getattr(self.stream, "readinto", None), buffer)
+
+    def readinto1(self, buffer: Any) -> int | None:
+        """Read buffered bytes into *buffer* below the ceiling."""
+        operation = getattr(self.stream, "readinto1", None)
+        return self._readinto_with_limit(operation, buffer)
+
+    def peek(self, size: int = 0) -> bytes:
+        """Peek only at bytes below the ceiling."""
+        operation = getattr(self.stream, "peek", None)
+        if operation is None:
+            return b""
+        if self.maximum_bytes is None:
+            return operation(size)
+        position, remaining = self._remaining()
+        data = operation(remaining if size <= 0 else min(size, remaining))
+        allowed = self.maximum_bytes - position
+        if len(data) > allowed:
+            raise self._limit_error()
+        return data
+
+    def __iter__(self) -> _BoundedReader:
+        return self
+
+    def __next__(self) -> bytes:
+        line = self.readline()
+        if not line:
+            raise StopIteration
+        return line
+
+    def _read_with_limit(
+        self,
+        operation: Callable[[int], bytes],
+        size: int,
+    ) -> bytes:
+        """Apply the ceiling to one bytes-returning read operation."""
+        if self.maximum_bytes is None:
+            return operation(size)
+        position, remaining = self._remaining()
+        data = operation(remaining if size < 0 else min(size, remaining))
+        if position + len(data) > self.maximum_bytes:
+            raise self._limit_error()
+        return data
+
+    def _readinto_with_limit(
+        self,
+        operation: Callable[[Any], int | None] | None,
+        buffer: Any,
+    ) -> int | None:
+        """Apply the ceiling to one read-into operation."""
+        if operation is None:
+            target = memoryview(buffer)
+            data = self.read(len(target))
+            target[: len(data)] = data
+            return len(data)
+        if self.maximum_bytes is None:
+            return operation(buffer)
+        position, remaining = self._remaining()
+        limited = memoryview(buffer)[:remaining]
+        read = operation(limited)
+        if read is not None and position + read > self.maximum_bytes:
+            raise self._limit_error()
+        return read
+
+    def _remaining(self) -> tuple[int, int]:
+        """Return the current position and one-byte oversize probe."""
+        assert self.maximum_bytes is not None
+        position = self.stream.tell()
+        if position > self.maximum_bytes:
+            raise self._limit_error()
+        return position, self.maximum_bytes + 1 - position
+
+    def _limit_error(self) -> ArchiveError:
+        """Build the stable byte-ceiling error."""
+        assert self.maximum_bytes is not None
+        return ArchiveError(
+            f"{self.label} exceeds the maximum size of {self.maximum_bytes:,} bytes."
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.stream, name)
+
+
+class _HashingReader(_BoundedReader):
     """Hash exactly the bytes consumed while a regular file enters a tar."""
 
-    def __init__(self, stream: BinaryIO) -> None:
-        self.stream = stream
+    def __init__(
+        self,
+        stream: BinaryIO,
+        *,
+        maximum_bytes: int | None = None,
+        label: str = "File",
+    ) -> None:
+        super().__init__(
+            stream,
+            maximum_bytes=maximum_bytes,
+            label=label,
+        )
         self.digest = hashlib.sha256()
 
     def read(self, size: int = -1) -> bytes:
         """Read and hash up to *size* bytes from the underlying stream."""
-        data = self.stream.read(size)
+        data = super().read(size)
         self.digest.update(data)
         return data
 
@@ -418,6 +566,8 @@ class WorkspaceArchiveExtractResult:
     info: dict[str, object]
     primed_packages: int = 0
     cache_priming_skipped: bool = False
+    attestation_path: Path | None = None
+    attestation_verified: bool = False
 
 
 @dataclass(frozen=True)
@@ -436,6 +586,8 @@ class WorkspaceArchiveInstallResult:
     cache_priming_skipped: bool = False
     prefix_reference_matches: tuple[Path, ...] = ()
     prefix_reference_matches_truncated: bool = False
+    attestation_path: Path | None = None
+    attestation_verified: bool = False
 
 
 @dataclass(frozen=True)
@@ -453,10 +605,17 @@ class WorkspaceArchive:
 
     path: Path
     receipt: bool | str | Path | None = None
+    attestation: bool | str | Path | None = None
 
-    def __init__(self, path: str | Path, receipt: bool | str | Path | None = None):
+    def __init__(
+        self,
+        path: str | Path,
+        receipt: bool | str | Path | None = None,
+        attestation: bool | str | Path | None = None,
+    ) -> None:
         object.__setattr__(self, "path", Path(path).expanduser().absolute())
         object.__setattr__(self, "receipt", receipt)
+        object.__setattr__(self, "attestation", attestation)
 
     @classmethod
     def create(
@@ -468,6 +627,8 @@ class WorkspaceArchive:
         bundle: bool = False,
         exclude: tuple[str, ...] = (),
         receipt: bool | str | Path | None = None,
+        sign: bool = False,
+        attestation: str | Path | None = None,
         dry_run: bool = False,
     ) -> WorkspaceArchive:
         """Create an archive for *workspace* and return its handle.
@@ -549,9 +710,21 @@ class WorkspaceArchive:
         )
         if requested_output_path.is_symlink():
             raise ArchiveError("The archive output cannot be a symbolic link.")
-        archive = cls(requested_output_path, receipt=receipt)
+        if attestation is not None and not sign:
+            raise ArchiveError("--attestation requires --sign.")
+        archive = cls(
+            requested_output_path,
+            receipt=receipt,
+            attestation=attestation if attestation is not None else sign,
+        )
         output_path = archive.path
+        if output_path.parent.is_symlink():
+            raise NotADirectoryError(
+                f"Archive output parent is a symbolic link: {output_path.parent}"
+            )
         receipt_path = archive.receipt_path
+        attestation_path = archive.attestation_path
+        needs_receipt = receipt_path is not None or attestation_path is not None
         extra_files = (lock_path,) if lock else ()
         manifest_member = manifest_path.relative_to(ctx.root).as_posix()
         lock_member = lock_path.relative_to(ctx.root).as_posix()
@@ -563,6 +736,8 @@ class WorkspaceArchive:
         output_paths = {"archive output": output_path}
         if receipt_path is not None:
             output_paths["receipt output"] = receipt_path
+        if attestation_path is not None:
+            output_paths["attestation output"] = attestation_path
         for output_label, candidate in output_paths.items():
             if candidate.is_symlink():
                 raise ArchiveError(f"The {output_label} cannot be a symbolic link.")
@@ -572,13 +747,73 @@ class WorkspaceArchive:
                         f"The {output_label} cannot overwrite the {protected_label}."
                     )
 
-        archive_output_generation = regular_file_generation(output_path)
+        archive_output_parent_identity: DirectoryIdentity | None = None
+        receipt_output_parent_identity: DirectoryIdentity | None = None
+        receipt_maximum_bytes: int | None = None
+        if needs_receipt and not dry_run:
+            from .receipts import MAX_RECEIPT_BYTES, ArchiveReceipt
+
+            receipt_maximum_bytes = MAX_RECEIPT_BYTES
+        if not dry_run:
+            archive_output_parent_identity = capture_directory_identity(
+                output_path.parent,
+                create=True,
+            )
+            if receipt_path is not None:
+                receipt_output_parent_identity = capture_directory_identity(
+                    receipt_path.parent,
+                    create=True,
+                )
+        if dry_run:
+            archive_output_generation = regular_file_generation(output_path)
+            archive_output_sha256 = None
+        else:
+            archive_output_generation, archive_output_sha256 = (
+                cls.capture_output_binding(
+                    output_path,
+                    maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
+                    label="Archive output",
+                    expected_parent_identity=archive_output_parent_identity,
+                )
+            )
+        if archive_output_parent_identity is not None:
+            require_directory_identity(
+                output_path.parent,
+                archive_output_parent_identity,
+            )
         if lock:
             validate_file_output(lock_path)
         if receipt_path is not None:
-            receipt_output_generation = regular_file_generation(receipt_path)
+            if dry_run:
+                receipt_output_generation = regular_file_generation(receipt_path)
+                receipt_output_sha256 = None
+            else:
+                assert receipt_maximum_bytes is not None
+                receipt_output_generation, receipt_output_sha256 = (
+                    cls.capture_output_binding(
+                        receipt_path,
+                        maximum_bytes=receipt_maximum_bytes,
+                        label="Receipt output",
+                        expected_parent_identity=receipt_output_parent_identity,
+                    )
+                )
+            if receipt_output_parent_identity is not None:
+                require_directory_identity(
+                    receipt_path.parent,
+                    receipt_output_parent_identity,
+                )
         else:
             receipt_output_generation = None
+            receipt_output_sha256 = None
+        attestation_output = None
+        if attestation_path is not None:
+            attestation_output = attestations.AttestationOutput.prepare(
+                attestation_path,
+                protected_paths=tuple(protected_paths.values())
+                + (output_path,)
+                + ((receipt_path,) if receipt_path is not None else ()),
+                create_parent=not dry_run,
+            )
         with open_tar_for_write(
             BytesIO(),
             detect_compression(output_path),
@@ -586,15 +821,24 @@ class WorkspaceArchive:
         ):
             pass
 
-        if receipt_path is not None:
+        if needs_receipt:
+            integrity_path = receipt_path or attestation_path
+            assert integrity_path is not None
+            if receipt_path is not None and attestation_path is not None:
+                integrity_option = "--receipt and --sign"
+            elif attestation_path is not None:
+                integrity_option = "--sign"
+            else:
+                integrity_option = "--receipt"
             archive.validate_receipt_inputs(
                 root=ctx.root,
                 output=output_path,
                 archive_config=archive_config,
                 manifest_path=manifest_path,
                 lockfile_path=lock_path,
-                receipt_path=receipt_path,
+                receipt_path=integrity_path,
                 extra_files=extra_files,
+                option=integrity_option,
             )
 
         try:
@@ -612,6 +856,10 @@ class WorkspaceArchive:
                 ),
                 output_path,
             )
+            if receipt_path is not None:
+                archive_files = exclude_archive_output(archive_files, receipt_path)
+            if attestation_path is not None:
+                archive_files = exclude_archive_output(archive_files, attestation_path)
             if file_generation(ctx.root.lstat()) != root_generation:
                 raise ArchiveError(
                     "Workspace root changed while archive inputs were collected."
@@ -632,31 +880,172 @@ class WorkspaceArchive:
         )
         output_existed = archive_output_generation is not None
         receipt_existed = receipt_output_generation is not None
-        created_output_identity = None
-        created_receipt_identity = None
+        created_output_generation: OutputFileGeneration | None = None
+        created_output_sha256: str | None = None
+        created_receipt_generation: OutputFileGeneration | None = None
+        created_receipt_content: bytes | None = None
+        published_archive_generation: OutputFileGeneration | None = None
+        published_receipt_generation: OutputFileGeneration | None = None
+        published_attestation_generation: OutputFileGeneration | None = None
+        previous_archive_backup: Path | None = None
+        previous_receipt_backup: Path | None = None
+        expected_receipt_sha256: str | None = None
+        expected_attestation_sha256: str | None = None
         captured_archive_output: ArchiveOutputCapture | None = None
+        staging_directory = (
+            tempfile.TemporaryDirectory(
+                prefix="conda-workspaces-archive-",
+                ignore_cleanup_errors=True,
+            )
+            if sign and not dry_run
+            else None
+        )
+        staging_root = (
+            Path(staging_directory.name) if staging_directory is not None else None
+        )
 
         def capture_archive_output(value: ArchiveOutputCapture) -> None:
-            nonlocal captured_archive_output
+            nonlocal captured_archive_output, created_output_sha256
             captured_archive_output = value
+            if staging_root is None:
+                created_output_sha256 = value.sha256
 
-        def remove_failed_outputs() -> None:
-            if not receipt_existed and created_receipt_identity is not None:
+        def capture_archive_publication(generation: OutputFileGeneration) -> None:
+            nonlocal created_output_generation
+            if staging_root is None:
+                created_output_generation = generation
+
+        def capture_staged_archive_publication(
+            generation: OutputFileGeneration,
+        ) -> None:
+            nonlocal published_archive_generation
+            published_archive_generation = generation
+
+        def capture_receipt_publication(generation: OutputFileGeneration) -> None:
+            nonlocal created_receipt_generation, published_receipt_generation
+            if staging_root is None:
+                created_receipt_generation = generation
+            else:
+                published_receipt_generation = generation
+
+        def remove_failed_outputs(operation_error: BaseException) -> None:
+            cleanup_failures: list[str] = []
+
+            def restore_output(
+                path: Path,
+                *,
+                published_generation: OutputFileGeneration,
+                published_sha256: str,
+                backup: Path | None,
+                maximum_bytes: int,
+                label: str,
+                expected_parent_identity: DirectoryIdentity,
+            ) -> None:
+                try:
+                    cls.restore_published_output(
+                        path,
+                        published_generation=published_generation,
+                        published_sha256=published_sha256,
+                        backup=backup,
+                        maximum_bytes=maximum_bytes,
+                        label=label,
+                        expected_parent_identity=expected_parent_identity,
+                    )
+                except (ArchiveError, FileRecoveryError, OSError, ValueError) as exc:
+                    cleanup_failures.append(f"{label} cleanup failed: {exc}")
+
+            if (
+                attestation_output is not None
+                and attestation_output.published_content is not None
+                and attestation_output.published_generation is not None
+            ):
+                try:
+                    attestation_output.restore()
+                except (
+                    AttestationError,
+                    FileRecoveryError,
+                    OSError,
+                    ValueError,
+                ) as exc:
+                    cleanup_failures.append(f"Attestation output cleanup failed: {exc}")
+            if published_receipt_generation is not None:
                 assert receipt_path is not None
-                cls.remove_created_output(
+                assert receipt_maximum_bytes is not None
+                assert receipt_output_parent_identity is not None
+                assert expected_receipt_sha256 is not None
+                restore_output(
                     receipt_path,
-                    created_receipt_identity,
+                    published_generation=published_receipt_generation,
+                    published_sha256=expected_receipt_sha256,
+                    backup=previous_receipt_backup,
+                    maximum_bytes=receipt_maximum_bytes,
+                    label="Receipt output",
+                    expected_parent_identity=receipt_output_parent_identity,
                 )
-            if not output_existed and created_output_identity is not None:
-                cls.remove_created_output(output_path, created_output_identity)
+            elif (
+                not receipt_existed
+                and created_receipt_generation is not None
+                and created_receipt_content is not None
+            ):
+                assert receipt_path is not None
+                assert receipt_maximum_bytes is not None
+                assert receipt_output_parent_identity is not None
+                restore_output(
+                    receipt_path,
+                    published_generation=created_receipt_generation,
+                    published_sha256=hashlib.sha256(
+                        created_receipt_content
+                    ).hexdigest(),
+                    backup=None,
+                    maximum_bytes=receipt_maximum_bytes,
+                    label="Receipt output",
+                    expected_parent_identity=receipt_output_parent_identity,
+                )
+            if published_archive_generation is not None:
+                assert archive_output_parent_identity is not None
+                assert captured_archive_output is not None
+                assert captured_archive_output.sha256 is not None
+                restore_output(
+                    output_path,
+                    published_generation=published_archive_generation,
+                    published_sha256=captured_archive_output.sha256,
+                    backup=previous_archive_backup,
+                    maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
+                    label="Archive output",
+                    expected_parent_identity=archive_output_parent_identity,
+                )
+            elif (
+                not output_existed
+                and created_output_generation is not None
+                and created_output_sha256 is not None
+            ):
+                assert archive_output_parent_identity is not None
+                restore_output(
+                    output_path,
+                    published_generation=created_output_generation,
+                    published_sha256=created_output_sha256,
+                    backup=None,
+                    maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
+                    label="Archive output",
+                    expected_parent_identity=archive_output_parent_identity,
+                )
+            if cleanup_failures:
+                raise ArchiveError(
+                    f"{operation_error}\nArchive output cleanup was incomplete.",
+                    hints=cleanup_failures,
+                ) from operation_error
 
         @contextmanager
         def guarded_archive_outputs() -> Iterator[None]:
             try:
                 with publication_guard:
                     yield
-            except BaseException:
-                remove_failed_outputs()
+            except BaseException as operation_error:
+                try:
+                    remove_failed_outputs(operation_error)
+                finally:
+                    if staging_directory is not None:
+                        staging_directory.cleanup()
                 raise
 
         with guarded_archive_outputs():
@@ -725,7 +1114,7 @@ class WorkspaceArchive:
                     lock_bytes
                 ).hexdigest()
 
-            if receipt_path is not None:
+            if needs_receipt:
                 if lock_data is None:
                     raise ArchiveError(
                         "Cannot create an archive receipt without conda.lock."
@@ -763,14 +1152,25 @@ class WorkspaceArchive:
                 verify_package_hashes(bundle_packages, lock_source)
                 bundle_hashes = build_hash_index(lock_source)
 
-            try:
-                if lock_content is not None and not dry_run:
-                    cast("WorkspacePublication", publication).publish_lockfile(
-                        lock_content
-                    )
+            if lock_content is not None and not dry_run and not sign:
+                cast("WorkspacePublication", publication).publish_lockfile(lock_content)
+            lockfile_publication = (
+                cast(
+                    "WorkspacePublication",
+                    publication,
+                ).reversible_lockfile_publication(lock_content)
+                if lock_content is not None and not dry_run and sign
+                else nullcontext()
+            )
+            with lockfile_publication:
+                archive_build_path = (
+                    staging_root / "new" / output_path.name
+                    if staging_root is not None
+                    else output_path
+                )
                 archive_path = create_archive(
                     ctx.root,
-                    output_path,
+                    archive_build_path,
                     archive_config,
                     files=archive_files,
                     root_descriptor=(
@@ -790,8 +1190,19 @@ class WorkspaceArchive:
                         (lock_member,) if lock and not lock_path.exists() else ()
                     ),
                     capture_output=capture_archive_output,
-                    capture_sha256=receipt_path is not None,
-                    expected_output_generation=archive_output_generation,
+                    capture_sha256=not dry_run,
+                    capture_publication=capture_archive_publication,
+                    expected_output_parent_identity=(
+                        None
+                        if staging_root is not None
+                        else archive_output_parent_identity
+                    ),
+                    expected_output_generation=(
+                        None if staging_root is not None else archive_output_generation
+                    ),
+                    expected_output_sha256=(
+                        None if staging_root is not None else archive_output_sha256
+                    ),
                     dry_run=dry_run,
                 )
                 if not dry_run:
@@ -804,11 +1215,25 @@ class WorkspaceArchive:
                         or created_output.st_size != captured_archive_output.size
                     ):
                         raise ArchiveError(
-                            "Archive output changed after it was published:"
+                            "Archive output changed after it was created:"
                             f" {archive_path}"
                         )
-                    created_output_identity = captured_archive_output.identity
-                if receipt_path is not None and not dry_run:
+                    if staging_root is None:
+                        if (
+                            created_output_generation is None
+                            or created_output_generation[:2]
+                            != captured_archive_output.identity
+                        ):
+                            raise ArchiveError(
+                                "Archive output changed during publication:"
+                                f" {archive_path}"
+                            )
+
+                receipt_obj = None
+                receipt_payload = None
+                bundle_json = None
+                archive_generation = None
+                if needs_receipt and not dry_run:
                     assert lock_data is not None
                     assert captured_archive_output is not None
                     assert captured_archive_output.sha256 is not None
@@ -817,19 +1242,20 @@ class WorkspaceArchive:
                             archive_path,
                             expected_identity=captured_archive_output.identity,
                             maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
-                            label="Archive output",
+                            label="Staged archive"
+                            if staging_root
+                            else "Archive output",
                         )
                     )
                     if live_archive_sha256 != captured_archive_output.sha256:
                         raise ArchiveHashMismatchError(
-                            archive_path.name,
+                            output_path.name,
                             expected=captured_archive_output.sha256,
                             actual=live_archive_sha256,
                         )
-                    from .receipts import ArchiveReceipt
-
+                    assert receipt_maximum_bytes is not None
                     receipt_obj = ArchiveReceipt.build_from_captured(
-                        archive_name=archive_path.name,
+                        archive_name=output_path.name,
                         archive_sha256=captured_archive_output.sha256,
                         manifest_name=manifest_member,
                         manifest_sha256=regular_member_hashes[manifest_member],
@@ -853,36 +1279,172 @@ class WorkspaceArchive:
                     require_regular_file_generation(
                         archive_path,
                         archive_generation,
+                        label="Staged archive" if staging_root else "Archive output",
+                    )
+                    receipt_payload = receipt_obj.serialized_text().encode("utf-8")
+                    created_receipt_content = receipt_payload
+                    if attestation_output is not None:
+                        bundle_json = attestations.sign_attestation_payload(
+                            receipt_payload
+                        )
+                        require_regular_file_generation(
+                            archive_path,
+                            archive_generation,
+                            label=(
+                                "Staged archive" if staging_root else "Archive output"
+                            ),
+                        )
+
+                if staging_root is not None:
+                    assert captured_archive_output is not None
+                    assert captured_archive_output.sha256 is not None
+                    if output_existed:
+                        assert archive_output_generation is not None
+                        previous_archive_backup = (
+                            staging_root / "previous" / "archive" / output_path.name
+                        )
+                        cls.snapshot_output(
+                            output_path,
+                            previous_archive_backup,
+                            expected_generation=archive_output_generation,
+                            expected_sha256=archive_output_sha256,
+                            maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
+                            label="Previous archive output",
+                            expected_parent_identity=archive_output_parent_identity,
+                        )
+                    assert archive_output_parent_identity is not None
+                    published_archive_generation, archive_generation = (
+                        cls.publish_staged_output(
+                            archive_path,
+                            output_path,
+                            expected_generation=archive_output_generation,
+                            expected_destination_sha256=archive_output_sha256,
+                            published_sha256=captured_archive_output.sha256,
+                            maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
+                            label="Archive output",
+                            expected_parent_identity=archive_output_parent_identity,
+                            capture_generation=capture_staged_archive_publication,
+                        )
+                    )
+                    archive_path = output_path
+
+                if receipt_path is not None and not dry_run:
+                    assert receipt_obj is not None
+                    assert receipt_payload is not None
+                    assert receipt_maximum_bytes is not None
+                    if staging_root is not None and receipt_existed:
+                        assert receipt_output_generation is not None
+                        previous_receipt_backup = (
+                            staging_root / "previous" / "receipt" / receipt_path.name
+                        )
+                        cls.snapshot_output(
+                            receipt_path,
+                            previous_receipt_backup,
+                            expected_generation=receipt_output_generation,
+                            expected_sha256=receipt_output_sha256,
+                            maximum_bytes=receipt_maximum_bytes,
+                            label="Previous receipt output",
+                            expected_parent_identity=receipt_output_parent_identity,
+                        )
+                    expected_receipt_sha256 = hashlib.sha256(
+                        receipt_payload
+                    ).hexdigest()
+                    try:
+                        receipt_obj.write(
+                            receipt_path,
+                            expected_generation=receipt_output_generation,
+                            expected_sha256=receipt_output_sha256,
+                            expected_parent_identity=receipt_output_parent_identity,
+                            capture_generation=capture_receipt_publication,
+                        )
+                    except (OSError, ValueError) as exc:
+                        raise ArchiveError(
+                            "Receipt output changed before publication:"
+                            f" {receipt_path}. {exc}"
+                        ) from exc
+                    receipt_generation, _ = cls.capture_published_output(
+                        receipt_path,
+                        expected_sha256=expected_receipt_sha256,
+                        maximum_bytes=receipt_maximum_bytes,
+                        label="Receipt output",
+                        expected_parent_identity=receipt_output_parent_identity,
+                    )
+                    if staging_root is None:
+                        created_receipt_generation = receipt_generation
+                    else:
+                        published_receipt_generation = receipt_generation
+
+                if attestation_output is not None and not dry_run:
+                    assert attestation_path is not None
+                    assert bundle_json is not None
+                    attestation_output.write(bundle_json)
+                    published_bundle = bundle_json.rstrip("\n") + "\n"
+                    expected_attestation_sha256 = hashlib.sha256(
+                        published_bundle.encode("utf-8")
+                    ).hexdigest()
+                    attestation_generation, _ = cls.capture_published_output(
+                        attestation_path,
+                        expected_sha256=expected_attestation_sha256,
+                        maximum_bytes=attestation_output.maximum_bytes,
+                        label="Attestation output",
+                        expected_parent_identity=attestation_output.parent_identity,
+                    )
+                    published_attestation_generation = attestation_generation
+
+                if staging_root is not None:
+                    assert archive_output_parent_identity is not None
+                    assert published_archive_generation is not None
+                    assert captured_archive_output is not None
+                    assert captured_archive_output.sha256 is not None
+                    cls.require_published_output(
+                        output_path,
+                        expected_generation=published_archive_generation,
+                        expected_sha256=captured_archive_output.sha256,
+                        maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
+                        expected_parent_identity=archive_output_parent_identity,
                         label="Archive output",
                     )
-                    expected_receipt_sha256 = hashlib.sha256(
-                        receipt_obj.serialized_text().encode("utf-8")
-                    ).hexdigest()
-                    receipt_obj.write(
-                        receipt_path,
-                        expected_generation=receipt_output_generation,
-                    )
-                    receipt_sha256, receipt_generation = file_sha256_with_generation(
-                        receipt_path,
-                        label="Receipt output",
-                    )
-                    if receipt_sha256 != expected_receipt_sha256:
-                        raise ArchiveHashMismatchError(
-                            receipt_path.name,
-                            expected=expected_receipt_sha256,
-                            actual=receipt_sha256,
+                    if published_receipt_generation is not None:
+                        assert receipt_path is not None
+                        assert receipt_output_parent_identity is not None
+                        assert expected_receipt_sha256 is not None
+                        assert receipt_maximum_bytes is not None
+                        cls.require_published_output(
+                            receipt_path,
+                            expected_generation=published_receipt_generation,
+                            expected_sha256=expected_receipt_sha256,
+                            maximum_bytes=receipt_maximum_bytes,
+                            expected_parent_identity=receipt_output_parent_identity,
+                            label="Receipt output",
                         )
-                    created_receipt_identity = receipt_generation[:2]
+                    if published_attestation_generation is not None:
+                        assert attestation_path is not None
+                        assert attestation_output is not None
+                        assert attestation_output.parent_identity is not None
+                        assert expected_attestation_sha256 is not None
+                        cls.require_published_output(
+                            attestation_path,
+                            expected_generation=published_attestation_generation,
+                            expected_sha256=expected_attestation_sha256,
+                            maximum_bytes=attestation_output.maximum_bytes,
+                            expected_parent_identity=attestation_output.parent_identity,
+                            label="Attestation output",
+                        )
+                elif archive_generation is not None:
                     require_regular_file_generation(
                         archive_path,
                         archive_generation,
                         label="Archive output",
                     )
-            except BaseException:
-                remove_failed_outputs()
-                raise
 
-        return cls(archive_path, receipt=receipt_path)
+        if staging_directory is not None:
+            staging_directory.cleanup()
+
+        return cls(
+            archive_path,
+            receipt=receipt_path,
+            attestation=attestation_path,
+        )
 
     @staticmethod
     def default_output_path(ctx: WorkspaceContext, output: str | Path | None) -> Path:
@@ -939,6 +1501,7 @@ class WorkspaceArchive:
         lockfile_path: Path,
         receipt_path: Path,
         extra_files: tuple[Path, ...] = (),
+        option: str = "--receipt",
     ) -> None:
         """Validate inputs required to write a receipt for a new archive."""
         if output_paths_collide(receipt_path, output):
@@ -1009,7 +1572,7 @@ class WorkspaceArchive:
                         "Receipt verification requires the workspace manifest and"
                         " conda.lock to be included in the archive."
                     ),
-                    "Remove matching include/exclude filters or run without --receipt.",
+                    f"Remove matching include/exclude filters or run without {option}.",
                 ],
             )
 
@@ -1044,6 +1607,24 @@ class WorkspaceArchive:
     def receipt_path(self) -> Path | None:
         """Return the configured external receipt path, if any."""
         return resolve_receipt_path(self.path, self.receipt)
+
+    @staticmethod
+    def default_attestation_path(archive_path: Path) -> Path:
+        """Return the default Sigstore bundle path for *archive_path*."""
+        return attestations.default_attestation_path(archive_path)
+
+    @property
+    def attestation_path(self) -> Path | None:
+        """Return the configured external Sigstore bundle path, if any."""
+        if self.attestation in (None, False):
+            return None
+        if self.attestation is True:
+            return self.default_attestation_path(self.path)
+        if isinstance(self.attestation, Path):
+            return self.attestation.expanduser().absolute()
+        if isinstance(self.attestation, str):
+            return Path(self.attestation).expanduser().absolute()
+        raise ArchiveError("Invalid --attestation value.")
 
     def default_target(self, cwd: str | Path | None = None) -> Path:
         """Return the default extraction target derived from the archive name."""
@@ -1207,6 +1788,8 @@ class WorkspaceArchive:
         require_sha256: bool = False,
         prime_cache: bool = True,
         package_cache: str | Path | None = None,
+        verify_attestation: bool = False,
+        expected_signer: SignerPolicy | None = None,
         dry_run: bool = False,
     ) -> WorkspaceArchiveExtractResult:
         """Extract the archive and optionally prime bundled package cache files."""
@@ -1215,6 +1798,8 @@ class WorkspaceArchive:
             require_sha256=require_sha256,
             prime_cache=prime_cache,
             package_cache=package_cache,
+            verify_attestation=verify_attestation,
+            expected_signer=expected_signer,
             dry_run=dry_run,
         )
 
@@ -1225,8 +1810,14 @@ class WorkspaceArchive:
         require_sha256: bool,
         prime_cache: bool,
         package_cache: str | Path | None,
+        verify_attestation: bool,
+        expected_signer: SignerPolicy | None,
         dry_run: bool,
-        validate_workspace: Callable[[Path, ArchiveReceipt | None], None] | None = None,
+        validate_workspace: Callable[
+            [Path, ArchiveReceipt | None, VerifiedArchiveWorkspace | None],
+            None,
+        ]
+        | None = None,
         validate_install: Callable[[], None] | None = None,
     ) -> WorkspaceArchiveExtractResult:
         """Stage, validate, and optionally promote an archive workspace."""
@@ -1242,14 +1833,42 @@ class WorkspaceArchive:
                 hints=["Remove the empty target directory before extracting."],
             )
 
-        if require_sha256 and self.receipt_path is None:
-            raise ArchiveError("--require-sha256 requires --receipt.")
+        if require_sha256 and self.receipt_path is None and not verify_attestation:
+            raise ArchiveError("--require-sha256 requires --receipt or --verify.")
         archive_path = self.require_existing_archive()
-        receipt = None
+        unsigned_receipt = None
         if self.receipt_path is not None:
             from .receipts import ArchiveReceipt
 
-            receipt = ArchiveReceipt.load(self.receipt_path)
+            unsigned_receipt = ArchiveReceipt.load(self.receipt_path)
+
+        receipt = unsigned_receipt
+        verified_attestation_path = None
+        attestation_verified = False
+        if verify_attestation:
+            if expected_signer is None:
+                raise ArchiveError(
+                    "--verify requires --cert-identity and --cert-oidc-issuer."
+                )
+            from .receipts import ArchiveReceipt
+
+            verified_attestation_path = (
+                self.attestation_path or self.default_attestation_path(archive_path)
+            )
+            verification = attestations.verify_attestation_bundle(
+                attestations.read_attestation_bundle(verified_attestation_path)
+            )
+            expected_signer.require_authorized(verification.signer)
+            signed_receipt = ArchiveReceipt.from_payload(verification.payload)
+            if (
+                unsigned_receipt is not None
+                and unsigned_receipt.statement != signed_receipt.statement
+            ):
+                raise ArchiveError(
+                    "The unsigned receipt does not match the signed archive receipt."
+                )
+            receipt = signed_receipt
+            attestation_verified = True
 
         temporary_parent = None
         if not dry_run:
@@ -1289,8 +1908,12 @@ class WorkspaceArchive:
                             )
 
             staged = extract_archive(snapshot_path, Path(temporary) / "workspace")
+            verified_workspace = None
             if receipt is not None:
-                receipt.verify_extracted(staged, require_sha256=require_sha256)
+                verified_workspace = receipt.verify_extracted(
+                    staged,
+                    require_sha256=require_sha256,
+                )
             cache_priming_skipped = bool(
                 info["has_packages"] and prime_cache and receipt is None
             )
@@ -1392,7 +2015,7 @@ class WorkspaceArchive:
                         cache_records.append((package, destination, receipt_record))
 
             if validate_workspace is not None:
-                validate_workspace(staged, receipt)
+                validate_workspace(staged, receipt, verified_workspace)
 
             primed_packages = len(
                 {name for name, _, _ in cache_plan}
@@ -1607,7 +2230,9 @@ class WorkspaceArchive:
             return WorkspaceArchiveExtractResult(
                 target=extracted,
                 receipt_path=self.receipt_path,
+                attestation_path=verified_attestation_path,
                 verified=receipt is not None,
+                attestation_verified=attestation_verified,
                 info=info,
                 primed_packages=primed_packages,
                 cache_priming_skipped=cache_priming_skipped,
@@ -1623,8 +2248,9 @@ class WorkspaceArchive:
         require_sha256: bool = False,
         prime_cache: bool = True,
         package_cache: str | Path | None = None,
-        install_handler: Callable[[Path, str | None, Path | None, str | None], int]
-        | None = None,
+        verify_attestation: bool = False,
+        expected_signer: SignerPolicy | None = None,
+        install_handler: Callable[..., int] | None = None,
         dry_run: bool = False,
     ) -> WorkspaceArchiveInstallResult:
         """Extract the archive and install environments from its lockfile.
@@ -1688,50 +2314,89 @@ class WorkspaceArchive:
         if install_prefix is not None:
             validate_directory_output(install_prefix)
 
-        prepared_install: tuple[WorkspaceContext, list[str]] | None = None
+        handler = install_handler or self.install_from_lockfile
+        prepared_install: (
+            tuple[
+                WorkspaceContext,
+                list[str],
+                dict[str, Any] | None,
+                VerifiedArchiveWorkspace | None,
+            ]
+            | None
+        ) = None
 
         def validate_workspace(
             workspace: Path,
-            receipt: ArchiveReceipt | None,
+            _receipt: ArchiveReceipt | None,
+            verified_workspace: VerifiedArchiveWorkspace | None,
         ) -> None:
             nonlocal prepared_install
 
             from .context import WorkspaceContext
-            from .lockfile import lockfile_status
+            from .lockfile import check_lockfile_satisfiability
             from .manifests import detect_and_parse
 
-            manifest_path = self.resolve_extracted_manifest(workspace)
-            lock_path = workspace / "conda.lock"
-            if lock_path.is_symlink() or not lock_path.is_file():
-                raise ArchiveError(
-                    "Cannot install from archive: no conda.lock found.",
-                    hints=["Create the archive with a conda.lock file."],
-                )
-            if receipt is not None and receipt.workspace_paths != (
-                manifest_path.name,
-                "conda.lock",
-            ):
-                raise ArchiveError(
-                    "Cannot install from archive: the receipt must bind the selected"
-                    " root manifest and conda.lock."
-                )
-
             load_yaml.cache_clear()
-            _, config = detect_and_parse(manifest_path)
+            lockfile_data = None
+            if verified_workspace is None:
+                manifest_path = self.resolve_extracted_manifest(workspace)
+                lock_path = workspace / "conda.lock"
+                if lock_path.is_symlink() or not lock_path.is_file():
+                    raise ArchiveError(
+                        "Cannot install from archive: no conda.lock found.",
+                        hints=["Create the archive with a conda.lock file."],
+                    )
+                _, config = detect_and_parse(manifest_path)
+            else:
+                if (
+                    verified_workspace.manifest_name not in MANIFEST_FILENAMES
+                    or verified_workspace.lockfile_name != "conda.lock"
+                ):
+                    raise ArchiveError(
+                        "Cannot install from archive: the receipt must bind the"
+                        " selected root manifest and conda.lock."
+                    )
+                manifest_path = workspace / verified_workspace.manifest_name
+                lock_path = workspace / verified_workspace.lockfile_name
+                try:
+                    manifest_text = verified_workspace.manifest_bytes.decode("utf-8")
+                    config = find_parser(manifest_path).parse_text(
+                        manifest_path,
+                        manifest_text,
+                    )
+                    lockfile_data = load_lockfile_data(
+                        verified_workspace.lockfile_bytes
+                    )
+                except (UnicodeDecodeError, ValueError, WorkspaceParseError) as exc:
+                    raise ArchiveError(
+                        "Cannot parse the receipt-verified workspace inputs."
+                    ) from exc
             ctx = WorkspaceContext(config)
             try:
-                status = lockfile_status(ctx, config)
+                if lockfile_data is None:
+                    lockfile_data = load_lockfile_data(
+                        read_regular_file_bytes(
+                            lock_path,
+                            maximum_bytes=MAX_LOCKFILE_BYTES,
+                            label="workspace lockfile",
+                        )
+                    )
+                current = check_lockfile_satisfiability(
+                    config,
+                    lockfile_data,
+                    ctx.platform,
+                )
             except Exception as exc:
                 raise ArchiveError(
                     "Cannot parse workspace lockfile: conda.lock"
                 ) from exc
-            if status.status == LockfileStatus.OUT_OF_DATE:
+            if current.status == LockfileStatus.OUT_OF_DATE:
                 raise LockfileStaleError(
                     manifest_path,
                     lock_path,
-                    reason=status.reason,
+                    reason=current.reason,
                 )
-            if status.status == LockfileStatus.MISSING:
+            if current.status == LockfileStatus.MISSING:
                 raise LockfileNotFoundError("(all)", lock_path)
 
             names = (
@@ -1739,14 +2404,28 @@ class WorkspaceArchive:
             )
             for name in names:
                 config.get_environment(name)
-            prepared_install = ctx, names
+            if verified_workspace is not None:
+                try:
+                    inspect.signature(handler).bind(
+                        workspace,
+                        environment,
+                        install_prefix,
+                        runtime_prefix,
+                        verified_workspace=verified_workspace,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ArchiveError(
+                        "Archive install handlers must accept the verified_workspace "
+                        "keyword argument when receipt verification is enabled."
+                    ) from exc
+            prepared_install = ctx, names, lockfile_data, verified_workspace
 
         def validate_install() -> None:
             from .lockfile import install_from_lockfile
 
             if prepared_install is None:
                 raise RuntimeError("Archive install was not validated")
-            ctx, names = prepared_install
+            ctx, names, lockfile_data, _ = prepared_install
             for name in names:
                 install_from_lockfile(
                     ctx,
@@ -1756,6 +2435,7 @@ class WorkspaceArchive:
                         runtime_prefix if environment is not None else None
                     ),
                     dry_run=True,
+                    lockfile_data=lockfile_data,
                 )
 
         extract_result = self._extract(
@@ -1763,6 +2443,8 @@ class WorkspaceArchive:
             require_sha256=require_sha256,
             prime_cache=prime_cache,
             package_cache=package_cache,
+            verify_attestation=verify_attestation,
+            expected_signer=expected_signer,
             dry_run=dry_run,
             validate_workspace=validate_workspace,
             validate_install=validate_install,
@@ -1771,7 +2453,9 @@ class WorkspaceArchive:
         if dry_run:
             return_code = 0
         else:
-            handler = install_handler or self.install_from_lockfile
+            if prepared_install is None:
+                raise RuntimeError("Archive install was not prepared")
+            _, _, _, verified_workspace = prepared_install
             cache_override = (
                 conda_context._override(
                     "_pkgs_dirs",
@@ -1783,12 +2467,21 @@ class WorkspaceArchive:
             PackageCacheData.clear()
             try:
                 with cache_override:
-                    return_code = handler(
-                        extract_result.target,
-                        environment,
-                        install_prefix,
-                        runtime_prefix,
-                    )
+                    if verified_workspace is None:
+                        return_code = handler(
+                            extract_result.target,
+                            environment,
+                            install_prefix,
+                            runtime_prefix,
+                        )
+                    else:
+                        return_code = handler(
+                            extract_result.target,
+                            environment,
+                            install_prefix,
+                            runtime_prefix,
+                            verified_workspace=verified_workspace,
+                        )
             finally:
                 PackageCacheData.clear()
 
@@ -1812,7 +2505,9 @@ class WorkspaceArchive:
             install_prefix=install_prefix,
             runtime_prefix=runtime_prefix,
             receipt_path=extract_result.receipt_path,
+            attestation_path=extract_result.attestation_path,
             verified=extract_result.verified,
+            attestation_verified=extract_result.attestation_verified,
             info=extract_result.info,
             return_code=return_code,
             primed_packages=extract_result.primed_packages,
@@ -1860,6 +2555,8 @@ class WorkspaceArchive:
         environment: str | None,
         prefix: Path | None,
         target_prefix_override: str | None,
+        *,
+        verified_workspace: VerifiedArchiveWorkspace | None = None,
     ) -> int:
         """Install workspace environments from ``conda.lock`` without the CLI."""
         from .context import WorkspaceContext
@@ -1868,9 +2565,18 @@ class WorkspaceArchive:
 
         load_yaml.cache_clear()
 
-        _, config = detect_and_parse(
-            WorkspaceArchive.resolve_extracted_manifest(workspace)
-        )
+        lockfile_data = None
+        if verified_workspace is None:
+            _, config = detect_and_parse(
+                WorkspaceArchive.resolve_extracted_manifest(workspace)
+            )
+        else:
+            manifest_path = workspace / verified_workspace.manifest_name
+            config = find_parser(manifest_path).parse_text(
+                manifest_path,
+                verified_workspace.manifest_bytes.decode("utf-8"),
+            )
+            lockfile_data = load_lockfile_data(verified_workspace.lockfile_bytes)
         ctx = WorkspaceContext(config)
         if environment is not None:
             install_from_lockfile(
@@ -1878,11 +2584,12 @@ class WorkspaceArchive:
                 environment,
                 prefix=prefix,
                 target_prefix_override=target_prefix_override,
+                lockfile_data=lockfile_data,
             )
             return 0
 
         for name in config.environments:
-            install_from_lockfile(ctx, name)
+            install_from_lockfile(ctx, name, lockfile_data=lockfile_data)
         return 0
 
     def require_existing_archive(self) -> Path:
@@ -1894,29 +2601,362 @@ class WorkspaceArchive:
     @staticmethod
     def snapshot_archive(source: Path, destination: Path) -> None:
         """Copy one no-follow archive generation into private staging."""
+        parent_identity = capture_directory_identity(source.parent)
+        sha256, archive_generation = file_sha256_with_generation(
+            source,
+            maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
+            label="Archive",
+        )
+        require_directory_identity(source.parent, parent_identity)
+        require_regular_file_generation(
+            source,
+            archive_generation,
+            label="Archive",
+        )
+        generation = regular_file_generation(source)
+        if generation is None:
+            raise ArchiveError(f"Archive changed before it was snapshotted: {source}")
+        WorkspaceArchive.snapshot_output(
+            source,
+            destination,
+            expected_generation=generation,
+            expected_sha256=sha256,
+            maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
+            label="Archive",
+            expected_parent_identity=parent_identity,
+        )
+
+    @staticmethod
+    def capture_output_binding(
+        path: Path,
+        *,
+        maximum_bytes: int,
+        label: str,
+        expected_parent_identity: DirectoryIdentity | None = None,
+    ) -> tuple[OutputFileGeneration | None, str | None]:
+        """Bind an existing output generation to its exact SHA-256 digest."""
         try:
+            if expected_parent_identity is not None:
+                require_directory_identity(path.parent, expected_parent_identity)
+            generation = regular_file_generation(path)
+            if generation is None:
+                if expected_parent_identity is not None:
+                    require_directory_identity(path.parent, expected_parent_identity)
+                return None, None
+            sha256, hashed_generation = regular_file_sha256(
+                path,
+                label=label,
+                maximum_bytes=maximum_bytes,
+            )
+            if hashed_generation != generation:
+                raise ValueError(f"{label} changed while it was captured: {path}")
+            if expected_parent_identity is not None:
+                require_directory_identity(path.parent, expected_parent_identity)
+        except (OSError, ValueError) as exc:
+            raise ArchiveError(f"{label} cannot be captured safely: {path}") from exc
+        return hashed_generation, sha256
+
+    @staticmethod
+    def snapshot_output(
+        source: Path,
+        destination: Path,
+        *,
+        expected_generation: OutputFileGeneration | None,
+        expected_sha256: str | None,
+        maximum_bytes: int,
+        label: str,
+        expected_parent_identity: DirectoryIdentity | None = None,
+    ) -> None:
+        """Copy one bounded output generation into private rollback storage."""
+        try:
+            if expected_parent_identity is not None:
+                require_directory_identity(source.parent, expected_parent_identity)
+            if (
+                expected_generation is not None
+                and regular_file_generation(source) != expected_generation
+            ):
+                raise ArchiveError(
+                    f"{label} changed before it was snapshotted: {source}"
+                )
+            if expected_generation is not None and expected_sha256 is None:
+                raise ValueError(
+                    f"{label} snapshot requires the captured SHA-256 digest"
+                )
+            copied_sha256: str | None = None
             with atomic_binary_writer(
                 destination,
                 expected_identity=None,
             ) as output_stream:
                 with open_stable_regular_file(
                     source,
-                    label="Archive",
-                    maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
+                    label=label,
+                    maximum_bytes=maximum_bytes,
                 ) as input_stream:
-                    shutil.copyfileobj(
+                    if expected_parent_identity is not None:
+                        require_directory_identity(
+                            source.parent,
+                            expected_parent_identity,
+                        )
+                    if (
+                        expected_generation is not None
+                        and regular_file_generation(source) != expected_generation
+                    ):
+                        raise ArchiveError(
+                            f"{label} changed before it was snapshotted: {source}"
+                        )
+                    hashing_input = _HashingReader(
                         input_stream,
+                        maximum_bytes=maximum_bytes,
+                        label=label,
+                    )
+                    shutil.copyfileobj(
+                        hashing_input,
                         output_stream,
                         length=1024 * 1024,
                     )
+                    copied_sha256 = hashing_input.digest.hexdigest()
+            if expected_sha256 is not None and copied_sha256 != expected_sha256:
+                raise ArchiveError(
+                    f"{label} changed while it was snapshotted: {source}"
+                )
+            if copied_sha256 is not None:
+                backup_sha256, _ = regular_file_sha256(
+                    destination,
+                    label=f"{label} rollback snapshot",
+                    maximum_bytes=maximum_bytes,
+                )
+                if backup_sha256 != copied_sha256:
+                    raise ArchiveError(
+                        f"{label} rollback snapshot changed: {destination}"
+                    )
+            if (
+                expected_generation is not None
+                and regular_file_generation(source) != expected_generation
+            ):
+                raise ArchiveError(
+                    f"{label} changed while it was snapshotted: {source}"
+                )
+            if expected_parent_identity is not None:
+                require_directory_identity(source.parent, expected_parent_identity)
         except (OSError, ValueError) as exc:
             raise ArchiveError(
-                f"Archive cannot be snapshotted safely: {source}"
+                f"{label} cannot be snapshotted safely: {source}"
             ) from exc
 
     @staticmethod
+    def capture_published_output(
+        path: Path,
+        *,
+        expected_sha256: str,
+        maximum_bytes: int,
+        label: str,
+        expected_parent_identity: DirectoryIdentity | None = None,
+    ) -> tuple[OutputFileGeneration, FileGeneration]:
+        """Return exact path and archive generations for a published output."""
+        if expected_parent_identity is not None:
+            try:
+                require_directory_identity(path.parent, expected_parent_identity)
+            except OSError as exc:
+                raise ArchiveError(
+                    f"{label} parent changed after publication: {path.parent}"
+                ) from exc
+        actual_sha256, archive_generation = file_sha256_with_generation(
+            path,
+            maximum_bytes=maximum_bytes,
+            label=label,
+        )
+        if actual_sha256 != expected_sha256:
+            raise ArchiveHashMismatchError(
+                path.name,
+                expected=expected_sha256,
+                actual=actual_sha256,
+            )
+        output_generation = regular_file_generation(path)
+        if output_generation is None or (
+            output_generation[0] != archive_generation[0]
+            or output_generation[1] != archive_generation[1]
+            or output_generation[2] != archive_generation[3]
+            or output_generation[5] != archive_generation[2]
+            or output_generation[6] != archive_generation[4]
+            or output_generation[7] != archive_generation[5]
+        ):
+            raise ArchiveError(f"{label} changed after publication: {path}")
+        require_regular_file_generation(
+            path,
+            archive_generation,
+            label=label,
+        )
+        if expected_parent_identity is not None:
+            try:
+                require_directory_identity(path.parent, expected_parent_identity)
+            except OSError as exc:
+                raise ArchiveError(
+                    f"{label} parent changed after publication: {path.parent}"
+                ) from exc
+        return output_generation, archive_generation
+
+    @classmethod
+    def publish_staged_output(
+        cls,
+        source: Path,
+        destination: Path,
+        *,
+        expected_generation: OutputFileGeneration | None,
+        expected_destination_sha256: str | None,
+        published_sha256: str,
+        maximum_bytes: int,
+        label: str,
+        expected_parent_identity: DirectoryIdentity,
+        capture_generation: Callable[[OutputFileGeneration], None],
+    ) -> tuple[OutputFileGeneration, FileGeneration]:
+        """Publish one private staged output with generation tracking."""
+        published_generations: list[OutputFileGeneration] = []
+
+        def capture_publication(generation: OutputFileGeneration) -> None:
+            published_generations.append(generation)
+            capture_generation(generation)
+
+        try:
+            with atomic_binary_writer(
+                destination,
+                expected_generation=expected_generation,
+                expected_sha256=expected_destination_sha256,
+                expected_parent_identity=expected_parent_identity,
+                capture_generation=capture_publication,
+            ) as output_stream:
+                with open_stable_regular_file(
+                    source,
+                    label=f"Staged {label.lower()}",
+                    maximum_bytes=maximum_bytes,
+                ) as input_stream:
+                    shutil.copyfileobj(
+                        _BoundedReader(
+                            input_stream,
+                            maximum_bytes=maximum_bytes,
+                            label=f"Staged {label.lower()}",
+                        ),
+                        output_stream,
+                        length=1024 * 1024,
+                    )
+        except ValueError as exc:
+            raise ArchiveError(
+                f"{label} changed before publication: {destination}. {exc}"
+            ) from exc
+        except OSError as exc:
+            raise ArchiveError(
+                f"{label} cannot be published safely: {destination}"
+            ) from exc
+        output_generation, archive_generation = cls.capture_published_output(
+            destination,
+            expected_sha256=published_sha256,
+            maximum_bytes=maximum_bytes,
+            label=label,
+            expected_parent_identity=expected_parent_identity,
+        )
+        if published_generations != [output_generation]:
+            raise ArchiveError(f"{label} changed during publication: {destination}")
+        return output_generation, archive_generation
+
+    @classmethod
+    def restore_published_output(
+        cls,
+        path: Path,
+        *,
+        published_generation: OutputFileGeneration,
+        published_sha256: str,
+        backup: Path | None,
+        maximum_bytes: int,
+        label: str,
+        expected_parent_identity: DirectoryIdentity,
+    ) -> bool:
+        """Restore or remove a publication while its generation and digest match."""
+        if backup is not None:
+            try:
+                with atomic_binary_writer(
+                    path,
+                    expected_generation=published_generation,
+                    expected_sha256=published_sha256,
+                    expected_parent_identity=expected_parent_identity,
+                ) as output_stream:
+                    with open_stable_regular_file(
+                        backup,
+                        label=f"Previous {label.lower()}",
+                        maximum_bytes=maximum_bytes,
+                    ) as input_stream:
+                        shutil.copyfileobj(
+                            _BoundedReader(
+                                input_stream,
+                                maximum_bytes=maximum_bytes,
+                                label=f"Previous {label.lower()}",
+                            ),
+                            output_stream,
+                            length=1024 * 1024,
+                        )
+            except FileRecoveryError:
+                raise
+            except ValueError:
+                return False
+            except OSError as exc:
+                raise ArchiveError(
+                    f"{label} cannot be restored safely: {path}. {exc}"
+                ) from exc
+            return True
+
+        try:
+            return remove_file_generation(
+                path,
+                published_generation,
+                expected_sha256=published_sha256,
+                expected_parent_identity=expected_parent_identity,
+            )
+        except (OSError, ValueError) as exc:
+            raise ArchiveError(
+                f"{label} cannot be removed safely: {path}. {exc}"
+            ) from exc
+
+    @classmethod
+    def require_published_output(
+        cls,
+        path: Path,
+        *,
+        expected_generation: OutputFileGeneration,
+        expected_sha256: str,
+        maximum_bytes: int,
+        expected_parent_identity: DirectoryIdentity,
+        label: str,
+    ) -> None:
+        """Require one published output to retain its generation and digest."""
+        try:
+            actual_generation, _ = cls.capture_published_output(
+                path,
+                expected_sha256=expected_sha256,
+                maximum_bytes=maximum_bytes,
+                label=label,
+                expected_parent_identity=expected_parent_identity,
+            )
+            if actual_generation != expected_generation:
+                raise ArchiveError(f"{label} changed after publication: {path}")
+        except ArchiveHashMismatchError as exc:
+            raise ArchiveError(f"{label} changed after publication: {path}") from exc
+        except ArchiveError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise ArchiveError(f"{label} changed after publication: {path}") from exc
+
+    @staticmethod
     def remove_created_output(path: Path, expected: tuple[int, int]) -> None:
-        """Remove *path* only while it still names the created output."""
+        """Remove an output by its legacy device and inode identity.
+
+        This compatibility method cannot distinguish an in-place rewrite. New
+        code should use :func:`remove_file_generation` with a content binding.
+        """
+        warnings.warn(
+            "WorkspaceArchive.remove_created_output() is deprecated because"
+            " device and inode identity does not bind file content. Use"
+            " remove_file_generation().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         try:
             with anchored_directory(path.parent) as parent_descriptor:
                 if parent_descriptor is None:
@@ -2227,9 +3267,12 @@ def create_archive(
     virtual_regular_members: tuple[str, ...] = (),
     capture_output: Callable[[ArchiveOutputCapture], None] | None = None,
     capture_sha256: bool = False,
+    capture_publication: Callable[[OutputFileGeneration], None] | None = None,
+    expected_output_parent_identity: DirectoryIdentity | None = None,
     expected_output_generation: OutputFileGeneration | None | object = (
         _CURRENT_ARCHIVE_OUTPUT_GENERATION
     ),
+    expected_output_sha256: str | None = None,
     dry_run: bool = False,
 ) -> Path:
     """Create a tar archive of the workspace at *root*.
@@ -2243,6 +3286,20 @@ def create_archive(
         raise ArchiveError("Archive output cannot be a symbolic link.")
     if expected_output_generation is _CURRENT_ARCHIVE_OUTPUT_GENERATION:
         expected_output_generation = regular_file_generation(output)
+    if (
+        expected_output_generation is not None
+        and expected_output_sha256 is None
+        and not dry_run
+    ):
+        expected_output_sha256, hashed_generation = regular_file_sha256(
+            output,
+            label="archive output",
+            maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
+        )
+        if hashed_generation != expected_output_generation:
+            raise ArchiveError(
+                f"Archive output changed before it was created: {output}"
+            )
     for package in bundle_packages or ():
         if output_paths_collide(output, package):
             raise ArchiveError(
@@ -2268,10 +3325,23 @@ def create_archive(
 
     compression = detect_compression(output)
 
-    with atomic_binary_writer(
-        output,
-        expected_generation=expected_output_generation,
-    ) as output_stream:
+    writer = (
+        atomic_binary_writer(
+            output,
+            expected_generation=expected_output_generation,
+            expected_sha256=expected_output_sha256,
+            capture_generation=capture_publication,
+        )
+        if expected_output_parent_identity is None
+        else atomic_binary_writer(
+            output,
+            expected_generation=expected_output_generation,
+            expected_sha256=expected_output_sha256,
+            expected_parent_identity=expected_output_parent_identity,
+            capture_generation=capture_publication,
+        )
+    )
+    with writer as output_stream:
         hashing_stream = _HashingWriter(output_stream) if capture_sha256 else None
         tar_output = (
             cast("BinaryIO", hashing_stream)
@@ -2944,9 +4014,23 @@ def open_stable_regular_file(
 
             with os.fdopen(descriptor, "rb") as stream:
                 descriptor = -1
+                bounded_stream = (
+                    stream
+                    if maximum_bytes is None
+                    else cast(
+                        "BinaryIO",
+                        _BoundedReader(
+                            stream,
+                            maximum_bytes=maximum_bytes,
+                            label=label,
+                        ),
+                    )
+                )
                 try:
-                    yield stream
-                finally:
+                    yield bounded_stream
+                except BaseException:
+                    raise
+                else:
                     final = os.fstat(stream.fileno())
                     try:
                         current = archive_leaf_stat(path, parent_descriptor)
@@ -2980,8 +4064,16 @@ def open_tar(archive_path: Path) -> Iterator[tarfile.TarFile]:
         label="Archive",
         maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
     ) as archive_stream:
+        bounded_archive_stream = cast(
+            "BinaryIO",
+            _BoundedReader(
+                archive_stream,
+                maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
+                label="Archive",
+            ),
+        )
         if compression == "zst" and not tarfile_supports_zstd():
-            with zstd_module().open(archive_stream, "rb") as compressed:
+            with zstd_module().open(bounded_archive_stream, "rb") as compressed:
                 with tarfile.open(
                     fileobj=compressed,
                     mode="r:",
@@ -2990,7 +4082,7 @@ def open_tar(archive_path: Path) -> Iterator[tarfile.TarFile]:
                     yield tf
             return
         with tarfile.open(  # ty: ignore[no-matching-overload]
-            fileobj=archive_stream,
+            fileobj=bounded_archive_stream,
             mode=f"r:{compression}",
             tarinfo=_BoundedTarInfo,
         ) as tf:
@@ -3467,11 +4559,15 @@ def file_sha256_with_generation(
             != expected_identity
         ):
             raise ArchiveError(f"{label} changed while opening: {path}")
-        digest = hashlib.sha256()
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
+        reader = _HashingReader(
+            stream,
+            maximum_bytes=maximum_bytes,
+            label=label,
+        )
+        for _chunk in iter(lambda: reader.read(1024 * 1024), b""):
+            pass
         generation = file_generation(opened)
-    return digest.hexdigest(), generation
+    return reader.digest.hexdigest(), generation
 
 
 def file_sha256(path: Path) -> str:

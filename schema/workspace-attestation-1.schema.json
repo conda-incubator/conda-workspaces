@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://conda-incubator.github.io/conda-workspaces/workspace-attestation-1.schema.json",
+  "title": "conda-workspaces workspace attestation v1",
+  "type": "object",
+  "required": ["_type", "subject", "predicateType", "predicate"],
+  "properties": {
+    "_type": {
+      "const": "https://in-toto.io/Statement/v1"
+    },
+    "subject": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [
+        {
+          "type": "object",
+          "required": ["name", "digest"],
+          "properties": {
+            "name": {
+              "enum": ["conda.toml", "pixi.toml", "pyproject.toml"]
+            },
+            "digest": {
+              "$ref": "#/$defs/digest"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["name", "digest"],
+          "properties": {
+            "name": {
+              "const": "conda.lock"
+            },
+            "digest": {
+              "$ref": "#/$defs/digest"
+            }
+          },
+          "additionalProperties": false
+        }
+      ],
+      "items": false
+    },
+    "predicateType": {
+      "const": "https://conda-incubator.github.io/conda-workspaces/workspace-attestation-1.schema.json"
+    },
+    "predicate": {
+      "type": "object",
+      "required": ["version", "workspace", "manifest", "lockfile"],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "workspace": {
+          "type": "object",
+          "required": ["manifest", "lockfile"],
+          "properties": {
+            "manifest": {
+              "enum": ["conda.toml", "pixi.toml", "pyproject.toml"]
+            },
+            "lockfile": {
+              "const": "conda.lock"
+            }
+          },
+          "additionalProperties": false
+        },
+        "manifest": {
+          "type": "object",
+          "required": ["format"],
+          "properties": {
+            "format": {
+              "enum": ["conda-toml", "pixi-toml", "pyproject-toml"]
+            }
+          },
+          "additionalProperties": false
+        },
+        "lockfile": {
+          "type": "object",
+          "required": ["format"],
+          "properties": {
+            "format": {
+              "const": "conda-workspaces-lock-v1"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "digest": {
+      "type": "object",
+      "required": ["sha256"],
+      "properties": {
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "allOf": [
+    {
+      "oneOf": [
+        {
+          "properties": {
+            "subject": {
+              "prefixItems": [
+                {
+                  "properties": {
+                    "name": { "const": "conda.toml" }
+                  }
+                }
+              ]
+            },
+            "predicate": {
+              "properties": {
+                "workspace": {
+                  "properties": {
+                    "manifest": { "const": "conda.toml" }
+                  }
+                },
+                "manifest": {
+                  "properties": {
+                    "format": { "const": "conda-toml" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "subject": {
+              "prefixItems": [
+                {
+                  "properties": {
+                    "name": { "const": "pixi.toml" }
+                  }
+                }
+              ]
+            },
+            "predicate": {
+              "properties": {
+                "workspace": {
+                  "properties": {
+                    "manifest": { "const": "pixi.toml" }
+                  }
+                },
+                "manifest": {
+                  "properties": {
+                    "format": { "const": "pixi-toml" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "subject": {
+              "prefixItems": [
+                {
+                  "properties": {
+                    "name": { "const": "pyproject.toml" }
+                  }
+                }
+              ]
+            },
+            "predicate": {
+              "properties": {
+                "workspace": {
+                  "properties": {
+                    "manifest": { "const": "pyproject.toml" }
+                  }
+                },
+                "manifest": {
+                  "properties": {
+                    "format": { "const": "pyproject-toml" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

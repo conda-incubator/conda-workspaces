@@ -70,6 +70,38 @@ def _add_workspace_channel_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_attestation_verification_options(
+    parser: argparse.ArgumentParser,
+    *,
+    verify_help: str | None,
+    attestation_help: str,
+) -> None:
+    """Add the shared bundle path and explicit signer policy options."""
+    if verify_help is not None:
+        parser.add_argument(
+            "--verify",
+            action="store_true",
+            default=False,
+            help=verify_help,
+        )
+    parser.add_argument(
+        "--attestation",
+        type=Path,
+        default=None,
+        help=attestation_help,
+    )
+    parser.add_argument(
+        "--cert-identity",
+        default=None,
+        help="Expected Sigstore certificate identity.",
+    )
+    parser.add_argument(
+        "--cert-oidc-issuer",
+        default=None,
+        help="Expected Sigstore certificate OIDC issuer.",
+    )
+
+
 def _handle_error(exc: CondaError) -> int:
     """Render a CondaError with Rich and return its exit code.
 
@@ -217,6 +249,15 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
             " the manifest."
         ),
     )
+    _add_attestation_verification_options(
+        install_parser,
+        verify_help=(
+            "Verify the workspace attestation before installing from the lockfile."
+        ),
+        attestation_help=(
+            "Sigstore bundle path (default: <workspace>/conda.lock.sigstore.json)."
+        ),
+    )
 
     lock_parser = sub.add_parser(
         "lock",
@@ -276,6 +317,53 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
             " multiple times; each value is treated as a glob"
             " (e.g. --merge 'conda.lock.*'). Cannot be combined with"
             " --environment, --platform, --skip-unsolvable, or --output."
+        ),
+    )
+    lock_parser.add_argument(
+        "--sign",
+        action="store_true",
+        default=False,
+        help="Sign the workspace manifest and generated canonical lockfile.",
+    )
+    lock_parser.add_argument(
+        "--attestation",
+        type=Path,
+        default=None,
+        help=(
+            "Sigstore bundle output path "
+            "(default: <workspace>/conda.lock.sigstore.json)."
+        ),
+    )
+
+    attest_parser = sub.add_parser(
+        "attest",
+        help="Sign the workspace manifest and canonical lockfile.",
+        add_help=False,
+    )
+    add_parser_help(attest_parser)
+    add_output_and_prompt_options(attest_parser)
+    attest_parser.add_argument(
+        "--attestation",
+        type=Path,
+        default=None,
+        help=(
+            "Sigstore bundle output path "
+            "(default: <workspace>/conda.lock.sigstore.json)."
+        ),
+    )
+
+    verify_parser = sub.add_parser(
+        "verify",
+        help="Verify the workspace manifest and lockfile attestation.",
+        add_help=False,
+    )
+    add_parser_help(verify_parser)
+    add_output_and_prompt_options(verify_parser)
+    _add_attestation_verification_options(
+        verify_parser,
+        verify_help=None,
+        attestation_help=(
+            "Sigstore bundle path (default: <workspace>/conda.lock.sigstore.json)."
         ),
     )
 
@@ -776,6 +864,18 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
             " Defaults to <archive>.receipt.json when PATH is omitted."
         ),
     )
+    archive_parser.add_argument(
+        "--sign",
+        action="store_true",
+        default=False,
+        help="Sign the exact archive receipt with Sigstore.",
+    )
+    archive_parser.add_argument(
+        "--attestation",
+        type=Path,
+        default=None,
+        help="Sigstore bundle output path (default: <archive>.sigstore.json).",
+    )
 
     unarchive_parser = sub.add_parser(
         "unarchive",
@@ -846,7 +946,12 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         "--require-sha256",
         action="store_true",
         default=False,
-        help="Require package records verified by --receipt to include SHA-256.",
+        help="Require verified package records to include SHA-256.",
+    )
+    _add_attestation_verification_options(
+        unarchive_parser,
+        verify_help="Verify the signed archive receipt before extraction.",
+        attestation_help="Sigstore bundle path (default: <archive>.sigstore.json).",
     )
 
     quickstart_parser = sub.add_parser(
@@ -1023,6 +1128,14 @@ def _dispatch_workspace(args: argparse.Namespace, subcmd: str) -> int:
         from .workspace.lock import execute_lock
 
         return execute_lock(args)
+    elif subcmd == "attest":
+        from .workspace.attest import execute_attest
+
+        return execute_attest(args)
+    elif subcmd == "verify":
+        from .workspace.attest import execute_verify
+
+        return execute_verify(args)
     elif subcmd == "export":
         from .workspace.export import execute_export
 

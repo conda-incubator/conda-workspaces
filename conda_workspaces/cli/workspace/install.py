@@ -6,8 +6,15 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from conda.exceptions import CondaValueError
 from rich.console import Console
 
+from ...attestations import (
+    SignerPolicy,
+    default_attestation_path,
+    read_attestation_bundle,
+    verify_workspace_snapshot,
+)
 from ...context import isolated_package_cache
 from ...exceptions import (
     CondaWorkspacesError,
@@ -22,9 +29,11 @@ from ...lockfile import (
     lockfile_path,
     lockfile_status,
 )
+from ...manifests import find_parser
+from ...manifests.base import MAX_MANIFEST_BYTES
 from ...models import LockfileStatus
 from ...paths import read_regular_file_bytes
-from ...publication import WorkspacePublication
+from ...publication import WorkspacePublication, WorkspaceSnapshot
 from .. import status
 from . import workspace_context_from_args
 from .sync import sync_environments
@@ -52,8 +61,29 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
     locked = getattr(args, "locked", False)
     frozen = getattr(args, "frozen", False)
     no_lock = getattr(args, "no_lock", False)
+    verify = bool(getattr(args, "verify", False))
     prefix = getattr(args, "prefix", None)
     target_prefix_override = getattr(args, "target_prefix_override", None)
+    attestation_path: Path | None = getattr(args, "attestation", None)
+    cert_identity: str | None = getattr(args, "cert_identity", None)
+    cert_oidc_issuer: str | None = getattr(args, "cert_oidc_issuer", None)
+    if verify and not (locked or frozen):
+        raise CondaValueError("--verify requires --locked or --frozen.")
+    if not verify and any(
+        value is not None
+        for value in (attestation_path, cert_identity, cert_oidc_issuer)
+    ):
+        raise CondaValueError(
+            "--attestation, --cert-identity, and --cert-oidc-issuer require --verify."
+        )
+    signer_policy = SignerPolicy.from_values(
+        cert_identity,
+        cert_oidc_issuer,
+    )
+    if verify and signer_policy is None:
+        raise CondaValueError(
+            "--verify requires --cert-identity and --cert-oidc-issuer."
+        )
     WorkspacePublication.validate_manifest_path(Path(config.manifest_path))
     publication = (
         None if dry_run else WorkspacePublication.from_current_manifest(ctx, "install")
@@ -62,6 +92,49 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
         publication.validate_manifest_generation if publication is not None else None
     )
     read_lockfile = publication.read_lockfile_bytes if publication is not None else None
+    manifest_path = Path(config.manifest_path)
+    manifest_format = find_parser(manifest_path).exporter_format
+    workspace_lockfile = lockfile_path(ctx)
+
+    def verify_lockfile(lockfile_bytes: bytes) -> None:
+        if not verify or signer_policy is None:
+            return
+        if publication is not None:
+            snapshot = publication.snapshot_with_lockfile_bytes(
+                manifest_format,
+                lockfile_bytes,
+            )
+        else:
+            manifest_bytes = read_regular_file_bytes(
+                manifest_path,
+                maximum_bytes=MAX_MANIFEST_BYTES,
+                label="workspace manifest",
+            )
+            if (
+                config._manifest_text is not None
+                and manifest_bytes.decode("utf-8") != config._manifest_text
+            ):
+                raise CondaValueError(
+                    "Workspace manifest changed before attestation verification."
+                )
+            snapshot = WorkspaceSnapshot.from_bytes(
+                root=ctx.root,
+                manifest_path=manifest_path,
+                manifest_bytes=manifest_bytes,
+                manifest_format=manifest_format,
+                lockfile_path=workspace_lockfile,
+                lockfile_bytes=lockfile_bytes,
+            )
+        verification = verify_workspace_snapshot(
+            read_attestation_bundle(
+                attestation_path or default_attestation_path(workspace_lockfile)
+            ),
+            snapshot,
+            signer_policy,
+        )
+        verification.require_authorized()
+        if publication is not None:
+            publication.validate_snapshot(snapshot)
 
     use_lockfile = frozen
     if not frozen:
@@ -104,6 +177,7 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
                 validate_current=not frozen,
                 validate_workspace=validate_workspace,
                 read_lockfile=read_lockfile,
+                verify_lockfile=verify_lockfile if verify else None,
             )
 
         env_names = [env_name] if env_name else list(config.environments.keys())
@@ -135,6 +209,7 @@ def install_from_lockfile_all(
     validate_current: bool = False,
     validate_workspace: Callable[[], None] | None = None,
     read_lockfile: Callable[[], bytes] | None = None,
+    verify_lockfile: Callable[[bytes], None] | None = None,
 ) -> int:
     """Install environments from existing lockfiles (no solving)."""
     if (prefix is not None or target_prefix_override is not None) and not env_name:
@@ -152,7 +227,7 @@ def install_from_lockfile_all(
     try:
         if validate_workspace is not None:
             validate_workspace()
-        lockfile_data = load_lockfile_data(
+        lockfile_bytes = (
             read_lockfile()
             if read_lockfile is not None
             else read_regular_file_bytes(
@@ -161,6 +236,9 @@ def install_from_lockfile_all(
                 label="workspace lockfile",
             )
         )
+        if verify_lockfile is not None:
+            verify_lockfile(lockfile_bytes)
+        lockfile_data = load_lockfile_data(lockfile_bytes)
         if validate_workspace is not None:
             validate_workspace()
     except (OSError, ValueError) as exc:

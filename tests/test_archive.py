@@ -15,8 +15,13 @@ from typing import TYPE_CHECKING
 import pytest
 from conda.base.context import context as conda_context
 from conda.core.package_cache_data import PackageCacheData
+from conda_sigstore.evidence import SignerIdentity
+from conda_sigstore.statements import InTotoStatement
+from conda_sigstore.verification import VerifiedStatement
 
 import conda_workspaces.archive as archive_module
+import conda_workspaces.attestations as attestations_module
+import conda_workspaces.lockfile as lockfile_module
 import conda_workspaces.paths as paths_module
 from conda_workspaces.archive import (
     ALLOWED_TAR_TYPES,
@@ -36,21 +41,39 @@ from conda_workspaces.archive import (
     validate_tar_members,
     verify_package_hashes,
 )
+from conda_workspaces.attestations import SignerPolicy
 from conda_workspaces.context import WorkspaceContext
 from conda_workspaces.exceptions import (
     ArchiveError,
     ArchiveHashMismatchError,
     ArchivePathTraversalError,
+    AttestationError,
     CondaWorkspacesError,
+    FileRecoveryError,
 )
 from conda_workspaces.manifests import detect_and_parse
 from conda_workspaces.models import ArchiveConfig
 from conda_workspaces.receipts import ArchiveReceipt
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
+    from typing import Any
 
+    from conda_workspaces.receipts import VerifiedArchiveWorkspace
     from tests.conftest import SnapshotTree
+
+
+def verified_receipt(
+    payload: bytes,
+    signer: SignerIdentity,
+) -> VerifiedStatement:
+    """Return cryptographic evidence without invoking the Sigstore service."""
+    return VerifiedStatement(
+        statement=InTotoStatement.from_payload(payload),
+        payload=payload,
+        signer=signer,
+        timestamps=(),
+    )
 
 
 @pytest.fixture
@@ -208,6 +231,25 @@ packages: []
     (root / "src").mkdir()
     (root / "src" / "app.py").write_text("print('hello')\n", encoding="utf-8")
     return root
+
+
+@pytest.fixture
+def signed_receipt_archive(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+) -> tuple[WorkspaceArchive, bytes]:
+    """Create an archive with a placeholder bundle for its exact receipt."""
+    created = WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=tmp_path / "signed-workspace.tar.gz",
+        receipt=True,
+    )
+    assert created.receipt_path is not None
+    payload = created.receipt_path.read_bytes()
+    created.receipt_path.unlink()
+    attestation_path = WorkspaceArchive.default_attestation_path(created.path)
+    attestation_path.write_bytes(b'{"bundle": true}\n')
+    return WorkspaceArchive(created.path, attestation=True), payload
 
 
 @pytest.fixture
@@ -1580,6 +1622,104 @@ def test_workspace_archive_create_writes_receipt(
     assert archive.verify().workspace_paths == ("conda.toml", "conda.lock")
 
 
+@pytest.mark.parametrize(
+    "explicit_attestation",
+    [False, True],
+    ids=["default-sidecar", "nested-sidecar"],
+)
+def test_workspace_archive_signs_exact_archive_receipt(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    explicit_attestation: bool,
+) -> None:
+    output = tmp_path / "workspace.tar.gz"
+    attestation = (
+        tmp_path / "nested" / "workspace.sigstore.json"
+        if explicit_attestation
+        else None
+    )
+    signed_payloads: list[bytes] = []
+    bundle_json = '{"bundle": true}'
+
+    def sign(payload: bytes) -> str:
+        signed_payloads.append(payload)
+        return bundle_json
+
+    monkeypatch.setattr(attestations_module, "sign_attestation_payload", sign)
+
+    archive = WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=output,
+        sign=True,
+        attestation=attestation,
+    )
+
+    assert len(signed_payloads) == 1
+    receipt = ArchiveReceipt.from_payload(signed_payloads[0])
+    receipt.verify_archive(archive.path)
+    assert receipt.workspace_paths == ("conda.toml", "conda.lock")
+    assert archive.receipt_path is None
+    assert archive.attestation_path == (
+        attestation.absolute()
+        if attestation is not None
+        else WorkspaceArchive.default_attestation_path(archive.path)
+    )
+    assert archive.attestation_path.read_text(encoding="utf-8") == f"{bundle_json}\n"
+    with open_tar(archive.path) as tar:
+        assert archive.attestation_path.name not in tar.getnames()
+
+
+def test_workspace_archive_sign_and_receipt_use_same_statement(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signed_payloads: list[bytes] = []
+    monkeypatch.setattr(
+        attestations_module,
+        "sign_attestation_payload",
+        lambda payload: signed_payloads.append(payload) or '{"bundle": true}',
+    )
+
+    archive = WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=tmp_path / "workspace.tar.gz",
+        receipt=True,
+        sign=True,
+    )
+
+    assert archive.receipt_path is not None
+    assert ArchiveReceipt.load(archive.receipt_path).statement == (
+        ArchiveReceipt.from_payload(signed_payloads[0]).statement
+    )
+
+
+def test_workspace_archive_sign_dry_run_does_not_request_oidc(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "workspace.tar.gz"
+
+    def fail_sign(_payload: bytes) -> str:
+        raise AssertionError("dry-run requested OIDC")
+
+    monkeypatch.setattr(attestations_module, "sign_attestation_payload", fail_sign)
+
+    archive = WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=output,
+        sign=True,
+        dry_run=True,
+    )
+
+    assert archive.path == output.resolve()
+    assert not output.exists()
+    assert archive.attestation_path is not None
+    assert not archive.attestation_path.exists()
+
+
 def test_workspace_archive_build_receipt_uses_legacy_signature(
     workspace_archive_project: Path,
 ) -> None:
@@ -1952,26 +2092,38 @@ def test_create_archive_preserves_existing_output_on_write_failure(
     assert output.read_bytes() == b"existing archive"
 
 
-@pytest.mark.parametrize("mutation", ["replace", "rewrite"])
-def test_create_archive_rejects_changed_validated_output_generation(
+@pytest.mark.parametrize(
+    ("mutation", "preserve_generation"),
+    [
+        ("replace", False),
+        ("rewrite", False),
+        ("rewrite", True),
+    ],
+    ids=["replace", "rewrite", "same-generation-rewrite"],
+)
+def test_create_archive_rejects_changed_validated_output(
     project_dir: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     mutation: str,
+    preserve_generation: bool,
 ) -> None:
     output = tmp_path / "workspace.tar.gz"
-    output.write_bytes(b"existing archive")
-    concurrent_content = b"concurrent archive generation"
+    original_content = b"existing archive"
+    concurrent_content = b"changed archive!"
+    output.write_bytes(original_content)
     original_atomic_binary_writer = archive_module.atomic_binary_writer
 
     @contextmanager
-    def mutate_before_write(path: Path, **kwargs):
+    def mutate_before_write(path: Path, **kwargs: Any):
         if mutation == "replace":
             replacement = output.with_name("replacement.tar.gz")
             replacement.write_bytes(concurrent_content)
             replacement.replace(output)
         else:
             output.write_bytes(concurrent_content)
+        if preserve_generation:
+            kwargs["expected_generation"] = paths_module.regular_file_generation(output)
         with original_atomic_binary_writer(path, **kwargs) as stream:
             yield stream
 
@@ -1984,6 +2136,7 @@ def test_create_archive_rejects_changed_validated_output_generation(
     with pytest.raises(ValueError, match="changed before writing"):
         create_archive(project_dir, output, ArchiveConfig())
 
+    assert len(concurrent_content) == len(original_content)
     assert output.read_bytes() == concurrent_content
 
 
@@ -2049,6 +2202,7 @@ def test_workspace_archive_extract_rejects_receipt_bound_manifest_symlink(
         ("manifest-symlink", "symbolic links are not supported"),
         ("archive-symlink", "cannot be a symbolic link"),
         ("receipt-hardlink", "archived workspace input"),
+        ("attestation-hardlink", "archived workspace input"),
     ],
 )
 def test_workspace_archive_create_dry_run_rejects_unsafe_aliases(
@@ -2061,6 +2215,7 @@ def test_workspace_archive_create_dry_run_rejects_unsafe_aliases(
     source = workspace_archive_project / "src" / "app.py"
     output = tmp_path / "workspace.tar.gz"
     receipt = None
+    attestation = None
     if unsafe_alias == "manifest-symlink":
         manifest = workspace_archive_project / "conda.toml"
         target = tmp_path / "outside-manifest"
@@ -2068,9 +2223,12 @@ def test_workspace_archive_create_dry_run_rejects_unsafe_aliases(
         manifest.symlink_to(target)
     elif unsafe_alias == "archive-symlink":
         output.symlink_to(source)
-    else:
+    elif unsafe_alias == "receipt-hardlink":
         receipt = workspace_archive_project / "receipt.json"
         receipt.hardlink_to(source)
+    else:
+        attestation = workspace_archive_project / "archive.sigstore.json"
+        attestation.hardlink_to(source)
     before = snapshot_tree(tmp_path)
 
     with pytest.raises(ArchiveError, match=message):
@@ -2078,6 +2236,8 @@ def test_workspace_archive_create_dry_run_rejects_unsafe_aliases(
             workspace=workspace_archive_project,
             output=output,
             receipt=receipt,
+            sign=attestation is not None,
+            attestation=attestation,
             dry_run=True,
         )
 
@@ -2544,12 +2704,20 @@ def test_workspace_archive_rejects_post_publication_replacement(
     assert not receipt_path.exists()
 
 
-@pytest.mark.parametrize("race", ["rewrite", "replace"])
+@pytest.mark.parametrize(
+    ("race", "expected_output"),
+    [
+        ("rewrite", b"rewritten archive"),
+        ("replace", b"replacement archive"),
+    ],
+    ids=["rewrite", "replace"],
+)
 def test_workspace_archive_receipt_rejects_changed_archive_output(
     workspace_archive_project: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     race: str,
+    expected_output: bytes,
 ) -> None:
     output = tmp_path / "workspace.tar.gz"
     receipt_path = ArchiveReceipt.default_path(output)
@@ -2578,11 +2746,749 @@ def test_workspace_archive_receipt_rejects_changed_archive_output(
             receipt=True,
         )
 
-    if race == "replace":
-        assert output.read_bytes() == b"replacement archive"
-    else:
-        assert not output.exists()
+    assert output.read_bytes() == expected_output
     assert not receipt_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("race", "expected_output"),
+    [
+        ("rewrite", b"rewritten archive"),
+        ("replace", b"replacement archive"),
+    ],
+    ids=["rewrite", "replace"],
+)
+def test_workspace_archive_sign_rejects_changed_archive_output(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    race: str,
+    expected_output: bytes,
+) -> None:
+    output = tmp_path / "workspace.tar.gz"
+    attestation_path = WorkspaceArchive.default_attestation_path(output)
+
+    def change_archive_during_sign(_payload: bytes) -> str:
+        if race == "rewrite":
+            output.write_bytes(b"rewritten archive")
+        else:
+            replacement = tmp_path / "replacement.tar.gz"
+            replacement.write_bytes(b"replacement archive")
+            os.replace(replacement, output)
+        return '{"bundle": true}'
+
+    monkeypatch.setattr(
+        attestations_module,
+        "sign_attestation_payload",
+        change_archive_during_sign,
+    )
+
+    with pytest.raises(ArchiveError, match="Archive output changed"):
+        WorkspaceArchive.create(
+            workspace=workspace_archive_project,
+            output=output,
+            sign=True,
+        )
+
+    assert output.read_bytes() == expected_output
+    assert not attestation_path.exists()
+
+
+def test_workspace_archive_sign_failure_preserves_existing_outputs(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "workspace.tar.gz"
+    receipt_path = ArchiveReceipt.default_path(output)
+    attestation_path = WorkspaceArchive.default_attestation_path(output)
+    existing = {
+        output: b"existing archive\n",
+        receipt_path: b"existing receipt\n",
+        attestation_path: b"existing attestation\n",
+    }
+    for path, content in existing.items():
+        path.write_bytes(content)
+
+    def fail_sign(_payload: bytes) -> str:
+        raise AttestationError("signing failed")
+
+    monkeypatch.setattr(attestations_module, "sign_attestation_payload", fail_sign)
+
+    with pytest.raises(AttestationError, match="signing failed"):
+        WorkspaceArchive.create(
+            workspace=workspace_archive_project,
+            output=output,
+            receipt=True,
+            sign=True,
+        )
+
+    assert {path: path.read_bytes() for path in existing} == existing
+
+
+@pytest.mark.parametrize(
+    "swapped_output",
+    ["archive", "receipt"],
+    ids=["archive-parent", "receipt-parent"],
+)
+def test_workspace_archive_sign_rejects_output_parent_swap(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    swapped_output: str,
+) -> None:
+    archive_parent = tmp_path / "archive-output"
+    receipt_parent = tmp_path / "receipt-output"
+    attestation_parent = tmp_path / "attestation-output"
+    for parent in (archive_parent, receipt_parent, attestation_parent):
+        parent.mkdir()
+    output = archive_parent / "workspace.tar.gz"
+    receipt_path = receipt_parent / "workspace.receipt.json"
+    attestation_path = attestation_parent / "workspace.sigstore.json"
+    selected_parent = archive_parent if swapped_output == "archive" else receipt_parent
+    displaced_parent = tmp_path / f"displaced-{swapped_output}"
+    marker = b"concurrent parent\n"
+
+    def swap_parent(_payload: bytes) -> str:
+        selected_parent.rename(displaced_parent)
+        selected_parent.mkdir()
+        (selected_parent / "marker").write_bytes(marker)
+        return '{"bundle": true}'
+
+    monkeypatch.setattr(attestations_module, "sign_attestation_payload", swap_parent)
+
+    with pytest.raises(ArchiveError, match="changed before publication"):
+        WorkspaceArchive.create(
+            workspace=workspace_archive_project,
+            output=output,
+            receipt=receipt_path,
+            sign=True,
+            attestation=attestation_path,
+        )
+
+    assert {path.name for path in selected_parent.iterdir()} == {"marker"}
+    assert (selected_parent / "marker").read_bytes() == marker
+    assert not attestation_path.exists()
+    assert not output.exists()
+    assert not receipt_path.exists()
+
+
+@pytest.mark.parametrize(
+    "replaced_output",
+    ["archive", "receipt", "attestation"],
+    ids=["archive", "receipt", "attestation"],
+)
+def test_workspace_archive_sign_rejects_final_output_replacement(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replaced_output: str,
+) -> None:
+    output = tmp_path / "workspace.tar.gz"
+    receipt_path = ArchiveReceipt.default_path(output)
+    attestation_path = WorkspaceArchive.default_attestation_path(output)
+    existing = {
+        output: b"existing archive\n",
+        receipt_path: b"existing receipt\n",
+        attestation_path: b"existing attestation\n",
+    }
+    for path, content in existing.items():
+        path.write_bytes(content)
+    replacement_content = f"concurrent {replaced_output}\n".encode()
+
+    monkeypatch.setattr(
+        attestations_module,
+        "sign_attestation_payload",
+        lambda payload: '{"bundle": true}',
+    )
+    if replaced_output in {"archive", "receipt"}:
+        original_write = attestations_module.AttestationOutput.write
+        replaced_path = output if replaced_output == "archive" else receipt_path
+
+        def replace_after_attestation_write(
+            self: attestations_module.AttestationOutput,
+            bundle_json: str,
+        ) -> Path:
+            result = original_write(self, bundle_json)
+            replacement = tmp_path / f"replacement-{replaced_output}"
+            replacement.write_bytes(replacement_content)
+            replacement.replace(replaced_path)
+            return result
+
+        monkeypatch.setattr(
+            attestations_module.AttestationOutput,
+            "write",
+            replace_after_attestation_write,
+        )
+    else:
+        original_capture = WorkspaceArchive.capture_published_output
+
+        def replace_after_attestation_capture(path: Path, **kwargs):
+            result = original_capture(path, **kwargs)
+            if kwargs["label"] == "Attestation output":
+                replacement = tmp_path / "replacement-attestation.json"
+                replacement.write_bytes(replacement_content)
+                replacement.replace(attestation_path)
+            return result
+
+        monkeypatch.setattr(
+            WorkspaceArchive,
+            "capture_published_output",
+            staticmethod(replace_after_attestation_capture),
+        )
+
+    with pytest.raises(ArchiveError, match=f"{replaced_output.title()} output changed"):
+        WorkspaceArchive.create(
+            workspace=workspace_archive_project,
+            output=output,
+            receipt=True,
+            sign=True,
+        )
+
+    replaced_path = {
+        "archive": output,
+        "receipt": receipt_path,
+        "attestation": attestation_path,
+    }[replaced_output]
+    assert replaced_path.read_bytes() == replacement_content
+    for path, content in existing.items():
+        if path != replaced_path:
+            assert path.read_bytes() == content
+
+
+@pytest.mark.parametrize(
+    "rewritten_output",
+    ["archive", "receipt"],
+    ids=["archive", "receipt"],
+)
+def test_workspace_archive_sign_binds_existing_output_digests(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rewritten_output: str,
+) -> None:
+    output = tmp_path / "workspace.tar.gz"
+    receipt_path = ArchiveReceipt.default_path(output)
+    existing = {
+        output: b"existing archive",
+        receipt_path: b"existing receipt",
+    }
+    concurrent = {
+        output: b"changed archive!",
+        receipt_path: b"changed receipt!",
+    }
+    for path, content in existing.items():
+        path.write_bytes(content)
+        assert len(concurrent[path]) == len(content)
+    monkeypatch.setattr(
+        attestations_module,
+        "sign_attestation_payload",
+        lambda payload: '{"bundle": true}',
+    )
+
+    target = output if rewritten_output == "archive" else receipt_path
+    if rewritten_output == "archive":
+        original_writer = archive_module.atomic_binary_writer
+
+        @contextmanager
+        def rewrite_archive_before_publication(path: Path, **kwargs):
+            if path == target:
+                target.write_bytes(concurrent[target])
+                kwargs["expected_generation"] = paths_module.regular_file_generation(
+                    target
+                )
+            with original_writer(path, **kwargs) as stream:
+                yield stream
+
+        monkeypatch.setattr(
+            archive_module,
+            "atomic_binary_writer",
+            rewrite_archive_before_publication,
+        )
+    else:
+        original_receipt_write = ArchiveReceipt.write
+
+        def rewrite_receipt_before_publication(
+            self: ArchiveReceipt,
+            path: Path,
+            **kwargs: Any,
+        ) -> Path:
+            target.write_bytes(concurrent[target])
+            kwargs["expected_generation"] = paths_module.regular_file_generation(target)
+            return original_receipt_write(self, path, **kwargs)
+
+        monkeypatch.setattr(
+            ArchiveReceipt,
+            "write",
+            rewrite_receipt_before_publication,
+        )
+
+    with pytest.raises(ArchiveError, match="changed before publication"):
+        WorkspaceArchive.create(
+            workspace=workspace_archive_project,
+            output=output,
+            receipt=True,
+            sign=True,
+        )
+
+    assert target.read_bytes() == concurrent[target]
+    for path, content in existing.items():
+        if path != target:
+            assert path.read_bytes() == content
+    assert not WorkspaceArchive.default_attestation_path(output).exists()
+
+
+def test_require_published_output_rechecks_digest_when_generation_is_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "archive.tar.gz"
+    original = b"AAAA"
+    path.write_bytes(original)
+    generation = paths_module.regular_file_generation(path)
+    assert generation is not None
+    parent_identity = paths_module.capture_directory_identity(path.parent)
+    initial = path.stat()
+    path.write_bytes(b"BBBB")
+    os.utime(path, ns=(initial.st_atime_ns, initial.st_mtime_ns))
+    monkeypatch.setattr(
+        archive_module,
+        "regular_file_generation",
+        lambda candidate: generation,
+    )
+
+    with pytest.raises(ArchiveError, match="Archive output changed") as exc_info:
+        WorkspaceArchive.require_published_output(
+            path,
+            expected_generation=generation,
+            expected_sha256=hashlib.sha256(original).hexdigest(),
+            maximum_bytes=len(original),
+            expected_parent_identity=parent_identity,
+            label="Archive output",
+        )
+    assert isinstance(exc_info.value.__cause__, ArchiveHashMismatchError)
+
+
+@pytest.mark.parametrize(
+    "previous_content",
+    [None, b"previous archive"],
+    ids=["remove", "restore"],
+)
+@pytest.mark.parametrize(
+    "digest_matches",
+    [True, False],
+    ids=["matching-digest", "mismatched-digest"],
+)
+def test_restore_published_output_requires_matching_digest(
+    tmp_path: Path,
+    previous_content: bytes | None,
+    digest_matches: bool,
+) -> None:
+    path = tmp_path / "archive.tar.gz"
+    content = b"published archive"
+    path.write_bytes(content)
+    generation = paths_module.regular_file_generation(path)
+    assert generation is not None
+    parent_identity = paths_module.capture_directory_identity(path.parent)
+    backup = None
+    if previous_content is not None:
+        backup = tmp_path / "previous.tar.gz"
+        backup.write_bytes(previous_content)
+    published_content = content if digest_matches else b"different archive"
+
+    restored = WorkspaceArchive.restore_published_output(
+        path,
+        published_generation=generation,
+        published_sha256=hashlib.sha256(published_content).hexdigest(),
+        backup=backup,
+        maximum_bytes=1024,
+        label="Archive output",
+        expected_parent_identity=parent_identity,
+    )
+
+    assert restored is digest_matches
+    if not digest_matches:
+        assert path.read_bytes() == content
+    elif previous_content is None:
+        assert not path.exists()
+    else:
+        assert path.read_bytes() == previous_content
+
+
+@pytest.mark.parametrize("replace", [False, True], ids=["matching", "replaced"])
+def test_remove_created_output_preserves_legacy_signature(
+    tmp_path: Path,
+    replace: bool,
+) -> None:
+    path = tmp_path / "archive.tar.gz"
+    path.write_bytes(b"created archive")
+    current = path.stat()
+    expected = current.st_dev, current.st_ino
+    if replace:
+        replacement = tmp_path / "replacement.tar.gz"
+        replacement.write_bytes(b"replacement archive")
+        replacement.replace(path)
+
+    with pytest.deprecated_call(match="does not bind file content"):
+        WorkspaceArchive.remove_created_output(path, expected)
+
+    assert path.exists() is replace
+
+
+@pytest.mark.parametrize(
+    "previous_content",
+    [None, b"previous archive"],
+    ids=["remove-new", "restore-existing"],
+)
+def test_restore_published_output_reports_recovery_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    previous_content: bytes | None,
+) -> None:
+    path = tmp_path / "archive.tar.gz"
+    recovery = tmp_path / ".archive.tar.gz.recovery.rollback"
+    claimant = b"claimant archive"
+    content = b"published archive"
+    path.write_bytes(content)
+    generation = paths_module.regular_file_generation(path)
+    assert generation is not None
+    parent_identity = paths_module.capture_directory_identity(path.parent)
+    backup = None
+    if previous_content is not None:
+        backup = tmp_path / "previous.tar.gz"
+        backup.write_bytes(previous_content)
+
+    def fail_removal(*args: Any, **kwargs: Any) -> bool:
+        path.rename(recovery)
+        path.write_bytes(claimant)
+        raise FileRecoveryError(path, recovery, "Removal failed.")
+
+    @contextmanager
+    def fail_restore(*args: Any, **kwargs: Any) -> Iterator[io.BytesIO]:
+        yield io.BytesIO()
+        path.rename(recovery)
+        path.write_bytes(claimant)
+        raise FileRecoveryError(path, recovery, "Restore failed.")
+
+    if backup is None:
+        monkeypatch.setattr(archive_module, "remove_file_generation", fail_removal)
+    else:
+        monkeypatch.setattr(archive_module, "atomic_binary_writer", fail_restore)
+
+    with pytest.raises(FileRecoveryError) as exc_info:
+        WorkspaceArchive.restore_published_output(
+            path,
+            published_generation=generation,
+            published_sha256=hashlib.sha256(content).hexdigest(),
+            backup=backup,
+            maximum_bytes=1024,
+            label="Archive output",
+            expected_parent_identity=parent_identity,
+        )
+
+    assert path.read_bytes() == claimant
+    assert recovery.read_bytes() == content
+    assert exc_info.value.recovery_path == recovery
+    if backup is not None:
+        assert backup.read_bytes() == previous_content
+
+
+@pytest.mark.parametrize(
+    "previous_attestation",
+    [None, b"existing attestation\n"],
+    ids=["missing", "existing"],
+)
+def test_workspace_archive_sign_restores_attestation_after_post_publish_failure(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    previous_attestation: bytes | None,
+) -> None:
+    output = tmp_path / "workspace.tar.gz"
+    receipt_path = ArchiveReceipt.default_path(output)
+    attestation_path = WorkspaceArchive.default_attestation_path(output)
+    existing = {
+        output: b"existing archive\n",
+        receipt_path: b"existing receipt\n",
+    }
+    for path, content in existing.items():
+        path.write_bytes(content)
+    if previous_attestation is not None:
+        attestation_path.write_bytes(previous_attestation)
+    monkeypatch.setattr(
+        attestations_module,
+        "sign_attestation_payload",
+        lambda payload: '{"bundle": true}',
+    )
+    original_publish = attestations_module.AttestationOutput._publish_content
+    failed = False
+
+    def publish_then_fail(
+        self: attestations_module.AttestationOutput,
+        content: bytes,
+        *,
+        expected_generation: Any,
+        expected_sha256: str | None,
+    ) -> tuple[bytes, paths_module.FileGeneration]:
+        nonlocal failed
+        result = original_publish(
+            self,
+            content,
+            expected_generation=expected_generation,
+            expected_sha256=expected_sha256,
+        )
+        if not failed:
+            failed = True
+            raise ValueError("post-publication validation failed")
+        return result
+
+    monkeypatch.setattr(
+        attestations_module.AttestationOutput,
+        "_publish_content",
+        publish_then_fail,
+    )
+
+    with pytest.raises(AttestationError, match="changed before publication"):
+        WorkspaceArchive.create(
+            workspace=workspace_archive_project,
+            output=output,
+            receipt=True,
+            sign=True,
+        )
+
+    assert failed is True
+    assert {path: path.read_bytes() for path in existing} == existing
+    if previous_attestation is None:
+        assert not attestation_path.exists()
+    else:
+        assert attestation_path.read_bytes() == previous_attestation
+
+
+@pytest.mark.parametrize(
+    "previous_archive",
+    [None, b"existing archive\n"],
+    ids=["missing", "existing"],
+)
+def test_workspace_archive_sign_restores_archive_after_post_publish_failure(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    previous_archive: bytes | None,
+) -> None:
+    output = tmp_path / "workspace.tar.gz"
+    if previous_archive is not None:
+        output.write_bytes(previous_archive)
+    original_writer = archive_module.atomic_binary_writer
+
+    @contextmanager
+    def fail_after_archive_publication(path: Path, **kwargs):
+        with original_writer(path, **kwargs) as stream:
+            yield stream
+        if path == output:
+            raise OSError("post-publication validation failed")
+
+    monkeypatch.setattr(
+        archive_module,
+        "atomic_binary_writer",
+        fail_after_archive_publication,
+    )
+    monkeypatch.setattr(
+        attestations_module,
+        "sign_attestation_payload",
+        lambda payload: '{"bundle": true}',
+    )
+
+    with pytest.raises(ArchiveError, match="cannot be published safely"):
+        WorkspaceArchive.create(
+            workspace=workspace_archive_project,
+            output=output,
+            receipt=True,
+            sign=True,
+        )
+
+    if previous_archive is None:
+        assert not output.exists()
+    else:
+        assert output.read_bytes() == previous_archive
+    assert not ArchiveReceipt.default_path(output).exists()
+    assert not WorkspaceArchive.default_attestation_path(output).exists()
+
+
+@pytest.mark.parametrize(
+    "previous_receipt",
+    [None, b"existing receipt\n"],
+    ids=["missing", "existing"],
+)
+def test_workspace_archive_sign_restores_receipt_after_post_publish_failure(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    previous_receipt: bytes | None,
+) -> None:
+    output = tmp_path / "workspace.tar.gz"
+    output.write_bytes(b"existing archive\n")
+    receipt_path = ArchiveReceipt.default_path(output)
+    if previous_receipt is not None:
+        receipt_path.write_bytes(previous_receipt)
+    original_write = ArchiveReceipt.write
+    failed = False
+
+    def fail_after_receipt_publication(
+        self: ArchiveReceipt,
+        path: Path,
+        **kwargs,
+    ) -> Path:
+        nonlocal failed
+        result = original_write(self, path, **kwargs)
+        if not failed:
+            failed = True
+            raise OSError("post-publication validation failed")
+        return result
+
+    monkeypatch.setattr(ArchiveReceipt, "write", fail_after_receipt_publication)
+    monkeypatch.setattr(
+        attestations_module,
+        "sign_attestation_payload",
+        lambda payload: '{"bundle": true}',
+    )
+
+    with pytest.raises(ArchiveError, match="changed before publication"):
+        WorkspaceArchive.create(
+            workspace=workspace_archive_project,
+            output=output,
+            receipt=True,
+            sign=True,
+        )
+
+    assert failed is True
+    assert output.read_bytes() == b"existing archive\n"
+    if previous_receipt is None:
+        assert not receipt_path.exists()
+    else:
+        assert receipt_path.read_bytes() == previous_receipt
+    assert not WorkspaceArchive.default_attestation_path(output).exists()
+
+
+@pytest.mark.parametrize(
+    "shared_basename",
+    [False, True],
+    ids=["default-output-names", "shared-output-basename"],
+)
+def test_workspace_archive_attestation_failure_restores_published_outputs(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shared_basename: bool,
+) -> None:
+    if shared_basename:
+        output = tmp_path / "archive" / "workspace.tar.gz"
+        receipt_path = tmp_path / "receipt" / "workspace.tar.gz"
+        attestation_path = tmp_path / "attestation" / "workspace.tar.gz"
+        for parent in (output.parent, receipt_path.parent, attestation_path.parent):
+            parent.mkdir()
+        receipt: bool | Path = receipt_path
+        attestation = attestation_path
+    else:
+        output = tmp_path / "workspace.tar.gz"
+        receipt_path = ArchiveReceipt.default_path(output)
+        attestation_path = WorkspaceArchive.default_attestation_path(output)
+        receipt = True
+        attestation = None
+    existing = {
+        output: b"existing archive\n",
+        receipt_path: b"existing receipt\n",
+        attestation_path: b"existing attestation\n",
+    }
+    for path, content in existing.items():
+        path.write_bytes(content)
+
+    monkeypatch.setattr(
+        attestations_module,
+        "sign_attestation_payload",
+        lambda payload: '{"bundle": true}',
+    )
+
+    def fail_attestation_publication(self, bundle: str) -> Path:
+        raise AttestationError("attestation publication failed")
+
+    monkeypatch.setattr(
+        attestations_module.AttestationOutput,
+        "write",
+        fail_attestation_publication,
+    )
+
+    with pytest.raises(AttestationError, match="attestation publication failed"):
+        WorkspaceArchive.create(
+            workspace=workspace_archive_project,
+            output=output,
+            receipt=receipt,
+            sign=True,
+            attestation=attestation,
+        )
+
+    assert {path: path.read_bytes() for path in existing} == existing
+
+
+def test_workspace_archive_cleanup_reports_recovery_and_continues(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "workspace.tar.gz"
+    receipt_path = ArchiveReceipt.default_path(output)
+    attestation_path = WorkspaceArchive.default_attestation_path(output)
+    recovery = tmp_path / ".workspace.receipt.json.recovery.rollback"
+    claimant = b"claimant receipt\n"
+    monkeypatch.setattr(
+        attestations_module,
+        "sign_attestation_payload",
+        lambda payload: '{"bundle": true}',
+    )
+    original_require = WorkspaceArchive.require_published_output
+    original_remove = archive_module.remove_file_generation
+
+    def fail_final_attestation_validation(
+        cls: type[WorkspaceArchive],
+        path: Path,
+        **kwargs: Any,
+    ) -> None:
+        if kwargs["label"] == "Attestation output":
+            raise ArchiveError("final output validation failed")
+        original_require(path, **kwargs)
+
+    def retain_receipt_recovery(path: Path, *args: Any, **kwargs: Any) -> bool:
+        if path == receipt_path:
+            path.rename(recovery)
+            path.write_bytes(claimant)
+            raise FileRecoveryError(path, recovery, "Receipt removal failed.")
+        return original_remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        WorkspaceArchive,
+        "require_published_output",
+        classmethod(fail_final_attestation_validation),
+    )
+    monkeypatch.setattr(
+        archive_module,
+        "remove_file_generation",
+        retain_receipt_recovery,
+    )
+
+    with pytest.raises(ArchiveError) as exc_info:
+        WorkspaceArchive.create(
+            workspace=workspace_archive_project,
+            output=output,
+            receipt=True,
+            sign=True,
+        )
+
+    message = str(exc_info.value)
+    assert "final output validation failed" in message
+    assert str(recovery) in message
+    assert receipt_path.read_bytes() == claimant
+    assert recovery.is_file()
+    assert not output.exists()
+    assert not attestation_path.exists()
 
 
 def test_workspace_archive_receipt_rejects_replacement_after_write(
@@ -2739,6 +3645,132 @@ def test_workspace_archive_extract_uses_receipt(
     assert result.verified is True
 
 
+def test_workspace_archive_extract_verifies_signed_receipt(
+    signed_receipt_archive: tuple[WorkspaceArchive, bytes],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive, payload = signed_receipt_archive
+    expected_signer = SignerPolicy("expected identity", "expected issuer")
+    authenticated_signer = SignerIdentity("expected identity", "expected issuer")
+    calls: list[bytes] = []
+
+    def verify(bundle: bytes) -> VerifiedStatement:
+        calls.append(bundle)
+        return verified_receipt(payload, authenticated_signer)
+
+    monkeypatch.setattr(attestations_module, "verify_attestation_bundle", verify)
+
+    result = archive.extract(
+        target=tmp_path / "extracted",
+        verify_attestation=True,
+        expected_signer=expected_signer,
+    )
+
+    assert calls == [b'{"bundle": true}\n']
+    assert result.verified is True
+    assert result.receipt_path is None
+    assert result.attestation_verified is True
+    assert result.attestation_path == archive.attestation_path
+    assert (result.target / "src" / "app.py").is_file()
+
+
+def test_workspace_archive_extract_rejects_mismatched_unsigned_receipt(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=tmp_path / "workspace.tar.gz",
+        receipt=True,
+    )
+    assert created.receipt_path is not None
+    statement = json.loads(created.receipt_path.read_text(encoding="utf-8"))
+    statement["predicate"]["archive"]["options"]["bundle"] = True
+    signed_payload = (json.dumps(statement, sort_keys=True) + "\n").encode("utf-8")
+    attestation_path = WorkspaceArchive.default_attestation_path(created.path)
+    attestation_path.write_text('{"bundle": true}\n', encoding="utf-8")
+    archive = WorkspaceArchive(
+        created.path,
+        receipt=created.receipt_path,
+        attestation=attestation_path,
+    )
+    monkeypatch.setattr(
+        attestations_module,
+        "verify_attestation_bundle",
+        lambda bundle: verified_receipt(
+            signed_payload,
+            SignerIdentity("expected", "issuer"),
+        ),
+    )
+
+    with pytest.raises(ArchiveError, match="does not match the signed"):
+        archive.extract(
+            target=tmp_path / "extracted",
+            verify_attestation=True,
+            expected_signer=SignerPolicy("expected", "issuer"),
+        )
+
+    assert not (tmp_path / "extracted").exists()
+
+
+def test_workspace_archive_extract_requires_authorized_signer(
+    signed_receipt_archive: tuple[WorkspaceArchive, bytes],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive, payload = signed_receipt_archive
+
+    monkeypatch.setattr(
+        attestations_module,
+        "verify_attestation_bundle",
+        lambda bundle: verified_receipt(
+            payload,
+            SignerIdentity("authenticated", "issuer"),
+        ),
+    )
+
+    with pytest.raises(AttestationError, match="does not match"):
+        archive.extract(
+            target=tmp_path / "extracted",
+            verify_attestation=True,
+            expected_signer=SignerPolicy("expected", "issuer"),
+        )
+
+    assert not (tmp_path / "extracted").exists()
+
+
+def test_workspace_archive_extract_verifies_signed_receipt_before_inspection(
+    signed_receipt_archive: tuple[WorkspaceArchive, bytes],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive, payload = signed_receipt_archive
+    archive.path.write_bytes(archive.path.read_bytes() + b"tampered")
+    monkeypatch.setattr(
+        attestations_module,
+        "verify_attestation_bundle",
+        lambda bundle: verified_receipt(
+            payload,
+            SignerIdentity("expected", "issuer"),
+        ),
+    )
+
+    def fail_inspection(path: Path) -> dict[str, object]:
+        raise AssertionError(f"archive was inspected before verification: {path}")
+
+    monkeypatch.setattr(archive_module, "inspect_archive", fail_inspection)
+
+    with pytest.raises(ArchiveHashMismatchError):
+        archive.extract(
+            target=tmp_path / "extracted",
+            verify_attestation=True,
+            expected_signer=SignerPolicy("expected", "issuer"),
+            dry_run=True,
+        )
+
+
 def test_workspace_archive_extract_uses_one_immutable_snapshot(
     workspace_archive_project: Path,
     tmp_path: Path,
@@ -2791,6 +3823,109 @@ def test_workspace_archive_snapshot_rejects_oversized_input(
 
     with pytest.raises(ArchiveError, match="maximum size"):
         WorkspaceArchive.snapshot_archive(source, tmp_path / "snapshot.tar")
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "read",
+        "read1",
+        "readall",
+        "readline",
+        "readinto",
+        "readinto1",
+        "iterate",
+        "peek",
+    ],
+    ids=[
+        "read",
+        "read1",
+        "readall",
+        "readline",
+        "readinto",
+        "readinto1",
+        "iteration",
+        "peek",
+    ],
+)
+def test_open_stable_regular_file_rejects_growth_beyond_maximum(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    source = tmp_path / "archive.tar"
+    source.write_bytes(b"A")
+
+    with pytest.raises(ArchiveError, match="maximum size"):
+        with archive_module.open_stable_regular_file(
+            source,
+            label="Archive",
+            maximum_bytes=1,
+        ) as stream:
+            with source.open("ab") as output:
+                output.write(b"B\n")
+            if operation in {"readinto", "readinto1"}:
+                getattr(stream, operation)(bytearray(3))
+            elif operation == "iterate":
+                next(iter(stream))
+            else:
+                getattr(stream, operation)()
+
+
+@pytest.mark.parametrize(
+    ("stream_content", "match", "snapshot_content"),
+    [
+        (b"BBBB", "changed while it was snapshotted", b"BBBB"),
+        (b"AAAAA", "maximum size", None),
+    ],
+    ids=["same-generation-rewrite", "growth"],
+)
+def test_workspace_archive_snapshot_output_rejects_changed_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream_content: bytes,
+    match: str,
+    snapshot_content: bytes | None,
+) -> None:
+    source = tmp_path / "archive.tar"
+    destination = tmp_path / "snapshot.tar"
+    content = b"AAAA"
+    source.write_bytes(content)
+    generation = paths_module.regular_file_generation(source)
+    assert generation is not None
+
+    @contextmanager
+    def changed_stream(
+        path: Path,
+        *,
+        label: str,
+        maximum_bytes: int | None = None,
+    ) -> Iterator[io.BytesIO]:
+        assert path == source
+        assert label == "Archive"
+        assert maximum_bytes == len(content)
+        yield io.BytesIO(stream_content)
+
+    monkeypatch.setattr(
+        archive_module,
+        "open_stable_regular_file",
+        changed_stream,
+    )
+
+    with pytest.raises(ArchiveError, match=match):
+        WorkspaceArchive.snapshot_output(
+            source,
+            destination,
+            expected_generation=generation,
+            expected_sha256=hashlib.sha256(content).hexdigest(),
+            maximum_bytes=len(content),
+            label="Archive",
+        )
+
+    assert source.read_bytes() == content
+    if snapshot_content is None:
+        assert not destination.exists()
+    else:
+        assert destination.read_bytes() == snapshot_content
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO requires POSIX")
@@ -3551,6 +4686,178 @@ def test_workspace_archive_install_uses_public_handler(
 
 
 @pytest.mark.parametrize(
+    "supports_verified_workspace",
+    [True, False],
+    ids=["compatible", "incompatible"],
+)
+def test_workspace_archive_receipt_validates_public_handler_contract(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    supports_verified_workspace: bool,
+) -> None:
+    archive = WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=tmp_path / "workspace.tar.gz",
+        receipt=True,
+    )
+    target = tmp_path / "extracted"
+    calls: list[VerifiedArchiveWorkspace] = []
+
+    def compatible_handler(
+        workspace: Path,
+        environment: str | None,
+        install_prefix: Path | None,
+        target_prefix_override: str | None,
+        *,
+        verified_workspace: VerifiedArchiveWorkspace,
+    ) -> int:
+        assert workspace == target.resolve()
+        assert environment is None
+        assert install_prefix is None
+        assert target_prefix_override is None
+        calls.append(verified_workspace)
+        return 0
+
+    def incompatible_handler(
+        workspace: Path,
+        environment: str | None,
+        install_prefix: Path | None,
+        target_prefix_override: str | None,
+    ) -> int:
+        raise AssertionError(
+            (workspace, environment, install_prefix, target_prefix_override)
+        )
+
+    handler = (
+        compatible_handler if supports_verified_workspace else incompatible_handler
+    )
+    if supports_verified_workspace:
+        result = archive.install(target=target, install_handler=handler)
+
+        assert result.return_code == 0
+        assert len(calls) == 1
+        assert (
+            calls[0].manifest_bytes
+            == (workspace_archive_project / "conda.toml").read_bytes()
+        )
+        assert (
+            calls[0].lockfile_bytes
+            == (workspace_archive_project / "conda.lock").read_bytes()
+        )
+        assert target.is_dir()
+    else:
+        with pytest.raises(
+            ArchiveError,
+            match="must accept the verified_workspace keyword argument",
+        ):
+            archive.install(target=target, install_handler=handler)
+
+        assert calls == []
+        assert not target.exists()
+
+
+def test_workspace_archive_install_passes_receipt_verified_workspace(
+    workspace_archive_project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_manifest = (workspace_archive_project / "conda.toml").read_bytes()
+    expected_lockfile = (workspace_archive_project / "conda.lock").read_bytes()
+    archive = WorkspaceArchive.create(
+        workspace=workspace_archive_project,
+        output=tmp_path / "workspace.tar.gz",
+        receipt=True,
+    )
+    target = tmp_path / "extracted"
+    replacement_manifest = b"later manifest bytes\n"
+    replacement_lockfile = b"later lockfile bytes\n"
+    original_rename = archive_module.rename_noreplace
+
+    def replace_after_publish(
+        source: str | Path,
+        destination: str | Path,
+        *,
+        source_dir_fd: int | None = None,
+        destination_dir_fd: int | None = None,
+    ) -> None:
+        original_rename(
+            source,
+            destination,
+            source_dir_fd=source_dir_fd,
+            destination_dir_fd=destination_dir_fd,
+        )
+        if Path(destination).name == target.name:
+            (target / "conda.toml").write_bytes(replacement_manifest)
+            (target / "conda.lock").write_bytes(replacement_lockfile)
+
+    monkeypatch.setattr(archive_module, "rename_noreplace", replace_after_publish)
+    expected_lockfile_data = archive_module.load_lockfile_data(expected_lockfile)
+    loaded_lockfiles: list[bytes] = []
+    install_calls: list[
+        tuple[bool, str, str | None, str | None, dict[str, Any] | None]
+    ] = []
+    original_load_lockfile_data = archive_module.load_lockfile_data
+
+    def record_load_lockfile_data(content: str | bytes) -> dict[str, Any]:
+        assert isinstance(content, bytes)
+        loaded_lockfiles.append(content)
+        return original_load_lockfile_data(content)
+
+    def record_install(
+        ctx: WorkspaceContext,
+        environment: str,
+        *,
+        prefix: Path | None = None,
+        target_prefix_override: str | Path | None = None,
+        dry_run: bool = False,
+        lockfile_data: dict[str, Any] | None = None,
+        **kwargs: object,
+    ) -> None:
+        assert prefix is None
+        assert target_prefix_override is None
+        assert kwargs == {}
+        install_calls.append(
+            (
+                dry_run,
+                environment,
+                ctx.config.name,
+                ctx.config._manifest_text,
+                lockfile_data,
+            )
+        )
+
+    monkeypatch.setattr(
+        archive_module,
+        "load_lockfile_data",
+        record_load_lockfile_data,
+    )
+    monkeypatch.setattr(lockfile_module, "install_from_lockfile", record_install)
+
+    result = archive.install(target=target)
+
+    assert result.return_code == 0
+    assert loaded_lockfiles == [expected_lockfile, expected_lockfile]
+    assert install_calls == [
+        (
+            True,
+            "default",
+            "archive-api-test",
+            expected_manifest.decode("utf-8"),
+            expected_lockfile_data,
+        ),
+        (
+            False,
+            "default",
+            "archive-api-test",
+            expected_manifest.decode("utf-8"),
+            expected_lockfile_data,
+        ),
+    ]
+    assert (target / "conda.toml").read_bytes() == replacement_manifest
+    assert (target / "conda.lock").read_bytes() == replacement_lockfile
+
+
+@pytest.mark.parametrize(
     "workflow",
     ["combined", "two-step"],
     ids=["combined", "two-step"],
@@ -3624,6 +4931,15 @@ def test_workspace_archive_install_rejects_cache_archive_changed_during_prefligh
         content = package.read_bytes()
         package.write_bytes(b"x" * len(content))
 
+    def record_handler(
+        workspace: Path,
+        *_args: object,
+        verified_workspace: object | None = None,
+    ) -> int:
+        del verified_workspace
+        handler_calls.append(workspace)
+        return 0
+
     monkeypatch.setattr(
         lockfile_module,
         "install_from_lockfile",
@@ -3634,7 +4950,7 @@ def test_workspace_archive_install_rejects_cache_archive_changed_during_prefligh
         installable_bundled_archive.install(
             target=target,
             package_cache=cache,
-            install_handler=lambda workspace, *_: handler_calls.append(workspace) or 0,
+            install_handler=record_handler,
         )
 
     assert handler_calls == []

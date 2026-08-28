@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from conda.exceptions import CondaValueError
 
+import conda_workspaces.cli.workspace.install as install_mod
 from conda_workspaces.cli.workspace import workspace_context_from_args
 from conda_workspaces.cli.workspace.install import (
     execute_install,
     install_from_lockfile_all,
 )
 from conda_workspaces.exceptions import (
+    AttestationError,
     CondaWorkspacesError,
     LockfileNotFoundError,
     LockfileStaleError,
@@ -23,7 +27,6 @@ from ..conftest import make_args
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from rich.console import Console
 
@@ -52,14 +55,6 @@ def _stub_lockfile(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.sync.write_lockfile",
         lambda ctx, content: None,
-    )
-    monkeypatch.setattr(
-        "conda_workspaces.publication.atomic_write_text_at",
-        lambda directory_descriptor, name, content, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        "conda_workspaces.publication.atomic_write_text",
-        lambda path, content, **kwargs: None,
     )
 
 
@@ -185,6 +180,7 @@ def test_install_envs(
         lambda path, content, write: (
             write_calls.append(content),
             events.append("write"),
+            write(content),
         ),
     )
 
@@ -384,6 +380,256 @@ def test_install_force_reinstall_rejects_explicit_prefix(
             prefix=pixi_workspace / "custom-prefix",
             force_reinstall=True,
         )
+
+
+def test_install_verifies_the_exact_lockfile_buffer_before_parsing(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rich_console: Console,
+    replace_lockfile_install_plan,
+) -> None:
+    config, ctx = workspace_context_from_args(
+        make_args(_DEFAULTS, manifest_file=pixi_workspace / "pixi.toml")
+    )
+    lockfile_bytes = _RENDERED_LOCK.encode("utf-8")
+    events: list[tuple[str, bytes]] = []
+    original_load = install_mod.load_lockfile_data
+
+    def verify(value: bytes) -> None:
+        events.append(("verify", value))
+
+    def load(value: bytes):
+        events.append(("load", value))
+        return original_load(value)
+
+    monkeypatch.setattr(install_mod, "load_lockfile_data", load)
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.install",
+        lambda phase, ctx, name, kwargs: None,
+    )
+
+    assert (
+        install_from_lockfile_all(
+            ctx,
+            config,
+            "default",
+            console=rich_console,
+            dry_run=True,
+            read_lockfile=lambda: lockfile_bytes,
+            verify_lockfile=verify,
+        )
+        == 0
+    )
+
+    assert [event for event, _ in events] == ["verify", "load"]
+    assert all(value is lockfile_bytes for _, value in events)
+
+
+def test_install_verification_failure_precedes_plan_preparation(
+    pixi_workspace: Path,
+    rich_console: Console,
+    replace_lockfile_install_plan,
+) -> None:
+    config, ctx = workspace_context_from_args(
+        make_args(_DEFAULTS, manifest_file=pixi_workspace / "pixi.toml")
+    )
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.install",
+        lambda *args, **kwargs: pytest.fail(
+            "prepared a plan after verification failed"
+        ),
+    )
+
+    def reject(value: bytes) -> None:
+        raise AttestationError("invalid attestation")
+
+    with pytest.raises(AttestationError, match="invalid attestation"):
+        install_from_lockfile_all(
+            ctx,
+            config,
+            "default",
+            console=rich_console,
+            read_lockfile=lambda: _RENDERED_LOCK.encode("utf-8"),
+            verify_lockfile=reject,
+        )
+
+
+@pytest.mark.parametrize("mode", ["locked", "frozen"], ids=["locked", "frozen"])
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+@pytest.mark.parametrize(
+    "attestation_name",
+    [None, "release.sigstore.json"],
+    ids=["default-sidecar", "explicit-sidecar"],
+)
+def test_execute_install_wires_workspace_verification(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    write_stub_lockfile: Callable[[Path], None],
+    replace_lockfile_install_plan,
+    mode: str,
+    dry_run: bool,
+    attestation_name: str | None,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    write_stub_lockfile(pixi_workspace)
+    lockfile = pixi_workspace / "conda.lock"
+    explicit_sidecar = (
+        pixi_workspace / attestation_name if attestation_name is not None else None
+    )
+    expected_sidecar = explicit_sidecar or Path(f"{lockfile}.sigstore.json")
+    events: list[tuple[str, object]] = []
+
+    if mode == "locked":
+        monkeypatch.setattr(
+            install_mod,
+            "lockfile_status",
+            lambda ctx, config: LockfileStatus(status=LockfileStatus.UP_TO_DATE),
+        )
+        monkeypatch.setattr(
+            install_mod,
+            "check_lockfile_satisfiability",
+            lambda config, data, platform: LockfileStatus(
+                status=LockfileStatus.UP_TO_DATE
+            ),
+        )
+
+    def read_bundle(path: Path) -> bytes:
+        events.append(("read-bundle", path))
+        return b'{"bundle":true}'
+
+    class Verification:
+        evidence: Verification
+
+        def __init__(self) -> None:
+            self.evidence = self
+
+        def require_authorized(self) -> None:
+            events.append(("authorize", None))
+
+    def verify_bundle(bundle, snapshot, expected_signer):
+        events.append(("verify", snapshot))
+        assert bundle == b'{"bundle":true}'
+        assert snapshot.manifest_path == pixi_workspace / "pixi.toml"
+        assert snapshot.manifest_bytes == (pixi_workspace / "pixi.toml").read_bytes()
+        assert snapshot.manifest_format == "pixi-toml"
+        assert snapshot.lockfile_path == lockfile
+        assert snapshot.lockfile_bytes == lockfile.read_bytes()
+        assert expected_signer.identity == "release@example.com"
+        assert expected_signer.issuer == "https://issuer.example"
+        return Verification()
+
+    def record_plan(phase, ctx, name, kwargs) -> None:
+        events.append((phase, name))
+
+    monkeypatch.setattr(install_mod, "read_attestation_bundle", read_bundle)
+    monkeypatch.setattr(install_mod, "verify_workspace_snapshot", verify_bundle)
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.install",
+        record_plan,
+    )
+
+    assert (
+        execute_install(
+            make_args(
+                _DEFAULTS,
+                environment="default",
+                dry_run=dry_run,
+                verify=True,
+                cert_identity="release@example.com",
+                cert_oidc_issuer="https://issuer.example",
+                attestation=explicit_sidecar,
+                **{mode: True},
+            )
+        )
+        == 0
+    )
+
+    assert events[0] == ("read-bundle", expected_sidecar)
+    assert [name for name, _ in events[:3]] == [
+        "read-bundle",
+        "verify",
+        "authorize",
+    ]
+    expected_plans = [("prepare", "default")]
+    if not dry_run:
+        expected_plans.append(("execute", "default"))
+    assert events[3:] == expected_plans
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+def test_execute_install_verification_failure_precedes_plans(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    write_stub_lockfile: Callable[[Path], None],
+    replace_lockfile_install_plan,
+    dry_run: bool,
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+    write_stub_lockfile(pixi_workspace)
+    monkeypatch.setattr(install_mod, "read_attestation_bundle", lambda path: b"bundle")
+
+    def reject_verification(*args) -> None:
+        raise AttestationError("invalid attestation")
+
+    monkeypatch.setattr(
+        install_mod,
+        "verify_workspace_snapshot",
+        reject_verification,
+    )
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.install",
+        lambda *args: pytest.fail("prepared a plan after verification failed"),
+    )
+
+    with pytest.raises(AttestationError, match="invalid attestation"):
+        execute_install(
+            make_args(
+                _DEFAULTS,
+                environment="default",
+                frozen=True,
+                dry_run=dry_run,
+                verify=True,
+                cert_identity="release@example.com",
+                cert_oidc_issuer="https://issuer.example",
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        pytest.param({"verify": True}, id="verify-without-lock-mode"),
+        pytest.param(
+            {"attestation": Path("bundle.json")},
+            id="attestation-without-verify",
+        ),
+        pytest.param(
+            {"cert_identity": "signer@example.com"},
+            id="identity-without-verify",
+        ),
+        pytest.param(
+            {"verify": True, "frozen": True},
+            id="verify-without-policy",
+        ),
+        pytest.param(
+            {
+                "verify": True,
+                "locked": True,
+                "cert_identity": "signer@example.com",
+            },
+            id="partial-policy",
+        ),
+    ],
+)
+def test_install_rejects_invalid_attestation_option_combinations(
+    pixi_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    options: dict[str, object],
+) -> None:
+    monkeypatch.chdir(pixi_workspace)
+
+    with pytest.raises((CondaValueError, AttestationError), match="require|together"):
+        execute_install(make_args(_DEFAULTS, **options))
 
 
 def test_install_fetches_every_environment_before_mutation(
@@ -768,6 +1014,7 @@ def test_install_no_lock_forces_solve(
         lambda path, content, write: (
             write_calls.append(content),
             events.append("write"),
+            write(content),
         ),
     )
 

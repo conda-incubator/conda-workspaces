@@ -221,3 +221,8 @@ manifest by searching the current directory and its parents.
 
 See [Lockfile management](../tutorials/lockfile-management.md) for a
 guided workflow that creates, installs from, and updates a lockfile.
+
+Use `conda workspace lock --sign` when a receiver must verify who signed the
+exact manifest and canonical lockfile. See
+[Workspace attestations](attestations.md) for the verification and
+authorization boundaries.
