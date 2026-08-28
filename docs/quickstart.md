@@ -117,14 +117,14 @@ through Conda outside the repository.
 ![quickstart demo](../demos/quickstart.gif)
 
 If you prefer to wire the commands together yourself, start from
-`conda workspace init` and incrementally add dependencies — each
-`add` installs into the affected environment and refreshes
-`conda.lock`:
+`conda workspace init`, add dependencies, then declare a named
+environment. Each `add` installs into the affected environment and
+refreshes `conda.lock`:
 
 ```bash
 conda workspace init --name my-project
 conda workspace add "python>=3.12" "numpy>=2"
-conda workspace add --feature test "pytest>=8.0"
+conda workspace add -e test
 conda workspace envs
 ```
 

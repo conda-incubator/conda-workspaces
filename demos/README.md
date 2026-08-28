@@ -8,7 +8,7 @@ Animated terminal demos recorded with [VHS](https://github.com/charmbracelet/vhs
 
 | Demo | Description |
 |---|---|
-| `quickstart` | Init a workspace, add deps, install, list envs, run a command |
+| `quickstart` | Init a workspace, add deps, declare an environment, list it, run a command |
 | `workspace-quickstart` | Single-command bootstrap with `conda workspace quickstart` |
 | `dependency-management` | Target feature, environment, and platform dependencies, then update safely |
 | `lockfile` | Install, lock, clean, reinstall from lockfile |
