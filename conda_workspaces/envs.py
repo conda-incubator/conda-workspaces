@@ -403,7 +403,8 @@ def _build_pypi_specs(
         log.warning(
             "PyPI dependencies found but conda-pypi is not installed.\n"
             "  Skipped PyPI packages: %s\n"
-            "  Install conda-pypi to enable: conda install conda-pypi",
+            "  Install conda-pypi to enable: "
+            "conda install -n base conda-forge::conda-pypi",
             names,
         )
         return []
@@ -414,7 +415,8 @@ def _build_pypi_specs(
             "PyPI dependencies found but conda-rattler-solver is not installed.\n"
             "  PyPI packages: %s\n"
             "  conda-rattler-solver is required as the solver backend for PyPI\n"
-            "  dependencies. Install it with: conda install conda-rattler-solver",
+            "  dependencies. Install it with: "
+            "conda install -n base conda-forge::conda-rattler-solver",
             names,
         )
 

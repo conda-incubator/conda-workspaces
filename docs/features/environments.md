@@ -265,6 +265,9 @@ To use PyPI dependencies you need:
   which serves pure Python packages from PyPI as conda packages using
   sharded repodata (requires the rattler solver)
 
+Install both plugin packages into conda's base environment so conda can
+discover them.
+
 Local path dependencies (e.g. `path = "."`) are handled separately via
 `conda-pypi`'s build system after the main solve completes. Git and URL
 dependencies are parsed for pixi manifest compatibility but are not

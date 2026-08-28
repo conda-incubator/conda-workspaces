@@ -30,7 +30,7 @@ jobs:
           activate-environment: ""
 
       - name: Install conda-workspaces
-        run: conda install -c conda-forge conda-workspaces
+        run: conda install -n base conda-forge::conda-workspaces
 
       - name: Install test environment
         run: conda workspace install -e test
@@ -91,7 +91,7 @@ jobs:
       - uses: conda-incubator/setup-miniconda@v3
         with:
           miniforge-version: latest
-      - run: conda install -c conda-forge conda-workspaces
+      - run: conda install -n base conda-forge::conda-workspaces
       - run: conda workspace install -e test
       - run: conda task run -e test check
 
@@ -102,7 +102,7 @@ jobs:
       - uses: conda-incubator/setup-miniconda@v3
         with:
           miniforge-version: latest
-      - run: conda install -c conda-forge conda-workspaces
+      - run: conda install -n base conda-forge::conda-workspaces
       - run: conda workspace install -e docs
       - run: conda task run -e docs build-docs
 ```
@@ -161,7 +161,7 @@ jobs:
         with:
           miniforge-version: latest
           activate-environment: ""
-      - run: conda install -c conda-forge conda-workspaces
+      - run: conda install -n base conda-forge::conda-workspaces
       - name: Solve ${{ matrix.platform }}
         run: |
           conda workspace lock \
@@ -181,7 +181,7 @@ jobs:
         with:
           miniforge-version: latest
           activate-environment: ""
-      - run: conda install -c conda-forge conda-workspaces
+      - run: conda install -n base conda-forge::conda-workspaces
       - uses: actions/download-artifact@v4
         with:
           pattern: conda-lock-fragment-*
@@ -224,7 +224,7 @@ jobs:
         with:
           miniforge-version: latest
           activate-environment: ""
-      - run: conda install -c conda-forge conda-workspaces
+      - run: conda install -n base conda-forge::conda-workspaces
 
       - name: Re-solve and update lockfile
         run: conda workspace lock
@@ -337,6 +337,7 @@ definition), your CI setup is simpler — just install dependencies
 manually and run tasks:
 
 ```yaml
-      - run: conda install -c conda-forge conda-workspaces pytest ruff
+      - run: conda install -n base conda-forge::conda-workspaces
+      - run: conda install conda-forge::pytest conda-forge::ruff
       - run: conda task run check
 ```

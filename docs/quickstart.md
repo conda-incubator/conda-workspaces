@@ -7,7 +7,7 @@
 :::{tab-item} conda
 
 ```bash
-conda install -c conda-forge conda-workspaces
+conda install -n base conda-forge::conda-workspaces
 ```
 
 :::
