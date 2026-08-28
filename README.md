@@ -88,7 +88,7 @@ and task running inside the conda CLI without switching tools.
 ## Installation
 
 ```bash
-conda install -c conda-forge conda-workspaces
+conda install -n base conda-forge::conda-workspaces
 ```
 
 ## CLI
