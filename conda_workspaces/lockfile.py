@@ -1937,6 +1937,7 @@ class LockfileInstallPlan:
         update_names: set[str] | None = None,
         prune: bool = True,
         replace_existing: bool = False,
+        require_absent: bool = False,
         validate_workspace: Callable[[], None] | None = None,
     ) -> LockfileInstallPlan:
         """Fetch packages and validate every non-mutating install input."""
@@ -1992,6 +1993,10 @@ class LockfileInstallPlan:
             prefix or ctx.env_prefix(env_name)
         )
         initial_prefix_identity = cls.prefix_identity(install_prefix)
+        if require_absent and initial_prefix_identity is not None:
+            raise CondaWorkspacesError(
+                f"Workspace environment prefix already exists: {install_prefix}"
+            )
         validate_directory_output(install_prefix)
 
         override = (
@@ -2091,6 +2096,10 @@ class LockfileInstallPlan:
                 )
         if validate_workspace is not None:
             validate_workspace()
+        if require_absent and cls.prefix_identity(install_prefix) is not None:
+            raise CondaWorkspacesError(
+                f"Workspace environment prefix already exists: {install_prefix}"
+            )
 
         return cls(
             env_name=env_name,

@@ -11,16 +11,23 @@ from typing import TYPE_CHECKING
 import pytest
 import tomlkit
 from conda.base.constants import on_win
+from conda.base.context import context as conda_context
 from conda.exceptions import DryRunExit
 from conda.models.channel import Channel
 from conda.utils import quote_for_shell
 from rich.console import Console
 
 import conda_workspaces.cli.workspace.import_manifest as import_manifest_mod
+from conda_workspaces.cli.main import execute_workspace, generate_workspace_parser
 from conda_workspaces.cli.workspace.import_manifest import execute_import
-from conda_workspaces.exceptions import ManifestImportError, WorkspaceParseError
+from conda_workspaces.exceptions import (
+    CondaWorkspacesError,
+    ManifestImportError,
+    WorkspaceNotFoundError,
+    WorkspaceParseError,
+)
+from conda_workspaces.importers import EnvironmentYmlImporter, find_importer
 from conda_workspaces.importers import base as importer_base
-from conda_workspaces.importers import find_importer
 from conda_workspaces.importers.serialize import config_to_toml
 from conda_workspaces.manifests import find_parser as find_manifest_parser
 from conda_workspaces.models import WorkspaceConfig
@@ -29,11 +36,17 @@ from conda_workspaces.runner import SubprocessShell
 from ..conftest import make_args
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
 _DEFAULTS = {
+    "manifest_file": None,
+    "environment": None,
     "output": None,
+    "no_install": False,
+    "no_lockfile_update": False,
+    "force_reinstall": False,
     "quiet": False,
     "dry_run": False,
     "yes": False,
@@ -1355,3 +1368,843 @@ def test_execute_import_rejects_output_changed_before_publication(
         )
 
     assert output.read_text(encoding="utf-8") == "# concurrent\n"
+
+
+@pytest.fixture
+def named_import_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Path:
+    """Create a workspace used by named import lifecycle tests."""
+    path = tmp_path / "conda.toml"
+    path.write_text(
+        """\
+# Preserve this comment.
+[workspace]
+name = "named-import"
+channels = ["conda-forge", "bioconda"]
+platforms = ["linux-64", "osx-arm64"]
+
+[dependencies]
+python = ">=3.11"
+
+[tasks]
+check = "python -V"
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    return path
+
+
+@pytest.fixture
+def named_import_sync_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[dict[str, object]]:
+    """Record named import sync calls and publish a synthetic lockfile."""
+    calls: list[dict[str, object]] = []
+
+    def record_sync(
+        _config: object,
+        _ctx: object,
+        env_names: list[str],
+        *,
+        no_install: bool,
+        force_reinstall: bool,
+        dry_run: bool,
+        publish_lockfile: Callable[[str], None] | None,
+        validate_workspace: Callable[[], None] | None,
+        require_absent_prefixes: list[str],
+        console: Console,
+    ) -> None:
+        assert validate_workspace is not None
+        validate_workspace()
+        calls.append(
+            {
+                "env_names": list(env_names),
+                "no_install": no_install,
+                "force_reinstall": force_reinstall,
+                "dry_run": dry_run,
+                "require_absent_prefixes": list(require_absent_prefixes),
+            }
+        )
+        assert console is not None
+        if not dry_run:
+            assert publish_lockfile is not None
+            publish_lockfile("rendered-lock")
+
+    monkeypatch.setattr(import_manifest_mod, "sync_environments", record_sync)
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("filename", "namespace"),
+    [
+        pytest.param("conda.toml", "", id="conda-toml"),
+        pytest.param("pixi.toml", "", id="pixi-toml"),
+        pytest.param("pyproject.toml", "tool.conda.", id="pyproject-conda"),
+        pytest.param("pyproject.toml", "tool.pixi.", id="pyproject-pixi"),
+    ],
+)
+def test_execute_named_import_adds_private_environment_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    namespace: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    project = '[project]\nname = "peer-project"\n\n' if namespace else ""
+    manifest = tmp_path / filename
+    manifest.write_text(
+        f"""{project}# Keep this declaration.
+[{namespace}workspace]
+name = "import-target"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[{namespace}dependencies]
+python = ">=3.11"
+
+[{namespace}tasks]
+keep = "python -V"
+""",
+        encoding="utf-8",
+    )
+    source = tmp_path / "environment.yaml"
+    source.write_text(
+        """\
+name: ignored-source-name
+prefix: /ignored/source/prefix
+channels:
+  - conda-forge
+platforms:
+  - linux-64
+dependencies:
+  - python>=3.12
+  - numpy>=2
+  - pip:
+      - requests[security]>=2
+""",
+        encoding="utf-8",
+    )
+    output = StringIO()
+
+    result = execute_import(
+        make_args(
+            _DEFAULTS,
+            file=source,
+            manifest_file=manifest,
+            environment="qa",
+            no_lockfile_update=True,
+        ),
+        console=Console(file=output, width=200),
+    )
+
+    assert result == 0
+    text = manifest.read_text(encoding="utf-8")
+    assert "# Keep this declaration." in text
+    doc = tomlkit.parse(text)
+    workspace = doc
+    if namespace:
+        tool_name = namespace.split(".")[1]
+        workspace = doc["tool"][tool_name]
+        assert doc["project"]["name"] == "peer-project"
+    assert workspace["tasks"]["keep"] == "python -V"
+    assert workspace["environments"]["default"] == []
+    imported = workspace["environments"]["qa"]
+    assert imported["no-default-feature"] is True
+    assert set(imported["dependencies"]) == {"python", "numpy"}
+    assert set(imported["pypi-dependencies"]) == {"requests"}
+    assert "feature" not in workspace
+    assert not (tmp_path / ".conda" / "envs" / "qa").exists()
+    rendered = output.getvalue()
+    assert "ignoring the environment.yml name" in rendered
+    assert "ignoring the environment.yml prefix" in rendered
+
+
+def test_parse_named_environment_preserves_absent_workspace_fields(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "environment.yml"
+    source.write_text("dependencies:\n  - python>=3.12\n", encoding="utf-8")
+
+    imported = EnvironmentYmlImporter().parse_named_environment(source)
+
+    assert imported.channels is None
+    assert imported.platforms is None
+    assert set(imported.conda_dependencies) == {"python"}
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        pytest.param("variables: {}\n", "variables cannot be imported", id="variables"),
+        pytest.param(
+            "unknown: true\n", "Unsupported environment.yml fields", id="unknown"
+        ),
+        pytest.param(
+            "channels: conda-forge\n", "channels must be a list", id="channels"
+        ),
+        pytest.param(
+            "platforms: linux-64\n", "platforms must be a list", id="platforms"
+        ),
+        pytest.param("name: [bad]\n", "name must be a string", id="name"),
+        pytest.param("prefix: 42\n", "prefix must be a string", id="prefix"),
+    ],
+)
+def test_parse_named_environment_rejects_unrepresentable_fields(
+    tmp_path: Path,
+    content: str,
+    message: str,
+) -> None:
+    source = tmp_path / "environment.yml"
+    source.write_text(content, encoding="utf-8")
+
+    with pytest.raises(ManifestImportError, match=message):
+        EnvironmentYmlImporter().parse_named_environment(source)
+
+
+@pytest.mark.parametrize(
+    ("declarations", "message"),
+    [
+        pytest.param("", None, id="inherit-omitted"),
+        pytest.param(
+            "channels:\n  - conda-forge\n  - bioconda\n"
+            "platforms:\n  - linux-64\n  - osx-arm64\n",
+            None,
+            id="exact",
+        ),
+        pytest.param(
+            "channels:\n  - https://conda.anaconda.org/conda-forge\n  - bioconda\n",
+            None,
+            id="normalized-channel",
+        ),
+        pytest.param(
+            "channels:\n  - bioconda\n  - conda-forge\n",
+            "channels must match",
+            id="channel-order",
+        ),
+        pytest.param("channels: []\n", "channels must match", id="empty-channels"),
+        pytest.param(
+            "channels:\n  - conda-forge\n  - nodefaults\n",
+            "nodefaults",
+            id="nodefaults",
+        ),
+        pytest.param(
+            "platforms:\n  - osx-arm64\n  - linux-64\n",
+            None,
+            id="platform-order",
+        ),
+        pytest.param(
+            "platforms:\n  - linux-64\n  - win-64\n",
+            "platforms must match",
+            id="platform-name",
+        ),
+        pytest.param(
+            "platforms: []\n",
+            "platforms must match",
+            id="empty-platforms",
+        ),
+    ],
+)
+def test_execute_named_import_validates_workspace_channels_and_platforms(
+    named_import_workspace: Path,
+    tmp_path: Path,
+    declarations: str,
+    message: str | None,
+) -> None:
+    source = tmp_path / "environment.yml"
+    source.write_text(
+        f"dependencies:\n  - python>=3.12\n{declarations}",
+        encoding="utf-8",
+    )
+    before = named_import_workspace.read_bytes()
+    args = make_args(
+        _DEFAULTS,
+        file=source,
+        environment="qa",
+        no_lockfile_update=True,
+    )
+
+    if message is None:
+        assert execute_import(args, console=Console(file=StringIO())) == 0
+        assert (
+            "qa"
+            in tomlkit.parse(named_import_workspace.read_text(encoding="utf-8"))[
+                "environments"
+            ]
+        )
+    else:
+        with pytest.raises(ManifestImportError, match=message):
+            execute_import(args, console=Console(file=StringIO()))
+        assert named_import_workspace.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("environment", "manifest_environment", "message"),
+    [
+        pytest.param("default", None, "already defined", id="implicit-default"),
+        pytest.param("qa", "qa", "already defined", id="existing"),
+        pytest.param("QA", "qa", "conflicts with environment", id="portable-collision"),
+        pytest.param("../qa", None, "not valid", id="invalid-name"),
+    ],
+)
+def test_execute_named_import_requires_a_new_portable_environment_name(
+    named_import_workspace: Path,
+    tmp_path: Path,
+    environment: str,
+    manifest_environment: str | None,
+    message: str,
+) -> None:
+    if manifest_environment is not None:
+        with named_import_workspace.open("a", encoding="utf-8") as stream:
+            stream.write(f"\n[environments.{manifest_environment}]\n")
+    source = tmp_path / "environment.yml"
+    source.write_text("dependencies: []\n", encoding="utf-8")
+    before = named_import_workspace.read_bytes()
+
+    with pytest.raises(CondaWorkspacesError, match=message):
+        execute_import(
+            make_args(
+                _DEFAULTS,
+                file=source,
+                environment=environment,
+                no_lockfile_update=True,
+            ),
+            console=Console(file=StringIO()),
+        )
+
+    assert named_import_workspace.read_bytes() == before
+
+
+def test_execute_named_import_existing_environment_hint_keeps_manifest_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    selected_directory = tmp_path / "selected workspace"
+    selected_directory.mkdir()
+    manifest = selected_directory / "conda.toml"
+    environment = "qa $(echo)"
+    manifest.write_text(
+        f'''\
+[workspace]
+name = "selected"
+channels = []
+platforms = ["linux-64"]
+
+[environments."{environment}"]
+''',
+        encoding="utf-8",
+    )
+    source = tmp_path / "environment.yml"
+    source.write_text("dependencies: []\n", encoding="utf-8")
+
+    with pytest.raises(CondaWorkspacesError, match="already defined") as exc_info:
+        execute_import(
+            make_args(
+                _DEFAULTS,
+                file=source,
+                manifest_file=manifest,
+                environment=environment,
+                no_lockfile_update=True,
+            ),
+            console=Console(file=StringIO()),
+        )
+
+    command = quote_for_shell(
+        "conda",
+        "workspace",
+        "--file",
+        str(manifest),
+        "install",
+        "-e",
+        environment,
+    )
+    assert any(command in hint for hint in exc_info.value.hints)
+
+
+def test_execute_named_import_uses_exact_selected_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    conda_toml = tmp_path / "conda.toml"
+    conda_toml.write_text(
+        '[workspace]\nname = "first"\nchannels = []\nplatforms = ["linux-64"]\n',
+        encoding="utf-8",
+    )
+    pixi_toml = tmp_path / "pixi.toml"
+    pixi_toml.write_text(
+        '[workspace]\nname = "selected"\nchannels = []\nplatforms = ["linux-64"]\n',
+        encoding="utf-8",
+    )
+    source = tmp_path / "environment.yml"
+    source.write_text("dependencies: []\n", encoding="utf-8")
+    conda_before = conda_toml.read_bytes()
+
+    execute_import(
+        make_args(
+            _DEFAULTS,
+            file=source,
+            manifest_file=pixi_toml,
+            environment="qa",
+            no_lockfile_update=True,
+        ),
+        console=Console(file=StringIO()),
+    )
+
+    assert conda_toml.read_bytes() == conda_before
+    assert "qa" in tomlkit.parse(pixi_toml.read_text(encoding="utf-8"))["environments"]
+
+
+def test_execute_named_import_preserves_inline_environment_table(
+    named_import_workspace: Path,
+    tmp_path: Path,
+) -> None:
+    named_import_workspace.write_text(
+        """\
+environments = { default = [] }
+
+[workspace]
+name = "inline-environments"
+channels = []
+platforms = ["linux-64"]
+""",
+        encoding="utf-8",
+    )
+    source = tmp_path / "environment.yml"
+    source.write_text(
+        "dependencies:\n  - python>=3.12\n  - pip:\n      - requests>=2\n",
+        encoding="utf-8",
+    )
+
+    execute_import(
+        make_args(
+            _DEFAULTS,
+            file=source,
+            environment="qa",
+            no_lockfile_update=True,
+        ),
+        console=Console(file=StringIO()),
+    )
+
+    doc = tomlkit.parse(named_import_workspace.read_text(encoding="utf-8"))
+    assert doc["environments"]["default"] == []
+    assert doc["environments"]["qa"]["no-default-feature"] is True
+    assert "python" in doc["environments"]["qa"]["dependencies"]
+    assert "requests" in doc["environments"]["qa"]["pypi-dependencies"]
+
+
+def test_execute_whole_import_rejects_global_manifest_selection(
+    named_import_workspace: Path,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "environment.yml"
+    source.write_text("dependencies: []\n", encoding="utf-8")
+
+    with pytest.raises(CondaWorkspacesError, match="--file option requires"):
+        execute_import(
+            make_args(
+                _DEFAULTS,
+                file=source,
+                manifest_file=named_import_workspace,
+            ),
+            console=Console(file=StringIO()),
+        )
+
+
+def test_execute_named_import_rejects_other_source_formats(
+    named_import_workspace: Path,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "pixi.toml"
+    source.write_text(
+        '[workspace]\nname = "source"\nchannels = []\nplatforms = ["linux-64"]\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ManifestImportError, match="only supports environment"):
+        execute_import(
+            make_args(_DEFAULTS, file=source, environment="qa"),
+            console=Console(file=StringIO()),
+        )
+
+    assert "qa" not in named_import_workspace.read_text(encoding="utf-8")
+
+
+def test_execute_named_import_requires_existing_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "environment.yml"
+    source.write_text("dependencies: []\n", encoding="utf-8")
+
+    with pytest.raises(WorkspaceNotFoundError):
+        execute_import(
+            make_args(_DEFAULTS, file=source, environment="qa"),
+            console=Console(file=StringIO()),
+        )
+
+
+@pytest.mark.parametrize(
+    ("force_reinstall", "active", "message", "expected_calls"),
+    [
+        pytest.param(False, False, "prefix already exists", 0, id="reject"),
+        pytest.param(True, False, None, 1, id="replace-inactive"),
+        pytest.param(True, True, "Cannot replace active", 0, id="reject-active"),
+    ],
+)
+def test_execute_named_import_handles_existing_target_prefix(
+    named_import_workspace: Path,
+    named_import_sync_calls: list[dict[str, object]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    force_reinstall: bool,
+    active: bool,
+    message: str | None,
+    expected_calls: int,
+) -> None:
+    source = tmp_path / "environment.yml"
+    source.write_text("dependencies: []\n", encoding="utf-8")
+    prefix = tmp_path / ".conda" / "envs" / "qa"
+    prefix.mkdir(parents=True)
+    monkeypatch.setattr(import_manifest_mod, "is_active_prefix", lambda _path: active)
+    args = make_args(
+        _DEFAULTS,
+        file=source,
+        environment="qa",
+        force_reinstall=force_reinstall,
+    )
+
+    if message is None:
+        assert execute_import(args, console=Console(file=StringIO())) == 0
+    else:
+        with pytest.raises(CondaWorkspacesError, match=message):
+            execute_import(args, console=Console(file=StringIO()))
+
+    assert len(named_import_sync_calls) == expected_calls
+    if named_import_sync_calls:
+        assert named_import_sync_calls[0]["force_reinstall"] is True
+
+
+def test_execute_named_import_rejects_active_missing_target_prefix(
+    named_import_workspace: Path,
+    named_import_sync_calls: list[dict[str, object]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "environment.yml"
+    source.write_text("dependencies: []\n", encoding="utf-8")
+    monkeypatch.setattr(import_manifest_mod, "is_active_prefix", lambda _path: True)
+
+    with pytest.raises(CondaWorkspacesError, match="active workspace environment"):
+        execute_import(
+            make_args(_DEFAULTS, file=source, environment="qa"),
+            console=Console(file=StringIO()),
+        )
+
+    assert not named_import_sync_calls
+    assert not (tmp_path / ".conda" / "envs" / "qa").exists()
+
+
+def test_execute_named_import_rechecks_prefix_before_manifest_only_publication(
+    named_import_workspace: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "environment.yml"
+    source.write_text("dependencies: []\n", encoding="utf-8")
+    before = named_import_workspace.read_bytes()
+    identities = iter((None, (1, 2)))
+    monkeypatch.setattr(
+        import_manifest_mod.LockfileInstallPlan,
+        "prefix_identity",
+        staticmethod(lambda _path: next(identities)),
+    )
+
+    with pytest.raises(CondaWorkspacesError, match="prefix appeared"):
+        execute_import(
+            make_args(
+                _DEFAULTS,
+                file=source,
+                environment="qa",
+                no_lockfile_update=True,
+            ),
+            console=Console(file=StringIO()),
+        )
+
+    assert named_import_workspace.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        pytest.param({"no_install": True}, id="no-install"),
+        pytest.param({"no_lockfile_update": True}, id="no-lockfile-update"),
+        pytest.param(
+            {"no_install": True, "no_lockfile_update": True},
+            id="both",
+        ),
+    ],
+)
+def test_execute_named_import_rejects_force_with_non_installing_modes(
+    named_import_workspace: Path,
+    tmp_path: Path,
+    flags: dict[str, bool],
+) -> None:
+    source = tmp_path / "environment.yml"
+    source.write_text("dependencies: []\n", encoding="utf-8")
+
+    with pytest.raises(CondaWorkspacesError, match="--force-reinstall cannot"):
+        execute_import(
+            make_args(
+                _DEFAULTS,
+                file=source,
+                environment="qa",
+                force_reinstall=True,
+                **flags,
+            ),
+            console=Console(file=StringIO()),
+        )
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected_sync", "expected_lock", "expected_manifest", "sync_flags"),
+    [
+        pytest.param(
+            {"no_lockfile_update": True},
+            False,
+            False,
+            True,
+            None,
+            id="manifest-only",
+        ),
+        pytest.param(
+            {"no_install": True},
+            True,
+            True,
+            True,
+            {"no_install": True, "dry_run": False},
+            id="lock-without-install",
+        ),
+        pytest.param(
+            {},
+            True,
+            True,
+            True,
+            {"no_install": False, "dry_run": False},
+            id="lock-and-install",
+        ),
+        pytest.param(
+            {"dry_run": True},
+            True,
+            False,
+            False,
+            {"no_install": False, "dry_run": True},
+            id="dry-run",
+        ),
+    ],
+)
+def test_execute_named_import_lifecycle_modes(
+    named_import_workspace: Path,
+    named_import_sync_calls: list[dict[str, object]],
+    tmp_path: Path,
+    flags: dict[str, bool],
+    expected_sync: bool,
+    expected_lock: bool,
+    expected_manifest: bool,
+    sync_flags: dict[str, bool] | None,
+) -> None:
+    source = tmp_path / "environment.yml"
+    source.write_text(
+        "dependencies:\n  - python>=3.12\n  - numpy\n  - pip:\n      - requests>=2\n",
+        encoding="utf-8",
+    )
+    before = named_import_workspace.read_bytes()
+    output = StringIO()
+
+    result = execute_import(
+        make_args(_DEFAULTS, file=source, environment="qa", **flags),
+        console=Console(file=output, width=200),
+    )
+
+    assert result == 0
+    assert bool(named_import_sync_calls) is expected_sync
+    lockfile = tmp_path / "conda.lock"
+    assert lockfile.exists() is expected_lock
+    if expected_manifest:
+        assert named_import_workspace.read_bytes() != before
+        assert (
+            "qa"
+            in tomlkit.parse(named_import_workspace.read_text(encoding="utf-8"))[
+                "environments"
+            ]
+        )
+    else:
+        assert named_import_workspace.read_bytes() == before
+    if sync_flags is not None:
+        assert {
+            name: named_import_sync_calls[0][name] for name in sync_flags
+        } == sync_flags
+        assert named_import_sync_calls[0]["require_absent_prefixes"] == ["qa"]
+    rendered = output.getvalue()
+    assert "qa" in rendered
+    assert "python" in rendered
+    assert "numpy" in rendered
+    assert "requests" in rendered
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+def test_execute_named_import_json_keeps_stdout_machine_readable(
+    named_import_workspace: Path,
+    named_import_sync_calls: list[dict[str, object]],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    dry_run: bool,
+) -> None:
+    source = tmp_path / "environment.yml"
+    source.write_text(
+        "name: source-name\nprefix: /ignored\ndependencies:\n  - python>=3.12\n",
+        encoding="utf-8",
+    )
+    arguments = [
+        "--file",
+        str(named_import_workspace),
+        "import",
+        "--environment",
+        "qa",
+        "--json",
+    ]
+    if dry_run:
+        arguments.append("--dry-run")
+    else:
+        arguments.append("--no-lockfile-update")
+    arguments.append(str(source))
+    args = generate_workspace_parser().parse_args(arguments)
+
+    with conda_context._override("json", True):
+        result = execute_workspace(args)
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert json.loads(captured.out) == {"success": True}
+    assert "Imported" not in captured.out
+    assert "Would import" not in captured.out
+    assert "Warning" in captured.err
+    assert bool(named_import_sync_calls) is dry_run
+    manifest = named_import_workspace.read_text(encoding="utf-8")
+    environments = tomlkit.parse(manifest).get("environments", {})
+    assert ("qa" in environments) is not dry_run
+
+
+@pytest.mark.parametrize(
+    "failure_stage",
+    [None, "preflight", "lockfile", "install"],
+    ids=["success", "preflight-failure", "lockfile-failure", "install-failure"],
+)
+def test_execute_named_import_runs_complete_lifecycle_before_prefix_install(
+    named_import_workspace: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str | None,
+    replace_lockfile_install_plan: Callable[..., None],
+    replace_publication_writer: Callable[..., None],
+) -> None:
+    source = tmp_path / "environment.yml"
+    source.write_text("dependencies:\n  - python>=3.12\n", encoding="utf-8")
+    before = named_import_workspace.read_bytes()
+    previous_lock = "previous lock\n"
+    lockfile = tmp_path / "conda.lock"
+    lockfile.write_text(previous_lock, encoding="utf-8")
+    rendered_lock = "version: 1\nenvironments: {}\npackages: []\n"
+    events: list[str] = []
+    prepare_kwargs: list[dict[str, object]] = []
+
+    def render_lock(_ctx, resolved, *, config, **_kwargs: object) -> str:
+        events.append("render")
+        assert set(resolved) == {"default", "qa"}
+        imported = config.environments["qa"]
+        assert imported.no_default_feature is True
+        assert set(config.merged_conda_dependencies(imported)) == {"python"}
+        return rendered_lock
+
+    def install_plan(phase, _ctx, name, kwargs) -> None:
+        assert name == "qa"
+        events.append(f"{phase}-qa")
+        validator = kwargs["validate_workspace"]
+        assert callable(validator)
+        validator()
+        if phase == "prepare":
+            prepare_kwargs.append(kwargs)
+            if failure_stage == "preflight":
+                raise RuntimeError("preflight failed")
+        elif failure_stage == "install":
+            raise RuntimeError("install failed")
+
+    def publish(path: Path, content: str, write: Callable[[str], None]) -> None:
+        event = "lockfile" if path.name == "conda.lock" else "manifest"
+        events.append(event)
+        if failure_stage == "lockfile" and event == "lockfile":
+            raise RuntimeError("lockfile failed")
+        write(content)
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.sync.render_lockfile",
+        render_lock,
+    )
+    replace_lockfile_install_plan(
+        "conda_workspaces.cli.workspace.sync",
+        install_plan,
+    )
+    replace_publication_writer(publish)
+
+    output = StringIO()
+    with conda_context._override("_subdir", "linux-64"):
+        if failure_stage == "preflight":
+            with pytest.raises(RuntimeError, match="preflight failed"):
+                execute_import(
+                    make_args(_DEFAULTS, file=source, environment="qa"),
+                    console=Console(file=output),
+                )
+        elif failure_stage is not None:
+            with pytest.raises(
+                CondaWorkspacesError,
+                match="did not finish",
+            ) as exc_info:
+                execute_import(
+                    make_args(_DEFAULTS, file=source, environment="qa"),
+                    console=Console(file=output),
+                )
+            assert any("install -e qa" in hint for hint in exc_info.value.hints)
+        else:
+            assert (
+                execute_import(
+                    make_args(_DEFAULTS, file=source, environment="qa"),
+                    console=Console(file=output),
+                )
+                == 0
+            )
+
+    assert prepare_kwargs[0]["require_absent"] is True
+    assert prepare_kwargs[0]["replace_existing"] is False
+    if failure_stage == "preflight":
+        assert events == ["render", "prepare-qa"]
+        assert named_import_workspace.read_bytes() == before
+        assert lockfile.read_text(encoding="utf-8") == previous_lock
+    elif failure_stage == "lockfile":
+        assert events == ["render", "prepare-qa", "manifest", "lockfile"]
+        assert named_import_workspace.read_bytes() != before
+        assert lockfile.read_text(encoding="utf-8") == previous_lock
+    else:
+        assert named_import_workspace.read_bytes() != before
+        assert lockfile.read_text(encoding="utf-8") == rendered_lock
+        assert events == [
+            "render",
+            "prepare-qa",
+            "manifest",
+            "lockfile",
+            "execute-qa",
+        ]
+    assert ("Imported" in output.getvalue()) is (failure_stage is None)

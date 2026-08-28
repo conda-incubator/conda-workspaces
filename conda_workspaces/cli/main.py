@@ -943,7 +943,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
 
     import_parser = sub.add_parser(
         "import",
-        help="Import a manifest from another format into conda.toml.",
+        help="Convert a manifest or import environment.yml into a workspace.",
         add_help=False,
     )
     add_parser_help(import_parser)
@@ -952,16 +952,51 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         "file",
         type=Path,
         help=(
-            "Manifest file to import (environment.yml, anaconda-project.yml, "
-            "conda-project.yml, pixi.toml, pyproject.toml)."
+            "Source manifest. Named environment import accepts only "
+            "environment.yml or environment.yaml."
         ),
     )
-    import_parser.add_argument(
+    import_destination = import_parser.add_mutually_exclusive_group()
+    import_destination.add_argument(
+        "-e",
+        "--environment",
+        default=None,
+        help=("Import environment.yml as this new non-default workspace environment."),
+    )
+    import_destination.add_argument(
         "-o",
         "--output",
         type=Path,
         default=None,
         help="Output path (default: conda.toml in the current directory).",
+    )
+    import_parser.add_argument(
+        "--no-install",
+        action="store_true",
+        default=False,
+        help=(
+            "Update the manifest and complete lockfile but skip installing"
+            " the imported environment. Requires --environment."
+        ),
+    )
+    import_parser.add_argument(
+        "--no-lockfile-update",
+        action="store_true",
+        default=False,
+        help=(
+            "Only update the manifest. Skip solving, lockfile, and install."
+            " Requires --environment."
+        ),
+    )
+    import_parser.add_argument(
+        "--force-reinstall",
+        action="store_true",
+        default=False,
+        help=(
+            "Remove and recreate an existing inactive target prefix. Requires"
+            " --environment and cannot be combined with --no-install or"
+            " --no-lockfile-update."
+        ),
     )
 
 

@@ -19,6 +19,7 @@ from conda.common.io import captured
 
 from ...context import isolated_package_cache
 from ...envs import activate_d_scripts, install_environment
+from ...exceptions import CondaWorkspacesError
 from ...lockfile import (
     LockfileInstallPlan,
     load_lockfile_data,
@@ -77,6 +78,7 @@ def sync_environments(
     baseline_lockfile: dict[str, Any] | None = None,
     update_targets: dict[tuple[str, str], set[str]] | None = None,
     publish_lockfile: Callable[[str], None] | None = None,
+    require_absent_prefixes: Iterable[str] = (),
     validate_workspace: Callable[[], None] | None = None,
     console: Console,
 ) -> None:
@@ -92,13 +94,16 @@ def sync_environments(
     prefix solve and overlays the same environment/platform slices onto
     *baseline_lockfile*. After every solve succeeds, *publish_lockfile*
     can publish that rendered lock with another desired-state file before
-    prefix transactions begin.
+    prefix transactions begin. *require_absent_prefixes* names environment
+    prefixes that must remain absent through install preflight.
 
     If new files appear under ``$PREFIX/etc/conda/activate.d/`` and the
     caller is inside a ``conda workspace shell`` session
     (``CONDA_SPAWN=1``), a hint is printed asking the user to re-spawn.
     """
     names = list(env_names)
+    required_absent_names = tuple(dict.fromkeys(require_absent_prefixes))
+    required_absent = set(required_absent_names)
     if not names and not update_targets:
         return
 
@@ -182,7 +187,16 @@ def sync_environments(
                     update_names=update_names,
                     prune=prune,
                     replace_existing=force_reinstall,
+                    require_absent=name in required_absent,
                     validate_workspace=validate_workspace,
+                )
+        for name in required_absent_names:
+            if name in install_plans:
+                continue
+            prefix = ctx.env_prefix(name)
+            if LockfileInstallPlan.prefix_identity(prefix) is not None:
+                raise CondaWorkspacesError(
+                    f"Workspace environment prefix already exists: {prefix}"
                 )
         if not dry_run:
             if publish_lockfile is not None:

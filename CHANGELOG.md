@@ -16,6 +16,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   declaration, complete lock records, and installed prefix after task, active
   environment, and confirmation checks. `workspace envs --orphans` and
   `workspace clean -e NAME` expose and remove valid undeclared prefixes. (#162)
+- Added `conda workspace import -e NAME environment.yml` to add one complete
+  environment.yml to an existing workspace with environment-private
+  dependencies, refresh the complete lockfile, and install its project-local
+  prefix. (#163)
 
 ## 0.8.0 — 2026-07-27
 

@@ -152,6 +152,32 @@ def test_workspace_unknown_subcmd_prints_help(
         (["remove", "-e", "test"], "specs", []),
         (["remove", "-e", "test", "--all"], "all", True),
         (["remove", "-e", "test", "--yes"], "yes", True),
+        (
+            ["import", "-e", "legacy", "environment.yml"],
+            "environment",
+            "legacy",
+        ),
+        (
+            ["import", "-e", "legacy", "--no-install", "environment.yml"],
+            "no_install",
+            True,
+        ),
+        (
+            [
+                "import",
+                "-e",
+                "legacy",
+                "--no-lockfile-update",
+                "environment.yml",
+            ],
+            "no_lockfile_update",
+            True,
+        ),
+        (
+            ["import", "-e", "legacy", "--force-reinstall", "environment.yml"],
+            "force_reinstall",
+            True,
+        ),
         (["clean", "-e", "test"], "environment", "test"),
         (["activate", "-e", "docs"], "environment", "docs"),
         (["activate"], "environment", "default"),
@@ -222,6 +248,10 @@ def test_workspace_unknown_subcmd_prints_help(
         "remove-empty-environment",
         "remove-all-environment",
         "remove-yes-independent",
+        "import-environment",
+        "import-no-install",
+        "import-no-lockfile-update",
+        "import-force-reinstall",
         "clean-env",
         "activate-named",
         "activate-default",
@@ -292,6 +322,42 @@ def test_workspace_mutation_locations_are_mutually_exclusive(subcmd: str) -> Non
                 "numpy",
             ]
         )
+
+
+@pytest.mark.parametrize(
+    "selectors",
+    [
+        pytest.param(["-e", "legacy", "-o", "conda.toml"], id="short"),
+        pytest.param(
+            ["--environment", "legacy", "--output", "conda.toml"],
+            id="long",
+        ),
+    ],
+)
+def test_workspace_import_destinations_are_mutually_exclusive(
+    selectors: list[str],
+) -> None:
+    parser = generate_workspace_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["import", *selectors, "environment.yml"])
+
+
+def test_workspace_import_named_form_preserves_source_file() -> None:
+    parsed = generate_workspace_parser().parse_args(
+        [
+            "import",
+            "--environment",
+            "legacy",
+            "--no-install",
+            "environment.yml",
+        ]
+    )
+
+    assert parsed.environment == "legacy"
+    assert parsed.file == Path("environment.yml")
+    assert parsed.output is None
+    assert parsed.no_install is True
 
 
 def test_workspace_parser_separates_manifest_and_export_paths() -> None:
