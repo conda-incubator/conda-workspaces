@@ -6,20 +6,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 0.9.0 — 2026-08-28
+
 ### Added
 
-- Added `conda workspace sbom` to export one locked or installed workspace environment as a CycloneDX 1.7 JSON SBOM through the optional conda-sboms plugin. Lockfile mode adds validated manifest dependency roots, prefix mode keeps conda history roots, metadata flags set product, manufacturer, and author identities per export, and `--reproducible` omits unstable timestamps.
+- Added `conda workspace sbom` to export one locked or installed workspace
+  environment as a CycloneDX 1.7 JSON SBOM through the optional conda-sboms
+  plugin. Lockfile mode adds validated manifest dependency roots, prefix mode
+  keeps conda history roots, metadata flags set product, manufacturer, and author
+  identities per export, and `--reproducible` omits unstable timestamps.
+  (#159, #160)
 - Added `conda workspace add -e NAME` to declare, lock, and install a named
   environment without requiring a package. Compose existing features with
   repeatable `--with-feature`, or exclude the default feature with
   `--no-default-feature`. `conda workspace remove -e NAME --all` removes the
   declaration, complete lock records, and installed prefix after task, active
   environment, and confirmation checks. `workspace envs --orphans` and
-  `workspace clean -e NAME` expose and remove valid undeclared prefixes. (#162)
+  `workspace clean -e NAME` expose and remove valid undeclared prefixes.
+  (#162, #164)
 - Added `conda workspace import -e NAME environment.yml` to add one complete
   environment.yml to an existing workspace with environment-private
   dependencies, refresh the complete lockfile, and install its project-local
-  prefix. (#163)
+  prefix. (#163, #166)
+
+### Changed
+
+- A lockfile is now current only when its environment names exactly match the
+  manifest. Extra lockfile environments make it stale and trigger regeneration
+  before installation. (#162, #164)
+- Installation instructions and missing-plugin messages now target conda's base
+  environment with channel-qualified conda-forge specs, allowing conda to
+  discover conda-workspaces and its optional plugins without changing the
+  configured channel list. (#161)
 
 ## 0.8.0 — 2026-07-27
 

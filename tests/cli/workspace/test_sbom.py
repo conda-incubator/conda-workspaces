@@ -274,9 +274,10 @@ def test_sbom_requires_conda_sboms_0_3_0(
             export_cyclonedx_json=lambda environment, **kwargs: str(environment),
         )
 
-    with pytest.raises(CondaValueError, match=r"conda-sboms >=0\.3\.0"):
+    with pytest.raises(CondaValueError, match=r"conda-sboms >=0\.3\.0") as error:
         execute_sbom(make_args(_DEFAULTS, **values))
 
+    assert 'conda install -n base "conda-forge::conda-sboms>=0.3.0"' in str(error.value)
     assert recorded_export_calls == []
 
 

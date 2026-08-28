@@ -1,17 +1,10 @@
 # Generate a workspace SBOM
 
-Install conda-sboms alongside conda-workspaces in the environment where
-`conda` is installed:
+Install conda-sboms into conda's base environment so conda can discover the
+plugin:
 
 ```console
-conda activate base
-conda pypi install "conda-sboms>=0.3.0"
-```
-
-If `conda pypi` is unavailable, use pip in the same environment:
-
-```console
-python -m pip install "conda-sboms>=0.3.0"
+conda install -n base "conda-forge::conda-sboms>=0.3.0"
 ```
 
 ## Generate from a lockfile
