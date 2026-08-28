@@ -51,7 +51,8 @@ def execute_sbom(
     metadata_requested = any(value is not None for value in metadata_values.values())
     requirement = (
         "SBOM export requires conda-sboms >=0.3.0. "
-        "Install or upgrade it in the environment where conda is installed."
+        "Install or upgrade it with: conda install -n base "
+        '"conda-forge::conda-sboms>=0.3.0"'
     )
     try:
         cyclonedx = import_module("conda_sboms.cyclonedx")
