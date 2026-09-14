@@ -6,6 +6,7 @@ from copy import deepcopy
 
 import pytest
 from conda.core.package_cache_data import ProgressiveFetchExtract
+from conda.models.records import PackageRecord
 from conda_lockfiles.rattler_lock import v6
 
 from conda_workspaces.exceptions import LockfileIntegrityError
@@ -120,6 +121,56 @@ def test_metadata_environment_reads_named_only_selection(selection_data: dict) -
     assert env.explicit_packages[0].build_number == 17
     assert env.explicit_packages[0].dump()["timestamp"] == 1726000000000
     assert env.explicit_packages[0].sha256 == "a" * 64
+
+
+@pytest.mark.parametrize(
+    ("target", "package_platform"),
+    [("osx-arm64", None), ("linux-cuda", "linux-64"), ("portable", "linux-64")],
+)
+def test_generic_environment_reads_named_only_selection(
+    selection_data: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    package_platform: str | None,
+) -> None:
+    selected = CondaLockLoader("conda.lock", data=selection_data).select(
+        {"test": (target,)}
+    )
+    selected["environments"]["unrelated"] = None
+    original = deepcopy(selected)
+    fetched: list[str] = []
+
+    def cached_records(metadata_by_url, **kwargs):
+        fetched.extend(metadata_by_url)
+        return tuple(
+            PackageRecord(
+                name=f"package-{index}",
+                version="1.0",
+                build="h0_0",
+                build_number=0,
+                subdir=package_platform or target,
+                url=url,
+                sha256=metadata["sha256"],
+                md5=metadata["md5"],
+            )
+            for index, (url, metadata) in enumerate(metadata_by_url.items())
+        )
+
+    monkeypatch.setattr(v6, "records_from_conda_urls", cached_records)
+
+    env = CondaLockLoader("conda.lock", data=selected).env_for(
+        target, name="test", package_platform=package_platform
+    )
+
+    assert env.name == "test"
+    assert env.platform == (package_platform or target)
+    assert getattr(env, "lock_platform", env.platform) == target
+    assert fetched == [record["conda"] for record in selected["packages"]]
+    assert [record.url for record in env.explicit_packages] == fetched
+    assert [record.sha256 for record in env.explicit_packages] == [
+        record["sha256"] for record in selected["packages"]
+    ]
+    assert selected == original
 
 
 @pytest.mark.parametrize(
