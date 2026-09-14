@@ -807,9 +807,17 @@ class ManifestParser(ABC):
             raise WorkspaceParseError(path, redact_url_text(str(exc))) from exc
         return self.parse_text(path, content)
 
-    def parse_text(self, path: Path, content: str) -> WorkspaceConfig:
+    def parse_text(
+        self,
+        path: Path,
+        content: str,
+        *,
+        reject_url_credentials: bool = False,
+    ) -> WorkspaceConfig:
         """Parse *content* and bind the result to that manifest generation."""
         data = self.parse_toml_text_with_redacted_errors(content, path).unwrap()
+        if reject_url_credentials:
+            self.validate_no_url_credentials(data, path, content=content)
         config = self.parse_data_with_redacted_errors(data, path)
         config._manifest_text = content
         return config

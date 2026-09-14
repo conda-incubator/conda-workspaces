@@ -229,3 +229,72 @@ def test_parse_tasks_redacts_malformed_manifest_credentials(
 
     assert "LEAKME" not in str(caught.value)
     assert "user" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "parser_class,filename,namespace",
+    [
+        (CondaTomlParser, "conda.toml", None),
+        (PixiTomlParser, "pixi.toml", None),
+        (PyprojectTomlParser, "pyproject.toml", "conda"),
+        (PyprojectTomlParser, "pyproject.toml", "pixi"),
+    ],
+    ids=["conda", "pixi", "pyproject-conda", "pyproject-pixi"],
+)
+def test_parse_text_url_credential_rejection_is_opt_in(
+    tmp_path: Path,
+    parser_class: type[ManifestParser],
+    filename: str,
+    namespace: str | None,
+) -> None:
+    prefix = f"tool.{namespace}." if namespace else ""
+    content = (
+        f"[{prefix}workspace]\n"
+        'channels = ["https://user:SECRET@example.test/channel"]\n'
+    )
+    path = tmp_path / filename
+    parser = parser_class()
+    assert len(parser.parse_text(path, content).channels) == 1
+    with pytest.raises(WorkspaceParseError, match="embedded URL credentials") as error:
+        parser.parse_text(path, content, reject_url_credentials=True)
+    assert "SECRET" not in str(error.value)
+    assert "user:" not in str(error.value)
+    path.write_text(content, encoding="utf-8")
+    assert len(parser.parse(path).channels) == 1
+
+
+@pytest.mark.parametrize(
+    "parser_class,filename,namespace",
+    [
+        (CondaTomlParser, "conda.toml", None),
+        (PixiTomlParser, "pixi.toml", None),
+        (PyprojectTomlParser, "pyproject.toml", "conda"),
+        (PyprojectTomlParser, "pyproject.toml", "pixi"),
+    ],
+    ids=["conda", "pixi", "pyproject-conda", "pyproject-pixi"],
+)
+@pytest.mark.parametrize(
+    "section",
+    [
+        {"environments": {"test": {"channels": ["conda-forge"]}}},
+        {"target": {"linux-64": {"channels": []}}},
+        {"feature": {"test": {"target": {"linux-64": {"channels": False}}}}},
+        {
+            "environments": {
+                "test": {"target": {"linux-64": {"channels": ["bioconda"]}}}
+            }
+        },
+    ],
+    ids=["environment", "target", "feature-target", "environment-target"],
+)
+def test_parse_data_rejects_unsupported_channel_overrides(
+    tmp_path: Path,
+    parser_class: type[ManifestParser],
+    filename: str,
+    namespace: str | None,
+    section: dict[str, Any],
+) -> None:
+    source = {"workspace": {"name": "example"}, **section}
+    document = {"tool": {namespace: source}} if namespace else source
+    with pytest.raises(WorkspaceParseError, match="channels is not supported"):
+        parser_class().parse_data_with_redacted_errors(document, tmp_path / filename)

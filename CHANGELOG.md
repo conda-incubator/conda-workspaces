@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed
+
+- Reject malformed channels and dependency values instead of dropping or coercing
+  them. Reject unsupported conda dependency fields and environment or target
+  channel overrides before they can change the requested solve.
+- Let callers of `ManifestParser.parse_text` reject embedded URL credentials
+  during the same parse with `reject_url_credentials=True`.
+
 ## 0.9.0 — 2026-08-28
 
 ### Added
