@@ -32,6 +32,7 @@ import conda_workspaces.paths as paths_module
 from conda_workspaces.context import WorkspaceContext
 from conda_workspaces.exceptions import (
     CondaWorkspacesError,
+    EnvironmentNotFoundError,
     LockfileIntegrityError,
     LockfileMergeError,
     LockfileNotFoundError,
@@ -4356,3 +4357,89 @@ def test_satisfiability_rejects_extra_lockfile_envs(
     assert result.status == LockfileStatus.OUT_OF_DATE
     assert "'extra'" in result.reason
     assert "not declared in the manifest" in result.reason
+
+
+@pytest.fixture
+def satisfiability_environment_pair(lockfile_data_factory):
+    config = WorkspaceConfig(
+        channels=[Channel("conda-forge")],
+        platforms=["linux-64"],
+        features={
+            "default": Feature(
+                name="default",
+                conda_dependencies={"python": MatchSpec("python >=3.10")},
+            ),
+            "newer": Feature(
+                name="newer",
+                conda_dependencies={"python": MatchSpec("python >=3.14")},
+            ),
+        },
+        environments={
+            "default": Environment(name="default"),
+            "newer": Environment(name="newer", features=["newer"]),
+        },
+    )
+    data = lockfile_data_factory()
+    data["environments"]["newer"] = deepcopy(data["environments"]["default"])
+    return config, data
+
+
+@pytest.mark.parametrize(
+    ("environment", "expected"),
+    [
+        pytest.param(None, LockfileStatus.OUT_OF_DATE, id="all-environments"),
+        pytest.param("default", LockfileStatus.UP_TO_DATE, id="satisfied-selection"),
+        pytest.param("newer", LockfileStatus.OUT_OF_DATE, id="stale-selection"),
+    ],
+)
+def test_satisfiability_selects_environment_package_requirements(
+    satisfiability_environment_pair,
+    environment: str | None,
+    expected: str,
+) -> None:
+    config, data = satisfiability_environment_pair
+
+    result = check_lockfile_satisfiability(
+        config, data, "linux-64", environment=environment
+    )
+
+    assert result.status == expected
+    if expected == LockfileStatus.OUT_OF_DATE:
+        assert "newer" in result.reason
+        assert "python" in result.reason
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    ["missing-environment", "extra-environment", "channels", "platform"],
+)
+def test_satisfiability_selection_keeps_complete_workspace_declaration_checks(
+    satisfiability_environment_pair,
+    mismatch: str,
+) -> None:
+    config, data = satisfiability_environment_pair
+    if mismatch == "missing-environment":
+        del data["environments"]["newer"]
+    elif mismatch == "extra-environment":
+        data["environments"]["extra"] = deepcopy(data["environments"]["default"])
+    elif mismatch == "channels":
+        data["environments"]["newer"]["channels"] = []
+    else:
+        del data["environments"]["newer"]["packages"]["linux-64"]
+
+    result = check_lockfile_satisfiability(
+        config, data, "linux-64", environment="default"
+    )
+
+    assert result.status == LockfileStatus.OUT_OF_DATE
+    affected_environment = "extra" if mismatch == "extra-environment" else "newer"
+    assert affected_environment in result.reason
+
+
+def test_satisfiability_rejects_unknown_environment(
+    satisfiability_environment_pair,
+) -> None:
+    config, data = satisfiability_environment_pair
+
+    with pytest.raises(EnvironmentNotFoundError, match="unknown"):
+        check_lockfile_satisfiability(config, data, "linux-64", environment="unknown")

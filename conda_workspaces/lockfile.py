@@ -234,6 +234,8 @@ def check_lockfile_satisfiability(
     config: WorkspaceConfig,
     lockfile_data: dict[str, Any],
     current_platform: str,
+    *,
+    environment: str | None = None,
 ) -> LockfileStatus:
     """Check whether *lockfile_data* satisfies the manifest's requirements.
 
@@ -241,8 +243,14 @@ def check_lockfile_satisfiability(
     the lockfile covers every environment, platform, channel, and
     dependency declared in *config*.  Returns ``status=OUT_OF_DATE``
     with a human-readable *reason* otherwise.
+
+    Set *environment* to check package requirements only for that environment
+    on *current_platform*. Environment names, channels and declared platforms
+    are still checked across the complete workspace.
     """
     _stale = LockfileStatus.OUT_OF_DATE
+    if environment is not None:
+        config.get_environment(environment)
 
     try:
         lockfile_data = CondaLockLoader.redact_data_urls(lockfile_data)
@@ -317,6 +325,9 @@ def check_lockfile_satisfiability(
                         f"'{env_name}' in the lockfile"
                     ),
                 )
+
+        if environment is not None and env_name != environment:
+            continue
 
         lock_packages = lock_env.get("packages", {})
         try:
