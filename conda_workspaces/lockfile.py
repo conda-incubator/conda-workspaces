@@ -675,10 +675,6 @@ class CondaLockLoader(EnvironmentSpecBase):
             package_platform=package_platform,
         )
 
-        # Share rattler-lock v6 conversion with conda-lockfiles via a
-        # localised in-memory version byte swap.  Disk file is untouched.
-        from conda_lockfiles.rattler_lock.v6 import RattlerLockV6
-
         conversion_platform = package_platform or platform
         records = None
         if metadata_only:
@@ -692,13 +688,18 @@ class CondaLockLoader(EnvironmentSpecBase):
             packages = payload["environments"][name]["packages"]
             packages[conversion_platform] = packages[platform]
         if records is None:
-            from conda_lockfiles.rattler_lock.v6 import rattler_lock_v6_to_conda_env
+            from conda_lockfiles.rattler_lock.v6 import (
+                RattlerLockV6,
+                rattler_lock_v6_to_conda_env,
+            )
 
-            payload["version"] = 6
+            # The shared rattler model requires a default environment, while
+            # conda.lock may contain only a named environment. Adapt the copy.
+            payload.update(version=6, environments={"default": env_data})
             lockfile_model = RattlerLockV6.model_validate(payload)
             env = rattler_lock_v6_to_conda_env(
                 lockfile_model,
-                name=name,
+                name="default",
                 platform=conversion_platform,
             )
         else:
