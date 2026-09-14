@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 from conda.base.context import context as conda_context
-from conda.base.context import determine_target_prefix
+from conda.base.context import determine_target_prefix, reset_context
+from conda.misc import get_package_records_from_explicit
 
 from conda_workspaces.cli.main import generate_workspace_parser
 from conda_workspaces.cli.workspace import workspace_context_from_args
@@ -26,9 +27,11 @@ from conda_workspaces.models import LockfileStatus
 from ..conftest import make_args
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
+    from os import PathLike
     from pathlib import Path
 
+    from conda.models.records import PackageCacheRecord
     from rich.console import Console
 
     from tests.conftest import SnapshotTree
@@ -111,10 +114,15 @@ def test_install_download_only_preserves_workspace(
         ),
         encoding="utf-8",
     )
-    fetched: list[list[str]] = []
+    fetched: list[tuple[list[str], tuple[str | PathLike[str], ...]]] = []
+
+    def fetch(urls: list[str]) -> Iterable[PackageCacheRecord]:
+        fetched.append((list(urls), conda_context.pkgs_dirs))
+        return get_package_records_from_explicit(urls)
+
     monkeypatch.setattr(
         "conda.misc.get_package_records_from_explicit",
-        lambda urls: fetched.append(list(urls)) or [],
+        fetch,
     )
     monkeypatch.setattr(
         "conda.misc.install_explicit_packages",
@@ -138,12 +146,23 @@ def test_install_download_only_preserves_workspace(
         ]
     )
 
-    assert determine_target_prefix(conda_context, args) == str(
-        tmp_path / "output" / "runtime"
-    )
-    assert execute_install(args) == 0
+    reset_context(argparse_args=args)
+    try:
+        configured_caches = conda_context.pkgs_dirs
+        assert determine_target_prefix(conda_context, args) == str(
+            tmp_path / "output" / "runtime"
+        )
+        assert conda_context.dry_run is dry_run
+        assert execute_install(args) == 0
+        assert conda_context.dry_run is dry_run
+        assert conda_context.pkgs_dirs == configured_caches
+    finally:
+        reset_context()
 
-    assert fetched == [[]]
+    assert len(fetched) == 1
+    urls, used_caches = fetched[0]
+    assert urls == []
+    assert (used_caches != configured_caches) is dry_run
     assert snapshot_tree(tmp_path) == before
     expected = "Would download packages for" if dry_run else "Downloaded packages for"
     assert expected in capsys.readouterr().out

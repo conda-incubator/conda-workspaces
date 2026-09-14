@@ -2210,7 +2210,9 @@ class LockfileInstallPlan:
             if target_prefix_override is not None
             else nullcontext()
         )
-        with override:
+        # Preparation only fetches packages. CLI dry runs isolate those cache
+        # writes and must still finish validation before skipping installation.
+        with override, conda_context._override("dry_run", False):
             if validate_workspace is not None:
                 validate_workspace()
             records = cast(
