@@ -725,6 +725,64 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         help="Optional command to run in the spawned shell.",
     )
 
+    image_parser = sub.add_parser(
+        "image",
+        help="Build a runnable image from a locked workspace environment.",
+        add_help=False,
+    )
+    add_parser_help(image_parser)
+    add_output_and_prompt_options(image_parser)
+    image_parser.add_argument(
+        "-e",
+        "--environment",
+        required=True,
+        help="Workspace environment to include in the image.",
+    )
+    image_parser.add_argument(
+        "--platform",
+        required=True,
+        help="Linux platform from conda.lock, such as linux-64 or linux-aarch64.",
+    )
+    image_parser.add_argument(
+        "-t",
+        "--tag",
+        action="append",
+        default=None,
+        help="Image tag (repeatable). Required for --load and --push.",
+    )
+    image_output = image_parser.add_mutually_exclusive_group(required=True)
+    image_output.add_argument(
+        "--load",
+        action="store_true",
+        help="Load the image into the local Docker image store.",
+    )
+    image_output.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="Write an OCI image archive to this path.",
+    )
+    image_output.add_argument(
+        "--push",
+        action="store_true",
+        help="Push the image to the registry named by its tags.",
+    )
+    image_parser.add_argument(
+        "--base-image",
+        default="debian:bookworm-slim",
+        help="Linux base image (default: debian:bookworm-slim).",
+    )
+    image_parser.add_argument(
+        "--builder",
+        default=None,
+        help="Existing Docker Buildx builder to use.",
+    )
+    image_parser.add_argument(
+        "cmd",
+        nargs=argparse.REMAINDER,
+        help="Default image command (use -- to separate from options).",
+    )
+
     archive_parser = sub.add_parser(
         "archive",
         help="Create a workspace archive.",
@@ -1115,6 +1173,10 @@ def _dispatch_workspace(args: argparse.Namespace, subcmd: str) -> int:
         from .workspace.archive import execute_archive
 
         return execute_archive(args)
+    elif subcmd == "image":
+        from .workspace.image import execute_image
+
+        return execute_image(args)
     elif subcmd == "unarchive":
         from .workspace.archive import execute_unarchive
 

@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "workspace-container-example"
+version = "1.0.0"
+requires-python = ">=3.13"
+
+[project.scripts]
+workspace-hello = "workspace_container_example:main"
+
+[tool.setuptools]
+py-modules = ["workspace_container_example"]

@@ -4,12 +4,19 @@ from __future__ import annotations
 
 pytest_plugins = ["conda.testing", "conda.testing.fixtures"]
 
+import json
+import shutil
+import subprocess
+import sys
 from contextlib import ExitStack
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 import pytest
 
 import conda_workspaces.publication as publication_mod
+from conda_workspaces.context import WorkspaceContext
+from conda_workspaces.manifests import detect_and_parse
 from conda_workspaces.models import (
     Channel,
     Environment,
@@ -23,7 +30,6 @@ from conda_workspaces.models import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-    from pathlib import Path
 
     from conda.testing.fixtures import TmpEnvFixture
 
@@ -53,6 +59,102 @@ class ReplacePublicationWriter(Protocol):
         self,
         callback: Callable[[Path, str, Callable[[str], None]], None],
     ) -> None: ...
+
+
+@pytest.fixture
+def image_workspace(
+    tmp_path: Path,
+) -> Callable[..., tuple[WorkspaceConfig, WorkspaceContext]]:
+    """Create a real manifest and empty exact lock without solving or downloading."""
+
+    def create(
+        *,
+        manifest_extra: str = "",
+        files: dict[str, str] | None = None,
+        lock_data: dict[str, object] | None = None,
+        platforms: tuple[str, ...] = ("linux-64",),
+    ) -> tuple[WorkspaceConfig, WorkspaceContext]:
+        root = tmp_path / "workspace"
+        root.mkdir()
+        manifest = root / "conda.toml"
+        manifest.write_text(
+            '[workspace]\nname = "image-test"\nchannels = []\n'
+            f"platforms = {json.dumps(platforms)}\n" + manifest_extra,
+            encoding="utf-8",
+        )
+        (root / "app.py").write_text('print("hello")\n', encoding="utf-8")
+        for name, content in (files or {}).items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        data = lock_data or {
+            "version": 1,
+            "environments": {
+                "default": {
+                    "channels": [],
+                    "packages": {platform: [] for platform in platforms},
+                }
+            },
+            "packages": [],
+        }
+        (root / "conda.lock").write_text(json.dumps(data), encoding="utf-8")
+        _, config = detect_and_parse(manifest)
+        return config, WorkspaceContext(config)
+
+    return create
+
+
+@pytest.fixture
+def record_image_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[..., list[list[str]]]:
+    """Replace Docker only, recording argv and writing simulated build artifacts."""
+    original_run = subprocess.run
+    original_which = shutil.which
+
+    def record(
+        *,
+        fail_operation: str | None = None,
+        on_build: Callable[[list[str]], None] | None = None,
+    ) -> list[list[str]]:
+        calls: list[list[str]] = []
+
+        def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            if args[:2] != ["docker", "buildx"]:
+                return original_run(args, **kwargs)
+            calls.append(list(args))
+            assert not kwargs.get("shell")
+            assert kwargs["check"] is True
+            assert kwargs["stderr"] is sys.stderr
+            operation = args[2]
+            if operation == "build":
+                assert kwargs["stdout"] is sys.stderr
+                metadata = Path(args[args.index("--metadata-file") + 1])
+                metadata.write_text(
+                    json.dumps({"containerimage.digest": "sha256:" + "a" * 64}),
+                    encoding="utf-8",
+                )
+                if "--output" in args:
+                    output = args[args.index("--output") + 1]
+                    Path(output.split("dest=", 1)[1]).write_bytes(b"OCI image archive")
+                if on_build is not None:
+                    on_build(args)
+            if operation == fail_operation:
+                raise subprocess.CalledProcessError(1, args)
+            return subprocess.CompletedProcess(args, 0, stdout="")
+
+        def which(command: str, **kwargs: object) -> str | None:
+            return (
+                "/usr/bin/docker"
+                if command == "docker"
+                else original_which(command, **kwargs)
+            )
+
+        monkeypatch.setattr("conda_workspaces.image.subprocess.run", run)
+        monkeypatch.setattr("conda_workspaces.image.shutil.which", which)
+        return calls
+
+    return record
 
 
 @pytest.fixture
