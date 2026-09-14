@@ -36,6 +36,7 @@ from .models import ArchiveConfig, LockfileStatus, has_url_credentials_in_data
 from .paths import (
     atomic_binary_writer,
     has_absolute_path_syntax,
+    is_path_segment,
     read_regular_file_bytes,
     validate_file_output,
 )
@@ -47,7 +48,6 @@ if TYPE_CHECKING:
     from .context import WorkspaceContext
     from .models import WorkspaceConfig
 
-WORKSPACE_ROOT: Final = "/opt/workspace"
 DEFAULT_BASE_IMAGE: Final = "debian:bookworm-slim"
 BOOTSTRAP_IMAGE: Final = "quay.io/condaforge/miniforge3:26.7.2-0"
 BUILD_TOOLS: Final = ("conda-workspaces=0.9.0", "conda-pypi>=0.9.0")
@@ -75,6 +75,7 @@ class WorkspaceImage:
     builder: str | None
     files: list[Path]
     input_hashes: dict[str, str]
+    workspace: str
     prefix: str
 
     @classmethod
@@ -111,6 +112,13 @@ class WorkspaceImage:
             r"[A-Za-z0-9][A-Za-z0-9_.-]*", builder
         ):
             raise CondaWorkspacesError("Invalid Buildx builder name.")
+        if not config.name or not is_path_segment(config.name) or "$" in config.name:
+            raise CondaWorkspacesError(
+                "Images require a workspace name that is a portable directory name "
+                "without dollar signs. "
+                "Set the workspace name in the manifest."
+            )
+        workspace = str(PurePosixPath("/workspaces") / config.name)
 
         resolved = resolve_environment(config, environment, platform)
         platform = config.resolve_platform_name(
@@ -124,9 +132,14 @@ class WorkspaceImage:
         root = ctx.root
         envs_directory = ctx.envs_dir
         prefix = str(
-            PurePosixPath(WORKSPACE_ROOT)
+            PurePosixPath(workspace)
             / ctx.env_prefix(environment).relative_to(root).as_posix()
         )
+        if "$" in prefix:
+            raise CondaWorkspacesError(
+                "Image environment paths cannot contain dollar signs. "
+                "Conda expands environment variables in activation prefixes."
+            )
         manifest = Path(config.manifest_path)
         lock = lockfile_path(ctx)
         if not lock.exists():
@@ -278,8 +291,14 @@ class WorkspaceImage:
             builder,
             files,
             hashes,
+            workspace,
             prefix,
         )
+
+    @property
+    def entrypoint(self) -> str:
+        """Keep activation alongside its workspace when images are combined."""
+        return str(PurePosixPath(self.workspace) / ".conda/bin/workspace-entrypoint")
 
     def recipe(self) -> str:
         """Return the BuildKit recipe with argv encoded as Dockerfile JSON arrays."""
@@ -290,7 +309,7 @@ class WorkspaceImage:
             "/opt/conda/bin/python",
             "/build/install.py",
             "packages",
-            str(PurePosixPath(WORKSPACE_ROOT) / manifest),
+            str(PurePosixPath(self.workspace) / manifest),
             self.environment,
             self.platform,
             self.prefix,
@@ -306,31 +325,52 @@ class WorkspaceImage:
             "conda-forge",
             *BUILD_TOOLS,
         ]
+        runtime_path = (
+            f"{self.prefix}/bin:{PurePosixPath(self.entrypoint).parent}".replace(
+                "\\", "\\\\"
+            ).replace('"', '\\"')
+        )
         return "\n".join(
             [
                 "# syntax=docker/dockerfile:1",
                 f"FROM {BOOTSTRAP_IMAGE} AS bootstrap",
                 "RUN " + json.dumps(bootstrap),
                 f"FROM {self.base_image} AS sources",
-                f"WORKDIR {WORKSPACE_ROOT}",
-                f"ADD workspace.tar.gz {WORKSPACE_ROOT}/",
+                "RUN "
+                + json.dumps(
+                    [
+                        "/bin/bash",
+                        "-ec",
+                        (
+                            'if [[ -e "$1" || -L "$1" ]]; then '
+                            'echo "Base image already contains $1. '
+                            'Choose a base without an installed workspace." >&2; '
+                            "exit 1; fi"
+                        ),
+                        "--",
+                        self.workspace,
+                    ]
+                ),
+                f'WORKDIR "{self.workspace}"',
+                "ADD " + json.dumps(["workspace.tar.gz", self.workspace + "/"]),
                 f"FROM {self.base_image} AS build",
                 "COPY --from=bootstrap /opt/conda /opt/conda",
-                f"COPY --from=sources {WORKSPACE_ROOT} {WORKSPACE_ROOT}",
+                "COPY --from=sources " + json.dumps([self.workspace, self.workspace]),
                 "COPY install.py /build/install.py",
-                f"WORKDIR {WORKSPACE_ROOT}",
+                f'WORKDIR "{self.workspace}"',
                 "RUN " + json.dumps(install),
                 "RUN --network=none "
                 + json.dumps(["/bin/bash", "/build/entrypoint.sh", *local]),
                 f"FROM {self.base_image}",
                 "COPY --from=build " + json.dumps([self.prefix, self.prefix]),
-                f"COPY --from=sources {WORKSPACE_ROOT} {WORKSPACE_ROOT}",
+                "COPY --from=sources " + json.dumps([self.workspace, self.workspace]),
                 (
-                    "COPY --from=build /build/entrypoint.sh "
-                    "/usr/local/bin/workspace-entrypoint"
+                    "COPY --from=build --chmod=0755 "
+                    + json.dumps(["/build/entrypoint.sh", self.entrypoint])
                 ),
-                f"WORKDIR {WORKSPACE_ROOT}",
-                'ENTRYPOINT ["/bin/bash", "/usr/local/bin/workspace-entrypoint"]',
+                f'ENV PATH="{runtime_path}:$PATH"',
+                f'WORKDIR "{self.workspace}"',
+                "ENTRYPOINT " + json.dumps([self.entrypoint]),
                 "CMD " + json.dumps(list(self.command)),
                 "",
             ]
@@ -341,7 +381,7 @@ class WorkspaceImage:
         return {
             "success": True,
             "environment": self.environment,
-            "workspace": WORKSPACE_ROOT,
+            "workspace": self.workspace,
             "prefix": self.prefix,
             "platform": self.platform,
             "oci_platform": self.oci_platform,
@@ -465,7 +505,7 @@ class WorkspaceImage:
         return {
             "success": True,
             "environment": self.environment,
-            "workspace": WORKSPACE_ROOT,
+            "workspace": self.workspace,
             "prefix": self.prefix,
             "platform": self.platform,
             "oci_platform": self.oci_platform,

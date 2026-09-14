@@ -30,14 +30,14 @@ def image_activation(tmp_path: Path) -> dict[str, Any]:
     return {
         "path": {
             "PATH": [
-                "/opt/workspace/.conda/envs/default/bin",
+                "/workspaces/image-test/.conda/envs/default/bin",
                 "/opt/conda/condabin",
                 "/__workspace_runtime_path__",
             ]
         },
         "vars": {
             "export": {
-                "CONDA_PREFIX": "/opt/workspace/.conda/envs/default",
+                "CONDA_PREFIX": "/workspaces/image-test/.conda/envs/default",
                 "CONDA_EXE": "/opt/conda/bin/conda",
                 "_CONDA_ROOT": "/opt/conda",
                 "VALUE": "a ' quote, $HOME, $(exit 9), `exit 8`\nand newline",
@@ -51,7 +51,9 @@ def image_activation(tmp_path: Path) -> dict[str, Any]:
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="requires bash")
 @pytest.mark.parametrize(
-    "runtime_path", ["/usr/bin:/custom/bin", ""], ids=["runtime-path", "fallback-path"]
+    "runtime_path",
+    ["/workspaces/image-test/.conda/bin:/usr/bin:/custom/bin", ""],
+    ids=["runtime-path", "fallback-path"],
 )
 def test_activation_exec_preserves_argv_env_and_hooks(
     tmp_path: Path, image_activation: dict[str, Any], runtime_path: str
@@ -89,8 +91,10 @@ def test_activation_exec_preserves_argv_env_and_hooks(
     assert argv == ["one argument", "$(exit 7)"]
     assert environment["VALUE"] == image_activation["vars"]["export"]["VALUE"]
     assert environment["HOOK_VALUE"] == environment["VALUE"] + " from hook"
-    assert environment["CONDA_PREFIX"] == "/opt/workspace/.conda/envs/default"
-    assert environment["PATH"].startswith("/opt/workspace/.conda/envs/default/bin:")
+    assert environment["CONDA_PREFIX"] == "/workspaces/image-test/.conda/envs/default"
+    assert environment["PATH"].startswith(
+        "/workspaces/image-test/.conda/envs/default/bin:"
+    )
     assert environment["PATH"].endswith(runtime_path or "/sbin:/bin")
     assert not {"TO_REMOVE", "CONDA_EXE", "_CONDA_ROOT"} & environment.keys()
     assert "/opt/conda" not in environment["PATH"]

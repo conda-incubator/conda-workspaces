@@ -9,9 +9,12 @@ optional for other workspace commands and for `image --dry-run`.
 
 ## Prepare the environment
 
-Declare a runtime environment and Linux platform in the manifest, then generate
-`conda.lock`. The image command requires a current, complete lockfile and never
-updates the source manifest or lockfile.
+Set the workspace's `name`, declare a runtime environment and Linux platform in
+the manifest, then generate `conda.lock`. The image command requires a current,
+complete lockfile and never updates the source manifest or lockfile. The
+workspace name must be a nonempty portable directory name without dollar signs.
+Image environment paths cannot contain dollar signs either, because conda
+expands environment variables when activating a prefix.
 
 Local Python applications must use non-editable, workspace-relative path
 dependencies. Include their runtime requirements, `python-build`, and their
@@ -44,16 +47,20 @@ arguments override it while preserving activation:
 docker run --rm myapp:latest python -c 'import sys; print(sys.prefix)'
 ```
 
-The final image contains the environment at `/opt/workspace/.conda/envs/<name>` and selected project
-files at `/opt/workspace`, which is also its working directory. Its entrypoint applies
-conda environment variables and sources activation hooks before using `exec`
-to start the application. Startup performs no installation or solving. Conda
-and temporary build tools are excluded unless the selected environment or base
-image itself includes them. Build-generated source caches are excluded.
+The final image contains selected project files at `/workspaces/<name>`, using
+the manifest's workspace name. This is also its working directory. The selected
+environment stays at `/workspaces/<name>/.conda/envs/<environment>`. Its `bin`
+directory and `/workspaces/<name>/.conda/bin` are on `PATH`. The workspace's
+`workspace-entrypoint` applies conda environment variables and sources activation
+hooks before using `exec` to start the application. Startup performs no
+installation or solving. Conda and temporary build tools are excluded unless
+the selected environment or base image itself includes them. Build-generated
+source caches are excluded.
 
 Mount runtime data into a subdirectory, for example
-`--mount type=bind,src=/path/to/data,dst=/opt/workspace/data`. Mounting over
-`/opt/workspace` would hide both the project files and the installed environment.
+`--mount type=bind,src=/path/to/data,dst=/workspaces/myapp/data` for a workspace
+named `myapp`. Mounting over `/workspaces/myapp` would hide both its project
+files and installed environment.
 
 Choose a compatible glibc-based Linux base with `/bin/bash`:
 
@@ -67,6 +74,43 @@ against locked package and manifest requirements. The runtime host must also
 meet kernel, CPU, and driver requirements. Pin base images by digest when a
 stable base is required. The bootstrap image is versioned, while its temporary
 conda build tools are installed separately from the locked application.
+
+The base must not already contain the selected workspace path, such as
+`/workspaces/myapp`. Other directories under `/workspaces` are allowed. This
+prevents files from an earlier version of the selected workspace or environment
+surviving a new build. Extend an existing workspace image with a downstream
+Dockerfile.
+
+Each invocation builds one workspace and selects one default runtime command.
+Named workspace directories can coexist, each keeping its own manifest,
+environment, and activation wrapper. Their task and dependency graphs remain
+separate.
+
+## Extend the image
+
+Use the generated image in `FROM` to add files and build steps:
+
+```dockerfile
+FROM myapp:latest
+WORKDIR /srv/app
+COPY app.py .
+RUN workspace-entrypoint python -m py_compile app.py
+CMD ["python", "app.py"]
+```
+
+Ordinary commands such as `RUN python --version` find the selected environment
+through `PATH`. Docker build steps do not use the image's `ENTRYPOINT`. Invoke
+`workspace-entrypoint` explicitly when a build step needs manifest environment
+variables or activation hooks. The derived image retains the activating
+entrypoint for its runtime command. Changing `WORKDIR` changes the command's
+working directory without relocating the installed environment.
+
+For a multistage build using `COPY --from`, preserve the installed prefix's
+absolute path and use a compatible Linux base. Copying `/workspaces/<name>` to
+the same location includes the environment, project files, and its activation
+wrapper at `/workspaces/<name>/.conda/bin/workspace-entrypoint`. Copying files
+does not carry image configuration such as `PATH`, `ENTRYPOINT`, `CMD`, or
+`WORKDIR`. Set those in the final stage as needed.
 
 ## Export or publish
 

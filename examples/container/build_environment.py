@@ -18,7 +18,7 @@ def main() -> None:
     status = lockfile_status(context, context.config)
     if status.status != LockfileStatus.UP_TO_DATE:
         raise RuntimeError(f"A current conda.lock is required: {status.reason}")
-    prefix = Path("/opt/workspace/.conda/envs/runtime")
+    prefix = Path("/workspaces/workspace-container-example/.conda/envs/runtime")
     plan = LockfileInstallPlan.prepare(context, "runtime", prefix=prefix)
     assert plan.resolved is not None
     plan.resolved.activation_scripts = [

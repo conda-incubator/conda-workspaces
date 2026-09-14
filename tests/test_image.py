@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tarfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -28,13 +29,20 @@ if TYPE_CHECKING:
     from .conftest import SnapshotTree
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["image-test", "image test", "image's workspace"],
+    ids=["plain", "spaces", "apostrophe"],
+)
 def test_image_preview_preserves_workspace_and_command_argv(
     image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
     monkeypatch: pytest.MonkeyPatch,
     snapshot_tree: SnapshotTree,
     tmp_path: Path,
+    name: str,
 ) -> None:
     config, ctx = image_workspace()
+    config.name = name
     output = tmp_path / "result.oci.tar"
     command = ("python", "-c", 'print("hello")\nRUN touch unwanted', "--json")
     before = snapshot_tree(tmp_path)
@@ -58,11 +66,113 @@ def test_image_preview_preserves_workspace_and_command_argv(
     assert json.loads(cmd_line[4:]) == list(command)
     assert "\nRUN touch unwanted" not in recipe
     assert preview["oci_platform"] == "linux/amd64"
-    assert preview["workspace"] == "/opt/workspace"
-    assert preview["prefix"] == "/opt/workspace/.conda/envs/default"
+    assert preview["workspace"] == f"/workspaces/{name}"
+    assert preview["prefix"] == f"/workspaces/{name}/.conda/envs/default"
     assert preview["files"] == ["app.py", "conda.lock", "conda.toml"]
     assert snapshot_tree(tmp_path) == before
     assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        None,
+        "",
+        ".",
+        "..",
+        "../escape",
+        "/absolute",
+        "group/project",
+        "group\\project",
+        "C:\\project",
+        "CON",
+        "project.",
+        "project ",
+        "project\nRUN true",
+        "image${PATH}",
+    ],
+    ids=[
+        "missing",
+        "empty",
+        "current-directory",
+        "parent-directory",
+        "traversal",
+        "absolute-posix",
+        "nested-posix",
+        "nested-windows",
+        "absolute-windows",
+        "reserved-windows",
+        "trailing-dot",
+        "trailing-space",
+        "newline",
+        "dollar",
+    ],
+)
+def test_image_rejects_missing_or_unsafe_workspace_name(
+    image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
+    tmp_path: Path,
+    name: str | None,
+) -> None:
+    config, ctx = image_workspace()
+    config.name = name
+
+    with pytest.raises(CondaWorkspacesError, match="workspace name"):
+        WorkspaceImage.prepare(
+            config,
+            ctx,
+            environment="default",
+            platform="linux-64",
+            command=("python", "app.py"),
+            output=tmp_path / "result.oci.tar",
+        )
+
+
+@pytest.mark.skipif(not Path("/bin/bash").is_file(), reason="requires /bin/bash")
+@pytest.mark.parametrize(
+    "existing", ["absent", "directory", "file", "symlink"], ids=str
+)
+def test_image_rejects_occupied_workspace_in_base(
+    image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
+    tmp_path: Path,
+    existing: str,
+) -> None:
+    config, ctx = image_workspace()
+    image = WorkspaceImage.prepare(
+        config,
+        ctx,
+        environment="default",
+        platform="linux-64",
+        command=("python", "app.py"),
+        output=tmp_path / "result.oci.tar",
+    )
+    sources = image.recipe().split(" AS sources\n", 1)[1]
+    command = json.loads(sources.splitlines()[0].removeprefix("RUN "))
+    assert command[-1] == "/workspaces/image-test"
+    root = tmp_path / "workspaces" / "image-test"
+    sibling = root.parent / "other-project"
+    sibling.mkdir(parents=True)
+    (sibling / "application").write_text("preserve other workspace")
+    command[-1] = str(root)
+    if existing == "directory":
+        root.mkdir()
+        (root / "old-package").write_text("preserve")
+    elif existing == "file":
+        root.write_text("preserve")
+    elif existing == "symlink":
+        root.symlink_to(tmp_path / "missing-workspace", target_is_directory=True)
+
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+
+    assert result.returncode == (0 if existing == "absent" else 1)
+    assert (sibling / "application").read_text() == "preserve other workspace"
+    if existing != "absent":
+        assert "Base image already contains" in result.stderr
+    if existing == "directory":
+        assert (root / "old-package").read_text() == "preserve"
+    elif existing == "file":
+        assert root.read_text() == "preserve"
+    elif existing == "symlink":
+        assert root.is_symlink()
 
 
 @pytest.mark.parametrize(
@@ -260,10 +370,22 @@ def test_image_resolves_activation_and_local_sources_from_manifest_directory(
 @pytest.mark.parametrize(
     "local_package", [False, True], ids=["application", "root-package"]
 )
+@pytest.mark.parametrize(
+    "envs_dir",
+    ["runtime-envs", "runtime envs", "runtime's envs"],
+    ids=["plain", "spaces", "apostrophe"],
+)
+@pytest.mark.parametrize(
+    "name",
+    ["image-test", "image test", "image's workspace"],
+    ids=["plain", "spaces", "apostrophe"],
+)
 def test_image_uses_custom_environment_path_without_archiving_host_environment(
     image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
     tmp_path: Path,
     local_package: bool,
+    envs_dir: str,
+    name: str,
 ) -> None:
     config, ctx = image_workspace(
         manifest_extra='[pypi-dependencies]\napp = {path = "."}\n'
@@ -271,10 +393,11 @@ def test_image_uses_custom_environment_path_without_archiving_host_environment(
         else "",
         files={
             "pyproject.toml": '[project]\nname = "app"\nversion = "1.0"\n',
-            "runtime-envs/default/bin/python": "host executable",
+            f"{envs_dir}/default/bin/python": "host executable",
         },
     )
-    config.envs_dir = "runtime-envs"
+    config.envs_dir = envs_dir
+    config.name = name
 
     image = WorkspaceImage.prepare(
         config,
@@ -285,7 +408,8 @@ def test_image_uses_custom_environment_path_without_archiving_host_environment(
         output=tmp_path / "result.oci.tar",
     )
 
-    assert image.prefix == "/opt/workspace/runtime-envs/default"
+    assert image.workspace == f"/workspaces/{name}"
+    assert image.prefix == f"/workspaces/{name}/{envs_dir}/default"
     assert image.preview()["prefix"] == image.prefix
     assert all(not file.is_relative_to(ctx.envs_dir) for file in image.files)
     copy = next(
@@ -305,7 +429,64 @@ def test_image_uses_custom_environment_path_without_archiving_host_environment(
     assert len(install_commands) == 2
     for command in install_commands:
         assert command[-1] == image.prefix
-        assert "/opt/workspace/conda.toml" in command
+        assert f"{image.workspace}/conda.toml" in command
+
+    entrypoint = next(
+        line.removeprefix("ENTRYPOINT ")
+        for line in image.recipe().splitlines()
+        if line.startswith("ENTRYPOINT ")
+    )
+    assert json.loads(entrypoint)[-1] == (
+        f"{image.workspace}/.conda/bin/workspace-entrypoint"
+    )
+
+    if Path("/bin/bash").is_file():
+        path_assignment = next(
+            line.removeprefix("ENV ")
+            for line in image.recipe().splitlines()
+            if line.startswith("ENV PATH=")
+        )
+        result = subprocess.run(
+            ["/bin/bash", "-ec", path_assignment + '\nprintf "%s" "$PATH"'],
+            env={"PATH": "/usr/bin:/bin"},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert result.stdout == (
+            f"{image.prefix}/bin:{image.workspace}/.conda/bin:/usr/bin:/bin"
+        )
+
+
+@pytest.mark.parametrize(
+    "component", ["envs-dir", "environment-name"], ids=["envs-dir", "environment"]
+)
+def test_image_rejects_dollar_sign_in_environment_prefix(
+    image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
+    tmp_path: Path,
+    component: str,
+) -> None:
+    environment = "runtime${PATH}" if component == "environment-name" else "default"
+    config, ctx = image_workspace(
+        manifest_extra=f'[environments]\n"{environment}" = []\n'
+    )
+    if component == "envs-dir":
+        config.envs_dir = "runtime${PATH}"
+    else:
+        lock = ctx.root / "conda.lock"
+        data = json.loads(lock.read_text(encoding="utf-8"))
+        data["environments"][environment] = data["environments"]["default"]
+        lock.write_text(json.dumps(data), encoding="utf-8")
+
+    with pytest.raises(CondaWorkspacesError, match="dollar sign"):
+        WorkspaceImage.prepare(
+            config,
+            ctx,
+            environment=environment,
+            platform="linux-64",
+            command=("python", "app.py"),
+            output=tmp_path / "result.oci.tar",
+        )
 
 
 @pytest.mark.parametrize(
