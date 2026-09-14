@@ -6,6 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+- Allow lock satisfiability checks to select one environment's package requirements while retaining workspace declaration checks.
 - Add public lock environment discovery, concrete platform inference and source-preserving selection without package downloads.
 - Preserve embedded build numbers and support named-only locks when reconstructing metadata-only environments.
 
