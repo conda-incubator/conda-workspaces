@@ -34,6 +34,19 @@ After a file is written, it returns the path in `file` instead:
 }
 ```
 
+### Workspace images
+
+`conda workspace image` builds one selected Linux environment and its project
+files using Docker Buildx. It requires `-e/--environment`, `--platform`, a
+startup command after `--`, and one of `--load`, `--push`, or `-o/--output`.
+Loading and pushing also require `-t/--tag`. Tags may be repeated.
+
+`--base-image` selects the Linux base. `--builder` reuses an existing Buildx
+builder. `--dry-run` previews the recipe and inputs without invoking Docker.
+`--json` returns the environment, conda and OCI platforms, tags, destination,
+and resulting image digests. See [Build a workspace image](../how-to/image.md)
+for the complete workflow and source restrictions.
+
 ### Importing manifests
 
 Without `-e/--environment`, `conda workspace import SOURCE` converts a
