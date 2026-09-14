@@ -2,19 +2,24 @@
 
 This example installs a local Python application and a locked environment with conda, generates an activation entrypoint, and copies the environment into a fresh Linux image. The manifest names the workspace `workspace-container-example`, so its application files stay at `/workspaces/workspace-container-example`. The environment stays at `/workspaces/workspace-container-example/.conda/envs/runtime` during installation and execution.
 
+Workspace names and environment paths support spaces but cannot contain dollar signs or apostrophes, which conda activation and Dockerfile parsing interpret.
+
 The default command prints its Python prefix, a manifest environment variable, a value set by the activation hook, and any application arguments. The final image contains neither the bootstrap conda installation nor its package caches. Container startup only activates the environment and executes the command.
 
 ## Build and run
 
-From this directory, with Docker and Buildx installed:
+From this directory, with Docker, Buildx, and conda-workspaces installed:
 
 ```bash
-docker buildx build --platform linux/amd64 --load -t workspace-container-example .
+conda workspace image -e runtime --platform linux-64 \
+  -t workspace-container-example --load -- workspace-hello
 docker run --rm --network none workspace-container-example
 docker run --rm --network none workspace-container-example workspace-hello "another argument"
 ```
 
-Use `--platform linux/arm64` for a native Linux ARM64 build. The committed `conda.lock` covers both architectures. Cross-architecture builds require a builder that supports the target architecture.
+This local-package example also requires conda-pypi with strict build support in the environment invoking the image command. That support is proposed in [conda-pypi#521](https://github.com/conda/conda-pypi/pull/521). Older conda-pypi versions are rejected rather than allowed to install additional build requirements.
+
+Use `--platform linux-aarch64` for Linux ARM64. The committed `conda.lock` covers both architectures. Cross-architecture builds require a builder that supports the target architecture. The image command creates a temporary Buildx builder unless `--builder` selects an existing one.
 
 The default output includes:
 
@@ -27,15 +32,6 @@ Overriding the command retains activation:
 ```bash
 docker run --rm --network none workspace-container-example python -m workspace_container_example "from Python"
 ```
-
-The workspace image command assembles this workflow from the manifest and archive rules:
-
-```bash
-conda workspace image -e runtime --platform linux-64 \
-  -t workspace-container-example --load -- workspace-hello
-```
-
-Use `--platform linux-aarch64` for Linux ARM64. The image command creates an OCI-capable Buildx builder for each invocation unless `--builder` selects an existing one.
 
 ## Extend the image
 
@@ -63,8 +59,8 @@ After changing the environment requirements, regenerate the lockfile before buil
 conda workspace lock
 ```
 
-The builder checks lockfile freshness and uses `LockfileInstallPlan` so an outdated or incomplete lockfile fails the build. `setuptools` and `python-build` are included in the locked environment because they build the local application. The application has a static version and does not need Git metadata during its build.
+The generated recipe first runs `conda workspace install --locked --download-only` to validate and fetch the locked packages. It then runs `conda workspace install --locked` in a Docker `RUN --network=none` step. Both commands select the runtime environment and target platform. An outdated or incomplete lockfile fails the build.
 
-`build_environment.py` uses conda-workspaces' Python API to install at the final prefix, then reads conda's activation JSON and creates a shell script that preserves the prefix variables and activation hooks without retaining the bootstrap executable paths. Its final `exec` makes the application receive container signals directly.
+`setuptools` and `python-build` are included in the locked environment because they build the local application. Builds use the activated environment and reject missing build or runtime requirements. The application has a static version and does not need Git metadata during its build. The image command generates the activation wrapper through `conda_workspaces.image_entrypoint`.
 
-The example uses Ubuntu 24.04 for both build and runtime. A different base must provide compatible Linux libraries and Bash. CUDA drivers, CPU capabilities, and the Linux kernel also depend on the machine running the container.
+The builder copies the invoking conda-workspaces and conda-pypi Python sources, while installing their native Linux dependencies in its bootstrap environment. By default, the image command uses `debian:bookworm-slim` for build and runtime. A different base must provide compatible Linux libraries and Bash. CUDA drivers, CPU capabilities, and the Linux kernel also depend on the machine running the container.

@@ -64,54 +64,11 @@ def recorded_image(
     return prepared, operations
 
 
-@pytest.mark.parametrize(
-    "destination, expected",
-    [
-        (["--load"], {"load": True, "push": False, "output": None}),
-        (["--push"], {"load": False, "push": True, "output": None}),
-        (
-            ["--output", "app.oci.tar"],
-            {"load": False, "push": False, "output": Path("app.oci.tar")},
-        ),
-    ],
-    ids=["load", "push", "oci-archive"],
-)
-def test_image_parser_preserves_command_arguments(
-    destination: list[str], expected: dict[str, object]
-) -> None:
+def test_image_parser_default_base_image() -> None:
     args = generate_workspace_parser().parse_args(
-        [
-            "--file",
-            "project/pixi.toml",
-            "image",
-            "-e",
-            "runtime",
-            "--platform",
-            "linux-aarch64",
-            "-t",
-            "example:latest",
-            "--tag",
-            "example:v1",
-            "--builder",
-            "existing-builder",
-            *destination,
-            "--",
-            "python",
-            "-m",
-            "myapp",
-            "--json",
-        ]
+        ["image", "-e", "runtime", "--platform", "linux-64", "--load"]
     )
-    assert args.subcmd == "image"
-    assert args.environment == "runtime"
-    assert args.platform == "linux-aarch64"
-    assert args.manifest_file == Path("project/pixi.toml")
-    assert args.tag == ["example:latest", "example:v1"]
     assert args.base_image == "debian:bookworm-slim"
-    assert args.builder == "existing-builder"
-    assert args.cmd == ["--", "python", "-m", "myapp", "--json"]
-    for name, value in expected.items():
-        assert getattr(args, name) == value
 
 
 @pytest.mark.parametrize(
@@ -144,11 +101,23 @@ def test_image_parser_requires_explicit_selection_and_one_destination(
 @pytest.mark.parametrize("dry_run", [False, True], ids=["build", "preview"])
 @pytest.mark.parametrize("json_output", [False, True], ids=["human", "json"])
 @pytest.mark.parametrize(
-    "destination, expected_verb",
+    "destination, expected_destination, expected_verb",
     [
-        (["--load"], ("Loaded", "Would load")),
-        (["--push"], ("Pushed", "Would push")),
-        (["-o", "app.oci.tar"], ("Wrote", "Would write")),
+        (
+            ["--load"],
+            {"load": True, "push": False, "output": None},
+            ("Loaded", "Would load"),
+        ),
+        (
+            ["--push"],
+            {"load": False, "push": True, "output": None},
+            ("Pushed", "Would push"),
+        ),
+        (
+            ["--output", "app.oci.tar"],
+            {"load": False, "push": False, "output": Path("app.oci.tar")},
+            ("Wrote", "Would write"),
+        ),
     ],
     ids=["load", "push", "oci-archive"],
 )
@@ -162,6 +131,7 @@ def test_image_dispatch_preserves_metadata_and_dry_run(
     dry_run: bool,
     json_output: bool,
     destination: list[str],
+    expected_destination: dict[str, object],
     expected_verb: tuple[str, str],
 ) -> None:
     options = []
@@ -177,9 +147,11 @@ def test_image_dispatch_preserves_metadata_and_dry_run(
             "-e",
             "test",
             "--platform",
-            "linux-64",
+            "linux-aarch64",
             "-t",
             "example:latest",
+            "--tag",
+            "example:v1",
             "--base-image",
             "example/base:latest",
             "--builder",
@@ -190,6 +162,7 @@ def test_image_dispatch_preserves_metadata_and_dry_run(
             "python",
             "-m",
             "myapp",
+            "--json",
         ]
     )
 
@@ -202,12 +175,10 @@ def test_image_dispatch_preserves_metadata_and_dry_run(
     assert Path(config.manifest_path) == pixi_workspace / "pixi.toml"
     assert kwargs == {
         "environment": "test",
-        "platform": "linux-64",
-        "command": ("python", "-m", "myapp"),
-        "tags": ("example:latest",),
-        "output": args.output,
-        "load": args.load,
-        "push": args.push,
+        "platform": "linux-aarch64",
+        "command": ("python", "-m", "myapp", "--json"),
+        "tags": ("example:latest", "example:v1"),
+        **expected_destination,
         "base_image": "example/base:latest",
         "builder": "existing-builder",
     }

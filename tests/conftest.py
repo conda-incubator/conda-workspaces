@@ -71,7 +71,6 @@ def image_workspace(
         *,
         manifest_extra: str = "",
         files: dict[str, str] | None = None,
-        lock_data: dict[str, object] | None = None,
         platforms: tuple[str, ...] = ("linux-64",),
     ) -> tuple[WorkspaceConfig, WorkspaceContext]:
         root = tmp_path / "workspace"
@@ -87,7 +86,7 @@ def image_workspace(
             path = root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
-        data = lock_data or {
+        data = {
             "version": 1,
             "environments": {
                 "default": {

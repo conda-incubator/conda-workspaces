@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 from conda.models.records import PackageRecord
 
@@ -11,6 +13,7 @@ from conda_workspaces.models import (
     Environment,
     Feature,
     MatchSpec,
+    PyPIDependency,
     WorkspaceConfig,
 )
 from conda_workspaces.resolver import (
@@ -19,6 +22,9 @@ from conda_workspaces.resolver import (
     resolve_all_environments,
     resolve_environment,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_requested_packages_for_export_does_not_require_virtual_lock_records() -> None:
@@ -218,8 +224,14 @@ def test_known_platforms_without_resolved_envs() -> None:
     assert known_platforms(config) == {"linux-64", "osx-arm64"}
 
 
-def test_resolve_activation_merged():
+def test_resolve_activation_merged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Activation scripts and env vars are merged across features."""
+    root = tmp_path / "workspace"
+    root.mkdir()
+    monkeypatch.chdir(tmp_path)
+    absolute_script = str(tmp_path / "dev.sh")
     default_feat = Feature(
         name="default",
         activation_scripts=["base.sh"],
@@ -227,10 +239,11 @@ def test_resolve_activation_merged():
     )
     dev_feat = Feature(
         name="dev",
-        activation_scripts=["dev.sh"],
+        activation_scripts=[absolute_script],
         activation_env={"DEV": "1"},
     )
     config = WorkspaceConfig(
+        root=str(root),
         channels=[Channel("conda-forge")],
         platforms=["linux-64"],
         features={"default": default_feat, "dev": dev_feat},
@@ -240,9 +253,91 @@ def test_resolve_activation_merged():
         },
     )
     resolved = resolve_environment(config, "dev")
-    assert "base.sh" in resolved.activation_scripts
-    assert "dev.sh" in resolved.activation_scripts
-    assert resolved.activation_env == {"BASE": "1", "DEV": "1"}
+    installation = resolved.with_absolute_paths(root)
+
+    assert installation.activation_scripts == [
+        str(root / "base.sh"),
+        absolute_script,
+    ]
+    assert installation.activation_env == {"BASE": "1", "DEV": "1"}
+    assert resolved.activation_scripts == ["base.sh", absolute_script]
+    assert default_feat.activation_scripts == ["base.sh"]
+
+
+@pytest.mark.parametrize("source", ["relative", "absolute", "url-shaped", "token-path"])
+def test_with_absolute_paths_preserves_target_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    monkeypatch.chdir(tmp_path)
+    path = {
+        "relative": "packages/local",
+        "absolute": str(tmp_path / "local"),
+        "url-shaped": "https://user:secret@example.invalid/local",
+        "token-path": "t/synthetic-token/private",
+    }[source]
+    dependency = PyPIDependency(name="local", path=path, editable=True)
+    registry_dependency = PyPIDependency(name="requests", spec=">=2")
+    config = WorkspaceConfig(
+        root=str(root),
+        platforms=["linux-cuda"],
+        platform_subdirs={"linux-cuda": "linux-64"},
+        features={
+            "default": Feature(
+                name="default",
+                pypi_dependencies={
+                    "local": PyPIDependency(name="local", path="base"),
+                    "requests": registry_dependency,
+                },
+                target_pypi_dependencies={
+                    "linux-64": {"local": PyPIDependency(name="local", path="linux")},
+                },
+            ),
+        },
+        environments={
+            "default": Environment(
+                name="default",
+                target_pypi_dependencies={"linux-cuda": {"local": dependency}},
+            ),
+        },
+    )
+    resolved = resolve_environment(config, "default", "linux-64")
+
+    installation = resolved.with_absolute_paths(root)
+
+    expected_path = str(root / path) if source == "relative" else path
+    assert installation.pypi_dependencies["local"].path == expected_path
+    assert installation.pypi_dependencies["local"].editable
+    assert installation.pypi_dependencies["requests"] == registry_dependency
+    assert resolved.pypi_dependencies["local"].path == path
+    assert dependency.to_toml() == {"path": path, "editable": True}
+
+
+@pytest.mark.parametrize(
+    ("name", "canonical"),
+    [
+        ("glibc", "glibc"),
+        ("libc", "glibc"),
+        ("osx", "osx"),
+        ("macos", "osx"),
+        ("win", "win"),
+        ("windows", "win"),
+        ("cuda", "cuda"),
+    ],
+    ids=["glibc", "libc", "osx", "macos", "win", "windows", "cuda"],
+)
+@pytest.mark.parametrize("prefix", ["", "__"], ids=["manifest", "virtual"])
+def test_system_requirement_specs(name: str, canonical: str, prefix: str) -> None:
+    resolved = ResolvedEnvironment(
+        name="default", system_requirements={f"{prefix}{name}": "2.17"}
+    )
+
+    specs = resolved.system_requirement_specs()
+
+    assert specs == [MatchSpec(f"__{canonical} >=2.17")]
+    assert resolved.system_requirement_version(canonical) == "2.17"
+    assert resolved.system_requirement_version(f"{prefix}{name}") == "2.17"
 
 
 def test_resolve_system_requirements_merged():

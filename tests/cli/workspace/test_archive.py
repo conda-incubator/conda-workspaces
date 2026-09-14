@@ -966,6 +966,7 @@ platforms = ["{platform}"]
     validate_workspace()
     assert install_kwargs == {
         "prefix": Path(prefix),
+        "platform": None,
         "replace_existing": False,
         "target_prefix_override": expected_override,
     }

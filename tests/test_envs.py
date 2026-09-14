@@ -1230,9 +1230,14 @@ def fake_pypi_build(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     return build_calls, install_calls, build_mod, sentinel_package
 
 
+@pytest.mark.parametrize(
+    "install_build_dependencies", [True, False], ids=["solve", "locked"]
+)
 def test_install_path_deps_success(
     fake_pypi_build: tuple,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    install_build_dependencies: bool,
 ) -> None:
     """When conda-pypi is available, builds and installs path deps."""
     build_calls, install_calls, _, sentinel_package = fake_pypi_build
@@ -1243,12 +1248,62 @@ def test_install_path_deps_success(
             "local": PyPIDependency(name="local", path="./src", editable=True),
         },
     )
-    _install_path_deps(tmp_path, resolved)
+    dependencies = types.SimpleNamespace(
+        check_dependencies=lambda requirements, *, prefix: [],
+        MissingDependencyError=RuntimeError,
+    )
+    monkeypatch.setattr(
+        sys.modules["conda_pypi"], "dependencies", dependencies, raising=False
+    )
+    _install_path_deps(
+        tmp_path, resolved, install_build_dependencies=install_build_dependencies
+    )
 
     assert len(build_calls) == 1
     assert build_calls[0]["distribution"] == "editable"
+    assert (
+        build_calls[0].get("install_build_dependencies", True)
+        is install_build_dependencies
+    )
     assert len(install_calls) == 1
     assert install_calls[0] == sentinel_package
+
+
+@pytest.mark.parametrize(
+    "raises", [False, True], ids=["missing-runtime", "missing-build-package"]
+)
+def test_locked_path_deps_validate_runtime_extras(
+    fake_pypi_build: tuple,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    raises: bool,
+) -> None:
+    class MissingDependencyError(Exception):
+        dependencies = ["server-runtime>=2"]
+
+    def check(requirements: set[str], *, prefix: Path) -> list[str]:
+        assert requirements == {"local[server]"}
+        assert prefix == tmp_path
+        if raises:
+            raise MissingDependencyError
+        return ["server-runtime>=2"]
+
+    dependencies = types.SimpleNamespace(
+        check_dependencies=check, MissingDependencyError=MissingDependencyError
+    )
+    monkeypatch.setattr(
+        sys.modules["conda_pypi"], "dependencies", dependencies, raising=False
+    )
+    resolved = ResolvedEnvironment(
+        name="default",
+        pypi_dependencies={
+            "local": PyPIDependency(name="local", path="./src", extras=("server",)),
+        },
+    )
+    with pytest.raises(
+        SolveError, match="runtime requirements.*locked environment.*server-runtime"
+    ):
+        _install_path_deps(tmp_path, resolved, install_build_dependencies=False)
 
 
 @pytest.mark.parametrize(
@@ -1285,10 +1340,14 @@ def test_path_dependency_rejects_relative_anaconda_token(
     assert install_calls == []
 
 
+@pytest.mark.parametrize(
+    "legacy", [False, True], ids=["backend-error", "old-conda-pypi"]
+)
 def test_install_path_deps_build_failure_raises(
     fake_pypi_build: tuple,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    legacy: bool,
 ) -> None:
     """A local package build failure fails the environment install."""
     _, _, build_mod, _ = fake_pypi_build
@@ -1296,18 +1355,26 @@ def test_install_path_deps_build_failure_raises(
     def broken_build(project, **kwargs):
         raise RuntimeError("build exploded")
 
-    build_mod.pypa_to_conda = broken_build
+    def old_build(project, *, prefix, distribution, output_path):
+        raise AssertionError("Legacy builders must not run for locked installs")
+
+    build_mod.pypa_to_conda = old_build if legacy else broken_build
     monkeypatch.setitem(sys.modules, "conda_pypi.build", build_mod)
 
     resolved = ResolvedEnvironment(
         name="default",
         pypi_dependencies={
-            "broken": PyPIDependency(name="broken", path="./broken"),
+            "broken": PyPIDependency(name="broken", path=str(tmp_path)),
         },
     )
 
-    with pytest.raises(SolveError, match="build exploded"):
-        _install_path_deps(tmp_path, resolved)
+    with pytest.raises(
+        SolveError, match="Update conda-pypi" if legacy else "build exploded"
+    ):
+        if legacy:
+            validate_path_dependencies(resolved, install_build_dependencies=False)
+        else:
+            _install_path_deps(tmp_path, resolved)
 
 
 def test_install_path_only_dependency_runs_without_solver(
