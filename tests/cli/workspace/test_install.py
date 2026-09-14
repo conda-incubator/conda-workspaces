@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import time
 from typing import TYPE_CHECKING
 
 import pytest
+from conda.base.context import context as conda_context
+from conda.base.context import determine_target_prefix, reset_context
+from conda.misc import get_package_records_from_explicit
 
+from conda_workspaces.cli.main import generate_workspace_parser
 from conda_workspaces.cli.workspace import workspace_context_from_args
 from conda_workspaces.cli.workspace.install import (
     execute_install,
@@ -22,10 +27,14 @@ from conda_workspaces.models import LockfileStatus
 from ..conftest import make_args
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
+    from os import PathLike
     from pathlib import Path
 
+    from conda.models.records import PackageCacheRecord
     from rich.console import Console
+
+    from tests.conftest import SnapshotTree
 
 _DEFAULTS = {
     "manifest_file": None,
@@ -35,6 +44,8 @@ _DEFAULTS = {
     "locked": False,
     "frozen": False,
     "no_lock": False,
+    "platform": None,
+    "download_only": False,
 }
 _RENDERED_LOCK = """\
 version: 1
@@ -71,6 +82,121 @@ def write_stub_lockfile() -> Callable[[Path], None]:
         (workspace / "conda.lock").write_text(_RENDERED_LOCK, encoding="utf-8")
 
     return write
+
+
+@pytest.mark.parametrize("mode", ["--locked", "--frozen"], ids=["locked", "frozen"])
+@pytest.mark.parametrize("dry_run", [False, True], ids=["download", "preview"])
+def test_install_download_only_preserves_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    snapshot_tree: SnapshotTree,
+    mode: str,
+    dry_run: bool,
+) -> None:
+    native = conda_context._native_subdir()
+    selected = f"{native}-selected"
+    manifest = tmp_path / "conda.toml"
+    manifest.write_text(
+        '[workspace]\nname = "download-test"\nchannels = []\n'
+        f'platforms = [{{name = "{selected}", platform = "{native}"}}]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "conda.lock").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "environments": {
+                    "default": {"channels": [], "packages": {selected: []}}
+                },
+                "packages": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    fetched: list[tuple[list[str], tuple[str | PathLike[str], ...]]] = []
+
+    def fetch(urls: list[str]) -> Iterable[PackageCacheRecord]:
+        fetched.append((list(urls), conda_context.pkgs_dirs))
+        return get_package_records_from_explicit(urls)
+
+    monkeypatch.setattr(
+        "conda.misc.get_package_records_from_explicit",
+        fetch,
+    )
+    monkeypatch.setattr(
+        "conda.misc.install_explicit_packages",
+        lambda **kwargs: pytest.fail("download-only installed an environment"),
+    )
+    before = snapshot_tree(tmp_path)
+    args = generate_workspace_parser().parse_args(
+        [
+            "--file",
+            str(manifest),
+            "install",
+            "-e",
+            "default",
+            mode,
+            "--platform",
+            selected,
+            "--download-only",
+            "-p" if mode == "--locked" else "--prefix",
+            str(tmp_path / "output" / "runtime"),
+            *(["--dry-run"] if dry_run else []),
+        ]
+    )
+
+    reset_context(argparse_args=args)
+    try:
+        configured_caches = conda_context.pkgs_dirs
+        assert determine_target_prefix(conda_context, args) == str(
+            tmp_path / "output" / "runtime"
+        )
+        assert conda_context.dry_run is dry_run
+        assert execute_install(args) == 0
+        assert conda_context.dry_run is dry_run
+        assert conda_context.pkgs_dirs == configured_caches
+    finally:
+        reset_context()
+
+    assert len(fetched) == 1
+    urls, used_caches = fetched[0]
+    assert urls == []
+    assert (used_caches != configured_caches) is dry_run
+    assert snapshot_tree(tmp_path) == before
+    expected = "Would download packages for" if dry_run else "Downloaded packages for"
+    assert expected in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--download-only"],
+        ["--platform", "linux-64"],
+        ["--prefix", "runtime"],
+        ["--download-only", "--frozen", "--no-lock"],
+    ],
+    ids=[
+        "download-without-lock",
+        "platform-without-lock",
+        "prefix-without-lock",
+        "download-with-no-lock",
+    ],
+)
+def test_install_target_options_require_locked_install(
+    pixi_workspace: Path,
+    options: list[str],
+) -> None:
+    args = generate_workspace_parser().parse_args(
+        [
+            "--file",
+            str(pixi_workspace / "pixi.toml"),
+            "install",
+            *options,
+        ]
+    )
+    with pytest.raises(CondaWorkspacesError, match="--locked|--no-lock"):
+        execute_install(args)
 
 
 @pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])

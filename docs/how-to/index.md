@@ -22,4 +22,17 @@ Create, verify, extract, and install workspace archives through the public
 Python API.
 :::
 
+:::{grid-item-card} {octicon}`package` Build a workspace image
+:link: image
+:link-type: doc
+
+Package a locked Linux environment and application files with Docker Buildx.
+:::
+
 ::::
+
+```{toctree}
+:hidden:
+
+image
+```
