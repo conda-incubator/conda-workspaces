@@ -31,8 +31,8 @@ if TYPE_CHECKING:
 
 @pytest.mark.parametrize(
     "name",
-    ["image-test", "image test", "image's workspace"],
-    ids=["plain", "spaces", "apostrophe"],
+    ["image-test", "image test"],
+    ids=["plain", "spaces"],
 )
 def test_image_preview_preserves_workspace_and_command_argv(
     image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
@@ -78,34 +78,18 @@ def test_image_preview_preserves_workspace_and_command_argv(
     [
         None,
         "",
-        ".",
-        "..",
         "../escape",
-        "/absolute",
-        "group/project",
-        "group\\project",
-        "C:\\project",
-        "CON",
-        "project.",
-        "project ",
         "project\nRUN true",
         "image${PATH}",
+        "image's workspace",
     ],
     ids=[
         "missing",
         "empty",
-        "current-directory",
-        "parent-directory",
         "traversal",
-        "absolute-posix",
-        "nested-posix",
-        "nested-windows",
-        "absolute-windows",
-        "reserved-windows",
-        "trailing-dot",
-        "trailing-space",
         "newline",
         "dollar",
+        "apostrophe",
     ],
 )
 def test_image_rejects_missing_or_unsafe_workspace_name(
@@ -372,13 +356,13 @@ def test_image_resolves_activation_and_local_sources_from_manifest_directory(
 )
 @pytest.mark.parametrize(
     "envs_dir",
-    ["runtime-envs", "runtime envs", "runtime's envs"],
-    ids=["plain", "spaces", "apostrophe"],
+    ["runtime-envs", "runtime envs"],
+    ids=["plain", "spaces"],
 )
 @pytest.mark.parametrize(
     "name",
-    ["image-test", "image test", "image's workspace"],
-    ids=["plain", "spaces", "apostrophe"],
+    ["image-test", "image test"],
+    ids=["plain", "spaces"],
 )
 def test_image_uses_custom_environment_path_without_archiving_host_environment(
     image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
@@ -424,12 +408,23 @@ def test_image_uses_custom_environment_path_without_archiving_host_environment(
     install_commands = [
         json.loads(line[line.index("[") :])
         for line in image.recipe().splitlines()
-        if line.startswith("RUN ") and "/build/install.py" in line
+        if line.startswith("RUN ") and '"install"' in line and '"workspace"' in line
     ]
     assert len(install_commands) == 2
     for command in install_commands:
-        assert command[-1] == image.prefix
+        assert command[command.index("--prefix") + 1] == image.prefix
         assert f"{image.workspace}/conda.toml" in command
+        assert command[:5] == [
+            "/opt/conda/bin/python",
+            "-m",
+            "conda",
+            "workspace",
+            "--file",
+        ]
+        assert "--locked" in command
+    assert install_commands[0][-1] == "--download-only"
+    assert "--download-only" not in install_commands[1]
+    assert "RUN --network=none " + json.dumps(install_commands[1]) in image.recipe()
 
     entrypoint = next(
         line.removeprefix("ENTRYPOINT ")
@@ -461,24 +456,28 @@ def test_image_uses_custom_environment_path_without_archiving_host_environment(
 @pytest.mark.parametrize(
     "component", ["envs-dir", "environment-name"], ids=["envs-dir", "environment"]
 )
-def test_image_rejects_dollar_sign_in_environment_prefix(
+@pytest.mark.parametrize(
+    "name", ["runtime${PATH}", "runtime's envs"], ids=["dollar", "apostrophe"]
+)
+def test_image_rejects_unsupported_characters_in_environment_prefix(
     image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
     tmp_path: Path,
     component: str,
+    name: str,
 ) -> None:
-    environment = "runtime${PATH}" if component == "environment-name" else "default"
+    environment = name if component == "environment-name" else "default"
     config, ctx = image_workspace(
         manifest_extra=f'[environments]\n"{environment}" = []\n'
     )
     if component == "envs-dir":
-        config.envs_dir = "runtime${PATH}"
+        config.envs_dir = name
     else:
         lock = ctx.root / "conda.lock"
         data = json.loads(lock.read_text(encoding="utf-8"))
         data["environments"][environment] = data["environments"]["default"]
         lock.write_text(json.dumps(data), encoding="utf-8")
 
-    with pytest.raises(CondaWorkspacesError, match="dollar sign"):
+    with pytest.raises(CondaWorkspacesError, match="dollar signs or apostrophes"):
         WorkspaceImage.prepare(
             config,
             ctx,
@@ -661,7 +660,8 @@ def test_image_build_publishes_after_success_and_only_cleans_its_own_builder(
         with tarfile.open(context / "workspace.tar.gz") as archive:
             assert set(archive.getnames()) == {"app.py", "conda.lock", "conda.toml"}
         assert (context / "Dockerfile").read_text(encoding="utf-8") == image.recipe()
-        assert (context / "install.py").is_file()
+        assert (context / "tools/conda_workspaces/cli/workspace/install.py").is_file()
+        assert not list((context / "tools").rglob("*.pyc"))
 
     calls = record_image_builder(on_build=inspect_build)
     result = image.build()

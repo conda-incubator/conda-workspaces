@@ -11,6 +11,7 @@ import sys
 import tempfile
 import uuid
 from dataclasses import dataclass
+from importlib.util import find_spec
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
@@ -112,10 +113,14 @@ class WorkspaceImage:
             r"[A-Za-z0-9][A-Za-z0-9_.-]*", builder
         ):
             raise CondaWorkspacesError("Invalid Buildx builder name.")
-        if not config.name or not is_path_segment(config.name) or "$" in config.name:
+        if (
+            not config.name
+            or not is_path_segment(config.name)
+            or any(char in config.name for char in "$'")
+        ):
             raise CondaWorkspacesError(
                 "Images require a workspace name that is a portable directory name "
-                "without dollar signs. "
+                "without dollar signs or apostrophes. "
                 "Set the workspace name in the manifest."
             )
         workspace = str(PurePosixPath("/workspaces") / config.name)
@@ -135,10 +140,10 @@ class WorkspaceImage:
             PurePosixPath(workspace)
             / ctx.env_prefix(environment).relative_to(root).as_posix()
         )
-        if "$" in prefix:
+        if any(char in prefix for char in "$'"):
             raise CondaWorkspacesError(
-                "Image environment paths cannot contain dollar signs. "
-                "Conda expands environment variables in activation prefixes."
+                "Image environment paths cannot contain dollar signs or apostrophes. "
+                "Conda activation and Dockerfile parsing interpret these characters."
             )
         manifest = Path(config.manifest_path)
         lock = lockfile_path(ctx)
@@ -307,15 +312,21 @@ class WorkspaceImage:
         )
         install = [
             "/opt/conda/bin/python",
-            "/build/install.py",
-            "packages",
+            "-m",
+            "conda",
+            "workspace",
+            "--file",
             str(PurePosixPath(self.workspace) / manifest),
+            "install",
+            "--locked",
+            "--yes",
+            "--environment",
             self.environment,
+            "--platform",
             self.platform,
+            "--prefix",
             self.prefix,
         ]
-        local = [*install]
-        local[2] = "local"
         bootstrap = [
             "/opt/conda/bin/conda",
             "install",
@@ -356,11 +367,21 @@ class WorkspaceImage:
                 f"FROM {self.base_image} AS build",
                 "COPY --from=bootstrap /opt/conda /opt/conda",
                 "COPY --from=sources " + json.dumps([self.workspace, self.workspace]),
-                "COPY install.py /build/install.py",
+                "COPY tools /build",
+                "ENV PYTHONPATH=/build",
                 f'WORKDIR "{self.workspace}"',
-                "RUN " + json.dumps(install),
+                "RUN " + json.dumps([*install, "--download-only"]),
+                "RUN --network=none " + json.dumps(install),
                 "RUN --network=none "
-                + json.dumps(["/bin/bash", "/build/entrypoint.sh", *local]),
+                + json.dumps(
+                    [
+                        "/opt/conda/bin/python",
+                        "-m",
+                        "conda_workspaces.image_entrypoint",
+                        self.prefix,
+                        "/build/entrypoint.sh",
+                    ]
+                ),
                 f"FROM {self.base_image}",
                 "COPY --from=build " + json.dumps([self.prefix, self.prefix]),
                 "COPY --from=sources " + json.dumps([self.workspace, self.workspace]),
@@ -376,8 +397,8 @@ class WorkspaceImage:
             ]
         )
 
-    def preview(self) -> dict[str, object]:
-        """Describe the recipe and inputs without requiring container tooling."""
+    def result(self) -> dict[str, object]:
+        """Describe the selected workspace, platform, and image destination."""
         return {
             "success": True,
             "environment": self.environment,
@@ -389,27 +410,37 @@ class WorkspaceImage:
             "output": str(self.output) if self.output is not None else None,
             "load": self.load,
             "push": self.push,
+        }
+
+    def preview(self) -> dict[str, object]:
+        """Describe the recipe and inputs without requiring container tooling."""
+        return {
+            **self.result(),
             "base_image": self.base_image,
             "builder": self.builder,
             "recipe": self.recipe(),
             "files": [
                 path.relative_to(self.config.root).as_posix() for path in self.files
             ],
-            "build_files": {
-                "install.py": Path(__file__)
-                .with_name("_image_install.py")
-                .read_text(encoding="utf-8")
-            },
+            "build_packages": list(self.build_packages()),
         }
 
-    def run_builder(self, args: list[str], *, capture: bool = False) -> str:
+    def build_packages(self) -> dict[str, Path]:
+        """Use the invoking tools' Python sources with native builder dependencies."""
+        packages = {"conda_workspaces": Path(__file__).parent}
+        pypi = find_spec("conda_pypi")
+        if pypi is not None and pypi.origin is not None:
+            packages["conda_pypi"] = Path(pypi.origin).parent
+        return packages
+
+    def run_builder(self, args: list[str], *, quiet: bool = False) -> None:
         """Run Buildx without shell interpolation, keeping build logs off stdout."""
         try:
-            result = subprocess.run(
+            subprocess.run(
                 ["docker", "buildx", *args],
                 check=True,
                 text=True,
-                stdout=subprocess.PIPE if capture else sys.stderr,
+                stdout=subprocess.DEVNULL if quiet else sys.stderr,
                 stderr=sys.stderr,
             )
         except (OSError, subprocess.CalledProcessError) as exc:
@@ -422,7 +453,6 @@ class WorkspaceImage:
                     )
                 ],
             ) from exc
-        return result.stdout or ""
 
     def build(self) -> dict[str, object]:
         """Build using an existing builder or a temporary docker-container builder."""
@@ -449,16 +479,19 @@ class WorkspaceImage:
                 regular_member_hashes=self.input_hashes,
             )
             (context / "Dockerfile").write_text(self.recipe(), encoding="utf-8")
-            shutil.copyfile(
-                Path(__file__).with_name("_image_install.py"), context / "install.py"
-            )
+            for name, source in self.build_packages().items():
+                shutil.copytree(
+                    source,
+                    context / "tools" / name,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+                )
             builder = self.builder or "conda-workspaces-" + uuid.uuid4().hex
             created = False
             try:
                 if self.builder is None:
                     self.run_builder(
                         ["create", "--name", builder, "--driver", "docker-container"],
-                        capture=True,
+                        quiet=True,
                     )
                     created = True
                 args = [
@@ -496,23 +529,14 @@ class WorkspaceImage:
             finally:
                 if created:
                     try:
-                        self.run_builder(["rm", builder], capture=True)
+                        self.run_builder(["rm", builder], quiet=True)
                     except CondaWorkspacesError:
                         print(
                             f"Could not remove temporary Buildx builder {builder}.",
                             file=sys.stderr,
                         )
         return {
-            "success": True,
-            "environment": self.environment,
-            "workspace": self.workspace,
-            "prefix": self.prefix,
-            "platform": self.platform,
-            "oci_platform": self.oci_platform,
-            "tags": list(self.tags),
-            "output": str(self.output) if self.output is not None else None,
-            "load": self.load,
-            "push": self.push,
+            **self.result(),
             "digest": metadata.get("containerimage.digest"),
             "image_id": metadata.get("containerimage.config.digest"),
         }

@@ -34,6 +34,30 @@ After a file is written, it returns the path in `file` instead:
 }
 ```
 
+### Locked installation
+
+`conda workspace install --locked` requires a current lockfile. `--frozen`
+uses the existing lockfile without checking whether the manifest has changed.
+
+Both modes accept `--platform NAME` to select a declared platform variant for
+the current machine. Its conda subdir must match the native platform. This
+option does not enable installation for a different operating system or
+architecture.
+
+`-p/--prefix PATH` installs the selected environment at an explicit prefix.
+It requires `-e/--environment` and either `--locked` or `--frozen`.
+
+Add `--download-only` to validate and fetch locked packages without creating,
+removing, or updating environment prefixes or building local Python packages.
+It requires `--locked` or `--frozen`. Combining it with `--dry-run` uses a
+temporary package cache.
+
+Locked local Python builds require conda-pypi strict build support, which is
+proposed in [conda-pypi#521](https://github.com/conda/conda-pypi/pull/521).
+Build and runtime requirements must already be present in
+the locked environment. An older conda-pypi version fails with an update-required
+error rather than installing additional build requirements.
+
 ### Workspace images
 
 `conda workspace image` builds one selected Linux environment and its project

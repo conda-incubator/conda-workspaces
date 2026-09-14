@@ -67,6 +67,18 @@ from conda_workspaces.resolver import ResolvedEnvironment, resolve_environment
 
 
 @pytest.fixture
+def locked_pypi_builder(monkeypatch: pytest.MonkeyPatch) -> None:
+    def build(
+        *args: object,
+        install_build_dependencies: bool = True,
+        **kwargs: object,
+    ) -> None:
+        pytest.fail("preflight invoked a local build")
+
+    monkeypatch.setattr("conda_pypi.build.pypa_to_conda", build)
+
+
+@pytest.fixture
 def race_symlink_on_publish(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Callable[[Path, Path], list[bool]]:
@@ -262,6 +274,19 @@ def selective_lock_data() -> dict:
             {"pypi": pypi},
         ],
     }
+
+
+@pytest.fixture
+def install_record() -> PrefixRecord:
+    """A fetched package record without virtual requirements."""
+    return PrefixRecord(
+        name="python",
+        version="3.12",
+        build="0",
+        build_number=0,
+        channel="@",
+        subdir="linux-64",
+    )
 
 
 @pytest.fixture
@@ -2028,6 +2053,139 @@ def test_install_from_lockfile_errors(
         install_from_lockfile(ctx, env_name)
 
 
+@pytest.mark.parametrize("platform", [None, "linux-special"], ids=["native", "named"])
+@pytest.mark.usefixtures("locked_pypi_builder")
+def test_lockfile_install_resolves_target_dependencies_before_preflight(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str | None,
+) -> None:
+    ctx = workspace_ctx_factory()
+    ctx.config.platforms.append("linux-special")
+    ctx.config.platform_subdirs["linux-special"] = "linux-64"
+    feature = ctx.config.features["default"]
+    feature.pypi_dependencies["app"] = PyPIDependency("app", path="missing-generic")
+    for target, version in (("linux-64", "3.11"), ("linux-special", "3.12")):
+        (tmp_path / target).mkdir()
+        feature.target_pypi_dependencies[target] = {
+            "app": PyPIDependency("app", path=target)
+        }
+        feature.target_conda_dependencies[target] = {
+            "python": MatchSpec(f"python >={version}")
+        }
+    data = {
+        "version": 1,
+        "environments": {
+            "default": {
+                "channels": [],
+                "packages": {"linux-64": [], "linux-special": []},
+            }
+        },
+        "packages": [],
+    }
+    monkeypatch.setattr(conda_context, "_native_subdir", lambda: "linux-64")
+    monkeypatch.setattr("conda.misc.get_package_records_from_explicit", lambda urls: [])
+
+    plan = LockfileInstallPlan.prepare(
+        ctx, "default", platform=platform, lockfile_data=data
+    )
+
+    selected = platform or "linux-64"
+    assert plan.resolved is not None
+    assert plan.resolved.pypi_dependencies["app"].path == str(tmp_path / selected)
+    expected_version = "3.12" if platform else "3.11"
+    assert f"python[version='>={expected_version}']" in (plan.requested_specs or [])
+    assert feature.pypi_dependencies["app"].path == "missing-generic"
+    assert not plan.prefix.exists()
+
+
+def test_lockfile_install_rejects_foreign_platform_before_fetch(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = workspace_ctx_factory()
+    monkeypatch.setattr(conda_context, "_native_subdir", lambda: "osx-arm64")
+    monkeypatch.setattr(
+        "conda.misc.get_package_records_from_explicit",
+        lambda urls: pytest.fail("fetched packages for a foreign platform"),
+    )
+
+    with pytest.raises(CondaWorkspacesError, match="Cannot install platform"):
+        LockfileInstallPlan.prepare(
+            ctx, "default", platform="linux-64", lockfile_data={"version": 1}
+        )
+    assert not ctx.env_prefix("default").exists()
+
+
+@pytest.mark.parametrize(
+    "source, version, rejected",
+    [
+        ("depends", None, True),
+        ("depends", "2.17", True),
+        ("depends", "2.31", False),
+        ("constrains", None, False),
+        ("constrains", "2.17", True),
+        ("constrains", "2.31", False),
+        ("system-alias", "2.17", True),
+        ("system-alias", "2.31", False),
+        ("requested", None, True),
+    ],
+    ids=[
+        "required-absent",
+        "required-old",
+        "required-compatible",
+        "optional-absent",
+        "optional-old",
+        "optional-compatible",
+        "system-alias-old",
+        "system-alias-compatible",
+        "requested-absent",
+    ],
+)
+def test_lockfile_install_checks_actual_virtual_packages_before_prefix_creation(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    monkeypatch: pytest.MonkeyPatch,
+    install_record: PrefixRecord,
+    source: str,
+    version: str | None,
+    rejected: bool,
+) -> None:
+    ctx = workspace_ctx_factory()
+    if source in {"depends", "constrains"}:
+        setattr(install_record, source, ["__glibc >=2.28"])
+    elif source == "system-alias":
+        ctx.config.features["default"].system_requirements = {"libc": "2.28"}
+    else:
+        ctx.config.features["default"].conda_dependencies = {
+            "__glibc": MatchSpec("__glibc >=2.28")
+        }
+    actual = (
+        []
+        if version is None
+        else [
+            PrefixRecord.from_objects(install_record, name="__glibc", version=version)
+        ]
+    )
+    monkeypatch.setattr(
+        conda_context.plugin_manager, "get_virtual_package_records", lambda: actual
+    )
+    monkeypatch.setattr(
+        "conda.misc.get_package_records_from_explicit", lambda urls: [install_record]
+    )
+    data = {
+        "version": 1,
+        "environments": {"default": {"channels": [], "packages": {"linux-64": []}}},
+        "packages": [],
+    }
+    if rejected:
+        with pytest.raises(CondaWorkspacesError, match="__glibc"):
+            LockfileInstallPlan.prepare(ctx, "default", lockfile_data=data)
+    else:
+        LockfileInstallPlan.prepare(ctx, "default", lockfile_data=data)
+    assert not ctx.env_prefix("default").exists()
+
+
 def test_install_from_lockfile_rejects_explicit_prefix_replacement(
     tmp_path: Path,
     workspace_ctx_factory: Callable[..., WorkspaceContext],
@@ -2056,6 +2214,7 @@ def test_install_from_lockfile(
     monkeypatch: pytest.MonkeyPatch,
     dry_run: bool,
     replace_existing: bool,
+    install_record: PrefixRecord,
 ) -> None:
     """install_from_lockfile validates URLs before its dry-run write boundary."""
     ctx = workspace_ctx_factory()
@@ -2083,7 +2242,7 @@ def test_install_from_lockfile(
         encoding="utf-8",
     )
 
-    records_sentinel = [object(), object()]
+    records_sentinel = [install_record]
     get_records_calls: list[list] = []
 
     def fake_get_records(lines):
@@ -2212,6 +2371,7 @@ def test_lockfile_install_plan_reuses_prefetched_records(
     tmp_path: Path,
     workspace_ctx_factory: Callable[..., WorkspaceContext],
     monkeypatch: pytest.MonkeyPatch,
+    install_record: PrefixRecord,
 ) -> None:
     ctx = workspace_ctx_factory()
     (tmp_path / LOCKFILE_NAME).write_text(
@@ -2224,7 +2384,7 @@ def test_lockfile_install_plan_reuses_prefetched_records(
         "packages: []\n",
         encoding="utf-8",
     )
-    records = [object()]
+    records = [install_record]
     fetches: list[list[str]] = []
     installs: list[list[object]] = []
     monkeypatch.setattr(
@@ -2336,6 +2496,7 @@ def test_install_from_lockfile_revalidates_workspace_after_package_fetch(
     [(False, True), (True, False)],
     ids=["update", "replace"],
 )
+@pytest.mark.usefixtures("locked_pypi_builder")
 def test_install_from_lockfile_dry_run_builds_requested_and_prune_plan(
     tmp_path: Path,
     workspace_ctx_factory: Callable[..., WorkspaceContext],
@@ -2406,15 +2567,18 @@ def test_install_from_lockfile_dry_run_builds_requested_and_prune_plan(
     assert PrefixData(str(prefix)).get("extra", None) == extra
 
 
+@pytest.mark.parametrize("dry_run", [False, True], ids=["install", "dry-run"])
 @pytest.mark.parametrize(
     "invalid_input",
-    ["activation-symlink", "missing-path-dependency"],
-    ids=["activation", "path-dependency"],
+    ["activation-symlink", "missing-path-dependency", "legacy-builder"],
+    ids=["activation", "path-dependency", "old-conda-pypi"],
 )
-def test_install_from_lockfile_dry_run_validates_post_install_inputs(
+def test_install_from_lockfile_prevalidates_post_install_inputs(
     tmp_path: Path,
     workspace_ctx_factory: Callable[..., WorkspaceContext],
     monkeypatch: pytest.MonkeyPatch,
+    snapshot_tree: SnapshotTree,
+    dry_run: bool,
     invalid_input: str,
 ) -> None:
     ctx = workspace_ctx_factory()
@@ -2427,7 +2591,7 @@ def test_install_from_lockfile_dry_run_validates_post_install_inputs(
         outside.write_text("{}", encoding="utf-8")
         state.symlink_to(outside)
         match = "Activation metadata path cannot contain a symlink"
-    else:
+    elif invalid_input == "missing-path-dependency":
         ctx.config.features["default"].pypi_dependencies = {
             "missing": PyPIDependency(
                 name="missing",
@@ -2435,6 +2599,18 @@ def test_install_from_lockfile_dry_run_validates_post_install_inputs(
             )
         }
         match = "must be an existing regular directory"
+    else:
+        prefix.mkdir(parents=True)
+        (prefix / "keep.txt").write_text("existing environment", encoding="utf-8")
+        ctx.config.features["default"].pypi_dependencies = {
+            "local": PyPIDependency(name="local", path=str(tmp_path))
+        }
+
+        def old_build(project, *, prefix, distribution, output_path):
+            pytest.fail("preflight invoked a legacy builder")
+
+        monkeypatch.setattr("conda_pypi.build.pypa_to_conda", old_build)
+        match = "Update conda-pypi"
     (tmp_path / LOCKFILE_NAME).write_text(
         "version: 1\n"
         "environments:\n"
@@ -2449,9 +2625,16 @@ def test_install_from_lockfile_dry_run_validates_post_install_inputs(
         "conda.misc.get_package_records_from_explicit",
         lambda urls: [],
     )
+    monkeypatch.setattr(
+        "conda.misc.install_explicit_packages",
+        lambda **kwargs: pytest.fail("invalid inputs mutated the prefix"),
+    )
+    before = snapshot_tree(tmp_path)
 
     with pytest.raises((CondaWorkspacesError, SolveError), match=match):
-        install_from_lockfile(ctx, "default", dry_run=True)
+        install_from_lockfile(ctx, "default", dry_run=dry_run)
+
+    assert snapshot_tree(tmp_path) == before
 
 
 def test_install_from_lockfile_rejects_parent_replacement_before_conda(
@@ -2521,6 +2704,7 @@ def test_install_from_lockfile_rejects_parent_replacement_before_conda(
     ],
     ids=["removed-package", "transitive-package", "local-path-package"],
 )
+@pytest.mark.usefixtures("locked_pypi_builder")
 def test_install_from_lockfile_reconciles_prefix_and_requested_specs(
     tmp_path: Path,
     workspace_ctx_factory: Callable[..., WorkspaceContext],
@@ -2595,10 +2779,12 @@ def test_install_from_lockfile_reconciles_prefix_and_requested_specs(
         "conda.misc.install_explicit_packages",
         lambda **kwargs: install_calls.append(kwargs),
     )
-    path_install_calls: list[str] = []
+    path_install_calls: list[tuple[str, bool]] = []
     monkeypatch.setattr(
         "conda_workspaces.envs._install_path_deps",
-        lambda prefix, resolved: path_install_calls.append(resolved.name),
+        lambda prefix, resolved, *, install_build_dependencies: (
+            path_install_calls.append((resolved.name, install_build_dependencies))
+        ),
     )
 
     install_from_lockfile(ctx, "default")
@@ -2607,7 +2793,7 @@ def test_install_from_lockfile_reconciles_prefix_and_requested_specs(
     assert ("boltons" in installed_names) is candidate_installed
     assert set(History(str(prefix)).get_requested_specs_map()) == expected_requested
     assert set(install_calls[0]["requested_specs"]) == expected_requested
-    assert path_install_calls == ["default"]
+    assert path_install_calls == [("default", False)]
 
 
 @pytest.mark.parametrize("dry_run", [False, True], ids=["install", "dry-run"])
@@ -2963,6 +3149,7 @@ def test_install_from_lockfile_explicit_prefix_override(
     tmp_path: Path,
     workspace_ctx_factory: Callable[..., WorkspaceContext],
     monkeypatch: pytest.MonkeyPatch,
+    install_record: PrefixRecord,
 ) -> None:
     """install_from_lockfile can install elsewhere while embedding a final prefix."""
     ctx = workspace_ctx_factory()
@@ -2985,7 +3172,7 @@ def test_install_from_lockfile_explicit_prefix_override(
         encoding="utf-8",
     )
 
-    records_sentinel = [object()]
+    records_sentinel = [install_record]
 
     def fake_get_records(lines):
         assert lines == [f"{package_url}#sha256:{package_sha256}"]

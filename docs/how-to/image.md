@@ -12,19 +12,24 @@ optional for other workspace commands and for `image --dry-run`.
 Set the workspace's `name`, declare a runtime environment and Linux platform in
 the manifest, then generate `conda.lock`. The image command requires a current,
 complete lockfile and never updates the source manifest or lockfile. The
-workspace name must be a nonempty portable directory name without dollar signs.
-Image environment paths cannot contain dollar signs either, because conda
-expands environment variables when activating a prefix.
+workspace name must be a nonempty portable directory name without dollar signs
+or apostrophes. Image environment paths have the same restriction. Conda expands
+environment variables when activating a prefix, and Dockerfile parsing
+interprets apostrophes in source paths. Spaces are supported.
 
 Local Python applications must use non-editable, workspace-relative path
 dependencies. Include their runtime requirements, `python-build`, and their
 Python build backend, such as `setuptools`, in the locked environment. The
 builder rejects missing build or runtime requirements instead of solving them.
-Local builds run with environment activation and networking disabled.
+Local builds run with environment activation and networking disabled. They
+require conda-pypi with strict build support in the invoking environment. This
+support is proposed in [conda-pypi#521](https://github.com/conda/conda-pypi/pull/521),
+so an older conda-pypi release will fail with an
+update-required error for local packages.
 
 The [container example](https://github.com/conda-incubator/conda-workspaces/tree/main/examples/container)
-includes a local application, activation settings, a lockfile for both supported
-Linux architectures, and a standalone Dockerfile.
+includes a local application, activation settings, and a lockfile for both
+supported Linux architectures. Build it with the image command in its README.
 
 ## Build and run
 
@@ -72,8 +77,26 @@ conda workspace image -e runtime --platform linux-64 \
 The default is `debian:bookworm-slim`. The build checks native virtual packages
 against locked package and manifest requirements. The runtime host must also
 meet kernel, CPU, and driver requirements. Pin base images by digest when a
-stable base is required. The bootstrap image is versioned, while its temporary
-conda build tools are installed separately from the locked application.
+stable base is required. The bootstrap image is versioned. It installs native
+Linux tool dependencies separately from the locked application. The build
+uses copies of the invoking conda-workspaces Python sources and, when
+installed, conda-pypi sources, so it runs those implementations.
+
+The generated recipe uses the ordinary install command for both phases,
+equivalent to:
+
+```dockerfile
+RUN /opt/conda/bin/python -m conda workspace install \
+    --locked -e runtime --platform linux-64 --download-only
+RUN --network=none /opt/conda/bin/python -m conda workspace install \
+    --locked -e runtime --platform linux-64
+```
+
+The first phase validates the lockfile and fetches its packages without
+creating an environment or building local packages. The second installs the
+locked environment and builds local packages with networking disabled.
+The generated commands use the selected manifest, environment, and platform.
+`conda_workspaces.image_entrypoint` then renders the runtime activation wrapper.
 
 The base must not already contain the selected workspace path, such as
 `/workspaces/myapp`. Other directories under `/workspaces` are allowed. This
@@ -161,7 +184,7 @@ conda workspace image -e runtime --platform linux-64 \
   -t myapp:latest --load --dry-run --json -- python -m myapp
 ```
 
-The preview includes the recipe, builder helper, selected files, environment,
+The preview includes the recipe, build package names, selected files, environment,
 platform, base, tags, and destination. Successful builds return these artifact
 identifiers in JSON: `environment`, `workspace`, `prefix`, `platform`,
 `oci_platform`, `tags`, `output`,

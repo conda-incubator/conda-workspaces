@@ -190,6 +190,29 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         ),
     )
     install_parser.add_argument(
+        "-p",
+        "--prefix",
+        default=None,
+        help="Install at this prefix. Requires -e and --locked or --frozen.",
+    )
+    install_parser.add_argument(
+        "--platform",
+        default=None,
+        help=(
+            "Select a declared platform variant for this machine. "
+            "Requires --locked or --frozen."
+        ),
+    )
+    install_parser.add_argument(
+        "--download-only",
+        action="store_true",
+        default=False,
+        help=(
+            "Fetch locked packages without installing environments or building "
+            "local packages. Requires --locked or --frozen."
+        ),
+    )
+    install_parser.add_argument(
         "--force-reinstall",
         action="store_true",
         default=False,
