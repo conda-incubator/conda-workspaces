@@ -6,6 +6,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+- Add public lock environment discovery, concrete platform inference and source-preserving selection without package downloads.
+- Preserve embedded build numbers and support named-only locks when reconstructing metadata-only environments.
+
 ### Fixed
 
 - Reject malformed channels and dependency values instead of dropping or coercing
