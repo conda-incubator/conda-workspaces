@@ -23,12 +23,13 @@ classifiers = [
 dependencies = [
   # These are required but only available via conda, not PyPI:
   # "conda >=26.3",
-  # "conda-lockfiles >=0.2.0",  # shares rattler-lock v6 schema with conda.lock
   # "conda-spawn >=0.1.0",
   #
   # These are optional (gracefully skipped when absent):
   # "conda-pypi >=0.9.0",         # PyPI dependency support
   # "conda-rattler-solver >=0.0.6",  # solver backend for PyPI deps
+  # Use the shared rattler-lock v6 build-number field until it is released.
+  "conda-lockfiles @ git+https://github.com/conda/conda-lockfiles.git@4b1b85b0d4ef3a6a58bcb4f052ef9c53ef115855",
   "jinja2 >=3.0",
   "packaging >=21.0",
   "platformdirs >=3.0",
@@ -44,6 +45,9 @@ repository = "https://github.com/conda-incubator/conda-workspaces"
 
 [tool.hatch.version]
 source = "vcs"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.hooks.vcs]
 version-file = "conda_workspaces/_version.py"
@@ -102,6 +106,9 @@ python-version = "3.10"
 [tool.pixi.workspace]
 channels = ["conda-forge"]
 platforms = ["linux-64", "osx-64", "osx-arm64", "win-64", "linux-aarch64"]
+
+[tool.pixi.workspace.conda-pypi-map]
+conda-forge = { mapping = { conda-lockfiles = false } }
 
 [tool.pixi.dependencies]
 python = ">=3.10"
