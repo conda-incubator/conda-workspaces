@@ -77,7 +77,10 @@ python = ">=3.10"
     assert "python" in default.conda_dependencies
 
 
-def test_parse_error_redacts_malformed_dependency_credentials(tmp_path: Path) -> None:
+@pytest.mark.parametrize("from_text", [False, True], ids=["file", "text"])
+def test_parse_error_redacts_malformed_dependency_credentials(
+    tmp_path: Path, from_text: bool
+) -> None:
     path = tmp_path / "conda.toml"
     path.write_text(
         """\
@@ -92,7 +95,10 @@ python = "https://user:LEAKME@example.test/["
     )
 
     with pytest.raises(WorkspaceParseError) as error:
-        CondaTomlParser().parse(path)
+        if from_text:
+            CondaTomlParser().parse_text(path, path.read_text(encoding="utf-8"))
+        else:
+            CondaTomlParser().parse(path)
 
     assert "user" not in str(error.value)
     assert "LEAKME" not in str(error.value)
@@ -111,8 +117,17 @@ def test_parse_rejects_project_table(tmp_path):
     [
         'workspace = "bad"\n',
         "[workspace]\nchannels = [{ priority = 1 }]\n",
+        '[workspace]\nchannels = "conda-forge"\n',
+        "[workspace]\nchannels = [42]\n",
+        "[workspace]\nchannels = [{ channel = false }]\n",
     ],
-    ids=["workspace-not-table", "channel-missing-url"],
+    ids=[
+        "workspace-not-table",
+        "channel-missing-url",
+        "channels-not-list",
+        "channel-not-string",
+        "channel-table-not-string",
+    ],
 )
 def test_parse_wraps_semantic_errors(tmp_path: Path, content: str) -> None:
     path = tmp_path / "conda.toml"
@@ -190,9 +205,8 @@ def test_parse_channels(raw, expected_names):
         ({"python": ">=3.10"}, "python"),
         ({"numpy": {"version": ">=1.24"}}, "numpy"),
         ({"gcc": {"version": ">=12", "build": "h*"}}, "gcc"),
-        ({"pkg": 42}, "pkg"),
     ],
-    ids=["str-spec", "dict-version", "dict-version-build", "other-type"],
+    ids=["str-spec", "dict-version", "dict-version-build"],
 )
 def test_parse_conda_deps(raw, expected_name):
     deps = WorkspaceDependencyResolver().parse_dependency_table(raw)
@@ -409,7 +423,7 @@ def test_parse_conda_deps_with_workspace_inheritance(
         (
             {"numpy": {"workspace": True, "path": "../numpy"}},
             {"numpy": "1.*"},
-            "unsupported by conda-workspaces inheritance: path",
+            "unsupported by conda-workspaces: path",
         ),
         (
             {"numpy": {"workspace": True, "unsupported": "value"}},
@@ -419,7 +433,7 @@ def test_parse_conda_deps_with_workspace_inheritance(
         (
             {"numpy": {"workspace": True}},
             {"numpy": {"version": "1.*", "path": "../numpy"}},
-            "unsupported by conda-workspaces inheritance: path",
+            "unsupported by conda-workspaces: path",
         ),
         (
             {"numpy": {"workspace": True}},
@@ -431,6 +445,13 @@ def test_parse_conda_deps_with_workspace_inheritance(
             {"numpy": {"workspace": True}},
             "\\[workspace.dependencies\\].numpy cannot use `workspace = true`",
         ),
+        ({"numpy": {"path": "../numpy"}}, {}, "unsupported by conda-workspaces: path"),
+        (
+            {"numpy": {"unexpected": "value"}},
+            {},
+            "unsupported field\\(s\\): unexpected",
+        ),
+        ({}, [], r"\[workspace.dependencies\] must be a table"),
     ],
     ids=[
         "missing-root",
@@ -441,6 +462,9 @@ def test_parse_conda_deps_with_workspace_inheritance(
         "root-source-field",
         "root-unsupported-field",
         "root-workspace-inheritance",
+        "direct-source-field",
+        "direct-unsupported-field",
+        "root-not-table",
     ],
 )
 def test_parse_conda_deps_workspace_inheritance_errors(
@@ -470,9 +494,8 @@ def test_parse_pypi_deps_empty():
     [
         ({"requests": ">=2.28"}, "requests"),
         ({"flask": {"version": ">=3.0"}}, "flask"),
-        ({"pkg": 1}, "pkg"),
     ],
-    ids=["str-spec", "dict-version", "other-type"],
+    ids=["str-spec", "dict-version"],
 )
 def test_parse_pypi_deps(raw, key):
     deps = parse_pypi_dependencies(raw)
@@ -704,3 +727,17 @@ def test_parse_environment_rejects_invalid_types(tmp_path, raw, type_name):
     path = tmp_path / "conda.toml"
     with pytest.raises(WorkspaceParseError, match=f"got {type_name}"):
         parse_environment("badenv", raw, path)
+
+
+@pytest.mark.parametrize("manager", ["conda", "pypi"])
+@pytest.mark.parametrize(
+    "raw",
+    ["1", [], {"pkg": 1}, {"pkg": False}, {"pkg": ["1"]}],
+    ids=["string-table", "list-table", "number", "boolean", "list"],
+)
+def test_dependency_parsers_reject_malformed_declarations(manager, raw):
+    with pytest.raises(ValueError, match="must be a (string or )?table"):
+        if manager == "conda":
+            WorkspaceDependencyResolver().parse_dependency_table(raw)
+        else:
+            parse_pypi_dependencies(raw)
