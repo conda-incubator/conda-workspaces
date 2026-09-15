@@ -791,6 +791,30 @@ def test_conda_lock_loader_compose_merges_prefix_and_solver_metadata() -> None:
     ]
 
 
+@pytest.mark.parametrize("build_number", [0, 7], ids=["zero", "nonzero"])
+def test_conda_lock_loader_compose_preserves_explicit_build_number(
+    build_number: int,
+) -> None:
+    channel = "https://repo.example.test/channel"
+    url = f"{channel}/linux-64/python-3.14.0-test_3.conda"
+    environment = _SolvedEnvironment(
+        name="default",
+        platform="linux-64",
+        package_platform="linux-64",
+        config=EnvironmentConfig(channels=(channel,)),
+        explicit_packages=[_FakePkg("python", url, build_number=build_number)],
+    )
+
+    result = CondaLockLoader.compose([environment])
+    records = CondaLockLoader.package_records_for_env_data(
+        result, "default", "linux-64"
+    )
+
+    assert result["packages"][0]["build_number"] == build_number
+    assert records[0].build_number == build_number
+    assert MatchSpec(name="python", build_number=build_number).match(records[0])
+
+
 def test_conda_lock_loader_rejects_metadata_conflicts_after_redaction() -> None:
     channel = "https://repo.example.test/private"
     package_path = "/private/linux-64/python-3.12.0-0.conda"
@@ -1232,6 +1256,7 @@ def test_render_lockfile_selective_update_only_replaces_target(
         {"certifi", "python"},
     )
     assert not solve_prefix.exists()
+    assert not any(prefix == solve_prefix for prefix, _ in PrefixData._cache_)
 
     result = load_lockfile_data(content)
     assert result["environments"]["default"]["packages"]["linux-64"] == [
@@ -1243,6 +1268,54 @@ def test_render_lockfile_selective_update_only_replaces_target(
         == baseline["environments"]["default"]["packages"]["osx-arm64"]
     )
     assert result["environments"]["test"] == baseline["environments"]["test"]
+
+
+@pytest.mark.parametrize("failure", ["seed", "missing-root", "solve"])
+def test_render_lockfile_releases_temporary_prefix_after_update_failure(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    selective_lock_data: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    ctx = workspace_ctx_factory(platform="linux-64")
+    resolved = ResolvedEnvironment(
+        name="default",
+        channels=[Channel("conda-forge")],
+        platforms=["linux-64"],
+        conda_dependencies={"python": MatchSpec("python >=3.10")},
+    )
+    prefixes: list[Path] = []
+    original_seed = CondaLockLoader.seed_prefix_from_data
+    baseline = deepcopy(selective_lock_data)
+
+    def seed(data, name, target, prefix, requested_specs, **kwargs):
+        prefixes.append(prefix)
+        records = original_seed(data, name, target, prefix, requested_specs, **kwargs)
+        if failure == "seed":
+            raise ValueError("seed failed")
+        return records
+
+    def solve(self, platform, *, prefix, update_names=None):
+        raise SolveError(self.name, "solve failed", platform=platform)
+
+    monkeypatch.setattr(CondaLockLoader, "seed_prefix_from_data", seed)
+    monkeypatch.setattr(ResolvedEnvironment, "solve_for_platform", solve)
+    update_names = {"absent"} if failure == "missing-root" else {"python"}
+    error = SolveError if failure == "solve" else LockfileIntegrityError
+    match = "missing requested roots" if failure == "missing-root" else failure
+
+    with pytest.raises(error, match=match):
+        render_lockfile(
+            ctx,
+            {"default": resolved},
+            baseline_data=selective_lock_data,
+            update_targets={("default", "linux-64"): update_names},
+        )
+
+    assert len(prefixes) == 1
+    assert not prefixes[0].exists()
+    assert not any(prefix == prefixes[0] for prefix, _ in PrefixData._cache_)
+    assert selective_lock_data == baseline
 
 
 def test_write_lockfile_writes_rendered_content(
