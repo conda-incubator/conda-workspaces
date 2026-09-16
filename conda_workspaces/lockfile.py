@@ -531,10 +531,100 @@ class CondaLockLoader(EnvironmentSpecBase):
         """Platforms declared in this lockfile's default environment."""
         return self.platforms_for()
 
+    @property
+    def available_environments(self) -> tuple[str, ...]:
+        """Return the environment names declared in this lockfile."""
+        data = self._data
+        if data.get("version") != LOCKFILE_VERSION:
+            raise ValueError(
+                f"Unsupported {LOCKFILE_NAME} version: {data.get('version')!r} "
+                f"(expected {LOCKFILE_VERSION})"
+            )
+        environments = data.get("environments")
+        if not isinstance(environments, dict) or not all(
+            isinstance(name, str) and name for name in environments
+        ):
+            raise ValueError("Lockfile environments must be a mapping of names")
+        return tuple(sorted(environments))
+
     def platforms_for(self, name: str = "default") -> tuple[str, ...]:
         """Return the platforms declared for lockfile environment *name*."""
         env_data = self._env_data(name)
         return tuple(sorted(env_data.get("packages", {})))
+
+    def package_platform_for(self, platform: str, name: str = "default") -> str | None:
+        """Find a target's conda subdir, or None without platform-specific records."""
+        from conda.base.context import context
+
+        selected = self.select({name: (platform,)})
+        records = self.package_records_for_env_data(selected, name, platform)
+        subdirs = {record.subdir for record in records if record.subdir != "noarch"}
+        if platform in context.known_subdirs:
+            subdirs.add(platform)
+        if len(subdirs) > 1 or not subdirs.issubset(context.known_subdirs):
+            raise ValueError(
+                f"Cannot determine one conda subdir for environment {name!r} "
+                f"target {platform!r}"
+            )
+        return subdirs.pop() if subdirs else None
+
+    def select(self, selections: Mapping[str, Iterable[str]]) -> dict[str, Any]:
+        """Copy selected solutions and their source metadata without solving."""
+        from conda.base.context import context
+
+        if not isinstance(selections, Mapping) or not selections:
+            raise ValueError("Select at least one lockfile environment and target")
+        result = self.redact_data_urls(self._data)
+        selected_environments: dict[str, Any] = {}
+        selected_urls: set[str] = set()
+        for name, requested in selections.items():
+            env_data = deepcopy(self._env_data(name))
+            if isinstance(requested, (str, bytes)):
+                raise ValueError("Lockfile targets must be a collection of names")
+            try:
+                targets = tuple(requested)
+            except TypeError as exc:
+                raise ValueError(
+                    "Lockfile targets must be a collection of names"
+                ) from exc
+            if not targets or not all(isinstance(target, str) for target in targets):
+                raise ValueError("Select at least one named lockfile target")
+            for target in targets:
+                if target not in env_data["packages"]:
+                    raise ValueError(
+                        f"Environment {name!r} does not include platform {target!r}"
+                    )
+                records = self.package_records_for_env_data(result, name, target)
+                subdirs = {
+                    record.subdir for record in records if record.subdir != "noarch"
+                }
+                if len(subdirs) > 1 or not subdirs.issubset(context.known_subdirs):
+                    raise ValueError(
+                        f"Environment {name!r} target {target!r} contains "
+                        "packages without one supported conda subdir"
+                    )
+                self.validate_env_for_conversion(
+                    result,
+                    name,
+                    target,
+                    package_platform=next(iter(subdirs), target),
+                )
+                selected_urls.update(
+                    ref["conda"] for ref in env_data["packages"][target]
+                )
+            env_data["packages"] = {
+                target: refs
+                for target, refs in env_data["packages"].items()
+                if target in targets
+            }
+            selected_environments[name] = env_data
+        result["environments"] = selected_environments
+        result["packages"] = [
+            record
+            for url, record in self.package_records_by_url_from_data(result).items()
+            if url in selected_urls
+        ]
+        return result
 
     def env_for(
         self,
@@ -555,19 +645,9 @@ class CondaLockLoader(EnvironmentSpecBase):
         *metadata_only* reconstructs exact records from the lockfile without
         accessing the package cache.
         """
+        self._env_data(name)
         payload = self.redact_data_urls(self._data)
-        if payload.get("version") != LOCKFILE_VERSION:
-            raise ValueError(
-                f"Unsupported {LOCKFILE_NAME} version: {payload.get('version')!r} "
-                f"(expected {LOCKFILE_VERSION})"
-            )
-        environments = payload.get("environments", {})
-        if name not in environments:
-            raise ValueError(
-                f"Environment {name!r} not found in lockfile. "
-                f"Available environments: {dashlist(sorted(environments))}"
-            )
-        env_data = environments[name]
+        env_data = payload["environments"][name]
         platforms = tuple(sorted(env_data.get("packages", {})))
         if platform not in platforms:
             from conda.exceptions import PlatformMismatchError
@@ -584,10 +664,6 @@ class CondaLockLoader(EnvironmentSpecBase):
             package_platform=package_platform,
         )
 
-        # Share rattler-lock v6 conversion with conda-lockfiles via a
-        # localised in-memory version byte swap.  Disk file is untouched.
-        from conda_lockfiles.rattler_lock.v6 import RattlerLockV6
-
         conversion_platform = package_platform or platform
         records = None
         if metadata_only:
@@ -600,21 +676,27 @@ class CondaLockLoader(EnvironmentSpecBase):
         if conversion_platform != platform:
             packages = payload["environments"][name]["packages"]
             packages[conversion_platform] = packages[platform]
-        payload["version"] = 6
-        lockfile_model = RattlerLockV6.model_validate(payload)
         if records is None:
-            from conda_lockfiles.rattler_lock.v6 import rattler_lock_v6_to_conda_env
+            from conda_lockfiles.rattler_lock.v6 import (
+                RattlerLockV6,
+                rattler_lock_v6_to_conda_env,
+            )
 
+            # The shared rattler model requires a default environment, while
+            # conda.lock may contain only a named environment. Adapt the copy.
+            payload.update(version=6, environments={"default": env_data})
+            lockfile_model = RattlerLockV6.model_validate(payload)
             env = rattler_lock_v6_to_conda_env(
                 lockfile_model,
-                name=name,
+                name="default",
                 platform=conversion_platform,
             )
         else:
             from conda.models.channel import Channel
             from conda.models.environment import Environment, EnvironmentConfig
+            from conda_lockfiles.rattler_lock.v6 import RattlerLockV6Environment
 
-            lock_environment = lockfile_model.environments[name]
+            lock_environment = RattlerLockV6Environment.model_validate(env_data)
             env = Environment(
                 name=name,
                 platform=conversion_platform,
@@ -702,19 +784,32 @@ class CondaLockLoader(EnvironmentSpecBase):
         return self.env_for(context.subdir)
 
     def _env_data(self, name: str = "default") -> dict[str, Any]:
-        data = self._data
-        if data.get("version") != LOCKFILE_VERSION:
-            raise ValueError(
-                f"Unsupported {LOCKFILE_NAME} version: {data.get('version')!r} "
-                f"(expected {LOCKFILE_VERSION})"
-            )
-        environments = data.get("environments", {})
-        if name not in environments:
+        available = self.available_environments
+        if name not in available:
             raise ValueError(
                 f"Environment {name!r} not found in lockfile. "
-                f"Available environments: {dashlist(sorted(environments))}"
+                f"Available environments: {dashlist(available)}"
             )
-        return environments[name]
+        env_data = self._data["environments"][name]
+        if not isinstance(env_data, dict):
+            raise ValueError(f"Lockfile environment {name!r} must be a mapping")
+        packages = env_data.get("packages")
+        if not isinstance(packages, dict) or not all(
+            isinstance(target, str) and target and isinstance(refs, list)
+            for target, refs in packages.items()
+        ):
+            raise ValueError(
+                f"Lockfile environment {name!r} has invalid target packages"
+            )
+        channels = env_data.get("channels")
+        if not isinstance(channels, list) or not all(
+            isinstance(channel, dict)
+            and isinstance(channel.get("url"), str)
+            and channel["url"]
+            for channel in channels
+        ):
+            raise ValueError(f"Lockfile environment {name!r} has invalid channels")
+        return env_data
 
     def explicit_package_specs_for(
         self,
@@ -788,7 +883,10 @@ class CondaLockLoader(EnvironmentSpecBase):
     ) -> dict[str, dict[str, Any]]:
         """Return top-level conda package records from *data* keyed by URL."""
         records_by_url: dict[str, dict[str, Any]] = {}
-        for record in data.get("packages", []) or []:
+        packages = data.get("packages", [])
+        if not isinstance(packages, list):
+            raise ValueError("Lockfile package records must be a list")
+        for record in packages:
             if not isinstance(record, dict):
                 continue
             url = record.get("conda") or record.get("url") or record.get("pypi")
@@ -847,6 +945,7 @@ class CondaLockLoader(EnvironmentSpecBase):
         deliberately avoids :meth:`env_for`, whose generic rattler-lock
         conversion may fetch package archives to fill missing metadata.
         """
+        from conda.base.context import context
         from conda.models.records import PackageRecord
 
         data = cls.redact_data_urls(data)
@@ -875,16 +974,44 @@ class CondaLockLoader(EnvironmentSpecBase):
                 raise ValueError(
                     f"Package URL {redact_url(url)!r} has no top-level record"
                 )
+            if "pypi" in metadata or (
+                "conda" in metadata
+                and "url" in metadata
+                and metadata["conda"] != metadata["url"]
+            ):
+                raise ValueError(
+                    f"Package URL {redact_url(url)!r} has inconsistent package sources"
+                )
             cls.digest_fragment_for_record(metadata, url)
             package_url = redact_url(url)
             dist = Dist(package_url)
+            identity = {
+                "name": dist.name,
+                "version": dist.version,
+                "build": dist.build_string,
+                "subdir": dist.subdir,
+                "fn": dist.to_filename(),
+            }
+            for key, value in identity.items():
+                if metadata.get(key) is not None and metadata[key] != value:
+                    raise ValueError(
+                        f"Package URL {package_url!r} disagrees with its {key} metadata"
+                    )
+            if (
+                dist.subdir is not None
+                and (package_platform or platform) in context.known_subdirs
+                and dist.subdir not in {"noarch", package_platform or platform}
+            ):
+                raise ValueError(
+                    f"Package URL {package_url!r} does not match target {platform!r}"
+                )
             records.append(
                 PackageRecord.from_objects(
                     metadata,
                     name=dist.name,
                     version=dist.version,
                     build=dist.build_string,
-                    build_number=dist.build_number,
+                    build_number=metadata.get("build_number", dist.build_number),
                     channel=dist.channel,
                     subdir=dist.subdir or package_platform or platform,
                     fn=dist.to_filename(),
