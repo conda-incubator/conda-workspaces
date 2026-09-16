@@ -12,6 +12,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Preserve explicit package build numbers when writing and reading workspace locks with released conda-lockfiles versions.
+- Release temporary prefix metadata from conda's cache after selective lock updates, including failed updates.
 - Reject malformed channels and dependency values instead of dropping or coercing
   them. Reject unsupported conda dependency fields and environment or target
   channel overrides before they can change the requested solve.

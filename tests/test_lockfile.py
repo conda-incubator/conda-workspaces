@@ -13,8 +13,6 @@ import pytest
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from conda.models.records import PackageRecord
-
     from tests.conftest import SnapshotTree
 
 from conda.base.constants import UpdateModifier
@@ -24,7 +22,7 @@ from conda.core.prefix_data import PrefixData
 from conda.history import History
 from conda.models.environment import EnvironmentConfig
 from conda.models.match_spec import MatchSpec
-from conda.models.records import PrefixRecord
+from conda.models.records import PackageRecord, PrefixRecord
 from conda_lockfiles.load_yaml import load_yaml
 
 import conda_workspaces.lockfile as lockfile_module
@@ -791,6 +789,67 @@ def test_conda_lock_loader_compose_merges_prefix_and_solver_metadata() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "build_number", [None, 0, 7], ids=["absent", "zero", "nonzero"]
+)
+@pytest.mark.parametrize(
+    "metadata_only", [False, True], ids=["generic", "metadata-only"]
+)
+def test_conda_lock_loader_roundtrip_preserves_explicit_build_number(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_number: int | None,
+    metadata_only: bool,
+) -> None:
+    channel = "https://repo.example.test/channel"
+    url = f"{channel}/linux-64/python-3.14.0-test_3.conda"
+    cached_record = PackageRecord(
+        name="python",
+        version="3.14.0",
+        build="test_3",
+        build_number=11,
+        channel=channel,
+        subdir="linux-64",
+        url=url,
+        sha256="a" * 64,
+    )
+    monkeypatch.setattr(
+        "conda_lockfiles.records_from_conda_urls.ProgressiveFetchExtract.execute",
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        "conda_lockfiles.records_from_conda_urls.PackageCacheData.query_all",
+        lambda spec: iter((cached_record,)),
+    )
+    environment = _SolvedEnvironment(
+        name="default",
+        platform="linux-64",
+        package_platform="linux-64",
+        config=EnvironmentConfig(channels=(channel,)),
+        explicit_packages=[_FakePkg("python", url, build_number=build_number)],
+    )
+
+    result = CondaLockLoader.compose([environment])
+    if build_number is None:
+        assert "build_number" not in result["packages"][0]
+    else:
+        assert result["packages"][0]["build_number"] == build_number
+    content = io.StringIO()
+    yaml_dump(result, content)
+    path = tmp_path / LOCKFILE_NAME
+    path.write_text(content.getvalue(), encoding="utf-8")
+
+    env = CondaLockLoader(path).env_for("linux-64", metadata_only=metadata_only)
+
+    expected = build_number
+    if expected is None:
+        expected = 3 if metadata_only else cached_record.build_number
+    record = env.explicit_packages[0]
+    assert record.build_number == expected
+    assert MatchSpec(name="python", build_number=expected).match(record)
+    assert cached_record.build_number == 11
+
+
 def test_conda_lock_loader_rejects_metadata_conflicts_after_redaction() -> None:
     channel = "https://repo.example.test/private"
     package_path = "/private/linux-64/python-3.12.0-0.conda"
@@ -1232,6 +1291,7 @@ def test_render_lockfile_selective_update_only_replaces_target(
         {"certifi", "python"},
     )
     assert not solve_prefix.exists()
+    assert not any(prefix == solve_prefix for prefix, _ in PrefixData._cache_)
 
     result = load_lockfile_data(content)
     assert result["environments"]["default"]["packages"]["linux-64"] == [
@@ -1243,6 +1303,54 @@ def test_render_lockfile_selective_update_only_replaces_target(
         == baseline["environments"]["default"]["packages"]["osx-arm64"]
     )
     assert result["environments"]["test"] == baseline["environments"]["test"]
+
+
+@pytest.mark.parametrize("failure", ["seed", "missing-root", "solve"])
+def test_render_lockfile_releases_temporary_prefix_after_update_failure(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    selective_lock_data: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    ctx = workspace_ctx_factory(platform="linux-64")
+    resolved = ResolvedEnvironment(
+        name="default",
+        channels=[Channel("conda-forge")],
+        platforms=["linux-64"],
+        conda_dependencies={"python": MatchSpec("python >=3.10")},
+    )
+    prefixes: list[Path] = []
+    original_seed = CondaLockLoader.seed_prefix_from_data
+    baseline = deepcopy(selective_lock_data)
+
+    def seed(data, name, target, prefix, requested_specs, **kwargs):
+        prefixes.append(prefix)
+        records = original_seed(data, name, target, prefix, requested_specs, **kwargs)
+        if failure == "seed":
+            raise ValueError("seed failed")
+        return records
+
+    def solve(self, platform, *, prefix, update_names=None):
+        raise SolveError(self.name, "solve failed", platform=platform)
+
+    monkeypatch.setattr(CondaLockLoader, "seed_prefix_from_data", seed)
+    monkeypatch.setattr(ResolvedEnvironment, "solve_for_platform", solve)
+    update_names = {"absent"} if failure == "missing-root" else {"python"}
+    error = SolveError if failure == "solve" else LockfileIntegrityError
+    match = "missing requested roots" if failure == "missing-root" else failure
+
+    with pytest.raises(error, match=match):
+        render_lockfile(
+            ctx,
+            {"default": resolved},
+            baseline_data=selective_lock_data,
+            update_targets={("default", "linux-64"): update_names},
+        )
+
+    assert len(prefixes) == 1
+    assert not prefixes[0].exists()
+    assert not any(prefix == prefixes[0] for prefix, _ in PrefixData._cache_)
+    assert selective_lock_data == baseline
 
 
 def test_write_lockfile_writes_rendered_content(

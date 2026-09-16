@@ -57,6 +57,7 @@ from urllib.parse import unquote, urlsplit
 
 from conda.common.io import dashlist
 from conda.common.serialize import yaml
+from conda.core.prefix_data import delete_prefix_from_linked_data
 from conda.models.dist import Dist
 from conda.plugins.types import EnvironmentSpecBase
 
@@ -689,14 +690,15 @@ class CondaLockLoader(EnvironmentSpecBase):
             packages[conversion_platform] = packages[platform]
         if records is None:
             from conda_lockfiles.rattler_lock.v6 import (
-                RattlerLockV6,
                 rattler_lock_v6_to_conda_env,
             )
+
+            from ._lockfile_compat import WorkspaceLock
 
             # The shared rattler model requires a default environment, while
             # conda.lock may contain only a named environment. Adapt the copy.
             payload.update(version=6, environments={"default": env_data})
-            lockfile_model = RattlerLockV6.model_validate(payload)
+            lockfile_model = WorkspaceLock.model_validate(payload)
             env = rattler_lock_v6_to_conda_env(
                 lockfile_model,
                 name="default",
@@ -1330,8 +1332,9 @@ class CondaLockLoader(EnvironmentSpecBase):
         without re-implementing it.
         """
         from conda.models.environment import Environment, EnvironmentConfig
-        from conda_lockfiles.rattler_lock.v6 import RattlerLockV6Package
         from conda_lockfiles.validate_urls import validate_urls
+
+        from ._lockfile_compat import WorkspaceLockPackage
 
         packages: list[dict[str, Any]] = []
         environments: dict[str, dict[str, Any]] = {}
@@ -1375,6 +1378,7 @@ class CondaLockLoader(EnvironmentSpecBase):
                 platform_refs.append({"conda": package_url})
                 package_kwargs: dict[str, Any] = {"conda": package_url}
                 for metadata_field in (
+                    "build_number",
                     "sha256",
                     "md5",
                     "depends",
@@ -1394,14 +1398,20 @@ class CondaLockLoader(EnvironmentSpecBase):
                     if value is not None and (
                         value
                         or metadata_field
-                        in {"depends", "constrains", "features", "track_features"}
+                        in {
+                            "build_number",
+                            "depends",
+                            "constrains",
+                            "features",
+                            "track_features",
+                        }
                     ):
                         package_kwargs[metadata_field] = value
                 package_kwargs = cls.redact_data_urls({"packages": [package_kwargs]})[
                     "packages"
                 ][0]
                 packages.append(
-                    RattlerLockV6Package(**package_kwargs).model_dump(exclude_none=True)
+                    WorkspaceLockPackage(**package_kwargs).model_dump(exclude_none=True)
                 )
 
             for manager, urls in env.external_packages.items():
@@ -1531,33 +1541,36 @@ def render_lockfile(
                         ) as temp_dir:
                             prefix = Path(temp_dir)
                             try:
-                                records = CondaLockLoader.seed_prefix_from_data(
-                                    baseline,
-                                    name,
-                                    target,
-                                    prefix,
-                                    requested_specs,
-                                    package_platform=package_platform,
+                                try:
+                                    records = CondaLockLoader.seed_prefix_from_data(
+                                        baseline,
+                                        name,
+                                        target,
+                                        prefix,
+                                        requested_specs,
+                                        package_platform=package_platform,
+                                    )
+                                except ValueError as exc:
+                                    raise LockfileIntegrityError(
+                                        lockfile_path(ctx),
+                                        str(exc),
+                                    ) from exc
+                                installed_names = {record.name for record in records}
+                                missing = update_names - installed_names
+                                if missing:
+                                    names = ", ".join(sorted(missing))
+                                    raise LockfileIntegrityError(
+                                        lockfile_path(ctx),
+                                        f"environment {name!r} on {target!r} is missing"
+                                        f" requested roots: {names}",
+                                    )
+                                records = target_resolved.solve_for_platform(
+                                    package_platform,
+                                    prefix=prefix,
+                                    update_names=update_names,
                                 )
-                            except ValueError as exc:
-                                raise LockfileIntegrityError(
-                                    lockfile_path(ctx),
-                                    str(exc),
-                                ) from exc
-                            installed_names = {record.name for record in records}
-                            missing = update_names - installed_names
-                            if missing:
-                                names = ", ".join(sorted(missing))
-                                raise LockfileIntegrityError(
-                                    lockfile_path(ctx),
-                                    f"environment {name!r} on {target!r} is missing"
-                                    f" requested roots: {names}",
-                                )
-                            records = target_resolved.solve_for_platform(
-                                package_platform,
-                                prefix=prefix,
-                                update_names=update_names,
-                            )
+                            finally:
+                                delete_prefix_from_linked_data(prefix)
                     else:
                         solve_prefix = (
                             solve_prefixes.get(
