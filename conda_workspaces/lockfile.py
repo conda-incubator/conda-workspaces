@@ -645,20 +645,9 @@ class CondaLockLoader(EnvironmentSpecBase):
         *metadata_only* reconstructs exact records from the lockfile without
         accessing the package cache.
         """
-        payload = self.redact_data_urls(self._data)
-        if payload.get("version") != LOCKFILE_VERSION:
-            raise ValueError(
-                f"Unsupported {LOCKFILE_NAME} version: {payload.get('version')!r} "
-                f"(expected {LOCKFILE_VERSION})"
-            )
-        environments = payload.get("environments", {})
-        if name not in environments:
-            raise ValueError(
-                f"Environment {name!r} not found in lockfile. "
-                f"Available environments: {dashlist(sorted(environments))}"
-            )
         self._env_data(name)
-        env_data = environments[name]
+        payload = self.redact_data_urls(self._data)
+        env_data = payload["environments"][name]
         platforms = tuple(sorted(env_data.get("packages", {})))
         if platform not in platforms:
             from conda.exceptions import PlatformMismatchError

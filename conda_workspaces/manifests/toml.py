@@ -245,7 +245,7 @@ class WorkspaceDependencyResolver:
         self.reject_source_fields(name, spec, table_name)
 
         if "workspace" not in spec:
-            fields = self.spec_fields(name, spec, strict_unsupported=True)
+            fields = self.spec_fields(name, spec)
             return self.match_spec_from_fields(name, fields)
 
         if not allow_inheritance:
@@ -268,22 +268,15 @@ class WorkspaceDependencyResolver:
             )
 
         base_spec = self.workspace_dependencies_raw[name]
-        base_fields = self.spec_fields(name, base_spec, strict_unsupported=True)
+        base_fields = self.spec_fields(name, base_spec)
         override_fields = self.spec_fields(
             name,
             {k: v for k, v in spec.items() if k != "workspace"},
-            strict_unsupported=True,
         )
         fields = {**base_fields, **override_fields}
         return self.match_spec_from_fields(name, fields)
 
-    def spec_fields(
-        self,
-        name: str,
-        spec: Any,
-        *,
-        strict_unsupported: bool,
-    ) -> dict[str, Any]:
+    def spec_fields(self, name: str, spec: Any) -> dict[str, Any]:
         """Return conda ``MatchSpec`` keyword fields for one TOML dependency."""
         if isinstance(spec, str):
             return {"version": spec}
@@ -295,7 +288,7 @@ class WorkspaceDependencyResolver:
             for key in spec
             if key not in self.spec_field_aliases and key != "workspace"
         }
-        if strict_unsupported and unsupported:
+        if unsupported:
             fields = ", ".join(sorted(unsupported))
             self.error(
                 f"Conda dependency '{name}' uses unsupported field(s): {fields}."
