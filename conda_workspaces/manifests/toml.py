@@ -148,11 +148,13 @@ def parse_archive_config(ws: dict[str, Any]) -> ArchiveConfig:
 
 def parse_channels(raw: list[Any]) -> list[Channel]:
     """Parse a channels list, handling both strings and dicts."""
+    if not isinstance(raw, list):
+        raise ValueError("Channels must be a list")
     channels: list[Channel] = []
     for item in raw:
         if isinstance(item, str):
             channels.append(Channel(normalize_url_scheme(item)))
-        elif isinstance(item, dict):
+        elif isinstance(item, dict) and isinstance(item.get("channel"), str):
             if "priority" in item:
                 log.debug(
                     "Channel priority is not supported by conda; "
@@ -161,6 +163,10 @@ def parse_channels(raw: list[Any]) -> list[Channel]:
                     redact_channel_name(str(item["channel"])),
                 )
             channels.append(Channel(normalize_url_scheme(item["channel"])))
+        else:
+            raise ValueError(
+                "Channel entries must be strings or tables with a string channel field"
+            )
     return channels
 
 
@@ -191,7 +197,9 @@ class WorkspaceDependencyResolver:
         workspace_dependencies: dict[str, Any] | None = None,
         path: Path | None = None,
     ) -> None:
-        self.workspace_dependencies_raw = workspace_dependencies or {}
+        self.workspace_dependencies_raw = (
+            {} if workspace_dependencies is None else workspace_dependencies
+        )
         self.path = path
         self.workspace_dependencies = self.parse_dependency_table(
             self.workspace_dependencies_raw,
@@ -207,6 +215,8 @@ class WorkspaceDependencyResolver:
         table_name: str = "[dependencies]",
     ) -> dict[str, MatchSpec]:
         """Parse a dependency table into ``MatchSpec`` objects."""
+        if not isinstance(raw, dict):
+            self.error(f"{table_name} must be a table.")
         deps: dict[str, MatchSpec] = {}
         for name, spec in raw.items():
             deps[name] = self.parse_dependency(
@@ -231,10 +241,11 @@ class WorkspaceDependencyResolver:
         if isinstance(spec, str):
             return MatchSpec(f"{name} {spec}".strip())
         if not isinstance(spec, dict):
-            return MatchSpec(f"{name} {spec}")
+            self.error(f"{table_name}.{name} must be a string or table.")
+        self.reject_source_fields(name, spec, table_name)
 
         if "workspace" not in spec:
-            fields = self.spec_fields(name, spec, strict_unsupported=False)
+            fields = self.spec_fields(name, spec, strict_unsupported=True)
             return self.match_spec_from_fields(name, fields)
 
         if not allow_inheritance:
@@ -257,9 +268,6 @@ class WorkspaceDependencyResolver:
             )
 
         base_spec = self.workspace_dependencies_raw[name]
-        self.reject_source_fields(name, base_spec, "[workspace.dependencies]")
-        self.reject_source_fields(name, spec, table_name)
-
         base_fields = self.spec_fields(name, base_spec, strict_unsupported=True)
         override_fields = self.spec_fields(
             name,
@@ -308,7 +316,7 @@ class WorkspaceDependencyResolver:
         return fields
 
     def reject_source_fields(self, name: str, spec: Any, table_name: str) -> None:
-        """Reject pixi source-package fields when inheritance would consume them."""
+        """Reject source-package fields that conda dependency parsing cannot retain."""
         if not isinstance(spec, dict):
             return
         unsupported = sorted(str(key) for key in spec if key in self.source_spec_fields)
@@ -317,7 +325,7 @@ class WorkspaceDependencyResolver:
         fields = ", ".join(unsupported)
         self.error(
             f"{table_name}.{name} uses source dependency field(s) unsupported by "
-            f"conda-workspaces inheritance: {fields}."
+            f"conda-workspaces: {fields}."
         )
 
     def match_spec_from_fields(self, name: str, fields: dict[str, Any]) -> MatchSpec:
@@ -336,6 +344,8 @@ class WorkspaceDependencyResolver:
 
 def parse_pypi_dependencies(raw: dict[str, Any]) -> dict[str, PyPIDependency]:
     """Parse PyPI dependency specs."""
+    if not isinstance(raw, dict):
+        raise ValueError("PyPI dependencies must be a table")
     deps: dict[str, PyPIDependency] = {}
     for name, spec in raw.items():
         if isinstance(spec, str):
@@ -355,7 +365,7 @@ def parse_pypi_dependencies(raw: dict[str, Any]) -> dict[str, PyPIDependency]:
                 url=spec.get("url"),
             )
         else:
-            deps[name] = PyPIDependency(name=name, spec=str(spec))
+            raise ValueError(f"PyPI dependency '{name}' must be a string or table")
         if deps[name].redacted().spec != deps[name].spec:
             raise ValueError(
                 f"PyPI dependency '{name}' has a credential-bearing URL in its"
@@ -381,6 +391,11 @@ def parse_environment(
         return Environment(name=name, features=raw)
     if isinstance(raw, dict):
         resolver = resolver or WorkspaceDependencyResolver(path=path)
+        if "channels" in raw:
+            resolver.error(
+                f"[environments.{name}].channels is not supported. "
+                "Use workspace or feature channels."
+            )
         environment = Environment(
             name=name,
             features=list(raw.get("features", [])),
@@ -415,6 +430,11 @@ def parse_target_overrides(
     """Parse target dependency overrides into a feature or environment."""
     resolver = resolver or WorkspaceDependencyResolver()
     for platform, tdata in target_data.items():
+        if "channels" in tdata:
+            resolver.error(
+                f"[{table_path}.{platform}].channels is not supported. "
+                "Use workspace or feature channels."
+            )
         if "system-requirements" in tdata:
             resolver.error(
                 f"[{table_path}.{platform}.system-requirements] is not supported. "
