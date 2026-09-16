@@ -690,14 +690,15 @@ class CondaLockLoader(EnvironmentSpecBase):
             packages[conversion_platform] = packages[platform]
         if records is None:
             from conda_lockfiles.rattler_lock.v6 import (
-                RattlerLockV6,
                 rattler_lock_v6_to_conda_env,
             )
+
+            from ._lockfile_compat import WorkspaceLock
 
             # The shared rattler model requires a default environment, while
             # conda.lock may contain only a named environment. Adapt the copy.
             payload.update(version=6, environments={"default": env_data})
-            lockfile_model = RattlerLockV6.model_validate(payload)
+            lockfile_model = WorkspaceLock.model_validate(payload)
             env = rattler_lock_v6_to_conda_env(
                 lockfile_model,
                 name="default",
@@ -1331,8 +1332,9 @@ class CondaLockLoader(EnvironmentSpecBase):
         without re-implementing it.
         """
         from conda.models.environment import Environment, EnvironmentConfig
-        from conda_lockfiles.rattler_lock.v6 import RattlerLockV6Package
         from conda_lockfiles.validate_urls import validate_urls
+
+        from ._lockfile_compat import WorkspaceLockPackage
 
         packages: list[dict[str, Any]] = []
         environments: dict[str, dict[str, Any]] = {}
@@ -1409,7 +1411,7 @@ class CondaLockLoader(EnvironmentSpecBase):
                     "packages"
                 ][0]
                 packages.append(
-                    RattlerLockV6Package(**package_kwargs).model_dump(exclude_none=True)
+                    WorkspaceLockPackage(**package_kwargs).model_dump(exclude_none=True)
                 )
 
             for manager, urls in env.external_packages.items():

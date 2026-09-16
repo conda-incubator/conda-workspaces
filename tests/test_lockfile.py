@@ -13,8 +13,6 @@ import pytest
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from conda.models.records import PackageRecord
-
     from tests.conftest import SnapshotTree
 
 from conda.base.constants import UpdateModifier
@@ -24,7 +22,7 @@ from conda.core.prefix_data import PrefixData
 from conda.history import History
 from conda.models.environment import EnvironmentConfig
 from conda.models.match_spec import MatchSpec
-from conda.models.records import PrefixRecord
+from conda.models.records import PackageRecord, PrefixRecord
 from conda_lockfiles.load_yaml import load_yaml
 
 import conda_workspaces.lockfile as lockfile_module
@@ -791,12 +789,38 @@ def test_conda_lock_loader_compose_merges_prefix_and_solver_metadata() -> None:
     ]
 
 
-@pytest.mark.parametrize("build_number", [0, 7], ids=["zero", "nonzero"])
-def test_conda_lock_loader_compose_preserves_explicit_build_number(
-    build_number: int,
+@pytest.mark.parametrize(
+    "build_number", [None, 0, 7], ids=["absent", "zero", "nonzero"]
+)
+@pytest.mark.parametrize(
+    "metadata_only", [False, True], ids=["generic", "metadata-only"]
+)
+def test_conda_lock_loader_roundtrip_preserves_explicit_build_number(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_number: int | None,
+    metadata_only: bool,
 ) -> None:
     channel = "https://repo.example.test/channel"
     url = f"{channel}/linux-64/python-3.14.0-test_3.conda"
+    cached_record = PackageRecord(
+        name="python",
+        version="3.14.0",
+        build="test_3",
+        build_number=11,
+        channel=channel,
+        subdir="linux-64",
+        url=url,
+        sha256="a" * 64,
+    )
+    monkeypatch.setattr(
+        "conda_lockfiles.records_from_conda_urls.ProgressiveFetchExtract.execute",
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        "conda_lockfiles.records_from_conda_urls.PackageCacheData.query_all",
+        lambda spec: iter((cached_record,)),
+    )
     environment = _SolvedEnvironment(
         name="default",
         platform="linux-64",
@@ -806,13 +830,24 @@ def test_conda_lock_loader_compose_preserves_explicit_build_number(
     )
 
     result = CondaLockLoader.compose([environment])
-    records = CondaLockLoader.package_records_for_env_data(
-        result, "default", "linux-64"
-    )
+    if build_number is None:
+        assert "build_number" not in result["packages"][0]
+    else:
+        assert result["packages"][0]["build_number"] == build_number
+    content = io.StringIO()
+    yaml_dump(result, content)
+    path = tmp_path / LOCKFILE_NAME
+    path.write_text(content.getvalue(), encoding="utf-8")
 
-    assert result["packages"][0]["build_number"] == build_number
-    assert records[0].build_number == build_number
-    assert MatchSpec(name="python", build_number=build_number).match(records[0])
+    env = CondaLockLoader(path).env_for("linux-64", metadata_only=metadata_only)
+
+    expected = build_number
+    if expected is None:
+        expected = 3 if metadata_only else cached_record.build_number
+    record = env.explicit_packages[0]
+    assert record.build_number == expected
+    assert MatchSpec(name="python", build_number=expected).match(record)
+    assert cached_record.build_number == 11
 
 
 def test_conda_lock_loader_rejects_metadata_conflicts_after_redaction() -> None:
