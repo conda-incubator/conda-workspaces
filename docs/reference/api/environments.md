@@ -33,3 +33,17 @@ Selection preserves root, environment and package metadata and removes unused re
 .. autoclass:: conda_workspaces.lockfile.CondaLockLoader
    :members: available_environments, platforms_for, package_platform_for, select, env_for
 ```
+
+## Check a saved lock against its manifest
+
+`check_lockfile_satisfiability(config, lockfile_data, current_platform)` checks workspace declarations and the package requirements for one target. Call it for every declared logical target to check all saved solutions. Its `LockfileStatus.reason` explains the first mismatch.
+
+Pass `environment="test"` to check package requirements only for that environment on the requested target. All workspace environment names, ordered channels and declared target names remain checked. This lets callers scope virtual package configuration independently for each environment and target without copying or removing declarations. An unknown environment raises `EnvironmentNotFoundError`.
+
+The checker uses conda's virtual package plugins and the active override configuration. Callers requiring host-independent results must configure target virtual packages before each call. Success describes manifest satisfiability, without checking for newer packages or verifying package archives.
+
+```{eval-rst}
+.. autofunction:: conda_workspaces.lockfile.load_lockfile_data
+
+.. autofunction:: conda_workspaces.lockfile.check_lockfile_satisfiability
+```
