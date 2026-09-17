@@ -10,24 +10,29 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import contextmanager
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import TYPE_CHECKING, ClassVar
 
 from conda.exceptions import CondaValueError
 
 from .exceptions import (
     PlatformError,
 )
-from .models import has_match_spec_url_credentials, redact_url_text
+from .models import (
+    MatchSpec,
+    has_match_spec_url_credentials,
+    has_url_credentials,
+    redact_url_text,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
-    from pathlib import Path
     from typing import Any
 
     from conda.models.records import PackageRecord
 
-    from .models import Channel, MatchSpec, PyPIDependency, WorkspaceConfig
+    from .models import Channel, PyPIDependency, WorkspaceConfig
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +45,12 @@ class ResolvedEnvironment:
     a project-local conda environment.
     """
 
+    _SYSTEM_REQUIREMENT_NAMES: ClassVar[dict[str, str]] = {
+        "libc": "glibc",
+        "macos": "osx",
+        "windows": "win",
+    }
+
     name: str
     conda_dependencies: dict[str, MatchSpec] = field(default_factory=dict)
     pypi_dependencies: dict[str, PyPIDependency] = field(default_factory=dict)
@@ -50,6 +61,32 @@ class ResolvedEnvironment:
     activation_env: dict[str, str] = field(default_factory=dict)
     system_requirements: dict[str, str] = field(default_factory=dict)
     channel_priority: str | None = None
+
+    def with_absolute_paths(self, root: Path) -> ResolvedEnvironment:
+        """Resolve installation inputs against *root*, preserving manifest values.
+
+        Keep symlinks intact so installation can reject them. URL-shaped or
+        credential-bearing values remain intact for input validation.
+        """
+        root = root.expanduser().absolute()
+        return replace(
+            self,
+            activation_scripts=[
+                str(root / Path(script).expanduser())
+                for script in self.activation_scripts
+            ],
+            pypi_dependencies={
+                name: replace(
+                    dependency,
+                    path=str(root / Path(dependency.path).expanduser()),
+                )
+                if dependency.path
+                and "://" not in dependency.path
+                and not has_url_credentials(dependency.path)
+                else dependency
+                for name, dependency in self.pypi_dependencies.items()
+            },
+        )
 
     def platform_subdir(self, platform: str) -> str:
         """Return the concrete conda subdir for a declared platform name."""
@@ -107,18 +144,32 @@ class ResolvedEnvironment:
 
     def system_requirement_version(self, name: str) -> str | None:
         """Look up a system requirement by conda or Pixi-facing virtual name."""
-        aliases = {
-            "glibc": ("glibc", "libc"),
-            "osx": ("osx", "macos"),
-            "win": ("win", "windows"),
-        }
-        for candidate in aliases.get(name, (name,)):
+        name = name.removeprefix("__")
+        name = self._SYSTEM_REQUIREMENT_NAMES.get(name, name)
+        candidates = (
+            name,
+            *(
+                alias
+                for alias, canonical in self._SYSTEM_REQUIREMENT_NAMES.items()
+                if canonical == name
+            ),
+        )
+        for candidate in candidates:
             version = self.system_requirements.get(
                 candidate
             ) or self.system_requirements.get(f"__{candidate}")
             if version:
                 return version
         return None
+
+    def system_requirement_specs(self) -> list[MatchSpec]:
+        """Return minimum virtual-package versions with conda package names."""
+        specs = []
+        for name, version in self.system_requirements.items():
+            name = name.removeprefix("__")
+            name = self._SYSTEM_REQUIREMENT_NAMES.get(name, name)
+            specs.append(MatchSpec(f"__{name} >={version}"))
+        return specs
 
     def virtual_package_overrides(self, platform: str) -> dict[str, str]:
         """Return ``CONDA_OVERRIDE_*`` env vars that enable a cross-platform solve.
@@ -136,12 +187,12 @@ class ResolvedEnvironment:
            for that key, leaving the existing value untouched.
         2. ``[system-requirements]`` declared in the manifest for the same
            virtual package (e.g. ``glibc = "2.28"``) — used as the override
-           so the virtual package record lines up with the spec constraint
-           :mod:`conda_workspaces.envs._apply_system_requirements` appends.
-        3. A conservative built-in baseline (``__glibc == 2.17`` for any
-           non-native linux target, ``__osx >= 10.15`` / ``>= 11.0`` for
-           ``osx-64`` / ``osx-arm64`` cross-compiles, presence-only
-           ``__win`` for win targets).
+           so the virtual package record lines up with the spec returned by
+           :meth:`system_requirement_specs`.
+        3. A conservative built-in baseline (``__linux == 4.18`` and
+           ``__glibc == 2.17`` for any non-native linux target,
+           ``__osx >= 10.15`` / ``>= 11.0`` for ``osx-64`` / ``osx-arm64``
+           cross-compiles, presence-only ``__win`` for win targets).
 
         ``__cuda`` and ``__archspec`` are *not* seeded — the caller must
         opt in via ``[system-requirements]`` or ``CONDA_OVERRIDE_*`` if
@@ -163,6 +214,9 @@ class ResolvedEnvironment:
 
         baseline: dict[str, str] = {}
         if target_family == "linux":
+            baseline["CONDA_OVERRIDE_LINUX"] = (
+                self.system_requirement_version("linux") or "4.18"
+            )
             baseline["CONDA_OVERRIDE_GLIBC"] = (
                 self.system_requirement_version("glibc") or "2.17"
             )
@@ -259,7 +313,6 @@ class ResolvedEnvironment:
         from conda.exceptions import UnsatisfiableError
 
         from .envs import (
-            _apply_system_requirements,
             _build_pypi_specs,
             _channel_priority_override,
         )
@@ -276,7 +329,7 @@ class ResolvedEnvironment:
                     f"Cannot update undeclared conda dependencies: {names}"
                 )
             specs = [self.conda_dependencies[name] for name in sorted(update_names)]
-        _apply_system_requirements(self, specs)
+        specs.extend(self.system_requirement_specs())
 
         if not specs:
             return []

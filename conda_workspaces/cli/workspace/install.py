@@ -52,11 +52,26 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
     locked = getattr(args, "locked", False)
     frozen = getattr(args, "frozen", False)
     no_lock = getattr(args, "no_lock", False)
-    prefix = getattr(args, "prefix", None)
+    platform = getattr(args, "platform", None)
+    download_only = getattr(args, "download_only", False)
+    prefix_arg = getattr(args, "prefix", None)
+    prefix = Path(prefix_arg) if prefix_arg is not None else None
+    selected_lock = platform is not None or download_only or prefix is not None
+    if selected_lock and not (locked or frozen):
+        raise CondaWorkspacesError(
+            "--platform, --prefix, and --download-only require --locked or --frozen."
+        )
+    if no_lock and selected_lock:
+        raise CondaWorkspacesError(
+            "--platform, --prefix, and --download-only "
+            "cannot be combined with --no-lock."
+        )
     target_prefix_override = getattr(args, "target_prefix_override", None)
     WorkspacePublication.validate_manifest_path(Path(config.manifest_path))
     publication = (
-        None if dry_run else WorkspacePublication.from_current_manifest(ctx, "install")
+        None
+        if dry_run or download_only
+        else WorkspacePublication.from_current_manifest(ctx, "install")
     )
     validate_workspace = (
         publication.validate_manifest_generation if publication is not None else None
@@ -67,7 +82,7 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
     if not frozen:
         strict = locked or (ctx.is_ci and not no_lock)
         if strict or not no_lock:
-            lock = lockfile_status(ctx, config)
+            lock = lockfile_status(ctx, config, platform=platform)
             if strict:
                 if lock.status == LockfileStatus.MISSING:
                     raise LockfileNotFoundError("(all)", lockfile_path(ctx))
@@ -100,6 +115,8 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
                 prefix=prefix,
                 target_prefix_override=target_prefix_override,
                 dry_run=dry_run,
+                platform=platform,
+                download_only=download_only,
                 force_reinstall=force,
                 validate_current=not frozen,
                 validate_workspace=validate_workspace,
@@ -131,6 +148,8 @@ def install_from_lockfile_all(
     prefix: Path | None = None,
     target_prefix_override: str | Path | None = None,
     dry_run: bool = False,
+    platform: str | None = None,
+    download_only: bool = False,
     force_reinstall: bool = False,
     validate_current: bool = False,
     validate_workspace: Callable[[], None] | None = None,
@@ -166,7 +185,9 @@ def install_from_lockfile_all(
     except (OSError, ValueError) as exc:
         raise LockfileNotFoundError("(all)", path) from exc
     if validate_current:
-        current = check_lockfile_satisfiability(config, lockfile_data, ctx.platform)
+        current = check_lockfile_satisfiability(
+            config, lockfile_data, platform or ctx.platform
+        )
         if current.status != LockfileStatus.UP_TO_DATE:
             raise LockfileStaleError(
                 Path(config.manifest_path),
@@ -181,6 +202,7 @@ def install_from_lockfile_all(
                     ctx,
                     name,
                     prefix=prefix,
+                    platform=platform,
                     target_prefix_override=target_prefix_override,
                     lockfile_data=lockfile_data,
                     replace_existing=force_reinstall,
@@ -192,19 +214,27 @@ def install_from_lockfile_all(
                 console.print()
             status.message(
                 console,
-                "Installing",
+                "Downloading packages for" if download_only else "Installing",
                 "environment",
                 name,
                 style="bold blue",
                 ellipsis=True,
             )
-            if not dry_run:
+            if not dry_run and not download_only:
                 if force_reinstall:
                     plan.remove_preflight_prefix(ctx)
                 plan.execute()
+            if download_only:
+                verb = (
+                    "Would download packages for"
+                    if dry_run
+                    else "Downloaded packages for"
+                )
+            else:
+                verb = "Would install" if dry_run else "Installed"
             status.message(
                 console,
-                "Would install" if dry_run else "Installed",
+                verb,
                 "environment",
                 name,
             )

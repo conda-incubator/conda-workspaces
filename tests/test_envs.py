@@ -28,7 +28,6 @@ from conda_workspaces.context import WorkspaceContext
 from conda_workspaces.envs import (
     _apply_activation_env,
     _apply_activation_scripts,
-    _apply_system_requirements,
     _build_pypi_specs,
     _channel_priority_override,
     _install_path_deps,
@@ -1572,34 +1571,6 @@ def test_activation_metadata_rejects_symlink_boundaries(
 
     assert marker.read_text(encoding="utf-8") == "keep"
     assert not (outside / "setup.sh").exists()
-
-
-@pytest.mark.parametrize(
-    "sys_reqs, initial_specs, expected_names",
-    [
-        (
-            {"glibc": "2.17", "cuda": "12.0"},
-            [MatchSpec("python >=3.10")],
-            {"python", "__glibc", "__cuda"},
-        ),
-        (
-            {"__linux": "5.15"},
-            [],
-            {"__linux"},
-        ),
-    ],
-    ids=["auto-prefix", "already-prefixed"],
-)
-def test_apply_system_requirements(
-    sys_reqs: dict[str, str],
-    initial_specs: list[MatchSpec],
-    expected_names: set[str],
-) -> None:
-    """system_requirements adds virtual package specs without double-prefixing."""
-    resolved = ResolvedEnvironment(name="test", system_requirements=sys_reqs)
-    result = _apply_system_requirements(resolved, initial_specs)
-
-    assert {str(s.name) for s in result} == expected_names
 
 
 def test_channel_priority_override() -> None:

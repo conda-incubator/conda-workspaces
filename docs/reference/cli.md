@@ -34,6 +34,42 @@ After a file is written, it returns the path in `file` instead:
 }
 ```
 
+### Locked installation
+
+`conda workspace install --locked` requires a current lockfile. `--frozen`
+uses the existing lockfile without checking whether the manifest has changed.
+
+Both modes accept `--platform NAME` to select a declared platform variant for
+the current machine. Its conda subdir must match the native platform. This
+option does not enable installation for a different operating system or
+architecture.
+
+`-p/--prefix PATH` installs the selected environment at an explicit prefix.
+It requires `-e/--environment` and either `--locked` or `--frozen`.
+
+Add `--download-only` to validate and fetch locked packages without creating,
+removing, or updating environment prefixes or building local Python packages.
+It requires `--locked` or `--frozen`. Locked installation with `--dry-run`
+fetches packages into a temporary cache to complete validation without changing
+the environment, with or without `--download-only`.
+
+### Workspace images
+
+`conda workspace image` builds one selected Linux environment and its project
+files using Docker Buildx. It requires `-e/--environment`, `--platform`, a
+startup command after `--`, and one of `--load`, `--push`, or `-o/--output`.
+Loading and pushing also require `-t/--tag`. Tags may be repeated.
+
+Applications can run from copied project files. Python path, Git, and URL
+dependencies and editable installs are unsupported. Version-based PyPI
+dependencies use the existing conda-pypi integration.
+
+`--base-image` selects the Linux base. `--builder` reuses an existing Buildx
+builder. `--dry-run` previews the recipe and inputs without invoking Docker.
+`--json` returns the environment, conda and OCI platforms, tags, destination,
+and resulting image digests. See [Build a workspace image](../how-to/image.md)
+for the complete workflow and source restrictions.
+
 ### Importing manifests
 
 Without `-e/--environment`, `conda workspace import SOURCE` converts a

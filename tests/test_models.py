@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import asdict, fields
 
 import pytest
@@ -275,6 +276,9 @@ def test_redact_channel_name_and_url(
     ("value", "expected"),
     [
         ("https://packages.example.test/channel", False),
+        ("file:///tmp", False),
+        ("1file:///tmp", False),
+        ("+file:///tmp", False),
         ("https://user:password@packages.example.test/channel", True),
         ("https://packages.example.test/t/token/channel", True),
         ("https://packages.example.test/channel?token=secret", True),
@@ -291,6 +295,9 @@ def test_redact_channel_name_and_url(
     ],
     ids=[
         "safe-url",
+        "file-url",
+        "file-url-after-number",
+        "file-url-after-plus",
         "basic-auth",
         "token-path",
         "query",
@@ -308,6 +315,18 @@ def test_redact_channel_name_and_url(
 )
 def test_has_url_credentials(value: str, expected: bool) -> None:
     assert has_url_credentials(value) is expected
+
+
+@pytest.mark.parametrize(
+    "prefix", ["#", "https://example.test/"], ids=["plain-text", "url-path"]
+)
+def test_credential_checks_scan_long_values_quickly(prefix: str) -> None:
+    value = prefix + "a" * 40_000
+    started = time.process_time()
+
+    assert not has_url_credentials(value)
+    assert redact_url_text(value) == value
+    assert time.process_time() - started < 1.0
 
 
 def test_redact_url_text_fails_closed_for_later_relative_token() -> None:

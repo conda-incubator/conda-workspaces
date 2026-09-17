@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, ClassVar
 from urllib.parse import unquote_to_bytes, urlsplit
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
     from typing import Any
 
 from conda.base.constants import KNOWN_SUBDIRS
@@ -36,7 +36,38 @@ from .exceptions import (
 )
 from .paths import is_path_segment, portable_path_key
 
-_URL_CANDIDATE_RE = re.compile(r"(?i)(?:[a-z][a-z0-9+.-]*:)?//[^\s'\"<>]*")
+_URL_CANDIDATE_TERMINATORS = frozenset("'\"<>")
+
+
+def _url_candidate_spans(value: str) -> Iterator[tuple[int, int]]:
+    """Yield URL-like spans without backtracking over unrelated text."""
+    cursor = 0
+    while (slashes := value.find("//", cursor)) >= 0:
+        start = slashes
+        scheme_end = slashes - 1
+        if scheme_end > 0 and value[scheme_end] == ":":
+            scheme_start = scheme_end
+            while scheme_start > 0:
+                character = value[scheme_start - 1]
+                if not character.isascii() or not (
+                    character.isalnum() or character in "+.-"
+                ):
+                    break
+                scheme_start -= 1
+            while scheme_start < scheme_end and not value[scheme_start].isalpha():
+                scheme_start += 1
+            if scheme_start < scheme_end:
+                start = scheme_start
+
+        end = slashes + 2
+        while (
+            end < len(value)
+            and not value[end].isspace()
+            and value[end] not in _URL_CANDIDATE_TERMINATORS
+        ):
+            end += 1
+        yield start, end
+        cursor = end
 
 
 def _decode_url_bytes(value: str) -> bytes | None:
@@ -79,7 +110,7 @@ def _redact_url_once(url: str) -> str:
     decoded_path = _decode_url_bytes(parts.path)
     if decoded_path is None:
         return "<redacted-url>"
-    if re.search(rb"(?i)(?:[a-z][a-z0-9+.-]*:)?//[^/]*@", decoded_path):
+    if re.search(rb"//[^/]*@", decoded_path):
         return "<redacted-url>"
 
     segments: list[str] = []
@@ -145,9 +176,9 @@ def has_url_credentials(value: str) -> bool:
     if decoded != value.encode():
         candidates.append(decoded.decode("utf-8", errors="ignore"))
     return any(
-        redact_url(match.group(0)) != match.group(0)
+        redact_url(candidate[start:end]) != candidate[start:end]
         for candidate in candidates
-        for match in _URL_CANDIDATE_RE.finditer(candidate)
+        for start, end in _url_candidate_spans(candidate)
     )
 
 
@@ -169,10 +200,10 @@ def redact_url_text(value: str) -> str:
     """Remove sensitive URL material embedded in a larger diagnostic string."""
     pieces: list[str] = []
     offset = 0
-    for match in _URL_CANDIDATE_RE.finditer(value):
-        pieces.append(value[offset : match.start()])
-        pieces.append(redact_url(match.group(0)))
-        offset = match.end()
+    for start, end in _url_candidate_spans(value):
+        pieces.append(value[offset:start])
+        pieces.append(redact_url(value[start:end]))
+        offset = end
     pieces.append(value[offset:])
     redacted = "".join(pieces)
     if has_url_credentials(redacted):

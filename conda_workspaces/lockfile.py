@@ -221,6 +221,8 @@ def _manifest_channel_entries(
 def lockfile_status(
     ctx: WorkspaceContext,
     config: WorkspaceConfig,
+    *,
+    platform: str | None = None,
 ) -> LockfileStatus:
     """Determine the lockfile status relative to the workspace manifest."""
     lock = lockfile_path(ctx)
@@ -228,7 +230,7 @@ def lockfile_status(
         return LockfileStatus(status=LockfileStatus.MISSING)
 
     data = load_lockfile_path(lock)
-    return check_lockfile_satisfiability(config, data, ctx.platform)
+    return check_lockfile_satisfiability(config, data, platform or ctx.platform)
 
 
 def check_lockfile_satisfiability(
@@ -400,7 +402,7 @@ def check_lockfile_satisfiability(
         from conda.base.context import context as conda_context
         from conda.models.match_spec import MatchSpec
 
-        from .envs import _apply_system_requirements, _build_pypi_specs
+        from .envs import _build_pypi_specs
 
         target_resolved = resolve_environment(
             config,
@@ -411,7 +413,7 @@ def check_lockfile_satisfiability(
             *target_resolved.conda_dependencies.values(),
             *_build_pypi_specs(target_resolved),
         ]
-        _apply_system_requirements(target_resolved, requested_specs)
+        requested_specs.extend(target_resolved.system_requirement_specs())
         try:
             dependencies = [
                 (record, MatchSpec(dependency))
@@ -2037,6 +2039,44 @@ class LockfileInstallPlan:
     expected_prefix_identity: tuple[int, int] | None
     validate_workspace: Callable[[], None] | None
 
+    def validate_virtual_packages(self, platform: str) -> None:
+        """Check required and optional virtual constraints against this machine."""
+        from conda.base.context import context as conda_context
+        from conda.models.match_spec import MatchSpec
+
+        requirements = [
+            (MatchSpec(spec), required)
+            for record in self.records
+            for specs, required in ((record.depends, True), (record.constrains, False))
+            for spec in specs
+            if spec.startswith("__")
+        ]
+        if self.resolved is not None:
+            requirements.extend(
+                (spec, True)
+                for spec in (
+                    *self.resolved.conda_dependencies.values(),
+                    *self.resolved.system_requirement_specs(),
+                )
+                if spec.name and spec.name.startswith("__")
+            )
+        if not requirements:
+            return
+        with conda_context._override("_subdir", platform):
+            actual = {
+                record.name: record
+                for record in conda_context.plugin_manager.get_virtual_package_records()
+            }
+        for requirement, required in requirements:
+            record = actual.get(requirement.name)
+            if (record is None and required) or (
+                record is not None and not requirement.match(record)
+            ):
+                raise CondaWorkspacesError(
+                    f"This machine does not satisfy {requirement} "
+                    f"required by environment '{self.env_name}'."
+                )
+
     def validate_workspace_generation(self) -> None:
         """Revalidate a guarded workspace immediately before path consumers."""
         if self.validate_workspace is not None:
@@ -2083,6 +2123,7 @@ class LockfileInstallPlan:
         env_name: str,
         *,
         prefix: Path | None = None,
+        platform: str | None = None,
         target_prefix_override: str | Path | None = None,
         lockfile_data: dict[str, Any] | None = None,
         update_names: set[str] | None = None,
@@ -2117,21 +2158,33 @@ class LockfileInstallPlan:
                 raise LockfileNotFoundError("(all)", path) from exc
 
         loader = CondaLockLoader(path, data=lockfile_data)
-        lock_platform = ctx.platform
-        package_platform = ctx.platform
+        lock_platform = platform or ctx.platform
+        package_platform = ctx.config.platform_subdir(lock_platform)
         resolved: ResolvedEnvironment | None = None
         try:
             from .resolver import resolve_environment
 
             try:
-                resolved = resolve_environment(ctx.config, env_name)
+                resolved = resolve_environment(
+                    ctx.config, env_name, lock_platform
+                ).with_absolute_paths(Path(ctx.config.root))
                 lock_platform = ctx.config.resolve_platform_name(
-                    ctx.platform,
+                    lock_platform,
                     resolved.platforms or ctx.config.platforms,
                 )
                 package_platform = ctx.config.platform_subdir(lock_platform)
             except (EnvironmentNotFoundError, PlatformError):
+                if platform is not None:
+                    raise
                 pass
+            if (
+                platform is not None
+                and package_platform != conda_context._native_subdir()
+            ):
+                raise CondaWorkspacesError(
+                    f"Cannot install platform '{lock_platform}' on this machine "
+                    f"({conda_context._native_subdir()})."
+                )
             urls = loader.explicit_package_specs_for(
                 lock_platform,
                 env_name,
@@ -2158,7 +2211,9 @@ class LockfileInstallPlan:
             if target_prefix_override is not None
             else nullcontext()
         )
-        with override:
+        # Preparation only fetches packages. CLI dry runs isolate those cache
+        # writes and must still finish validation before skipping installation.
+        with override, conda_context._override("dry_run", False):
             if validate_workspace is not None:
                 validate_workspace()
             records = cast(
@@ -2252,7 +2307,7 @@ class LockfileInstallPlan:
                 f"Workspace environment prefix already exists: {install_prefix}"
             )
 
-        return cls(
+        plan = cls(
             env_name=env_name,
             prefix=install_prefix,
             target_prefix_override=target_prefix_override,
@@ -2271,6 +2326,8 @@ class LockfileInstallPlan:
             ),
             validate_workspace=validate_workspace,
         )
+        plan.validate_virtual_packages(package_platform)
+        return plan
 
     @contextmanager
     def open_prefix(self) -> Iterator[Callable[[], None]]:
@@ -2434,6 +2491,7 @@ def install_from_lockfile(
     env_name: str,
     *,
     prefix: Path | None = None,
+    platform: str | None = None,
     target_prefix_override: str | Path | None = None,
     dry_run: bool = False,
     lockfile_data: dict[str, Any] | None = None,
@@ -2474,6 +2532,7 @@ def install_from_lockfile(
         ctx,
         env_name,
         prefix=prefix,
+        platform=platform,
         target_prefix_override=target_prefix_override,
         lockfile_data=lockfile_data,
         update_names=update_names,

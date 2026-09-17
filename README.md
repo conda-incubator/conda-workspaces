@@ -75,6 +75,7 @@ and task running inside the conda CLI without switching tools.
 - Project-local environments in `.conda/envs/`
 - Lockfile generation (`conda.lock`) using a rattler-lock-derived schema for reproducible installs
 - Workspace archives with optional receipt verification for portable handoff
+- [Runnable container images](https://conda-incubator.github.io/conda-workspaces/how-to/image/) from locked Linux environments and project files
 - Per-platform dependency overrides via `[target.<platform>]`
 - PyPI dependencies translated and resolved alongside conda packages via conda-pypi
 - Activation scripts and environment variables per feature
@@ -120,6 +121,7 @@ and also provides `cw` and `ct` as shorter aliases.
 | `conda workspace clean` | Remove installed environments |
 | `conda workspace archive` | Create a portable workspace archive |
 | `conda workspace unarchive` | Extract and optionally verify a workspace archive |
+| `conda workspace image` | Build a runnable container image from a locked Linux environment |
 
 ### Task commands
 
