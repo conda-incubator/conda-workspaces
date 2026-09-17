@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from .archive import (
+    WorkspaceArchive,
     collect_archive_files,
     create_archive,
     validate_archive_members_for_create,
@@ -33,7 +34,7 @@ from .lockfile import (
     load_lockfile_data,
     lockfile_path,
 )
-from .models import ArchiveConfig, LockfileStatus, has_url_credentials_in_data
+from .models import ArchiveConfig, LockfileStatus
 from .paths import (
     atomic_binary_writer,
     has_absolute_path_syntax,
@@ -154,11 +155,10 @@ class WorkspaceImage:
                 lock, maximum_bytes=MAX_LOCKFILE_BYTES, label="workspace lockfile"
             )
             data = load_lockfile_data(lock_bytes)
-            if has_url_credentials_in_data(data):
-                raise CondaWorkspacesError(
-                    "Image lockfiles must not contain credentials. "
-                    "Configure package authentication outside the workspace."
-                )
+            WorkspaceArchive.validate_lockfile_credentials(
+                data,
+                lock_bytes.decode("utf-8"),
+            )
             current = check_lockfile_satisfiability(config, data, platform)
             if current.status != LockfileStatus.UP_TO_DATE:
                 raise LockfileStaleError(manifest, lock, reason=current.reason)
@@ -268,10 +268,9 @@ class WorkspaceImage:
         manifest_bytes = read_regular_file_bytes(
             manifest, maximum_bytes=MAX_LOCKFILE_BYTES, label="workspace manifest"
         )
-        if (
-            config._manifest_text is not None
-            and manifest_bytes.decode("utf-8") != config._manifest_text
-        ):
+        manifest_text = manifest_bytes.decode("utf-8")
+        WorkspaceArchive.validate_manifest_credentials(manifest_text)
+        if config._manifest_text is not None and manifest_text != config._manifest_text:
             raise CondaWorkspacesError(
                 "Workspace manifest changed during image preparation. "
                 "Retry the command."
@@ -347,6 +346,7 @@ class WorkspaceImage:
                 f"FROM {BOOTSTRAP_IMAGE} AS bootstrap",
                 "RUN " + json.dumps(bootstrap),
                 f"FROM {self.base_image} AS sources",
+                "USER 0",
                 "RUN "
                 + json.dumps(
                     [
@@ -365,11 +365,12 @@ class WorkspaceImage:
                 f'WORKDIR "{self.workspace}"',
                 "ADD " + json.dumps(["workspace.tar.gz", self.workspace + "/"]),
                 f"FROM {self.base_image} AS build",
+                "USER 0",
                 "COPY --from=bootstrap /opt/conda /opt/conda",
                 "COPY --from=sources " + json.dumps([self.workspace, self.workspace]),
                 "COPY tools /build",
                 "ENV PYTHONPATH=/build",
-                f'WORKDIR "{self.workspace}"',
+                'WORKDIR "/build"',
                 "RUN " + json.dumps([*install, "--download-only"]),
                 "RUN --network=none " + json.dumps(install),
                 "RUN --network=none "
@@ -473,7 +474,7 @@ class WorkspaceImage:
             create_archive(
                 Path(self.config.root),
                 context / "workspace.tar.gz",
-                self.config.archive,
+                ArchiveConfig(compression="gz"),
                 files=self.files,
                 regular_members=tuple(self.input_hashes),
                 regular_member_hashes=self.input_hashes,

@@ -82,11 +82,7 @@ def execute_install(args: argparse.Namespace, *, console: Console | None = None)
     if not frozen:
         strict = locked or (ctx.is_ci and not no_lock)
         if strict or not no_lock:
-            lock = (
-                lockfile_status(ctx, config, platform=platform)
-                if platform is not None
-                else lockfile_status(ctx, config)
-            )
+            lock = lockfile_status(ctx, config, platform=platform)
             if strict:
                 if lock.status == LockfileStatus.MISSING:
                     raise LockfileNotFoundError("(all)", lockfile_path(ctx))

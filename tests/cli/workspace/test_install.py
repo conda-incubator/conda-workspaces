@@ -627,7 +627,9 @@ def test_install_lockfile_paths_forward_dry_run(
     write_stub_lockfile(pixi_workspace)
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.install.lockfile_status",
-        lambda ctx, config: LockfileStatus(status=LockfileStatus.UP_TO_DATE),
+        lambda ctx, config, *, platform=None: LockfileStatus(
+            status=LockfileStatus.UP_TO_DATE
+        ),
     )
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.install.check_lockfile_satisfiability",
@@ -744,7 +746,9 @@ def test_install_default_uses_lockfile_when_satisfiable(
 
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.install.lockfile_status",
-        lambda ctx, config: LockfileStatus(status=LockfileStatus.UP_TO_DATE),
+        lambda ctx, config, *, platform=None: LockfileStatus(
+            status=LockfileStatus.UP_TO_DATE
+        ),
     )
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.install.check_lockfile_satisfiability",
@@ -789,7 +793,7 @@ def test_install_default_solves_when_not_satisfiable(
 
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.install.lockfile_status",
-        lambda ctx, config: LockfileStatus(
+        lambda ctx, config, *, platform=None: LockfileStatus(
             status=LockfileStatus.OUT_OF_DATE, reason="dep missing"
         ),
     )
@@ -832,7 +836,7 @@ def test_install_lockfile_reason_does_not_emit_terminal_controls(
     reason = "[bold]\x1b]52;c;QUJD\x07\x9b31m"
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.install.lockfile_status",
-        lambda ctx, config: LockfileStatus(
+        lambda ctx, config, *, platform=None: LockfileStatus(
             status=LockfileStatus.OUT_OF_DATE,
             reason=reason,
         ),
@@ -963,7 +967,7 @@ def test_install_ci_mode(
     if has_lockfile:
         (pixi_workspace / "conda.lock").write_text("version: 1\n", encoding="utf-8")
 
-    def fake_lockfile_status(ctx, config):
+    def fake_lockfile_status(ctx, config, *, platform=None):
         if not has_lockfile:
             return LockfileStatus(status=LockfileStatus.MISSING)
         if satisfiable:

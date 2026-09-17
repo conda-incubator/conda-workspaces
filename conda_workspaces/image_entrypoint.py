@@ -36,13 +36,16 @@ def activation_script(activation: dict[str, Any]) -> str:
         for value in activation["path"]["PATH"]
         if not value.startswith("/opt/conda/")
     ]
-    path = ":".join(paths)
-    pieces = path.split("/__workspace_runtime_path__")
+    runtime_marker = "/__workspace_runtime_path__"
     runtime_path = (
         '"${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"'
     )
     lines.append(
-        "export PATH=" + runtime_path.join(shlex.quote(piece) for piece in pieces)
+        "export PATH="
+        + ":".join(
+            runtime_path if value == runtime_marker else shlex.quote(value)
+            for value in paths
+        )
     )
     for name, value in exports.items():
         if name not in bootstrap_variables:

@@ -402,7 +402,7 @@ def check_lockfile_satisfiability(
         from conda.base.context import context as conda_context
         from conda.models.match_spec import MatchSpec
 
-        from .envs import _apply_system_requirements, _build_pypi_specs
+        from .envs import _build_pypi_specs
 
         target_resolved = resolve_environment(
             config,
@@ -413,7 +413,7 @@ def check_lockfile_satisfiability(
             *target_resolved.conda_dependencies.values(),
             *_build_pypi_specs(target_resolved),
         ]
-        _apply_system_requirements(target_resolved, requested_specs)
+        requested_specs.extend(target_resolved.system_requirement_specs())
         try:
             dependencies = [
                 (record, MatchSpec(dependency))
@@ -2039,7 +2039,7 @@ class LockfileInstallPlan:
     expected_prefix_identity: tuple[int, int] | None
     validate_workspace: Callable[[], None] | None
 
-    def validate_virtual_packages(self) -> None:
+    def validate_virtual_packages(self, platform: str) -> None:
         """Check required and optional virtual constraints against this machine."""
         from conda.base.context import context as conda_context
         from conda.models.match_spec import MatchSpec
@@ -2062,10 +2062,11 @@ class LockfileInstallPlan:
             )
         if not requirements:
             return
-        actual = {
-            record.name: record
-            for record in conda_context.plugin_manager.get_virtual_package_records()
-        }
+        with conda_context._override("_subdir", platform):
+            actual = {
+                record.name: record
+                for record in conda_context.plugin_manager.get_virtual_package_records()
+            }
         for requirement, required in requirements:
             record = actual.get(requirement.name)
             if (record is None and required) or (
@@ -2325,7 +2326,7 @@ class LockfileInstallPlan:
             ),
             validate_workspace=validate_workspace,
         )
-        plan.validate_virtual_packages()
+        plan.validate_virtual_packages(package_platform)
         return plan
 
     @contextmanager

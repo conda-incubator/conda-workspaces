@@ -130,7 +130,11 @@ def test_image_rejects_occupied_workspace_in_base(
         output=tmp_path / "result.oci.tar",
     )
     sources = image.recipe().split(" AS sources\n", 1)[1]
-    command = json.loads(sources.splitlines()[0].removeprefix("RUN "))
+    command = json.loads(
+        next(
+            line for line in sources.splitlines() if line.startswith("RUN ")
+        ).removeprefix("RUN ")
+    )
     assert command[-1] == "/workspaces/image-test"
     root = tmp_path / "workspaces" / "image-test"
     sibling = root.parent / "other-project"
@@ -200,6 +204,80 @@ def test_image_rejects_invalid_build_arguments(
     }
     with pytest.raises(CondaWorkspacesError, match=message):
         WorkspaceImage.prepare(config, ctx, **options)
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["manifest", "lock-comment"],
+    ids=str,
+)
+def test_image_rejects_credentials_in_raw_workspace_inputs(
+    image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
+    tmp_path: Path,
+    source: str,
+) -> None:
+    manifest_extra = (
+        '[tasks]\nleak = "curl https://user:secret@repo.example/private"\n'
+        if source == "manifest"
+        else ""
+    )
+    config, ctx = image_workspace(
+        manifest_extra=manifest_extra,
+    )
+    if source == "lock-comment":
+        lock = ctx.root / "conda.lock"
+        lock.write_text(
+            lock.read_text(encoding="utf-8")
+            + "\n# https://user:secret@repo.example/private\n",
+            encoding="utf-8",
+        )
+
+    with pytest.raises(ArchiveError, match="credentials embedded"):
+        WorkspaceImage.prepare(
+            config,
+            ctx,
+            environment="default",
+            platform="linux-64",
+            command=("python", "app.py"),
+            output=tmp_path / "result.oci.tar",
+        )
+
+
+def test_image_build_stages_use_root_from_neutral_directory(
+    image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
+    tmp_path: Path,
+) -> None:
+    config, ctx = image_workspace(
+        files={
+            "conda.py": "raise AssertionError('workspace conda imported')\n",
+            "conda_workspaces/__init__.py": (
+                "raise AssertionError('workspace conda_workspaces imported')\n"
+            ),
+        }
+    )
+    base_image = "example.invalid/nonroot:latest"
+    image = WorkspaceImage.prepare(
+        config,
+        ctx,
+        environment="default",
+        platform="linux-64",
+        command=("python", "app.py"),
+        output=tmp_path / "result.oci.tar",
+        base_image=base_image,
+    )
+    recipe = image.recipe()
+    assert ctx.root / "conda.py" in image.files
+    assert ctx.root / "conda_workspaces" / "__init__.py" in image.files
+    sources, remainder = recipe.split(f"FROM {base_image} AS sources\n", 1)[1].split(
+        f"FROM {base_image} AS build\n", 1
+    )
+    build, final = remainder.split(f"FROM {base_image}\n", 1)
+
+    assert sources.startswith("USER 0\n")
+    assert build.startswith("USER 0\n")
+    assert 'WORKDIR "/build"\nRUN ' in build
+    assert f'WORKDIR "{image.workspace}"' not in build
+    assert not final.startswith("USER 0\n")
 
 
 @pytest.mark.parametrize(
@@ -639,7 +717,11 @@ def test_image_build_publishes_after_success_and_only_cleans_its_own_builder(
     builder: str | None,
     destination: str,
 ) -> None:
-    config, ctx = image_workspace()
+    config, ctx = image_workspace(
+        manifest_extra=(
+            '[workspace.archive]\ncompression = "zst"\ncompression-level = 15\n'
+        )
+    )
     output = tmp_path / "result.oci.tar"
     image = WorkspaceImage.prepare(
         config,

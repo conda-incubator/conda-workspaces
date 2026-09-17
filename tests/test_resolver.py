@@ -323,9 +323,10 @@ def test_with_absolute_paths_preserves_target_sources(
         ("macos", "osx"),
         ("win", "win"),
         ("windows", "win"),
+        ("linux", "linux"),
         ("cuda", "cuda"),
     ],
-    ids=["glibc", "libc", "osx", "macos", "win", "windows", "cuda"],
+    ids=["glibc", "libc", "osx", "macos", "win", "windows", "linux", "cuda"],
 )
 @pytest.mark.parametrize("prefix", ["", "__"], ids=["manifest", "virtual"])
 def test_system_requirement_specs(name: str, canonical: str, prefix: str) -> None:

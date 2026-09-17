@@ -187,12 +187,12 @@ class ResolvedEnvironment:
            for that key, leaving the existing value untouched.
         2. ``[system-requirements]`` declared in the manifest for the same
            virtual package (e.g. ``glibc = "2.28"``) — used as the override
-           so the virtual package record lines up with the spec constraint
-           :mod:`conda_workspaces.envs._apply_system_requirements` appends.
-        3. A conservative built-in baseline (``__glibc == 2.17`` for any
-           non-native linux target, ``__osx >= 10.15`` / ``>= 11.0`` for
-           ``osx-64`` / ``osx-arm64`` cross-compiles, presence-only
-           ``__win`` for win targets).
+           so the virtual package record lines up with the spec returned by
+           :meth:`system_requirement_specs`.
+        3. A conservative built-in baseline (``__linux == 4.18`` and
+           ``__glibc == 2.17`` for any non-native linux target,
+           ``__osx >= 10.15`` / ``>= 11.0`` for ``osx-64`` / ``osx-arm64``
+           cross-compiles, presence-only ``__win`` for win targets).
 
         ``__cuda`` and ``__archspec`` are *not* seeded — the caller must
         opt in via ``[system-requirements]`` or ``CONDA_OVERRIDE_*`` if
@@ -214,6 +214,9 @@ class ResolvedEnvironment:
 
         baseline: dict[str, str] = {}
         if target_family == "linux":
+            baseline["CONDA_OVERRIDE_LINUX"] = (
+                self.system_requirement_version("linux") or "4.18"
+            )
             baseline["CONDA_OVERRIDE_GLIBC"] = (
                 self.system_requirement_version("glibc") or "2.17"
             )
@@ -310,7 +313,6 @@ class ResolvedEnvironment:
         from conda.exceptions import UnsatisfiableError
 
         from .envs import (
-            _apply_system_requirements,
             _build_pypi_specs,
             _channel_priority_override,
         )
@@ -327,7 +329,7 @@ class ResolvedEnvironment:
                     f"Cannot update undeclared conda dependencies: {names}"
                 )
             specs = [self.conda_dependencies[name] for name in sorted(update_names)]
-        _apply_system_requirements(self, specs)
+        specs.extend(self.system_requirement_specs())
 
         if not specs:
             return []

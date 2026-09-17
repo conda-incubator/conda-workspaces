@@ -81,15 +81,6 @@ def _channel_priority_override(priority: str | None):
         yield
 
 
-def _apply_system_requirements(
-    resolved: ResolvedEnvironment,
-    specs: list[MatchSpec],
-) -> list[MatchSpec]:
-    """Add virtual package constraints from system_requirements to the spec list."""
-    specs.extend(resolved.system_requirement_specs())
-    return specs
-
-
 def _validate_prefix_metadata_path(
     prefix: Path,
     path: Path,
@@ -616,8 +607,7 @@ def install_environment(
         specs = list(resolved.conda_dependencies.values())
         specs.extend(_build_pypi_specs(resolved))
 
-    # Add system requirements as virtual package constraints
-    _apply_system_requirements(resolved, specs)
+    specs.extend(resolved.system_requirement_specs())
 
     specs_to_remove: list[MatchSpec] = []
     if prune and exists and not force_reinstall:

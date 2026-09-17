@@ -1,7 +1,0 @@
-*
-!conda.toml
-!conda.lock
-!pyproject.toml
-!workspace_container_example.py
-!activate.sh
-!build_environment.py

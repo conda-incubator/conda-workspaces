@@ -96,6 +96,25 @@ def test_activation_exec_preserves_argv_env_and_hooks(
     assert "/opt/conda" not in environment["PATH"]
 
 
+def test_activation_replaces_only_the_runtime_path_element(
+    image_activation: dict[str, Any],
+) -> None:
+    collision = "/workspaces/__workspace_runtime_path__/.conda/envs/default/bin"
+    image_activation["path"]["PATH"] = [
+        collision,
+        "/__workspace_runtime_path__",
+    ]
+
+    path_export = next(
+        line
+        for line in activation_script(image_activation).splitlines()
+        if line.startswith("export PATH=")
+    )
+
+    assert path_export.startswith(f"export PATH={collision}:")
+    assert path_export.count("${PATH:-") == 1
+
+
 @pytest.mark.parametrize(
     "name",
     ["BAD-NAME", "X=$(exit 1)", "X\nexit 1"],
