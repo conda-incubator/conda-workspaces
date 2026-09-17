@@ -10,6 +10,7 @@ import subprocess
 import sys
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Protocol
 
 import pytest
@@ -60,6 +61,19 @@ class ReplacePublicationWriter(Protocol):
         self,
         callback: Callable[[Path, str, Callable[[str], None]], None],
     ) -> None: ...
+
+
+@pytest.fixture
+def sigstore_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep mocked signing independent of the optional Sigstore installation."""
+    monkeypatch.setattr(
+        attestations_mod,
+        "_sigstore_settings",
+        lambda: SimpleNamespace(
+            trust_config=None,
+            max_sidecar_bytes=attestations_mod.MAX_ATTESTATION_BYTES,
+        ),
+    )
 
 
 @pytest.fixture

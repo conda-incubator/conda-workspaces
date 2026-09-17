@@ -51,8 +51,8 @@ SIGSTORE_JSON_SUFFIX = ".sigstore.json"
 MAX_ATTESTATION_BYTES = 10 * 1024 * 1024
 
 _DEPENDENCY_MESSAGE = (
-    "Workspace attestations require conda-sigstore >=0.1.0. Install or upgrade "
-    "it in the environment where conda is installed."
+    "Workspace attestations require conda-sigstore >=0.1.2 and Python >=3.11. "
+    "Install or upgrade it with pip in the environment where conda is installed."
 )
 
 

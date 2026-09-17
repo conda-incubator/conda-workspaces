@@ -5,11 +5,13 @@ the exact manifest and `conda.lock` they are about to use.
 
 ## Install attestation support
 
-The Sigstore integration is optional. Install conda-sigstore 0.1.0 or newer in
-the environment where conda and conda-workspaces are installed:
+The Sigstore integration is optional and requires Python 3.11 or newer in the
+environment where conda and conda-workspaces are installed. Install the
+released conda-sigstore package from PyPI. For a conda base environment:
 
 ```bash
-conda install -c conda-forge conda-workspaces "conda-sigstore>=0.1.0"
+conda install -n base conda-forge::conda-workspaces conda-forge::pip
+conda run -n base python -m pip install "conda-sigstore>=0.1.2"
 ```
 
 For a pip installation, use the optional extra:

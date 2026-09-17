@@ -15,9 +15,6 @@ from typing import TYPE_CHECKING
 import pytest
 from conda.base.context import context as conda_context
 from conda.core.package_cache_data import PackageCacheData
-from conda_sigstore.evidence import SignerIdentity
-from conda_sigstore.statements import InTotoStatement
-from conda_sigstore.verification import VerifiedStatement
 
 import conda_workspaces.archive as archive_module
 import conda_workspaces.attestations as attestations_module
@@ -59,6 +56,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from typing import Any
 
+    from conda_sigstore.evidence import SignerIdentity
+    from conda_sigstore.verification import VerifiedStatement
+
     from conda_workspaces.receipts import VerifiedArchiveWorkspace
     from tests.conftest import SnapshotTree
 
@@ -68,6 +68,10 @@ def verified_receipt(
     signer: SignerIdentity,
 ) -> VerifiedStatement:
     """Return cryptographic evidence without invoking the Sigstore service."""
+    InTotoStatement = pytest.importorskip("conda_sigstore.statements").InTotoStatement
+    VerifiedStatement = pytest.importorskip(
+        "conda_sigstore.verification"
+    ).VerifiedStatement
     return VerifiedStatement(
         statement=InTotoStatement.from_payload(payload),
         payload=payload,
@@ -1627,6 +1631,7 @@ def test_workspace_archive_create_writes_receipt(
     [False, True],
     ids=["default-sidecar", "nested-sidecar"],
 )
+@pytest.mark.usefixtures("sigstore_settings")
 def test_workspace_archive_signs_exact_archive_receipt(
     workspace_archive_project: Path,
     tmp_path: Path,
@@ -1670,6 +1675,7 @@ def test_workspace_archive_signs_exact_archive_receipt(
         assert archive.attestation_path.name not in tar.getnames()
 
 
+@pytest.mark.usefixtures("sigstore_settings")
 def test_workspace_archive_sign_and_receipt_use_same_statement(
     workspace_archive_project: Path,
     tmp_path: Path,
@@ -1695,6 +1701,7 @@ def test_workspace_archive_sign_and_receipt_use_same_statement(
     )
 
 
+@pytest.mark.usefixtures("sigstore_settings")
 def test_workspace_archive_sign_dry_run_does_not_request_oidc(
     workspace_archive_project: Path,
     tmp_path: Path,
@@ -2205,6 +2212,7 @@ def test_workspace_archive_extract_rejects_receipt_bound_manifest_symlink(
         ("attestation-hardlink", "archived workspace input"),
     ],
 )
+@pytest.mark.usefixtures("sigstore_settings")
 def test_workspace_archive_create_dry_run_rejects_unsafe_aliases(
     workspace_archive_project: Path,
     tmp_path: Path,
@@ -2758,6 +2766,7 @@ def test_workspace_archive_receipt_rejects_changed_archive_output(
     ],
     ids=["rewrite", "replace"],
 )
+@pytest.mark.usefixtures("sigstore_settings")
 def test_workspace_archive_sign_rejects_changed_archive_output(
     workspace_archive_project: Path,
     tmp_path: Path,
@@ -2794,6 +2803,7 @@ def test_workspace_archive_sign_rejects_changed_archive_output(
     assert not attestation_path.exists()
 
 
+@pytest.mark.usefixtures("sigstore_settings")
 def test_workspace_archive_sign_failure_preserves_existing_outputs(
     workspace_archive_project: Path,
     tmp_path: Path,
@@ -2831,6 +2841,7 @@ def test_workspace_archive_sign_failure_preserves_existing_outputs(
     ["archive", "receipt"],
     ids=["archive-parent", "receipt-parent"],
 )
+@pytest.mark.usefixtures("sigstore_settings")
 def test_workspace_archive_sign_rejects_output_parent_swap(
     workspace_archive_project: Path,
     tmp_path: Path,
@@ -2878,6 +2889,7 @@ def test_workspace_archive_sign_rejects_output_parent_swap(
     ["archive", "receipt", "attestation"],
     ids=["archive", "receipt", "attestation"],
 )
+@pytest.mark.usefixtures("sigstore_settings")
 def test_workspace_archive_sign_rejects_final_output_replacement(
     workspace_archive_project: Path,
     tmp_path: Path,
@@ -2961,6 +2973,7 @@ def test_workspace_archive_sign_rejects_final_output_replacement(
     ["archive", "receipt"],
     ids=["archive", "receipt"],
 )
+@pytest.mark.usefixtures("sigstore_settings")
 def test_workspace_archive_sign_binds_existing_output_digests(
     workspace_archive_project: Path,
     tmp_path: Path,
@@ -3198,6 +3211,7 @@ def test_restore_published_output_reports_recovery_path(
     [None, b"existing attestation\n"],
     ids=["missing", "existing"],
 )
+@pytest.mark.usefixtures("sigstore_settings")
 def test_workspace_archive_sign_restores_attestation_after_post_publish_failure(
     workspace_archive_project: Path,
     tmp_path: Path,
@@ -3269,6 +3283,7 @@ def test_workspace_archive_sign_restores_attestation_after_post_publish_failure(
     [None, b"existing archive\n"],
     ids=["missing", "existing"],
 )
+@pytest.mark.usefixtures("sigstore_settings")
 def test_workspace_archive_sign_restores_archive_after_post_publish_failure(
     workspace_archive_project: Path,
     tmp_path: Path,
@@ -3319,6 +3334,7 @@ def test_workspace_archive_sign_restores_archive_after_post_publish_failure(
     [None, b"existing receipt\n"],
     ids=["missing", "existing"],
 )
+@pytest.mark.usefixtures("sigstore_settings")
 def test_workspace_archive_sign_restores_receipt_after_post_publish_failure(
     workspace_archive_project: Path,
     tmp_path: Path,
@@ -3374,6 +3390,7 @@ def test_workspace_archive_sign_restores_receipt_after_post_publish_failure(
     [False, True],
     ids=["default-output-names", "shared-output-basename"],
 )
+@pytest.mark.usefixtures("sigstore_settings")
 def test_workspace_archive_attestation_failure_restores_published_outputs(
     workspace_archive_project: Path,
     tmp_path: Path,
@@ -3429,6 +3446,7 @@ def test_workspace_archive_attestation_failure_restores_published_outputs(
     assert {path: path.read_bytes() for path in existing} == existing
 
 
+@pytest.mark.usefixtures("sigstore_settings")
 def test_workspace_archive_cleanup_reports_recovery_and_continues(
     workspace_archive_project: Path,
     tmp_path: Path,
@@ -3650,6 +3668,7 @@ def test_workspace_archive_extract_verifies_signed_receipt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    SignerIdentity = pytest.importorskip("conda_sigstore.evidence").SignerIdentity
     archive, payload = signed_receipt_archive
     expected_signer = SignerPolicy("expected identity", "expected issuer")
     authenticated_signer = SignerIdentity("expected identity", "expected issuer")
@@ -3680,6 +3699,7 @@ def test_workspace_archive_extract_rejects_mismatched_unsigned_receipt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    SignerIdentity = pytest.importorskip("conda_sigstore.evidence").SignerIdentity
     created = WorkspaceArchive.create(
         workspace=workspace_archive_project,
         output=tmp_path / "workspace.tar.gz",
@@ -3720,6 +3740,7 @@ def test_workspace_archive_extract_requires_authorized_signer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    SignerIdentity = pytest.importorskip("conda_sigstore.evidence").SignerIdentity
     archive, payload = signed_receipt_archive
 
     monkeypatch.setattr(
@@ -3746,6 +3767,7 @@ def test_workspace_archive_extract_verifies_signed_receipt_before_inspection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    SignerIdentity = pytest.importorskip("conda_sigstore.evidence").SignerIdentity
     archive, payload = signed_receipt_archive
     archive.path.write_bytes(archive.path.read_bytes() + b"tampered")
     monkeypatch.setattr(

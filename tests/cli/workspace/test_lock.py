@@ -132,6 +132,7 @@ def test_lock_envs(
 
 
 @pytest.mark.parametrize("mode", ["generate", "merge"], ids=["generate", "merge"])
+@pytest.mark.usefixtures("sigstore_settings")
 def test_lock_signs_exact_canonical_publication(
     pixi_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -235,6 +236,7 @@ def test_lock_rejects_invalid_signing_combinations(
     assert capture_generate_lockfile == []
 
 
+@pytest.mark.usefixtures("sigstore_settings")
 def test_lock_sign_dry_run_validates_without_signing(
     pixi_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -257,6 +259,7 @@ def test_lock_sign_dry_run_validates_without_signing(
     ["manifest", "lockfile", "hardlink", "symlink"],
     ids=["manifest", "lockfile", "hardlink", "symlink"],
 )
+@pytest.mark.usefixtures("sigstore_settings")
 def test_lock_sign_dry_run_rejects_unsafe_attestation_output(
     pixi_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -312,6 +315,7 @@ def test_lock_sign_dry_run_rejects_unsafe_attestation_output(
     ["previous lock\n", None],
     ids=["existing-lock", "missing-lock"],
 )
+@pytest.mark.usefixtures("sigstore_settings")
 def test_lock_sign_failure_restores_previous_lock_and_preserves_sidecar(
     pixi_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -375,6 +379,7 @@ def test_lock_sign_failure_restores_previous_lock_and_preserves_sidecar(
     ],
     ids=["input-change", "writer-after-publication"],
 )
+@pytest.mark.usefixtures("sigstore_settings")
 def test_lock_sign_restores_outputs_after_sidecar_publication_failure(
     pixi_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,

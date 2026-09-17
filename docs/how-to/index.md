@@ -43,4 +43,5 @@ and gate locked installs.
 :hidden:
 
 image
+workspace-attestations
 ```

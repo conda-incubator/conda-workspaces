@@ -9,7 +9,6 @@ import subprocess
 import tarfile
 from io import StringIO
 from pathlib import Path, PureWindowsPath
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -478,6 +477,7 @@ def test_execute_archive_receipt_path(
     }
 
 
+@pytest.mark.usefixtures("sigstore_settings")
 def test_execute_archive_signs_external_receipt(
     archive_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -485,11 +485,6 @@ def test_execute_archive_signs_external_receipt(
 ) -> None:
     import conda_workspaces.attestations as attestations_module
 
-    monkeypatch.setattr(
-        attestations_module,
-        "_sigstore_settings",
-        lambda: SimpleNamespace(trust_config=None, max_sidecar_bytes=1024),
-    )
     monkeypatch.chdir(archive_workspace)
     output = tmp_path / "test.tar.gz"
     signed_payloads: list[bytes] = []

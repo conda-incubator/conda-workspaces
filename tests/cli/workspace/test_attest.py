@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import json
 import os
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
 
-import conda_workspaces.attestations as attestations_module
 import conda_workspaces.cli.workspace.attest as attest_module
 from conda_workspaces.attestations import (
     MAX_ATTESTATION_BYTES,
@@ -54,18 +52,11 @@ _SIGNER_POLICY = SignerPolicy(
 def attestation_workspace(
     pixi_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
+    sigstore_settings: None,
 ) -> Path:
     """Create a workspace with a canonical lockfile and make it current."""
     (pixi_workspace / "conda.lock").write_bytes(_LOCKFILE_BYTES)
     monkeypatch.chdir(pixi_workspace)
-    monkeypatch.setattr(
-        attestations_module,
-        "_sigstore_settings",
-        lambda: SimpleNamespace(
-            trust_config=None,
-            max_sidecar_bytes=MAX_ATTESTATION_BYTES,
-        ),
-    )
     return pixi_workspace
 
 
@@ -89,9 +80,7 @@ def workspace_verification(
             signer=signer,
             timestamps=("2026-08-22T09:10:11Z", "2026-08-22T09:10:12Z"),
         ),
-        authorized=(
-            None if signer_policy is None else signer_policy.authorize(signer)
-        ),
+        authorized=(None if signer_policy is None else signer_policy.authorize(signer)),
     )
 
 

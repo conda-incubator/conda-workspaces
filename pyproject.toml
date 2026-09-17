@@ -39,7 +39,7 @@ dependencies = [
 dynamic = ["version"]
 
 [project.optional-dependencies]
-attestations = ["conda-sigstore >=0.1.0"]
+attestations = ["conda-sigstore >=0.1.2"]
 
 [project.urls]
 documentation = "https://conda-incubator.github.io/conda-workspaces"
@@ -123,7 +123,7 @@ ty = ">=0.0.1a7"
 pre-commit = ">=4.0"
 
 [tool.pixi.feature.sigstore.pypi-dependencies]
-conda-sigstore = { git = "https://github.com/jezdez/conda-sigstore", rev = "baa5040b9ffedcb0a06497c468f06f0a9d225270" }
+conda-sigstore = ">=0.1.2"
 
 [tool.pixi.feature.test.dependencies]
 cyclonedx-cli = ">=0.33.1,<0.34"
@@ -164,7 +164,7 @@ sphinx-argparse = ">=0.4"
 [tool.pixi.environments]
 dev = {features = ["dev", "sigstore"], solve-group = "default"}
 test = {features = ["test", "sigstore"], solve-group = "default"}
-test-py310 = {features = ["test", "sigstore", "py310"], solve-group = "test-py310"}
+test-py310 = {features = ["test", "py310"], solve-group = "test-py310"}
 test-py311 = {features = ["test", "sigstore", "py311"], solve-group = "test-py311"}
 test-py312 = {features = ["test", "sigstore", "py312"], solve-group = "test-py312"}
 test-py313 = {features = ["test", "sigstore", "py313"], solve-group = "test-py313"}
