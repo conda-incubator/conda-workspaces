@@ -16,6 +16,7 @@ from conda_workspaces.receipts import (
     ArchiveReceipt,
     ReceiptInventory,
     ReceiptPackageRecord,
+    VerifiedArchiveWorkspace,
 )
 
 if TYPE_CHECKING:
@@ -105,28 +106,81 @@ def test_archive_receipt_roundtrip(receipt_workspace: Path, tmp_path: Path) -> N
     assert "/t/token/" not in json.dumps(loaded.statement)
 
 
-@pytest.mark.parametrize("mutation", ["replace", "rewrite"])
-def test_archive_receipt_rejects_changed_validated_output_generation(
+@pytest.mark.parametrize("payload_type", ["bytes", "text"], ids=["bytes", "text"])
+def test_archive_receipt_from_verified_payload(
+    receipt_workspace: Path,
+    tmp_path: Path,
+    payload_type: str,
+) -> None:
+    archive_path = tmp_path / "workspace.tar.gz"
+    create_archive(receipt_workspace, archive_path, ArchiveConfig())
+    expected = build_receipt(receipt_workspace, archive_path)
+    payload = expected.serialized_text()
+
+    actual = ArchiveReceipt.from_payload(
+        payload.encode("utf-8") if payload_type == "bytes" else payload
+    )
+
+    assert actual.statement == expected.statement
+    actual.verify_archive(archive_path)
+
+
+@pytest.mark.parametrize(
+    ("payload", "match"),
+    [
+        (b"", "Invalid receipt payload JSON"),
+        (b"[]", "expected a JSON object"),
+        (
+            b'{"_type":"https://in-toto.io/Statement/v1","_type":"x"}',
+            "duplicate JSON key",
+        ),
+    ],
+    ids=["empty", "non-object", "duplicate-key"],
+)
+def test_archive_receipt_from_payload_rejects_invalid_statement(
+    payload: bytes,
+    match: str,
+) -> None:
+    with pytest.raises(ArchiveError, match=match):
+        ArchiveReceipt.from_payload(payload)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "preserve_generation"),
+    [
+        ("replace", False),
+        ("rewrite", False),
+        ("rewrite", True),
+    ],
+    ids=["replace", "rewrite", "same-generation-rewrite"],
+)
+def test_archive_receipt_rejects_changed_validated_output(
     receipt_workspace: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     mutation: str,
+    preserve_generation: bool,
 ) -> None:
     archive_path = tmp_path / "workspace.tar.gz"
     create_archive(receipt_workspace, archive_path, ArchiveConfig())
     receipt_path = ArchiveReceipt.default_path(archive_path)
-    receipt_path.write_text("existing receipt", encoding="utf-8")
-    concurrent_content = "concurrent receipt generation"
+    original_content = b"existing receipt"
+    concurrent_content = b"changed receipt!"
+    receipt_path.write_bytes(original_content)
     receipt = build_receipt(receipt_workspace, archive_path)
     original_atomic_write_text = receipts_module.atomic_write_text
 
-    def mutate_before_write(path: Path, content: str, **kwargs) -> None:
+    def mutate_before_write(path: Path, content: str, **kwargs: Any) -> None:
         if mutation == "replace":
             replacement = receipt_path.with_name("replacement.receipt.json")
-            replacement.write_text(concurrent_content, encoding="utf-8")
+            replacement.write_bytes(concurrent_content)
             replacement.replace(receipt_path)
         else:
-            receipt_path.write_text(concurrent_content, encoding="utf-8")
+            receipt_path.write_bytes(concurrent_content)
+        if preserve_generation:
+            kwargs["expected_generation"] = receipts_module.regular_file_generation(
+                receipt_path
+            )
         original_atomic_write_text(path, content, **kwargs)
 
     monkeypatch.setattr(
@@ -138,7 +192,8 @@ def test_archive_receipt_rejects_changed_validated_output_generation(
     with pytest.raises(ValueError, match="changed before writing"):
         receipt.write(receipt_path)
 
-    assert receipt_path.read_text(encoding="utf-8") == concurrent_content
+    assert len(concurrent_content) == len(original_content)
+    assert receipt_path.read_bytes() == concurrent_content
 
 
 @pytest.mark.parametrize("mutation", ["replace", "rewrite"])
@@ -415,38 +470,60 @@ def test_archive_receipt_detects_invalid_extracted_lockfile(
         receipt.verify_extracted(target)
 
 
-def test_archive_receipt_inventory_uses_verified_lockfile_bytes(
+@pytest.mark.parametrize(
+    ("subject_name", "replacement"),
+    [
+        ("conda.toml", b"[workspace]\nname = 'attacker'\n"),
+        (
+            "conda.lock",
+            b"version: 1\nenvironments:\n  attacker: {}\npackages: []\n",
+        ),
+    ],
+    ids=["manifest", "lockfile"],
+)
+def test_archive_receipt_returns_exact_verified_workspace_bytes(
     receipt_workspace: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    subject_name: str,
+    replacement: bytes,
 ) -> None:
     archive_path = tmp_path / "workspace.tar.gz"
     create_archive(receipt_workspace, archive_path, ArchiveConfig())
     receipt = build_receipt(receipt_workspace, archive_path)
     target = tmp_path / "extracted"
     extract_archive(archive_path, target)
+    manifest_path = target / "conda.toml"
     lockfile_path = target / "conda.lock"
-    replacement = "version: 1\nenvironments:\n  attacker: {}\npackages: []\n"
+    manifest_bytes = manifest_path.read_bytes()
+    lockfile_bytes = lockfile_path.read_bytes()
+    subject_path = target / subject_name
     original_verify = ArchiveReceipt.verify_subject_digest
 
-    def replace_lockfile_after_digest(
+    def replace_subject_after_digest(
         self: ArchiveReceipt,
         name: str,
         actual: str,
     ) -> None:
         original_verify(self, name, actual)
-        if name == "conda.lock":
-            lockfile_path.write_text(replacement, encoding="utf-8")
+        if name == subject_name:
+            subject_path.write_bytes(replacement)
 
     monkeypatch.setattr(
         ArchiveReceipt,
         "verify_subject_digest",
-        replace_lockfile_after_digest,
+        replace_subject_after_digest,
     )
 
-    receipt.verify_extracted(target)
+    verified = receipt.verify_extracted(target)
 
-    assert lockfile_path.read_text(encoding="utf-8") == replacement
+    assert verified == VerifiedArchiveWorkspace(
+        manifest_name="conda.toml",
+        manifest_bytes=manifest_bytes,
+        lockfile_name="conda.lock",
+        lockfile_bytes=lockfile_bytes,
+    )
+    assert subject_path.read_bytes() == replacement
 
 
 def test_archive_receipt_build_binds_one_lockfile_generation(

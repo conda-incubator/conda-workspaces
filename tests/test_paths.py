@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
 import stat
 import sys
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 
 from conda_workspaces import paths as paths_mod
+from conda_workspaces.exceptions import FileRecoveryError
 from conda_workspaces.paths import (
     atomic_binary_writer,
     atomic_write_text,
@@ -24,6 +27,39 @@ from conda_workspaces.paths import (
     resolve_relative_path,
     supports_anchored_directory_operations,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from typing import Any
+
+
+@pytest.fixture
+def intercept_file_removal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[Callable[[Path], None]], None]:
+    original_os_unlink = paths_mod.os.unlink
+    original_path_unlink = Path.unlink
+
+    def install(callback: Callable[[Path], None]) -> None:
+        def intercept_os_unlink(
+            candidate: str | os.PathLike[str],
+            *,
+            dir_fd: int | None = None,
+        ) -> None:
+            callback(Path(os.fspath(candidate)))
+            original_os_unlink(candidate, dir_fd=dir_fd)
+
+        def intercept_path_unlink(
+            candidate: Path,
+            missing_ok: bool = False,
+        ) -> None:
+            callback(candidate)
+            original_path_unlink(candidate, missing_ok=missing_ok)
+
+        monkeypatch.setattr(paths_mod.os, "unlink", intercept_os_unlink)
+        monkeypatch.setattr(Path, "unlink", intercept_path_unlink)
+
+    return install
 
 
 @pytest.mark.parametrize(
@@ -59,7 +95,7 @@ def test_portable_path_key_normalizes_unicode() -> None:
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows stat semantics")
 @pytest.mark.parametrize("follow_symlinks", [True, False], ids=["stat", "lstat"])
-def test_stat_generation_matches_windows_file_descriptor(
+def test_file_generation_matches_windows_file_descriptor(
     tmp_path: Path,
     follow_symlinks: bool,
 ) -> None:
@@ -70,10 +106,10 @@ def test_stat_generation_matches_windows_file_descriptor(
     with path.open("rb") as stream:
         descriptor_stat = os.fstat(stream.fileno())
 
-    assert paths_mod._stat_generation(path_stat) == paths_mod._stat_generation(
+    assert paths_mod.file_generation(path_stat) == paths_mod.file_generation(
         descriptor_stat
     )
-    assert paths_mod._stat_generation(path_stat)[-1] == getattr(
+    assert paths_mod.file_generation(path_stat)[-1] == getattr(
         path_stat,
         "st_birthtime_ns",
         path_stat.st_ctime_ns,
@@ -438,6 +474,33 @@ def test_linux_flagged_rename_reports_unavailable_support(
     assert exc_info.value.__cause__.errno == error_number
 
 
+@pytest.mark.parametrize("existing", [False, True], ids=["new", "replace"])
+def test_atomic_write_text_translates_unavailable_flagged_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    existing: bool,
+) -> None:
+    if not supports_anchored_directory_operations():
+        pytest.skip("descriptor-relative directory operations are unavailable")
+    path = tmp_path / "output.txt"
+    if existing:
+        path.write_text("original", encoding="utf-8")
+
+    def unavailable(*args, **kwargs) -> None:
+        raise NotImplementedError("flagged rename unavailable")
+
+    monkeypatch.setattr(paths_mod, "_rename_with_flags", unavailable)
+
+    with pytest.raises(ValueError, match="Safe publication is unavailable"):
+        atomic_write_text(path, "new")
+
+    if existing:
+        assert path.read_text(encoding="utf-8") == "original"
+    else:
+        assert not path.exists()
+    assert not list(tmp_path.glob(f".{path.name}.*.tmp"))
+
+
 def test_atomic_write_text_does_not_overwrite_raced_new_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -465,7 +528,89 @@ def test_atomic_write_text_does_not_overwrite_raced_new_target(
     assert not list(tmp_path.glob(".output.txt.*.tmp"))
 
 
-def test_atomic_write_text_retains_raced_existing_target_for_recovery(
+def test_atomic_write_text_preserves_claimant_of_published_temporary_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not supports_anchored_directory_operations():
+        pytest.skip("descriptor-relative directory operations are unavailable")
+    path = tmp_path / "output.txt"
+    original_rename = paths_mod.rename_noreplace
+    claimant = b"temporary claimant"
+    claimed_path: Path | None = None
+
+    def claim_temporary_name(
+        source: str | os.PathLike[str],
+        destination: str | os.PathLike[str],
+        **kwargs: Any,
+    ) -> None:
+        nonlocal claimed_path
+        original_rename(source, destination, **kwargs)
+        if Path(os.fspath(destination)).name == path.name:
+            claimed_path = tmp_path / Path(os.fspath(source)).name
+            claimed_path.write_bytes(claimant)
+            path.unlink()
+
+    monkeypatch.setattr(paths_mod, "rename_noreplace", claim_temporary_name)
+
+    with pytest.raises(ValueError, match="changed during publication"):
+        atomic_write_text(path, "published")
+
+    assert claimed_path is not None
+    assert claimed_path.read_bytes() == claimant
+
+
+@pytest.mark.parametrize("anchored", [True, False], ids=["descriptor", "fallback"])
+def test_atomic_write_text_preserves_identical_post_publication_claimant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    anchored: bool,
+) -> None:
+    if anchored and not supports_anchored_directory_operations():
+        pytest.skip("descriptor-relative directory operations are unavailable")
+    if not anchored and os.name != "nt" and sys.platform not in {"darwin", "linux"}:
+        pytest.skip("safe exclusive rename is unavailable")
+    monkeypatch.setattr(
+        paths_mod,
+        "_SUPPORTS_ANCHORED_DIRECTORY_OPERATIONS",
+        anchored,
+    )
+    path = tmp_path / "output.txt"
+    claimant = tmp_path / "claimant.txt"
+    original_rename = paths_mod.rename_noreplace
+    raced = False
+    claimant_generation: paths_mod.FileGeneration | None = None
+
+    def replace_after_publication(
+        source: str | os.PathLike[str],
+        destination: str | os.PathLike[str],
+        **kwargs: Any,
+    ) -> None:
+        nonlocal raced, claimant_generation
+        original_rename(source, destination, **kwargs)
+        source_name = Path(os.fspath(source)).name
+        if (
+            not raced
+            and source_name.startswith(f".{path.name}.")
+            and source_name.endswith(".tmp")
+            and Path(os.fspath(destination)).name == path.name
+        ):
+            claimant.write_text("published", encoding="utf-8")
+            claimant.replace(path)
+            claimant_generation = regular_file_generation(path)
+            raced = True
+
+    monkeypatch.setattr(paths_mod, "rename_noreplace", replace_after_publication)
+
+    with pytest.raises(ValueError, match="changed during publication"):
+        atomic_write_text(path, "published")
+
+    assert raced is True
+    assert regular_file_generation(path) == claimant_generation
+    assert path.read_text(encoding="utf-8") == "published"
+
+
+def test_atomic_write_text_restores_raced_existing_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -477,41 +622,344 @@ def test_atomic_write_text_retains_raced_existing_target_for_recovery(
     path = tmp_path / "output.txt"
     displaced = tmp_path / "displaced.txt"
     path.write_text("old", encoding="utf-8")
-    original_stat = paths_mod.os.stat
-    target_stats = 0
+    original_exchange = paths_mod._rename_with_flags
     raced = False
 
-    def replace_after_current_check(
-        target,
+    def replace_before_exchange(
+        source,
+        destination,
         *,
-        dir_fd=None,
-        follow_symlinks=True,
-    ):
-        nonlocal raced, target_stats
-        result = original_stat(
-            target,
-            dir_fd=dir_fd,
-            follow_symlinks=follow_symlinks,
-        )
-        if target == path.name and dir_fd is not None:
-            target_stats += 1
-        if target_stats == 2 and not raced:
+        flag,
+        source_dir_fd=None,
+        destination_dir_fd=None,
+    ) -> None:
+        nonlocal raced
+        if flag == 2 and Path(destination).name == path.name and not raced:
             path.rename(displaced)
             path.write_text("competitor", encoding="utf-8")
             raced = True
-        return result
+        original_exchange(
+            source,
+            destination,
+            flag=flag,
+            source_dir_fd=source_dir_fd,
+            destination_dir_fd=destination_dir_fd,
+        )
 
-    monkeypatch.setattr(paths_mod.os, "stat", replace_after_current_check)
+    monkeypatch.setattr(paths_mod, "_rename_with_flags", replace_before_exchange)
 
     with pytest.raises(ValueError, match="changed during publication"):
         atomic_write_text(path, "new")
 
     assert raced is True
-    assert path.read_text(encoding="utf-8") == "new"
+    assert path.read_text(encoding="utf-8") == "competitor"
     assert displaced.read_text(encoding="utf-8") == "old"
-    recovery = list(tmp_path.glob(".output.txt.*.tmp"))
-    assert len(recovery) == 1
-    assert recovery[0].read_text(encoding="utf-8") == "competitor"
+    assert not list(tmp_path.glob(".output.txt.*.tmp"))
+
+
+@pytest.mark.parametrize(
+    ("concurrent_claimant", "error_type"),
+    [
+        (None, ValueError),
+        ("replace", FileRecoveryError),
+        ("rewrite", FileRecoveryError),
+    ],
+    ids=["restore", "replacement-recovery", "rewrite-recovery"],
+)
+def test_atomic_write_text_restores_same_inode_rewrite_after_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    concurrent_claimant: str | None,
+    error_type: type[Exception],
+) -> None:
+    if not supports_anchored_directory_operations() or sys.platform not in {
+        "darwin",
+        "linux",
+    }:
+        pytest.skip("atomic name exchange is unavailable")
+    path = tmp_path / "output.txt"
+    path.write_bytes(b"AAAA")
+    initial = path.stat()
+    original_exchange = paths_mod._rename_with_flags
+    exchanges = 0
+
+    def race_exchange(
+        source,
+        destination,
+        *,
+        flag,
+        source_dir_fd=None,
+        destination_dir_fd=None,
+    ) -> None:
+        nonlocal exchanges
+        if flag == 2 and Path(destination).name == path.name:
+            exchanges += 1
+            if exchanges == 1:
+                path.write_bytes(b"BBBB")
+                os.utime(path, ns=(initial.st_atime_ns, initial.st_mtime_ns))
+            elif exchanges == 2:
+                if concurrent_claimant == "replace":
+                    claimant = tmp_path / "claimant.txt"
+                    claimant.write_bytes(b"claimant")
+                    claimant.replace(path)
+                elif concurrent_claimant == "rewrite":
+                    published = path.stat()
+                    path.write_bytes(b"bad")
+                    os.utime(
+                        path,
+                        ns=(published.st_atime_ns, published.st_mtime_ns),
+                    )
+        original_exchange(
+            source,
+            destination,
+            flag=flag,
+            source_dir_fd=source_dir_fd,
+            destination_dir_fd=destination_dir_fd,
+        )
+
+    monkeypatch.setattr(paths_mod, "_rename_with_flags", race_exchange)
+
+    with pytest.raises(error_type, match="changed during publication") as exc_info:
+        atomic_write_text(path, "new")
+
+    assert exchanges == 2
+    assert path.read_bytes() == b"BBBB"
+    recoveries = list(tmp_path.glob(".output.txt.*.tmp"))
+    if concurrent_claimant is not None:
+        assert len(recoveries) == 1
+        expected_recovery = b"claimant" if concurrent_claimant == "replace" else b"bad"
+        assert recoveries[0].read_bytes() == expected_recovery
+        assert isinstance(exc_info.value, FileRecoveryError)
+        assert exc_info.value.recovery_path == recoveries[0]
+    else:
+        assert not recoveries
+
+
+@pytest.mark.parametrize("anchored", [True, False], ids=["descriptor", "fallback"])
+@pytest.mark.parametrize("existing", [True, False], ids=["existing", "new"])
+def test_atomic_write_text_rejects_staged_mutation_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    anchored: bool,
+    existing: bool,
+) -> None:
+    if anchored and not supports_anchored_directory_operations():
+        pytest.skip("descriptor-relative directory operations are unavailable")
+    if not anchored and os.name != "nt" and sys.platform not in {"darwin", "linux"}:
+        pytest.skip("safe exclusive rename is unavailable")
+    monkeypatch.setattr(
+        paths_mod,
+        "_SUPPORTS_ANCHORED_DIRECTORY_OPERATIONS",
+        anchored,
+    )
+    path = tmp_path / "output.txt"
+    if existing:
+        path.write_bytes(b"old")
+    tampered = False
+    original_rename = paths_mod.rename_noreplace
+    original_exchange = paths_mod._rename_with_flags
+
+    def tamper(source: str | os.PathLike[str]) -> None:
+        nonlocal tampered
+        source_path = Path(os.fspath(source))
+        if not source_path.is_absolute():
+            source_path = tmp_path / source_path
+        if (
+            source_path.name.startswith(f".{path.name}.")
+            and source_path.name.endswith(".tmp")
+            and not tampered
+        ):
+            source_path.write_bytes(b"evil")
+            tampered = True
+
+    def tamper_before_rename(
+        source: str | os.PathLike[str],
+        destination: str | os.PathLike[str],
+        **kwargs: Any,
+    ) -> None:
+        if Path(os.fspath(destination)).name == path.name:
+            tamper(source)
+        original_rename(source, destination, **kwargs)
+
+    def tamper_before_exchange(
+        source: str | os.PathLike[str],
+        destination: str | os.PathLike[str],
+        *,
+        flag: int,
+        source_dir_fd: int | None = None,
+        destination_dir_fd: int | None = None,
+    ) -> None:
+        if flag == 2 and Path(os.fspath(destination)).name == path.name:
+            tamper(source)
+        original_exchange(
+            source,
+            destination,
+            flag=flag,
+            source_dir_fd=source_dir_fd,
+            destination_dir_fd=destination_dir_fd,
+        )
+
+    monkeypatch.setattr(paths_mod, "rename_noreplace", tamper_before_rename)
+    monkeypatch.setattr(paths_mod, "_rename_with_flags", tamper_before_exchange)
+
+    with pytest.raises(FileRecoveryError) as exc_info:
+        atomic_write_text(path, "new")
+
+    assert tampered is True
+    assert all(Path(entry).exists() for entry in exc_info.value.recovery_paths)
+
+
+@pytest.mark.parametrize(
+    ("race", "retain_staged"),
+    [
+        (None, False),
+        ("publish-error", False),
+        ("competitor", False),
+        ("competitor", True),
+        ("same-inode-rewrite", False),
+    ],
+    ids=[
+        "success",
+        "publish-error",
+        "competitor",
+        "competitor-retained-staged",
+        "same-inode-rewrite",
+    ],
+)
+def test_atomic_write_text_fallback_preserves_existing_output_races(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    intercept_file_removal: Callable[[Callable[[Path], None]], None],
+    race: str | None,
+    retain_staged: bool,
+) -> None:
+    if os.name != "nt" and sys.platform not in {"darwin", "linux"}:
+        pytest.skip("safe exclusive rename is unavailable")
+    monkeypatch.setattr(paths_mod, "_SUPPORTS_ANCHORED_DIRECTORY_OPERATIONS", False)
+    path = tmp_path / "output.txt"
+    original_content = b"AAAA"
+    path.write_bytes(original_content)
+    initial = path.stat()
+    original_rename = paths_mod.rename_noreplace
+    raced = False
+
+    def race_publication(source, destination, **kwargs) -> None:
+        nonlocal raced
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if (
+            race == "same-inode-rewrite"
+            and source_path == path
+            and destination_path.name.endswith(".rollback")
+            and not raced
+        ):
+            path.write_bytes(b"BBBB")
+            os.utime(path, ns=(initial.st_atime_ns, initial.st_mtime_ns))
+            raced = True
+        elif (
+            race in {"publish-error", "competitor"}
+            and source_path.name.startswith(f".{path.name}.")
+            and source_path.name.endswith(".tmp")
+            and destination_path == path
+            and not raced
+        ):
+            raced = True
+            if race == "publish-error":
+                raise OSError("injected publication error")
+            path.write_bytes(b"competitor")
+        original_rename(source, destination, **kwargs)
+
+    monkeypatch.setattr(paths_mod, "rename_noreplace", race_publication)
+    if retain_staged:
+
+        def retain_staged_output(candidate: Path) -> None:
+            if candidate.name.startswith(f".{path.name}.") and candidate.name.endswith(
+                ".tmp"
+            ):
+                raise PermissionError("injected staged cleanup failure")
+
+        intercept_file_removal(retain_staged_output)
+
+    if race is None:
+        atomic_write_text(path, "new")
+    else:
+        error_type = FileRecoveryError if race == "competitor" else ValueError
+        with pytest.raises(error_type, match="changed during publication") as exc_info:
+            atomic_write_text(path, "new")
+
+    if race is None:
+        assert path.read_bytes() == b"new"
+    elif race == "publish-error":
+        assert raced is True
+        assert path.read_bytes() == original_content
+        assert not list(tmp_path.glob(f".{path.name}.*.rollback"))
+    elif race == "same-inode-rewrite":
+        assert raced is True
+        assert path.read_bytes() == b"BBBB"
+    else:
+        assert raced is True
+        assert path.read_bytes() == b"competitor"
+        recoveries = list(tmp_path.glob(f".{path.name}.*.rollback"))
+        assert len(recoveries) == 1
+        assert recoveries[0].read_bytes() == original_content
+        assert isinstance(exc_info.value, FileRecoveryError)
+        assert exc_info.value.recovery_path == recoveries[0]
+        staged = list(tmp_path.glob(f".{path.name}.*.tmp"))
+        if retain_staged:
+            assert len(staged) == 1
+            assert staged[0].read_bytes() == b"new"
+            assert exc_info.value.recovery_paths == (recoveries[0], staged[0])
+        else:
+            assert not staged
+    if race != "competitor":
+        assert not list(tmp_path.glob(f".{path.name}.*.tmp"))
+
+
+def test_atomic_write_text_fallback_stops_cleanup_after_parent_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if os.name != "nt" and sys.platform not in {"darwin", "linux"}:
+        pytest.skip("safe exclusive rename is unavailable")
+    monkeypatch.setattr(paths_mod, "_SUPPORTS_ANCHORED_DIRECTORY_OPERATIONS", False)
+    parent = tmp_path / "output-parent"
+    displaced = tmp_path / "displaced-parent"
+    parent.mkdir()
+    path = parent / "output.txt"
+    path.write_bytes(b"original")
+    original_rename = paths_mod.rename_noreplace
+    replacement_temp_content = b"unrelated replacement temp"
+    swapped = False
+
+    def swap_parent_after_quarantine(source, destination, **kwargs) -> None:
+        nonlocal swapped
+        original_rename(source, destination, **kwargs)
+        if Path(source) == path and Path(destination).name.endswith(".rollback"):
+            staged = next(parent.glob(f".{path.name}.*.tmp"))
+            parent.rename(displaced)
+            parent.mkdir()
+            (parent / staged.name).write_bytes(replacement_temp_content)
+            (parent / "marker").write_bytes(b"replacement parent")
+            swapped = True
+
+    monkeypatch.setattr(
+        paths_mod,
+        "rename_noreplace",
+        swap_parent_after_quarantine,
+    )
+
+    with pytest.raises(NotADirectoryError, match="Directory changed"):
+        atomic_write_text(path, "new")
+
+    assert swapped is True
+    assert (parent / "marker").read_bytes() == b"replacement parent"
+    replacement_temps = list(parent.glob(f".{path.name}.*.tmp"))
+    assert len(replacement_temps) == 1
+    assert replacement_temps[0].read_bytes() == replacement_temp_content
+    assert len(list(displaced.glob(f".{path.name}.*.tmp"))) == 1
+    recoveries = list(displaced.glob(f".{path.name}.*.rollback"))
+    assert len(recoveries) == 1
+    assert recoveries[0].read_bytes() == b"original"
 
 
 @pytest.mark.parametrize("mutation", ["replace", "rewrite"])
@@ -538,6 +986,417 @@ def test_atomic_binary_writer_rejects_generation_change_while_writing(
                 path.write_text(concurrent_content, encoding="utf-8")
 
     assert path.read_text(encoding="utf-8") == concurrent_content
+
+
+def test_atomic_binary_writer_rejects_expected_digest_mismatch(tmp_path: Path) -> None:
+    path = tmp_path / "output.txt"
+    content = b"current"
+    path.write_bytes(content)
+    generation = regular_file_generation(path)
+    assert generation is not None
+
+    with pytest.raises(ValueError, match="changed before writing"):
+        with atomic_binary_writer(
+            path,
+            expected_generation=generation,
+            expected_sha256=hashlib.sha256(b"expected").hexdigest(),
+        ) as stream:
+            stream.write(b"replacement")
+
+    assert path.read_bytes() == content
+
+
+@pytest.mark.parametrize(
+    "anchored",
+    [True, False],
+    ids=["descriptor", "fallback"],
+)
+def test_atomic_binary_writer_reports_retained_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    intercept_file_removal: Callable[[Callable[[Path], None]], None],
+    anchored: bool,
+) -> None:
+    if anchored and not supports_anchored_directory_operations():
+        pytest.skip("descriptor-relative directory operations are unavailable")
+    monkeypatch.setattr(
+        paths_mod,
+        "_SUPPORTS_ANCHORED_DIRECTORY_OPERATIONS",
+        anchored,
+    )
+    path = tmp_path / "output.txt"
+    original_content = b"original"
+    path.write_bytes(original_content)
+    recovery_suffix = ".tmp" if anchored else ".rollback"
+    removal_attempts = 0
+
+    def reject_recovery_removal(candidate: Path) -> None:
+        nonlocal removal_attempts
+        if candidate.name.startswith(f".{path.name}.") and candidate.name.endswith(
+            recovery_suffix
+        ):
+            removal_attempts += 1
+            if removal_attempts == 1:
+                raise PermissionError("injected recovery removal failure")
+
+    intercept_file_removal(reject_recovery_removal)
+
+    with pytest.raises(FileRecoveryError) as exc_info:
+        atomic_write_text(path, "published")
+
+    recovery = Path(exc_info.value.recovery_path)
+    assert path.read_text(encoding="utf-8") == "published"
+    assert recovery.read_bytes() == original_content
+    assert removal_attempts == 1
+
+
+def test_atomic_write_captures_generation_before_directory_sync_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not supports_anchored_directory_operations():
+        pytest.skip("descriptor-relative directory operations are unavailable")
+    path = tmp_path / "output.txt"
+    captured: list[paths_mod.FileGeneration] = []
+    original_fsync = paths_mod.os.fsync
+
+    def fail_after_capture(descriptor: int) -> None:
+        if captured:
+            raise OSError("directory sync failed")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(paths_mod.os, "fsync", fail_after_capture)
+
+    with pytest.raises(OSError, match="directory sync failed"):
+        atomic_write_text(
+            path,
+            "published",
+            capture_generation=captured.append,
+        )
+
+    assert path.read_text(encoding="utf-8") == "published"
+    assert captured == [regular_file_generation(path)]
+
+
+@pytest.mark.parametrize("anchored", [True, False], ids=["descriptor", "fallback"])
+@pytest.mark.parametrize("existing", [True, False], ids=["existing", "new"])
+def test_atomic_write_handles_generation_capture_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    anchored: bool,
+    existing: bool,
+) -> None:
+    if anchored and not supports_anchored_directory_operations():
+        pytest.skip("descriptor-relative directory operations are unavailable")
+    monkeypatch.setattr(
+        paths_mod,
+        "_SUPPORTS_ANCHORED_DIRECTORY_OPERATIONS",
+        anchored,
+    )
+    path = tmp_path / "output.txt"
+    original_content = b"original"
+    if existing:
+        path.write_bytes(original_content)
+
+    def fail_capture(generation: paths_mod.FileGeneration) -> None:
+        raise RuntimeError(f"capture failed for {generation}")
+
+    expected_error = FileRecoveryError if existing else RuntimeError
+    with pytest.raises(expected_error) as exc_info:
+        atomic_write_text(
+            path,
+            "published",
+            capture_generation=fail_capture,
+        )
+
+    if existing:
+        assert isinstance(exc_info.value, FileRecoveryError)
+        recovery = Path(exc_info.value.recovery_path)
+        assert path.read_text(encoding="utf-8") == "published"
+        assert recovery.read_bytes() == original_content
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
+    else:
+        assert not path.exists()
+
+
+@pytest.mark.parametrize(
+    "inspection_failure",
+    [False, True],
+    ids=["readable-recovery", "unreadable-recovery"],
+)
+def test_atomic_write_reports_recovery_after_unexpected_validation_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    inspection_failure: bool,
+) -> None:
+    if not supports_anchored_directory_operations():
+        pytest.skip("descriptor-relative directory operations are unavailable")
+    path = tmp_path / "output.txt"
+    original_content = b"original"
+    path.write_bytes(original_content)
+    original_sha256 = paths_mod.regular_file_sha256
+    original_stat = paths_mod.os.stat
+    interrupted = False
+
+    def interrupt_displaced_validation(
+        candidate: Path,
+        **kwargs: Any,
+    ) -> tuple[str, paths_mod.FileGeneration]:
+        nonlocal interrupted
+        if kwargs.get("label") == "displaced output":
+            interrupted = True
+            raise KeyboardInterrupt
+        return original_sha256(candidate, **kwargs)
+
+    def reject_recovery_inspection(
+        candidate: str | os.PathLike[str],
+        *args: Any,
+        **kwargs: Any,
+    ) -> os.stat_result:
+        candidate_name = Path(os.fspath(candidate)).name
+        if (
+            inspection_failure
+            and interrupted
+            and candidate_name.startswith(f".{path.name}.")
+            and candidate_name.endswith(".tmp")
+        ):
+            raise PermissionError("injected recovery inspection failure")
+        return original_stat(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(
+        paths_mod,
+        "regular_file_sha256",
+        interrupt_displaced_validation,
+    )
+    monkeypatch.setattr(paths_mod.os, "stat", reject_recovery_inspection)
+
+    with pytest.raises(FileRecoveryError) as exc_info:
+        atomic_write_text(path, "published")
+
+    recovery = Path(exc_info.value.recovery_path)
+    assert path.read_text(encoding="utf-8") == "published"
+    assert recovery.read_bytes() == original_content
+    expected_cause = PermissionError if inspection_failure else KeyboardInterrupt
+    assert isinstance(exc_info.value.__cause__, expected_cause)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b"", b"owned generation\n"],
+    ids=["empty", "nonempty"],
+)
+@pytest.mark.parametrize(
+    "binding",
+    ["content", "sha256"],
+    ids=["exact-content", "sha256"],
+)
+def test_remove_file_generation_removes_matching_content(
+    tmp_path: Path,
+    content: bytes,
+    binding: str,
+) -> None:
+    path = tmp_path / "output.txt"
+    path.write_bytes(content)
+    generation = regular_file_generation(path)
+    assert generation is not None
+
+    expected_content = content if binding == "content" else None
+    expected_sha256 = (
+        hashlib.sha256(content).hexdigest() if binding == "sha256" else None
+    )
+
+    assert paths_mod.remove_file_generation(
+        path,
+        generation,
+        expected_content=expected_content,
+        expected_sha256=expected_sha256,
+    )
+
+    assert not path.exists()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["replace", "same-size-rewrite", "growth"],
+    ids=["replacement", "same-size-in-place-rewrite", "growth"],
+)
+@pytest.mark.parametrize(
+    "binding",
+    ["content", "sha256"],
+    ids=["exact-content", "sha256"],
+)
+def test_remove_file_generation_restores_mismatch(
+    tmp_path: Path,
+    mutation: str,
+    binding: str,
+) -> None:
+    path = tmp_path / "output.txt"
+    original_content = b"original"
+    concurrent_content = b"changed and larger" if mutation == "growth" else b"changed!"
+    path.write_bytes(original_content)
+    original_stat = path.stat()
+    generation = regular_file_generation(path)
+    assert generation is not None
+    if mutation == "replace":
+        replacement = tmp_path / "replacement.txt"
+        replacement.write_bytes(concurrent_content)
+        replacement.replace(path)
+    else:
+        path.write_bytes(concurrent_content)
+        os.utime(
+            path,
+            ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+        )
+
+    expected_content = original_content if binding == "content" else None
+    expected_sha256 = (
+        hashlib.sha256(original_content).hexdigest() if binding == "sha256" else None
+    )
+    assert not paths_mod.remove_file_generation(
+        path,
+        generation,
+        expected_content=expected_content,
+        expected_sha256=expected_sha256,
+    )
+
+    assert path.read_bytes() == concurrent_content
+
+
+def test_remove_file_generation_preserves_concurrent_claimant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "output.txt"
+    expected_content = b"expected"
+    replaced_content = b"replaced"
+    claimant_content = b"claimant"
+    path.write_bytes(expected_content)
+    generation = regular_file_generation(path)
+    assert generation is not None
+    replacement = tmp_path / "replacement.txt"
+    replacement.write_bytes(replaced_content)
+    replacement.replace(path)
+    original_rename = paths_mod.rename_noreplace
+    claimed = False
+
+    def claim_before_restore(*args, **kwargs) -> None:
+        nonlocal claimed
+        source = Path(args[0])
+        destination = Path(args[1])
+        if (
+            source.name.startswith(f".{path.name}.")
+            and destination.name == path.name
+            and not claimed
+        ):
+            path.write_bytes(claimant_content)
+            claimed = True
+        original_rename(*args, **kwargs)
+
+    monkeypatch.setattr(paths_mod, "rename_noreplace", claim_before_restore)
+
+    with pytest.raises(FileRecoveryError) as exc_info:
+        paths_mod.remove_file_generation(
+            path,
+            generation,
+            expected_content=expected_content,
+        )
+
+    assert claimed is True
+    assert path.read_bytes() == claimant_content
+    recoveries = list(tmp_path.glob(f".{path.name}.*.rollback"))
+    assert len(recoveries) == 1
+    assert recoveries[0].read_bytes() == replaced_content
+    assert exc_info.value.recovery_path == recoveries[0]
+
+
+@pytest.mark.parametrize(
+    "claimant",
+    [
+        None,
+        b"claimant",
+    ],
+    ids=["unclaimed-path", "preserve-claimant"],
+)
+@pytest.mark.parametrize(
+    "binding",
+    ["content", "sha256"],
+    ids=["exact-content", "sha256"],
+)
+def test_remove_file_generation_preserves_recovery_after_removal_failure(
+    tmp_path: Path,
+    intercept_file_removal: Callable[[Callable[[Path], None]], None],
+    claimant: bytes | None,
+    binding: str,
+) -> None:
+    path = tmp_path / "output.txt"
+    expected_content = b"expected"
+    path.write_bytes(expected_content)
+    generation = regular_file_generation(path)
+    assert generation is not None
+    failed = False
+
+    def fail_quarantine_removal(candidate: Path) -> None:
+        nonlocal failed
+        if (
+            not failed
+            and candidate.name.startswith(f".{path.name}.")
+            and candidate.name.endswith(".rollback")
+        ):
+            failed = True
+            if claimant is not None:
+                path.write_bytes(claimant)
+            raise PermissionError("injected quarantine removal failure")
+
+    intercept_file_removal(fail_quarantine_removal)
+
+    bound_content = expected_content if binding == "content" else None
+    expected_sha256 = (
+        hashlib.sha256(expected_content).hexdigest() if binding == "sha256" else None
+    )
+
+    with pytest.raises(FileRecoveryError, match="Recovery entry") as exc_info:
+        paths_mod.remove_file_generation(
+            path,
+            generation,
+            expected_content=bound_content,
+            expected_sha256=expected_sha256,
+        )
+
+    assert failed is True
+    recoveries = list(tmp_path.glob(f".{path.name}.*.rollback"))
+    assert len(recoveries) == 1
+    assert recoveries[0].read_bytes() == expected_content
+    assert exc_info.value.recovery_path == recoveries[0]
+    if claimant is None:
+        assert not path.exists()
+    else:
+        assert path.read_bytes() == claimant
+
+
+def test_remove_file_generation_rejects_parent_replacement(tmp_path: Path) -> None:
+    parent = tmp_path / "output-parent"
+    parent.mkdir()
+    path = parent / "output.txt"
+    content = b"expected"
+    path.write_bytes(content)
+    generation = regular_file_generation(path)
+    assert generation is not None
+    parent_identity = paths_mod.capture_directory_identity(parent)
+    displaced = tmp_path / "displaced-parent"
+    parent.rename(displaced)
+    parent.mkdir()
+    path.write_bytes(b"concurrent")
+
+    with pytest.raises(NotADirectoryError, match="Directory changed"):
+        paths_mod.remove_file_generation(
+            path,
+            generation,
+            expected_content=content,
+            expected_parent_identity=parent_identity,
+        )
+
+    assert path.read_bytes() == b"concurrent"
+    assert (displaced / path.name).read_bytes() == content
 
 
 def test_atomic_write_text_drops_special_permission_bits(tmp_path: Path) -> None:
@@ -579,6 +1438,70 @@ def test_read_regular_file_bytes_rejects_same_length_in_place_rewrite(
         read_regular_file_bytes(path, maximum_bytes=4, label="test input")
 
     assert replaced is True
+
+
+@pytest.mark.parametrize(
+    "anchored",
+    [None, True, False],
+    ids=["direct", "descriptor-writer", "fallback-writer"],
+)
+def test_regular_file_hashing_rejects_growth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    anchored: bool | None,
+) -> None:
+    if anchored and not supports_anchored_directory_operations():
+        pytest.skip("descriptor-relative directory operations are unavailable")
+    if anchored is not None:
+        monkeypatch.setattr(
+            paths_mod,
+            "_SUPPORTS_ANCHORED_DIRECTORY_OPERATIONS",
+            anchored,
+        )
+    path = tmp_path / "input.txt"
+    path.write_bytes(b"A")
+    original_fdopen = paths_mod.os.fdopen
+
+    class GrowingReader:
+        def __init__(self, stream: Any) -> None:
+            self.stream = stream
+            self.grew = False
+
+        def __enter__(self) -> GrowingReader:
+            return self
+
+        def __exit__(
+            self,
+            exc_type: object,
+            exc_value: object,
+            traceback: object,
+        ) -> None:
+            self.stream.close()
+
+        def read(self, size: int = -1) -> bytes:
+            if not self.grew:
+                with path.open("ab") as output:
+                    output.write(b"B")
+                self.grew = True
+            return self.stream.read(size)
+
+        def fileno(self) -> int:
+            return self.stream.fileno()
+
+    def growing_fdopen(descriptor: int, mode: str) -> GrowingReader:
+        return GrowingReader(original_fdopen(descriptor, mode))
+
+    monkeypatch.setattr(paths_mod.os, "fdopen", growing_fdopen)
+
+    with pytest.raises(ValueError, match="exceeds the maximum size"):
+        if anchored is None:
+            paths_mod.regular_file_sha256(
+                path,
+                maximum_bytes=1,
+                label="test input",
+            )
+        else:
+            atomic_write_text(path, "replacement")
 
 
 def test_read_regular_file_bytes_rejects_fifo_without_blocking(tmp_path: Path) -> None:

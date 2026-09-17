@@ -92,6 +92,12 @@ conda workspace unarchive my-project.tar.zst --receipt --target ./verified
 Python integrations can use `conda_workspaces.archive.WorkspaceArchive`
 for the same archive operations without importing CLI handlers.
 
+Pass `--sign` to sign the archive receipt with Sigstore. The signed receipt
+binds the archive digest, manifest, lockfile, and package inventory to an
+authenticated signer. `unarchive --verify` checks the signature and receipt
+before publishing the target directory. See [Workspace attestations](attestations.md)
+for how this differs from signing a live workspace.
+
 See the [archive tutorial](../tutorials/archives.md) for a full CLI
 walkthrough, [Use workspace archives from Python](../how-to/archive-api.md)
 for integration examples, and the [archive receipt reference](../reference/archive-receipts.md)

@@ -29,10 +29,19 @@ Python API.
 Package a locked Linux environment and application files with Docker Buildx.
 :::
 
+:::{grid-item-card} {octicon}`verified` Sign and verify a workspace
+:link: workspace-attestations
+:link-type: doc
+
+Sign the workspace manifest and canonical lockfile, require an exact signer,
+and gate locked installs.
+:::
+
 ::::
 
 ```{toctree}
 :hidden:
 
 image
+workspace-attestations
 ```
