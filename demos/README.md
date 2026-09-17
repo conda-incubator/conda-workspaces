@@ -23,6 +23,7 @@ Animated terminal demos recorded with [VHS](https://github.com/charmbracelet/vhs
 | `archives-receipt` | Create a workspace archive receipt and verify extraction |
 | `archives-bundle` | Bundle packages for offline/air-gapped deployment |
 | `archives-install` | Extract and install in one step with --install |
+| `image` | Build a locked Linux image, run it offline, and retain activation when overriding its command |
 | `auto-lockfile` | Automatic lockfile creation and staleness detection |
 
 ### Tasks
@@ -48,6 +49,8 @@ Animated terminal demos recorded with [VHS](https://github.com/charmbracelet/vhs
 - [ttyd](https://github.com/tsl0922/ttyd) (installed automatically by VHS on first run)
 - [bat](https://github.com/sharkdp/bat) (`conda install conda-forge::bat`)
 - A working `pixi` installation with the dev environment configured
+
+The `image` demo also requires a running Linux Docker daemon with Buildx and network access to fetch its base images and locked packages. It uses the Docker host's native architecture (`linux-64` or `linux-aarch64`) and the committed lockfile from `examples/container`. The recording omits the build wait and leaves the resulting `workspace-image-demo` image available locally.
 
 ## Regenerating demos
 

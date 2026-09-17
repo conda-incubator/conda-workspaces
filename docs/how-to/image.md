@@ -1,5 +1,7 @@
 # Build a workspace image
 
+![workspace image demo](../../demos/image.gif)
+
 `conda workspace image` builds one locked Linux environment and the workspace's
 project files into a runnable container image. It delegates image construction
 to Docker Buildx and installs packages through conda inside the Linux builder.

@@ -49,8 +49,9 @@ It requires `-e/--environment` and either `--locked` or `--frozen`.
 
 Add `--download-only` to validate and fetch locked packages without creating,
 removing, or updating environment prefixes or building local Python packages.
-It requires `--locked` or `--frozen`. Combining it with `--dry-run` uses a
-temporary package cache.
+It requires `--locked` or `--frozen`. Locked installation with `--dry-run`
+fetches packages into a temporary cache to complete validation without changing
+the environment, with or without `--download-only`.
 
 ### Workspace images
 
