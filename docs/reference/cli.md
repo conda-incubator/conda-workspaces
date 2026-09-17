@@ -52,18 +52,16 @@ removing, or updating environment prefixes or building local Python packages.
 It requires `--locked` or `--frozen`. Combining it with `--dry-run` uses a
 temporary package cache.
 
-Locked local Python builds require conda-pypi strict build support, which is
-proposed in [conda-pypi#521](https://github.com/conda/conda-pypi/pull/521).
-Build and runtime requirements must already be present in
-the locked environment. An older conda-pypi version fails with an update-required
-error rather than installing additional build requirements.
-
 ### Workspace images
 
 `conda workspace image` builds one selected Linux environment and its project
 files using Docker Buildx. It requires `-e/--environment`, `--platform`, a
 startup command after `--`, and one of `--load`, `--push`, or `-o/--output`.
 Loading and pushing also require `-t/--tag`. Tags may be repeated.
+
+Applications can run from copied project files. Python path, Git, and URL
+dependencies and editable installs are unsupported. Version-based PyPI
+dependencies use the existing conda-pypi integration.
 
 `--base-image` selects the Linux base. `--builder` reuses an existing Buildx
 builder. `--dry-run` previews the recipe and inputs without invoking Docker.

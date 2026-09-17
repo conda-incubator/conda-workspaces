@@ -2239,7 +2239,7 @@ class LockfileInstallPlan:
                     requested_specs.append(spec)
                     unlocked_requested_names.add(spec.name)
             if update_names is None:
-                validate_path_dependencies(resolved, install_build_dependencies=False)
+                validate_path_dependencies(resolved)
 
         prune_setup = None
         existing_prefix = (
@@ -2481,11 +2481,7 @@ class LockfileInstallPlan:
                 )
                 require_current_prefix()
                 if self.update_path_dependencies:
-                    _install_path_deps(
-                        self.prefix,
-                        self.resolved,
-                        install_build_dependencies=False,
-                    )
+                    _install_path_deps(self.prefix, self.resolved)
                     require_current_prefix()
         sys.stdout.flush()
 

@@ -1,4 +1,4 @@
-"""Show that application installation and activation survive the image build."""
+"""Show that copied application source runs with the image's activation."""
 
 from __future__ import annotations
 

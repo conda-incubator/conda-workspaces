@@ -67,18 +67,6 @@ from conda_workspaces.resolver import ResolvedEnvironment, resolve_environment
 
 
 @pytest.fixture
-def locked_pypi_builder(monkeypatch: pytest.MonkeyPatch) -> None:
-    def build(
-        *args: object,
-        install_build_dependencies: bool = True,
-        **kwargs: object,
-    ) -> None:
-        pytest.fail("preflight invoked a local build")
-
-    monkeypatch.setattr("conda_pypi.build.pypa_to_conda", build)
-
-
-@pytest.fixture
 def race_symlink_on_publish(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Callable[[Path, Path], list[bool]]:
@@ -2054,7 +2042,6 @@ def test_install_from_lockfile_errors(
 
 
 @pytest.mark.parametrize("platform", [None, "linux-special"], ids=["native", "named"])
-@pytest.mark.usefixtures("locked_pypi_builder")
 def test_lockfile_install_resolves_target_dependencies_before_preflight(
     tmp_path: Path,
     workspace_ctx_factory: Callable[..., WorkspaceContext],
@@ -2512,7 +2499,6 @@ def test_install_from_lockfile_revalidates_workspace_after_package_fetch(
     [(False, True), (True, False)],
     ids=["update", "replace"],
 )
-@pytest.mark.usefixtures("locked_pypi_builder")
 def test_install_from_lockfile_dry_run_builds_requested_and_prune_plan(
     tmp_path: Path,
     workspace_ctx_factory: Callable[..., WorkspaceContext],
@@ -2586,8 +2572,8 @@ def test_install_from_lockfile_dry_run_builds_requested_and_prune_plan(
 @pytest.mark.parametrize("dry_run", [False, True], ids=["install", "dry-run"])
 @pytest.mark.parametrize(
     "invalid_input",
-    ["activation-symlink", "missing-path-dependency", "legacy-builder"],
-    ids=["activation", "path-dependency", "old-conda-pypi"],
+    ["activation-symlink", "missing-path-dependency"],
+    ids=["activation", "path-dependency"],
 )
 def test_install_from_lockfile_prevalidates_post_install_inputs(
     tmp_path: Path,
@@ -2607,7 +2593,7 @@ def test_install_from_lockfile_prevalidates_post_install_inputs(
         outside.write_text("{}", encoding="utf-8")
         state.symlink_to(outside)
         match = "Activation metadata path cannot contain a symlink"
-    elif invalid_input == "missing-path-dependency":
+    else:
         ctx.config.features["default"].pypi_dependencies = {
             "missing": PyPIDependency(
                 name="missing",
@@ -2615,18 +2601,6 @@ def test_install_from_lockfile_prevalidates_post_install_inputs(
             )
         }
         match = "must be an existing regular directory"
-    else:
-        prefix.mkdir(parents=True)
-        (prefix / "keep.txt").write_text("existing environment", encoding="utf-8")
-        ctx.config.features["default"].pypi_dependencies = {
-            "local": PyPIDependency(name="local", path=str(tmp_path))
-        }
-
-        def old_build(project, *, prefix, distribution, output_path):
-            pytest.fail("preflight invoked a legacy builder")
-
-        monkeypatch.setattr("conda_pypi.build.pypa_to_conda", old_build)
-        match = "Update conda-pypi"
     (tmp_path / LOCKFILE_NAME).write_text(
         "version: 1\n"
         "environments:\n"
@@ -2720,7 +2694,6 @@ def test_install_from_lockfile_rejects_parent_replacement_before_conda(
     ],
     ids=["removed-package", "transitive-package", "local-path-package"],
 )
-@pytest.mark.usefixtures("locked_pypi_builder")
 def test_install_from_lockfile_reconciles_prefix_and_requested_specs(
     tmp_path: Path,
     workspace_ctx_factory: Callable[..., WorkspaceContext],
@@ -2795,12 +2768,10 @@ def test_install_from_lockfile_reconciles_prefix_and_requested_specs(
         "conda.misc.install_explicit_packages",
         lambda **kwargs: install_calls.append(kwargs),
     )
-    path_install_calls: list[tuple[str, bool]] = []
+    path_install_calls: list[str] = []
     monkeypatch.setattr(
         "conda_workspaces.envs._install_path_deps",
-        lambda prefix, resolved, *, install_build_dependencies: (
-            path_install_calls.append((resolved.name, install_build_dependencies))
-        ),
+        lambda prefix, resolved: path_install_calls.append(resolved.name),
     )
 
     install_from_lockfile(ctx, "default")
@@ -2809,7 +2780,7 @@ def test_install_from_lockfile_reconciles_prefix_and_requested_specs(
     assert ("boltons" in installed_names) is candidate_installed
     assert set(History(str(prefix)).get_requested_specs_map()) == expected_requested
     assert set(install_calls[0]["requested_specs"]) == expected_requested
-    assert path_install_calls == [("default", False)]
+    assert path_install_calls == ["default"]
 
 
 @pytest.mark.parametrize("dry_run", [False, True], ids=["install", "dry-run"])

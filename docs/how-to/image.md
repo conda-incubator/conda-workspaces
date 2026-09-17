@@ -17,18 +17,21 @@ or apostrophes. Image environment paths have the same restriction. Conda expands
 environment variables when activating a prefix, and Dockerfile parsing
 interprets apostrophes in source paths. Spaces are supported.
 
-Local Python applications must use non-editable, workspace-relative path
-dependencies. Include their runtime requirements, `python-build`, and their
-Python build backend, such as `setuptools`, in the locked environment. The
-builder rejects missing build or runtime requirements instead of solving them.
-Local builds run with environment activation and networking disabled. They
-require conda-pypi with strict build support in the invoking environment. This
-support is proposed in [conda-pypi#521](https://github.com/conda/conda-pypi/pull/521),
-so an older conda-pypi release will fail with an
-update-required error for local packages.
+Applications can run directly from the copied project files, for example with
+`python -m myapp` or `python app.py`. Declare their runtime requirements in the
+selected environment. Version-based PyPI dependencies use the existing
+conda-pypi integration. Python path, Git, and URL dependencies are not supported
+by the image command.
+
+Local Python package builds are tracked in
+[#178](https://github.com/conda-incubator/conda-workspaces/issues/178). They will
+use the shared workspace installer once conda-pypi provides strict builds with
+locked requirements and activated backends through
+[conda-pypi#521](https://github.com/conda/conda-pypi/pull/521) and
+[conda-pypi#523](https://github.com/conda/conda-pypi/pull/523).
 
 The [container example](https://github.com/conda-incubator/conda-workspaces/tree/main/examples/container)
-includes a local application, activation settings, and a lockfile for both
+includes application source files, activation settings, and a lockfile for both
 supported Linux architectures. Build it with the image command in its README.
 
 ## Build and run
@@ -59,8 +62,7 @@ directory and `/workspaces/<name>/.conda/bin` are on `PATH`. The workspace's
 `workspace-entrypoint` applies conda environment variables and sources activation
 hooks before using `exec` to start the application. Startup performs no
 installation or solving. Conda and temporary build tools are excluded unless
-the selected environment or base image itself includes them. Build-generated
-source caches are excluded.
+the selected environment or base image itself includes them.
 
 Mount runtime data into a subdirectory, for example
 `--mount type=bind,src=/path/to/data,dst=/workspaces/myapp/data` for a workspace
@@ -79,8 +81,8 @@ against locked package and manifest requirements. The runtime host must also
 meet kernel, CPU, and driver requirements. Pin base images by digest when a
 stable base is required. The bootstrap image is versioned. It installs native
 Linux tool dependencies separately from the locked application. The build
-uses copies of the invoking conda-workspaces Python sources and, when
-installed, conda-pypi sources, so it runs those implementations.
+uses a copy of the invoking conda-workspaces Python sources and a released
+conda-pypi package.
 
 The generated recipe uses the ordinary install command for both phases,
 equivalent to:
@@ -93,9 +95,8 @@ RUN --network=none /opt/conda/bin/python -m conda workspace install \
 ```
 
 The first phase validates the lockfile and fetches its packages without
-creating an environment or building local packages. The second installs the
-locked environment and builds local packages with networking disabled.
-The generated commands use the selected manifest, environment, and platform.
+creating an environment. The second installs the locked environment with
+networking disabled. The generated commands use the selected manifest, environment, and platform.
 `conda_workspaces.image_entrypoint` then renders the runtime activation wrapper.
 
 The base must not already contain the selected workspace path, such as
@@ -192,11 +193,11 @@ identifiers in JSON: `environment`, `workspace`, `prefix`, `platform`,
 
 Project files follow the existing [archive selection rules](../features/archives.md).
 Git workspaces include tracked files, plus the manifest and lockfile when
-allowed by the archive filters. Required activation scripts and local package
-sources must be included. All eligible files beneath a local package directory
-are required because arbitrary Python build backends can read those files.
+allowed by the archive filters. Required activation scripts must be included.
+Ensure the selected files include the application modules used by the runtime
+command.
 
-Git and URL Python dependencies, editable installs, absolute or external local
-source paths, and local conda channels are rejected. Container configuration
-schemas, multi-architecture image indexes, and task-oriented entrypoints are
-outside this command's initial scope.
+Python path, Git, and URL dependencies, editable installs, and local conda
+channels are rejected. Container configuration schemas, multi-architecture
+image indexes, and task-oriented entrypoints are outside this command's
+initial scope.

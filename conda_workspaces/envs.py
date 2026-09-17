@@ -8,7 +8,6 @@ a standard conda prefix that can be activated with ``conda activate``.
 from __future__ import annotations
 
 import importlib.util
-import inspect
 import json
 import logging
 import os
@@ -306,11 +305,7 @@ def validate_activation_metadata(
                 validate_file_output(destination)
 
 
-def validate_path_dependencies(
-    resolved: ResolvedEnvironment,
-    *,
-    install_build_dependencies: bool = True,
-) -> None:
+def validate_path_dependencies(resolved: ResolvedEnvironment) -> None:
     """Validate local PyPI project inputs without building or installing them.
 
     Building requires Python in the target prefix, so exact-install preflights
@@ -340,7 +335,7 @@ def validate_path_dependencies(
             resolved.name,
             f"Path PyPI dependencies require conda-pypi. Could not install: {names}",
         ) from exc
-    del _install_ephemeral_conda
+    del _install_ephemeral_conda, _pypa_to_conda
 
     for dependency in path_dependencies:
         assert dependency.path is not None
@@ -365,18 +360,6 @@ def validate_path_dependencies(
                 f"'{dependency.name}' must be an existing regular directory: "
                 f"{source_path}",
             ) from exc
-
-    if not install_build_dependencies:
-        try:
-            inspect.signature(_pypa_to_conda).bind_partial(
-                install_build_dependencies=False
-            )
-        except TypeError:
-            raise SolveError(
-                resolved.name,
-                "Locked local builds require conda-pypi with locked build support. "
-                "Update conda-pypi before installing this environment.",
-            ) from None
 
 
 def _build_pypi_specs(
@@ -439,8 +422,6 @@ def _build_pypi_specs(
 def _install_path_deps(
     prefix: Path,
     resolved: ResolvedEnvironment,
-    *,
-    install_build_dependencies: bool = True,
 ) -> None:
     """Install local-path PyPI deps via conda-pypi's build system.
 
@@ -474,10 +455,6 @@ def _install_path_deps(
             f"Path PyPI dependencies require conda-pypi. Could not install: {names}",
         ) from exc
 
-    build_options: dict[str, Any] = {}
-    if not install_build_dependencies:
-        build_options["install_build_dependencies"] = False
-
     for dep in path_deps:
         if dep.path is None:
             continue
@@ -505,7 +482,6 @@ def _install_path_deps(
                     distribution=distribution,
                     output_path=Path(output_dir),
                     prefix=prefix,
-                    **build_options,
                 )
                 install_ephemeral_conda(prefix, package)
         except Exception as exc:
@@ -513,24 +489,6 @@ def _install_path_deps(
                 resolved.name,
                 f"Failed to install path PyPI dependency '{dep.name}': {exc}",
             ) from exc
-
-    if not install_build_dependencies:
-        from conda_pypi import dependencies  # type: ignore[import-untyped]
-
-        requirements = {
-            dep.name + (f"[{','.join(dep.extras)}]" if dep.extras else "")
-            for dep in path_deps
-        }
-        try:
-            missing = dependencies.check_dependencies(requirements, prefix=prefix)
-        except dependencies.MissingDependencyError as exc:
-            missing = exc.dependencies
-        if missing:
-            raise SolveError(
-                resolved.name,
-                "Local package runtime requirements are absent from the locked "
-                "environment: " + ", ".join(sorted(missing)),
-            )
 
 
 def install_environment(

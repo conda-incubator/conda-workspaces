@@ -6,9 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added
+
 - Allow lock satisfiability checks to select one environment's package requirements while retaining workspace declaration checks.
 - Add public lock environment discovery, concrete platform inference and source-preserving selection without package downloads.
 - Preserve embedded build numbers and support named-only locks when reconstructing metadata-only environments.
+- Added `conda workspace image` to build a locked Linux environment and project
+  files into a container image through Docker Buildx. Images preserve activation
+  and can be loaded into Docker, exported as OCI archives, or pushed to a
+  registry. Python path, Git, and URL dependencies are not supported. (#175)
 
 ### Fixed
 

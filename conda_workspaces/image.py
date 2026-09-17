@@ -11,7 +11,6 @@ import sys
 import tempfile
 import uuid
 from dataclasses import dataclass
-from importlib.util import find_spec
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
@@ -135,6 +134,22 @@ class WorkspaceImage:
             raise CondaWorkspacesError(
                 "Images currently support linux-64 and linux-aarch64."
             )
+        for name, dependency in resolved.pypi_dependencies.items():
+            if dependency.path is not None:
+                raise CondaWorkspacesError(
+                    f"Image dependency '{name}' requires a local Python package "
+                    "build, which workspace images do not support yet.",
+                    hints=[
+                        (
+                            "Run the copied application source directly, or lock a "
+                            "prebuilt conda package instead."
+                        )
+                    ],
+                )
+            if dependency.git or dependency.url:
+                raise CondaWorkspacesError(
+                    f"Image dependency '{name}' uses an unsupported Git or URL source."
+                )
         root = ctx.root
         envs_directory = ctx.envs_dir
         prefix = str(
@@ -201,54 +216,10 @@ class WorkspaceImage:
                 )
             script_names.add(path.name)
             required.add(path)
-        # Source discovery cannot infer arbitrary backend file requirements, so
-        # require every archive-eligible file under each local package directory.
-        source_files = collect_archive_files(
-            root, ArchiveConfig(), extra_files=(manifest, lock)
-        )
-        source_files = [
-            path for path in source_files if not path.is_relative_to(envs_directory)
-        ]
-        for name, dependency in resolved.pypi_dependencies.items():
-            if dependency.git or dependency.url:
-                raise CondaWorkspacesError(
-                    f"Image dependency '{name}' uses an unsupported Git or URL source."
-                )
-            if dependency.path is None:
-                continue
-            if dependency.editable:
-                raise CondaWorkspacesError(
-                    f"Image dependency '{name}' uses an unsupported editable install. "
-                    "Use a non-editable local package."
-                )
-            raw = dependency.path
-            if raw is None or has_absolute_path_syntax(raw) or raw.startswith("~"):
-                raise CondaWorkspacesError(
-                    f"Image dependency '{name}' must use a workspace-relative path."
-                )
-            path = root / dependency.path
-            if not path.resolve().is_relative_to(root.resolve()) or not path.is_dir():
-                raise CondaWorkspacesError(
-                    f"Image dependency '{name}' must be a directory "
-                    "inside the workspace."
-                )
-            metadata = [
-                path / filename
-                for filename in ("pyproject.toml", "setup.py", "setup.cfg")
-            ]
-            if not any(candidate in selected for candidate in metadata):
-                raise CondaWorkspacesError(
-                    f"Image dependency '{name}' has no included Python build metadata."
-                )
-            required.update(
-                candidate
-                for candidate in source_files
-                if candidate.is_relative_to(path)
-            )
         if not required.issubset(selected):
             raise CondaWorkspacesError(
                 "Archive filters exclude the manifest, lockfile, "
-                "activation scripts, or local package sources.",
+                "or activation scripts.",
                 hints=[
                     (
                         "Adjust [workspace.archive] include/exclude rules "
@@ -427,12 +398,8 @@ class WorkspaceImage:
         }
 
     def build_packages(self) -> dict[str, Path]:
-        """Use the invoking tools' Python sources with native builder dependencies."""
-        packages = {"conda_workspaces": Path(__file__).parent}
-        pypi = find_spec("conda_pypi")
-        if pypi is not None and pypi.origin is not None:
-            packages["conda_pypi"] = Path(pypi.origin).parent
-        return packages
+        """Use this conda-workspaces version with released builder dependencies."""
+        return {"conda_workspaces": Path(__file__).parent}
 
     def run_builder(self, args: list[str], *, quiet: bool = False) -> None:
         """Run Buildx without shell interpolation, keeping build logs off stdout."""

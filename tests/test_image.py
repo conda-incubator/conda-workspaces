@@ -69,6 +69,7 @@ def test_image_preview_preserves_workspace_and_command_argv(
     assert preview["workspace"] == f"/workspaces/{name}"
     assert preview["prefix"] == f"/workspaces/{name}/.conda/envs/default"
     assert preview["files"] == ["app.py", "conda.lock", "conda.toml"]
+    assert preview["build_packages"] == ["conda_workspaces"]
     assert snapshot_tree(tmp_path) == before
     assert not output.exists()
 
@@ -402,18 +403,14 @@ def test_image_only_builds_supported_linux_targets(
         )
 
 
-def test_image_resolves_activation_and_local_sources_from_manifest_directory(
+def test_image_copies_activation_and_application_sources_from_manifest_directory(
     image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
     tmp_path: Path,
 ) -> None:
     config, ctx = image_workspace(
-        manifest_extra=(
-            '[activation]\nscripts = ["activate.sh"]\n'
-            '[pypi-dependencies]\napp = {path = "pkg", editable = false}\n'
-        ),
+        manifest_extra='[activation]\nscripts = ["activate.sh"]\n',
         files={
             "activate.sh": "export APP_READY=yes\n",
-            "pkg/pyproject.toml": '[project]\nname = "app"\nversion = "1.0"\n',
             "pkg/app.py": 'print("app")\n',
         },
     )
@@ -430,9 +427,6 @@ def test_image_resolves_activation_and_local_sources_from_manifest_directory(
 
 
 @pytest.mark.parametrize(
-    "local_package", [False, True], ids=["application", "root-package"]
-)
-@pytest.mark.parametrize(
     "envs_dir",
     ["runtime-envs", "runtime envs"],
     ids=["plain", "spaces"],
@@ -445,16 +439,11 @@ def test_image_resolves_activation_and_local_sources_from_manifest_directory(
 def test_image_uses_custom_environment_path_without_archiving_host_environment(
     image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
     tmp_path: Path,
-    local_package: bool,
     envs_dir: str,
     name: str,
 ) -> None:
     config, ctx = image_workspace(
-        manifest_extra='[pypi-dependencies]\napp = {path = "."}\n'
-        if local_package
-        else "",
         files={
-            "pyproject.toml": '[project]\nname = "app"\nversion = "1.0"\n',
             f"{envs_dir}/default/bin/python": "host executable",
         },
     )
@@ -595,35 +584,17 @@ def test_image_rejects_unsupported_characters_in_environment_prefix(
         (
             '[pypi-dependencies]\napp = {path = "pkg", editable = true}\n',
             {"pkg/pyproject.toml": ""},
-            "unsupported editable install",
+            "local Python package build",
         ),
         (
             '[pypi-dependencies]\napp = {path = "pkg"}\n',
-            {"pkg/app.py": ""},
-            "no included Python build metadata",
-        ),
-        (
-            (
-                '[pypi-dependencies]\napp = {path = "pkg"}\n'
-                '[workspace.archive]\nexclude = ["pkg/app.py"]\n'
-            ),
             {"pkg/pyproject.toml": "", "pkg/app.py": ""},
-            "Archive filters exclude",
+            "local Python package build",
         ),
         (
-            '[pypi-dependencies]\napp = {path = ".."}\n',
-            {},
-            "directory inside the workspace",
-        ),
-        (
-            '[pypi-dependencies]\napp = {path = "/outside/pkg"}\n',
-            {},
-            "must use a workspace-relative path",
-        ),
-        (
-            "[pypi-dependencies]\napp = {path = 'C:\\project\\pkg'}\n",
-            {},
-            "must use a workspace-relative path",
+            '[target.linux-64.pypi-dependencies]\napp = {path = "pkg"}\n',
+            {"pkg/pyproject.toml": "", "pkg/app.py": ""},
+            "local Python package build",
         ),
         (
             '[pypi-dependencies]\napp = {git = "https://example.invalid/app.git"}\n',
@@ -647,11 +618,8 @@ def test_image_rejects_unsupported_characters_in_environment_prefix(
         "absolute-activation",
         "duplicate-activation-filenames",
         "editable-package",
-        "missing-package-metadata",
-        "excluded-package-source",
-        "outside-package",
-        "absolute-posix-package",
-        "absolute-windows-package",
+        "local-package",
+        "target-local-package",
         "git-source",
         "url-source",
         "excluded-lock",
