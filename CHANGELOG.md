@@ -4,27 +4,32 @@ All notable changes to conda-workspaces will be documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## Unreleased
+## 0.10.0 — 2026-09-18
 
 ### Added
 
-- Allow lock satisfiability checks to select one environment's package requirements while retaining workspace declaration checks.
-- Add public lock environment discovery, concrete platform inference and source-preserving selection without package downloads.
-- Preserve embedded build numbers and support named-only locks when reconstructing metadata-only environments.
 - Added `conda workspace image` to build a locked Linux environment and project
   files into a container image through Docker Buildx. Images preserve activation
   and can be loaded into Docker, exported as OCI archives, or pushed to a
   registry. Python path, Git, and URL dependencies are not supported. (#175)
+- Added public lock environment discovery, concrete platform inference, and
+  source-preserving selection without package downloads. (#173)
+- Added support for named-only locks when reconstructing metadata-only
+  environments. (#173)
+- Allowed lock satisfiability checks to select one environment's package
+  requirements while retaining workspace declaration checks. (#176)
 
 ### Fixed
 
-- Preserve explicit package build numbers when writing and reading workspace locks with released conda-lockfiles versions.
-- Release temporary prefix metadata from conda's cache after selective lock updates, including failed updates.
-- Reject malformed channels and dependency values instead of dropping or coercing
-  them. Reject unsupported conda dependency fields and environment or target
-  channel overrides before they can change the requested solve.
+- Preserved explicit package build numbers when writing and reading workspace
+  locks with released conda-lockfiles versions. (#177)
+- Released temporary prefix metadata from conda's cache after selective lock
+  updates, including failed updates. (#177)
+- Rejected malformed channels and dependency values instead of dropping or
+  coercing them. Rejected unsupported conda dependency fields and environment or
+  target channel overrides before they can change the requested solve. (#172)
 - Let callers of `ManifestParser.parse_text` reject embedded URL credentials
-  during the same parse with `reject_url_credentials=True`.
+  during the same parse with `reject_url_credentials=True`. (#172)
 
 ## 0.9.0 — 2026-08-28
 
