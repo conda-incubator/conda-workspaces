@@ -4,7 +4,7 @@ All notable changes to conda-workspaces will be documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## 0.10.0 — Unreleased
+## 0.10.0 — 2026-09-18
 
 ### Added
 
