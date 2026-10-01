@@ -4,6 +4,20 @@ All notable changes to conda-workspaces will be documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.11.0 — 2026-10-01
+
+### Changed
+
+- Clarified documentation and CLI messages to distinguish workspace environments
+  and configuration from the user's project. Task documentation now distinguishes
+  manifest tasks from user tasks, including tasks used without a workspace.
+  (#181)
+- Renamed the introductory tutorial to "Your first workspace" and moved it to
+  `first-workspace`. Existing tutorial URLs and section links still work. (#181)
+- Updated the Pixi compatibility demo to use `[workspace]`, clarified the
+  ecosystem demo, and refreshed both recordings. Legacy Pixi `[project]`
+  manifests remain supported. (#181)
+
 ## 0.10.0 — 2026-09-18
 
 ### Added
