@@ -15,7 +15,7 @@ Enter
 Wait /\$/
 Type "cat > pixi.toml << 'EOF'"
 Enter
-Type "[project]"
+Type "[workspace]"
 Enter
 Type `name = "my-pixi-project"`
 Enter

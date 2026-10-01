@@ -41,8 +41,8 @@ An installable archive must contain exactly one valid root workspace manifest:
 extra root manifests before creating the archive.
 
 If no `-o` is given, the archive is named after the workspace
-(`<name>.tar.zst`) and placed in the project root. The workspace name
-must be a single filename segment for this default; pass `-o/--output`
+(`<name>.tar.zst`) and placed in the workspace root. The workspace name
+must be a single filename segment for this default. Pass `-o/--output`
 when you want to write the archive somewhere else.
 
 ## Use gzip compression

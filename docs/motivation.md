@@ -2,17 +2,14 @@
 
 ## Why conda-workspaces?
 
-Conda is a powerful package and environment manager, but it has lacked
-two things that modern projects need: project-scoped multi-environment
-workspace management, and a built-in task runner. Projects typically
-manage environments manually with `environment.yml` files and rely on
-`Makefile`, `tox`, or ad-hoc shell scripts for common workflows.
+Conda manages packages and environments. conda-workspaces adds workspace
+manifests and a task runner, so you can define related environments and
+the commands that use them in one place.
 
-[pixi](https://pixi.sh) introduced an excellent project model that
-integrates multi-environment management and a task runner with project
-configuration. conda-workspaces brings both capabilities to conda as a
-plugin, so existing conda users can define workspaces and tasks without
-switching tools.
+[pixi](https://pixi.sh) uses a workspace model that combines multiple
+environments and tasks in one manifest. conda-workspaces brings that
+model to conda as a plugin, using conda's own solver and environment
+management.
 
 ## Workspaces and tasks, not a new package manager
 
@@ -65,8 +62,8 @@ check = { depends-on = ["test", "lint"] }
 ## Compatibility with pixi
 
 conda-workspaces reads the supported workspace and task portions of
-pixi manifests. A project with a `pixi.toml` or `pyproject.toml` can use
-both tools when it stays within that shared surface:
+pixi manifests. A workspace defined in a `pixi.toml` or `pyproject.toml`
+can use both tools when its manifest uses fields supported by both:
 
 - pixi users run `pixi install` and `pixi run` as usual
 - conda users run `conda workspace install` and `conda task run` using conda's solver
@@ -83,7 +80,7 @@ for the compatibility mapping.
 | Tool | Scope | Tasks | Multi-env | Lock files | Solver |
 |---|---|---|---|---|---|
 | conda-workspaces | Workspaces + tasks | Yes | Yes | Yes (`conda.lock`) | configured conda solver backend |
-| pixi | Full project mgmt | Yes | Yes | Yes | rattler (bundled) |
+| pixi | Workspace management | Yes | Yes | Yes | rattler (bundled) |
 | conda-project | Project management | Commands only | Yes | Yes | conda (via conda-lock) |
 | anaconda-project | Project management | Commands only | Yes | Yes | conda |
 | conda-devenv | Env templating | No | Via includes | Yes | conda / mamba |
@@ -113,9 +110,9 @@ support multiple independent environments per project.
 
 conda-workspaces differs from all of the above in two ways:
 
-1. It uses pixi's TOML-based manifest format rather than inventing a new
-   one. Projects can share a single `pixi.toml` or `pyproject.toml`
-   between pixi and conda-workspaces.
+1. It reads pixi's TOML workspace manifests. A workspace can use a single
+   `pixi.toml` or `pyproject.toml` with both tools when its manifest uses
+   fields supported by both.
 2. It integrates as a conda plugin (`conda workspace`, `conda task`)
    rather than shipping a standalone CLI. Environments are standard conda
    prefixes that work with `conda activate` and all existing conda

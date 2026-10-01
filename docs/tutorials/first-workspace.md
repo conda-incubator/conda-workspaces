@@ -1,17 +1,23 @@
-# Your first project
+(your-first-project)=
 
-This tutorial walks through setting up a Python project with separate
-environments for development, testing, and documentation — plus tasks
-to automate your workflow.
+# Your first workspace
+
+This tutorial creates a workspace for a Python project, with separate
+environments for development, testing, and documentation, plus tasks
+to run tests and build the docs.
+
+The project is the code, data, and other files you work on. The workspace
+defines the environments and tasks used to work with those files. The
+directory containing the workspace manifest is the workspace root.
 
 ## Prerequisites
 
 - conda (>= 26.3) with the conda-workspaces plugin installed
-- A project directory to work in
+- A directory in which to create the workspace
 
 ## Create the workspace manifest
 
-Start by creating a `conda.toml` in your project root:
+Create a directory and initialize its workspace manifest, `conda.toml`:
 
 ```bash
 mkdir my-project && cd my-project

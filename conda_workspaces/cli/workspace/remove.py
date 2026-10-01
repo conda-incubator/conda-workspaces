@@ -123,17 +123,17 @@ def execute_remove(args: argparse.Namespace, *, console: Console | None = None) 
             manifest_path.parent,
             reject_symlinks=True,
         )
-        project_task_sets = [parser.parse_tasks_data(doc.unwrap())]
+        manifest_task_sets = [parser.parse_tasks_data(doc.unwrap())]
         if task_manifest_path is not None and not output_paths_collide(
             task_manifest_path,
             manifest_path,
         ):
-            project_task_sets.append(
+            manifest_task_sets.append(
                 find_parser(task_manifest_path).parse_tasks(task_manifest_path)
             )
         references: list[str] = []
-        for project_tasks in project_task_sets:
-            for task_name, task in project_tasks.items():
+        for manifest_tasks in manifest_task_sets:
+            for task_name, task in manifest_tasks.items():
                 if task.default_environment == environment:
                     references.append(
                         f"Task '{task_name}' sets default-environment to"

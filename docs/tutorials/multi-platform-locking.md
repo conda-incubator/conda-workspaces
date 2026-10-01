@@ -8,11 +8,11 @@ environments from the same `conda.lock`.
 
 - conda (>= 26.3) with conda-workspaces >= 0.8.0 installed
 - An existing workspace with a `conda.toml` (see [Your first
-  project](first-project.md) if you need one)
+  workspace](first-workspace.md) if you need one)
 
 ## Declare your platforms
 
-If you are starting a new project, pass `--platform` (repeatable) to
+If you are creating a workspace, pass `--platform` (repeatable) to
 `workspace init`:
 
 ```bash
@@ -68,7 +68,7 @@ from scratch.
 
 ## Generate the lockfile
 
-Run `conda workspace lock` from the project root:
+Run `conda workspace lock` from the workspace root:
 
 ```bash
 conda workspace lock

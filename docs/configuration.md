@@ -47,10 +47,9 @@ When a file defines both workspace and task sections, both are used.
 
 ## User-level tasks
 
-Tasks can also be defined in a user-level file that applies across all
-projects. This is useful for personal utility tasks (formatting, linting,
-cleanup) that you want available everywhere without repeating them in
-every project manifest.
+Tasks can also be defined in a user-level file. This makes personal utility
+tasks available in any directory without repeating them in each local
+manifest.
 
 ### User task file search order
 
@@ -71,18 +70,20 @@ check = { cmd = "ruff check --fix .", description = "Lint and auto-fix" }
 
 ### Merge semantics
 
-User tasks act as a base layer beneath project tasks:
+Tasks from the local manifest are merged with user tasks:
 
-- Project tasks override user tasks on name collision (project always wins)
-- User-only tasks (not defined in the project) are included as-is
+- Manifest tasks override user tasks with the same name
+- User tasks with no matching manifest task are included as-is
 - `depends-on` can reference tasks from either layer
 - `conda task list` shows user tasks with a `(user)` annotation
 
-### No project manifest required
+(no-project-manifest-required)=
 
-User tasks work even without a project `conda.toml` in the current
+### No local manifest required
+
+User tasks work even without a local task manifest in the current
 directory. Running `conda task run fmt` in any directory executes the
-user-defined task. If neither a project manifest nor a user task file
+user-defined task. If neither a local manifest nor a user task file
 exists, `conda task run` falls back to ad-hoc command execution.
 
 ## Lockfile format
@@ -189,13 +190,20 @@ build = "python -m build"
 test = { cmd = "pytest", depends-on = ["build"] }
 ```
 
-The legacy `[project]` table is also accepted (pre-workspace pixi
-manifests).
+Legacy `pixi.toml` manifests may use `[project]` instead of `[workspace]`.
+Pixi [deprecated `[project]` in version 0.57.0](https://github.com/prefix-dev/pixi/releases/tag/v0.57.0).
+conda-workspaces still reads that legacy table in `pixi.toml`. Use
+`[workspace]` in new manifests.
 
 ### pyproject.toml
 
 Workspace and task configuration is embedded under `[tool.conda.*]`
-(preferred) or `[tool.pixi.*]`:
+(preferred) or `[tool.pixi.*]`.
+
+The top-level `[project]` table contains Python packaging metadata.
+If the workspace table omits `name` or `version`, conda-workspaces uses
+the corresponding value from `[project]`. The workspace description is
+also read from `[project]`.
 
 ::::{tab-set}
 
@@ -257,7 +265,8 @@ test = { cmd = "pytest", depends-on = ["build"] }
 
 ## Workspace table
 
-The `[workspace]` (or `[project]`) table defines workspace metadata:
+The `[workspace]` table defines workspace metadata. Only legacy
+`pixi.toml` manifests may use `[project]` in its place:
 
 | Field | Type | Description |
 |---|---|---|

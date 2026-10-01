@@ -286,7 +286,7 @@ Beyond what anaconda-project offered, conda-workspaces adds:
 
 ## Next steps
 
-- [Your first project](../first-project.md) — full walkthrough
+- [Your first workspace](../first-workspace.md) — full walkthrough
 - [Coming from conda-project](conda-project.md) — the
   intermediate successor
 - [Features](../../features.md) — environments, tasks, caching, templates

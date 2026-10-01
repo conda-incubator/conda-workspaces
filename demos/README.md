@@ -54,7 +54,7 @@ The `image` demo also requires a running Linux Docker daemon with Buildx and net
 
 ## Regenerating demos
 
-From the project root:
+From the repository root:
 
 ```bash
 # Regenerate all demos
@@ -67,7 +67,7 @@ pixi run demos quickstart
 ## File structure
 
 - `_settings.tape` — shared VHS theme, font, and dimensions (sourced by all tapes)
-- `fixtures/` — TOML manifests used by demos that start from an existing project
+- `fixtures/` — TOML manifests used by demos that start from an existing workspace
 - `*.tape` — individual demo scripts
 - `*.gif` — generated animated GIFs (used in docs and README)
 - `*.mp4` — generated MP4 videos (higher quality)

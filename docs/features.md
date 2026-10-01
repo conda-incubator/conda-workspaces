@@ -1,6 +1,6 @@
 # Features
 
-conda-workspaces adds project workspaces and task execution to conda
+conda-workspaces adds workspaces and task execution to conda
 without replacing conda's solver, package cache, or environment prefixes.
 This overview explains the main feature areas and points to the detailed
 explanation pages for each one.
@@ -30,7 +30,7 @@ explanation pages for each one.
 <span id="task-environment-targeting"></span>
 <span id="user-level-tasks"></span>
 
-Repeatable project commands with dependencies, arguments, templates,
+Named shell commands with dependencies, arguments, templates,
 environment targeting, clean environments, and caching.
 :::
 
@@ -50,7 +50,7 @@ environment targeting, clean environments, and caching.
 <span id="system-requirements"></span>
 <span id="channel-priority"></span>
 
-Project-local conda prefixes composed from reusable features, shared
+Workspace environments composed from reusable features, shared
 dependencies, channels, platform overrides, PyPI dependencies, and
 activation settings.
 :::
@@ -98,7 +98,7 @@ lockfiles and package bundles, receipts, and verified extraction.
 <span id="ci-and-docker"></span>
 <span id="optimizing-disk-usage-with-hardlinks"></span>
 
-Project-local prefix layout and package-cache placement for efficient CI
+Workspace environment layout and package-cache placement for efficient CI
 and Docker installs.
 :::
 

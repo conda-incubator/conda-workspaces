@@ -1,9 +1,10 @@
 """Task output caching using file fingerprints.
 
 Cache entries are stored in a platform-appropriate directory via
-``platformdirs``.  Each project gets a subdirectory keyed by a hash
-of the project root path. Within that, each task has a JSON file
-containing fingerprints of its inputs and outputs.
+``platformdirs``. Each task base directory gets a subdirectory keyed
+by a hash of its path. This is the manifest directory, or the invocation
+directory when only user tasks are available. Within that, each task has
+a JSON file containing fingerprints of its inputs and outputs.
 
 SHA-256 digests are the file identity.
 """
@@ -27,17 +28,17 @@ def _cache_root() -> Path:
     return Path(user_cache_dir("conda-workspaces"))
 
 
-def _project_cache_dir(project_root: Path) -> Path:
-    """Return the per-project cache directory, creating it if necessary."""
-    key = hashlib.sha256(str(project_root.resolve()).encode()).hexdigest()[:16]
+def _task_cache_dir(task_base_dir: Path) -> Path:
+    """Return the cache directory for a task base directory, creating it if needed."""
+    key = hashlib.sha256(str(task_base_dir.resolve()).encode()).hexdigest()[:16]
     d = _cache_root() / key
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-def _cache_file(project_root: Path, task_name: str) -> Path:
+def _cache_file(task_base_dir: Path, task_name: str) -> Path:
     """Return the JSON cache file path for a specific task."""
-    return _project_cache_dir(project_root) / f"{task_name}.json"
+    return _task_cache_dir(task_base_dir) / f"{task_name}.json"
 
 
 def _file_sha256(path: str) -> str:
@@ -107,6 +108,10 @@ def is_cached(
 ) -> bool:
     """Check whether the task can be skipped (cache hit).
 
+    *project_root* is the manifest directory, or the invocation directory
+    when only user tasks are available. The keyword name is retained for
+    compatibility.
+
     Returns True only when all of the following hold:
 
     1. A cache entry exists for the task.
@@ -173,7 +178,12 @@ def save_cache(
     *,
     conda_prefix: Path | None = None,
 ) -> None:
-    """Write or update the cache entry for a task."""
+    """Write or update the cache entry for a task.
+
+    *project_root* is the manifest directory, or the invocation directory
+    when only user tasks are available. The keyword name is retained for
+    compatibility.
+    """
     input_files = _expand_globs(input_patterns, cwd)
     output_files = _expand_globs(output_patterns, cwd)
     entry = _compute_entry(

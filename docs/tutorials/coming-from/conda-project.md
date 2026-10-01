@@ -1,7 +1,7 @@
 # Coming from conda-project
 
 [conda-project](https://github.com/conda-incubator/conda-project) and
-conda-workspaces both provide project-scoped conda environments. If you
+conda-workspaces both manage related conda environments. If you
 are migrating from conda-project, this guide maps the concepts and
 commands to their conda-workspaces equivalents.
 
@@ -236,6 +236,6 @@ Beyond what conda-project offered, conda-workspaces adds:
 
 ## Next steps
 
-- [Your first project](../first-project.md) — full walkthrough
+- [Your first workspace](../first-workspace.md) — full walkthrough
 - [Coming from pixi](pixi.md) — if you also use pixi
 - [Features](../../features.md) — environments, tasks, caching, templates

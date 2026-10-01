@@ -127,7 +127,7 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
         file_path=getattr(args, "file", None)
     )
     is_user_only = user_only_names == set(tasks)
-    project_root = Path.cwd() if is_user_only else task_file.parent
+    task_base_dir = Path.cwd() if is_user_only else task_file.parent
 
     subdir = context.subdir
     tasks = {name: t.resolve_for_platform(subdir) for name, t in tasks.items()}
@@ -300,7 +300,7 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
             for k, v in task.env.items()
         }
 
-        cwd = Path(getattr(args, "cwd", None) or task.cwd or project_root)
+        cwd = Path(getattr(args, "cwd", None) or task.cwd or task_base_dir)
         clean_env = getattr(args, "clean_env", False) or task.clean_env
 
         rendered_inputs = render_list(
@@ -321,7 +321,7 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
 
         if rendered_inputs or rendered_outputs:
             if is_cached(
-                project_root,
+                task_base_dir,
                 name,
                 cmd,
                 task_env,
@@ -390,7 +390,7 @@ def execute_run(args: argparse.Namespace, *, console: Console | None = None) -> 
 
         if rendered_inputs or rendered_outputs:
             save_cache(
-                project_root,
+                task_base_dir,
                 name,
                 cmd,
                 task_env,

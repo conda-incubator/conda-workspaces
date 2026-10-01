@@ -507,7 +507,7 @@ class WorkspaceConfig:
     # Path to the manifest file that was parsed
     manifest_path: str = ""
 
-    # Directory for project-local environments (default: .conda/envs)
+    # Directory for workspace-local environments (default: .conda/envs)
     envs_dir: str = ".conda/envs"
 
     # Preview / optional fields

@@ -1,12 +1,11 @@
 # conda-workspaces
 
-Project-scoped multi-environment workspaces and task runner for conda,
+Multi-environment workspaces and task runner for conda,
 with pixi manifest compatibility.
 
 Define environments, features, dependencies, and tasks in a single manifest.
 conda-workspaces reads `conda.toml`, `pixi.toml`, or `pyproject.toml` and
-delegates solving and installation to conda — no extra solver, no new
-package manager, just workspaces and tasks on top of the tools you already use.
+delegates solving and installation to conda.
 
 ## Install
 
@@ -38,7 +37,7 @@ conda's base environment also registers the `conda workspace` and
 
 ![quickstart demo](../demos/quickstart.gif)
 
-Create a `conda.toml` in your project root:
+Create a workspace manifest named `conda.toml`. Its directory is the workspace root:
 
 ```toml
 [workspace]
@@ -101,11 +100,10 @@ the current conda environment.
 
 ## Why conda-workspaces?
 
-[pixi](https://pixi.sh) introduced an excellent project model for
-managing multi-environment workspaces and tasks, but it brings its own
-solver and installation machinery. conda-workspaces reuses that same
-manifest format while delegating all solving and installation to conda's
-existing infrastructure.
+[pixi](https://pixi.sh) combines multi-environment workspaces and tasks
+with its own solver and installation machinery. conda-workspaces reads
+pixi-compatible workspace manifests and uses conda to solve and install
+the environments.
 
 This means:
 
@@ -138,7 +136,7 @@ Set up your first workspace and tasks in under a minute.
 :link: tutorials/index
 :link-type: doc
 
-Your first project, migrating from conda / pixi / anaconda-project / conda-project, CI setup.
+Your first workspace, migrating from conda / pixi / anaconda-project / conda-project, CI setup.
 :::
 
 :::{grid-item-card} {octicon}`tools` How-to guides
@@ -209,7 +207,7 @@ and unknown keys.
 :caption: Tutorials
 
 quickstart
-tutorials/first-project
+tutorials/first-workspace
 tutorials/pypi-dependencies
 tutorials/multi-platform-locking
 tutorials/coming-from/index

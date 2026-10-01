@@ -1,13 +1,15 @@
 # Local environments and CI
 
-Workspace environments are project-local, standard conda prefixes. This
-keeps project environments separate from global conda environments while
-still allowing normal conda activation and execution workflows.
+Workspace environments are standard conda prefixes stored under the
+workspace root. They support normal conda activation and execution
+workflows.
 
-## Project-local environments
+<span id="project-local-environments"></span>
 
-All environments are installed under `.conda/envs/` in your project
-directory:
+## Workspace environments
+
+All environments are installed under `.conda/envs/` in the workspace
+root:
 
 ```text
 my-project/
@@ -31,11 +33,12 @@ or `conda activate .conda/envs/<name>` directly.
 conda hardlinks packages from its global cache into environment
 prefixes, which saves significant disk space. In CI and Docker the
 global cache is often on a different filesystem or volume from the
-project directory, causing conda to silently fall back to copying
+workspace directory, causing conda to silently fall back to copying
 packages. That roughly doubles disk usage per environment.
 
-Set the `CONDA_PKGS_DIRS` environment variable to a project-local path
-before installing so that the cache and environments share a filesystem:
+Set the `CONDA_PKGS_DIRS` environment variable to a path inside the
+workspace before installing so that the cache and environments share a
+filesystem:
 
 ```bash
 export CONDA_PKGS_DIRS="$PWD/.conda/pkgs"

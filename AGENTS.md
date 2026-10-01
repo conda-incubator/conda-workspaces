@@ -300,6 +300,14 @@
 
 ## Documentation
 
+- Use "workspace" for the environments and configuration managed by
+  conda-workspaces, and "workspace root" for the directory containing
+  its manifest. Use "project" for the user's application, library,
+  analysis, or other work. Tasks can exist without a workspace, so use
+  "manifest tasks" and "user tasks" when describing task sources.
+  Keep Python packaging's `[project]`, legacy pixi `[project]` syntax,
+  and external product names unchanged.
+
 - Docs use Sphinx with `conda-sphinx-theme`, `myst-parser`, and
   `sphinx-design`.
 

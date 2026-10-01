@@ -8,19 +8,18 @@
 [![License](https://img.shields.io/github/license/conda-incubator/conda-workspaces)](https://github.com/conda-incubator/conda-workspaces/blob/main/LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%E2%80%933.14-blue)](https://github.com/conda-incubator/conda-workspaces)
 
-Project-scoped multi-environment workspaces and task runner for conda,
+Multi-environment workspaces and task runner for conda,
 with pixi manifest compatibility.
 
-Define environments and tasks in your project manifest, compose
+Define environments and tasks in your workspace manifest, compose
 environments from reusable features, and let conda handle the solving and
-installation. Works with existing pixi manifests -- no new package manager
-required.
+installation. Existing pixi manifests are supported.
 
 ## Quick start
 
 ![quickstart demo](demos/quickstart.gif)
 
-Create a `conda.toml` in your project root:
+Create a workspace manifest named `conda.toml`. Its directory is the workspace root:
 
 ```toml
 [workspace]
@@ -60,9 +59,9 @@ $ conda workspace install --locked     # reproducible install from conda.lock
 
 ## Why?
 
-Conda handles environments and packages. [pixi](https://pixi.sh) introduced
-a great project model with multi-environment workspaces and a task runner,
-but it brings its own solver and environment management.
+Conda handles environments and packages. [pixi](https://pixi.sh) combines
+multi-environment workspaces and a task runner with its own solver and
+environment management.
 
 conda-workspaces reads pixi-compatible manifests and delegates solving and
 installation to conda's own infrastructure. You get workspace management
@@ -72,7 +71,7 @@ and task running inside the conda CLI without switching tools.
 
 - Reads `conda.toml`, `pixi.toml`, and `pyproject.toml` workspace manifests
 - Multi-environment support with composable features
-- Project-local environments in `.conda/envs/`
+- Workspace environments in `.conda/envs/`
 - Lockfile generation (`conda.lock`) using a rattler-lock-derived schema for reproducible installs
 - Workspace archives with optional receipt verification for portable handoff
 - [Runnable container images](https://conda-incubator.github.io/conda-workspaces/how-to/image/) from locked Linux environments and project files

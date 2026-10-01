@@ -205,12 +205,12 @@ def detect_and_parse_tasks(
 
     Returns ``(resolved_path, {task_name: Task}, user_only_names)`` where
     *user_only_names* is the set of task names that came from the user-level
-    file and were not overridden by the project.
+    file and were not overridden by manifest tasks.
 
-    Raises ``NoTaskFileError`` when neither a project nor a user task file
+    Raises ``NoTaskFileError`` when neither a manifest nor a user task file
     is found.
     """
-    project_path: Path | None = None
+    manifest_path: Path | None = None
     if file_path is not None:
         if reject_symlinks and file_path.is_symlink():
             raise WorkspaceParseError(
@@ -218,30 +218,30 @@ def detect_and_parse_tasks(
                 "symbolic links are not supported for this operation",
             )
         if reject_symlinks:
-            project_path = file_path.absolute()
-            validate_path_parent(project_path)
+            manifest_path = file_path.absolute()
+            validate_path_parent(manifest_path)
         else:
-            project_path = file_path.resolve()
+            manifest_path = file_path.resolve()
     else:
-        project_path = detect_task_file(
+        manifest_path = detect_task_file(
             start_dir,
             reject_symlinks=reject_symlinks,
         )
 
     user_path = user_task_file()
 
-    if project_path is None and user_path is None:
+    if manifest_path is None and user_path is None:
         raise NoTaskFileError(str(start_dir or Path.cwd()))
 
     user_tasks: dict[str, Task] = {}
     if user_path is not None:
         user_tasks = cached_user_task_parse(str(user_path))
 
-    if project_path is not None:
-        project_tasks = cached_task_parse(str(project_path))
-        merged = {**user_tasks, **project_tasks}
-        user_only = set(user_tasks) - set(project_tasks)
-        return project_path, merged, user_only
+    if manifest_path is not None:
+        manifest_tasks = cached_task_parse(str(manifest_path))
+        merged = {**user_tasks, **manifest_tasks}
+        user_only = set(user_tasks) - set(manifest_tasks)
+        return manifest_path, merged, user_only
 
     assert user_path is not None
     return user_path, dict(user_tasks), set(user_tasks)

@@ -2,7 +2,7 @@
 
 # Archives and portable workspaces
 
-Workspace archives package a project into a portable `.tar.zst`,
+Workspace archives package a workspace into a portable `.tar.zst`,
 `.tar.gz`, or `.tar.bz2` archive that includes the manifest and source
 files. An existing or newly generated lockfile can also be included,
 along with resolved conda package artifacts for offline deployment and

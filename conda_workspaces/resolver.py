@@ -42,7 +42,7 @@ class ResolvedEnvironment:
     """The fully resolved dependency set for a single environment.
 
     This is what the environment manager uses to install or update
-    a project-local conda environment.
+    a workspace-local conda environment.
     """
 
     _SYSTEM_REQUIREMENT_NAMES: ClassVar[dict[str, str]] = {

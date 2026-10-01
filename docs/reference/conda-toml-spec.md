@@ -26,11 +26,14 @@ format names and aliases](format-aliases.md).
 
 ## Scope
 
-`conda.toml` describes a *workspace*: a project root that may declare
-one or more conda environments composed from reusable *features*, plus
-a set of *tasks* that run inside those environments.  It is the
-conda-native sibling of `pixi.toml`. The core workspace, dependency,
-feature, environment, and task tables deliberately overlap with pixi,
+`conda.toml` describes a *workspace*: a set of conda environments,
+their shared configuration, and optional tasks. Environments are composed
+from reusable *features*. The *workspace root* is the directory containing
+the workspace manifest. A *project* is the code, data, or other work that
+uses those environments and tasks.
+
+`conda.toml` is the conda-native sibling of `pixi.toml`. The core workspace,
+dependency, feature, environment, and task tables deliberately overlap with pixi,
 while conda-workspaces also owns conda-specific extensions such as
 `default-environment` and `[workspace.archive]`. The reverse direction
 (pixi.toml → conda.toml) holds only when the `pixi.toml` keeps to the
