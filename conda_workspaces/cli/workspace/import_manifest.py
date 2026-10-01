@@ -209,7 +209,7 @@ def execute_import(args: argparse.Namespace, *, console: Console | None = None) 
         if imported.prefix is not None:
             warning_console.print(
                 "Warning: ignoring the environment.yml prefix because workspace "
-                "environments use project-local prefixes.",
+                "environments use workspace-local prefixes.",
                 style="yellow",
             )
 

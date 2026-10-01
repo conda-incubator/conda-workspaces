@@ -9,11 +9,11 @@ Step-by-step guides for common workflows.
 ::::{grid} 1
 :gutter: 3
 
-:::{grid-item-card} {octicon}`rocket` Your first project
+:::{grid-item-card} {octicon}`rocket` Your first workspace
 :link: first-project
 :link-type: doc
 
-Set up a Python project with workspaces, tasks, and multiple environments.
+Set up a workspace for a Python project, with tasks and multiple environments.
 :::
 
 :::{grid-item-card} {octicon}`arrow-switch` Coming from...

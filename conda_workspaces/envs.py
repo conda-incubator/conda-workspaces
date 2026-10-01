@@ -1,6 +1,6 @@
-"""Environment manager — create, update, and remove project-local envs.
+"""Environment manager — create, update, and remove workspace environments.
 
-Uses conda's Solver API to install packages into project-scoped
+Uses conda's Solver API to install packages into workspace-local
 environments under ``.conda/envs/<name>/``.  Each environment is
 a standard conda prefix that can be activated with ``conda activate``.
 """
@@ -500,7 +500,7 @@ def install_environment(
     prune: bool = False,
     update_names: set[str] | None = None,
 ) -> Path:
-    """Create or update a project-local environment.
+    """Create or update a workspace-local environment.
 
     Uses conda's Solver API directly instead of shelling out, which
     avoids the overhead of a subprocess and gives full control over
@@ -875,7 +875,7 @@ def remove_environment(
 
 
 def clean_all(ctx: WorkspaceContext) -> None:
-    """Remove all project-local environments."""
+    """Remove all workspace-local environments."""
     envs_identity = ctx.envs_dir_identity()
     if envs_identity is None:
         return

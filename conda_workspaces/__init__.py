@@ -1,4 +1,4 @@
-"""conda-workspaces: Project-scoped multi-environment workspace management."""
+"""conda-workspaces: Multi-environment conda workspace management."""
 
 from __future__ import annotations
 

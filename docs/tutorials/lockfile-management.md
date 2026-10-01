@@ -10,7 +10,7 @@ behavior in different scenarios.
 ## Prerequisites
 
 - conda (>= 26.3) with the conda-workspaces plugin installed
-- A project directory to work in
+- A directory in which to create the workspace
 
 ## Step 1: Install creates the lockfile
 

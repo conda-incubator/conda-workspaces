@@ -2,7 +2,7 @@
 
 If you manage environments with `conda create`, `conda activate`, and
 `environment.yml` files, this guide shows how conda-workspaces brings
-project-scoped environments, lockfiles, and tasks to the workflow you
+workspace environments, lockfiles, and tasks to the workflow you
 already know.
 
 ## What stays the same
@@ -17,7 +17,7 @@ over. Environments are real conda prefixes you can inspect with
 
 | Traditional conda | conda-workspaces |
 |---|---|
-| Environments live in a global location | Environments live in `.conda/envs/` inside your project |
+| Environments live in a global location | Environments live in `.conda/envs/` under the workspace root |
 | One environment per `environment.yml` | Multiple environments from a single manifest |
 | No lockfile (or separate conda-lock) | `conda.lock` generated automatically |
 | No built-in task runner | `conda task run` with dependencies, caching, templates |
@@ -268,11 +268,13 @@ Tasks support dependency graphs, input/output caching, Jinja2
 templates, and per-platform overrides — see [features](../../features.md)
 for details.
 
-## Project-local environments
+<span id="project-local-environments"></span>
+
+## Workspace environments
 
 Traditional conda stores environments globally (typically under
-`~/miniconda3/envs/`). conda-workspaces stores them inside your
-project:
+`~/miniconda3/envs/`). conda-workspaces stores them under the workspace
+root:
 
 ```
 my-project/
@@ -284,12 +286,12 @@ my-project/
     └── docs/
 ```
 
-This keeps your project self-contained. Different projects can have
+Each workspace has its own environments. Different workspaces can have
 different versions of the same packages without conflicting.
 
 ## Next steps
 
-- [Your first project](../first-project.md) — full walkthrough with
+- [Your first workspace](../first-project.md) — full walkthrough with
   environments and tasks
 - [Configuration](../../configuration.md) — all manifest fields and
   file formats

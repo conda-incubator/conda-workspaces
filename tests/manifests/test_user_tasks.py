@@ -28,7 +28,7 @@ greet = "echo hello"
 lint = "ruff check --global"
 """
 
-PROJECT_TASKS_TOML = """\
+MANIFEST_TASKS_TOML = """\
 [tasks]
 build = "make build"
 lint = "ruff check ."
@@ -104,33 +104,33 @@ def test_user_task_file_none_when_missing(fake_home: Path):
     [False, True],
     ids=["via-start-dir", "via-file-path"],
 )
-def test_merge_project_overrides_user(
+def test_merge_manifest_overrides_user(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     fake_home: Path,
     use_file_path: bool,
 ):
-    """Project tasks win on name collision; user-only tasks survive."""
+    """Manifest tasks win on name collision. User-only tasks survive."""
     user_file = fake_home / ".config" / "conda" / "tasks.toml"
     user_file.parent.mkdir(parents=True)
     user_file.write_text(USER_TASKS_TOML)
 
-    project_dir = tmp_path / "project"
-    project_dir.mkdir()
-    project_file = project_dir / "conda.toml"
-    project_file.write_text(PROJECT_TASKS_TOML)
-    monkeypatch.chdir(project_dir)
+    manifest_dir = tmp_path / "manifest"
+    manifest_dir.mkdir()
+    manifest_file = manifest_dir / "conda.toml"
+    manifest_file.write_text(MANIFEST_TASKS_TOML)
+    monkeypatch.chdir(manifest_dir)
 
     if use_file_path:
         path, tasks, user_only = detect_and_parse_tasks(
-            file_path=project_file,
+            file_path=manifest_file,
         )
-        assert path == project_file.resolve()
+        assert path == manifest_file.resolve()
     else:
         path, tasks, user_only = detect_and_parse_tasks(
-            start_dir=project_dir,
+            start_dir=manifest_dir,
         )
-        assert path == project_file
+        assert path == manifest_file
 
     assert "build" in tasks
     assert "greet" in tasks
@@ -139,22 +139,22 @@ def test_merge_project_overrides_user(
     assert user_only == {"greet"}
 
 
-def test_user_tasks_only_when_no_project(
+def test_user_tasks_only_when_no_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     fake_home: Path,
 ):
-    """When no project file exists, user tasks are the sole source."""
+    """When no manifest exists, user tasks are the sole source."""
     user_file = fake_home / ".config" / "conda" / "tasks.toml"
     user_file.parent.mkdir(parents=True)
     user_file.write_text(USER_TASKS_TOML)
 
-    project_dir = tmp_path / "empty_project"
-    project_dir.mkdir()
-    monkeypatch.chdir(project_dir)
+    invocation_dir = tmp_path / "empty"
+    invocation_dir.mkdir()
+    monkeypatch.chdir(invocation_dir)
 
     path, tasks, user_only = detect_and_parse_tasks(
-        start_dir=project_dir,
+        start_dir=invocation_dir,
     )
 
     assert path == user_file
@@ -167,9 +167,9 @@ def test_no_files_raises_error(
     monkeypatch: pytest.MonkeyPatch,
     fake_home: Path,
 ):
-    project_dir = tmp_path / "empty"
-    project_dir.mkdir()
-    monkeypatch.chdir(project_dir)
+    invocation_dir = tmp_path / "empty"
+    invocation_dir.mkdir()
+    monkeypatch.chdir(invocation_dir)
 
     with pytest.raises(NoTaskFileError):
-        detect_and_parse_tasks(start_dir=project_dir)
+        detect_and_parse_tasks(start_dir=invocation_dir)

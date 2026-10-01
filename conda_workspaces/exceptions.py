@@ -104,7 +104,7 @@ class EnvironmentNameInvalidError(CondaWorkspacesError):
         self.name = name
         detail = f" because {reason}" if reason else ""
         super().__init__(
-            f"Environment name '{name}' is not valid for a project-local prefix"
+            f"Environment name '{name}' is not valid for a workspace-local prefix"
             f"{detail}.",
             hints=[
                 (

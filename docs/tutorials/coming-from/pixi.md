@@ -22,7 +22,7 @@ how the two tools relate and how to use them side by side.
 ## Using both tools
 
 Since pixi stores environments in `.pixi/envs/` and conda-workspaces
-uses `.conda/envs/`, both tools can coexist on the same project:
+uses `.conda/envs/`, both tools can use the same workspace:
 
 ```bash
 # pixi users

@@ -30,7 +30,7 @@ Installing into a conda base environment also registers the
 
 ![task quickstart demo](../demos/task-quickstart.gif)
 
-Create a `conda.toml` in your project root:
+Create a task manifest named `conda.toml` in your working directory:
 
 ```toml
 [tasks]
@@ -271,9 +271,9 @@ conda workspace clean -e docs
 conda workspace install
 ```
 
-This creates project-local conda environments under `.conda/envs/` for
-each environment defined in your manifest. A `conda.lock` file is
-generated automatically after solving.
+This creates conda environments under `.conda/envs/` in the workspace
+root for each environment defined in your manifest. A `conda.lock` file
+is generated automatically after solving.
 
 You can select an exact manifest with the global `--file` / `-f`
 option:

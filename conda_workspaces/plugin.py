@@ -33,7 +33,7 @@ def conda_subcommands() -> Iterable[CondaSubcommand]:
 
     yield CondaSubcommand(
         name="workspace",
-        summary="Manage project-scoped multi-environment workspaces.",
+        summary="Manage multi-environment conda workspaces.",
         action=execute_workspace,
         configure_parser=configure_workspace_parser,
     )
@@ -45,7 +45,7 @@ def conda_subcommands() -> Iterable[CondaSubcommand]:
     )
     yield CondaSubcommand(
         name="task",
-        summary="Run, list, and manage project tasks.",
+        summary="Run, list, and manage tasks.",
         action=execute_task,
         configure_parser=configure_task_parser,
     )

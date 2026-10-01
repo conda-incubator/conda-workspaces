@@ -6,10 +6,10 @@ two ecosystems.
 
 ## Overview
 
-conda-workspaces is a conda plugin that brings project-scoped,
-multi-environment workspace management to conda.  It reads pixi-compatible
-manifest files (`pixi.toml`, `conda.toml`, `pyproject.toml`) and manages
-project-local conda environments under `.conda/envs/`.
+conda-workspaces is a conda plugin that brings multi-environment
+workspace management to conda. It reads pixi-compatible manifest files
+(`pixi.toml`, `conda.toml`, `pyproject.toml`) and manages conda
+environments under `.conda/envs/` in the workspace root.
 
 The plugin registers two subcommands: `conda workspace` for environment
 management (`init`, `install`, `lock`, `list`, `envs`, `info`, `add`,
@@ -20,12 +20,11 @@ shortcuts `cw` and `ct` are also available as aliases.
 ## Goals
 
 1. **Pixi-compatible manifest format** — read the same `pixi.toml` and
-   `[tool.pixi.*]` tables that pixi uses, so projects can share a single
-   manifest between both tools.
+   `[tool.pixi.*]` tables that pixi uses, so a workspace can use a single
+   manifest with both tools.
 
-2. **Project-scoped environments** — environments live in
-   `.conda/envs/<name>/` within the project, not in the global
-   `~/miniconda3/envs/`.
+2. **Workspace environments** — environments live in
+   `.conda/envs/<name>/` under the workspace root.
 
 3. **Multi-environment support** — define multiple named environments
    from composable features, matching pixi's feature/environment model.
@@ -42,7 +41,7 @@ shortcuts `cw` and `ct` are also available as aliases.
 
 | Pixi concept | conda-workspaces equivalent | Notes |
 |---|---|---|
-| `[workspace]` table | Parsed directly | `[project]` legacy also supported |
+| `[workspace]` table | Parsed directly | Legacy `[project]` also supported in `pixi.toml` |
 | `channels` | Mapped to conda channels | Identical semantics |
 | `platforms` | Stored and validated | Used for platform filtering |
 | `[dependencies]` | `CondaDependency` model | Spec syntax is identical |
@@ -87,10 +86,9 @@ project/
 └── ...
 ```
 
-**Rationale**: `.conda/envs/` mirrors conda's existing conventions while
-keeping environments project-scoped.  Pixi uses `.pixi/envs/` — we
-intentionally use a different path to avoid conflicts when both tools
-are used on the same project.
+**Rationale**: `.conda/envs/` keeps environments under the workspace
+root. Pixi uses `.pixi/envs/`, so both tools can use the same workspace
+without overwriting each other's environments.
 
 ### 2. Feature Composition Model
 
@@ -371,15 +369,15 @@ reporting and downstream tools can see them.
 
 ### 7. Hardlink Optimization
 
-Project-local environments live under `.conda/envs/`, which may be on
-a different filesystem from conda's global package cache (`pkgs_dirs`).
+Workspace environments live under `.conda/envs/`, which may be on a
+different filesystem from conda's global package cache (`pkgs_dirs`).
 When they are, conda silently falls back from hardlinks to copies,
 significantly increasing disk usage — especially in CI and Docker
 where the global cache is often on a separate volume.
 
 conda already provides the `CONDA_PKGS_DIRS` environment variable to
 redirect the package cache.  In CI/Docker, set it to a path on the
-same filesystem as the project directory to ensure hardlinks work:
+same filesystem as the workspace directory to ensure hardlinks work:
 
 ```bash
 export CONDA_PKGS_DIRS="$PWD/.conda/pkgs"

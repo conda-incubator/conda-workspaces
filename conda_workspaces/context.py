@@ -99,7 +99,7 @@ class WorkspaceContext:
 
     @property
     def envs_dir(self) -> Path:
-        """Directory where project-local environments are stored."""
+        """Directory where workspace-local environments are stored."""
         if "envs_dir" not in self._cache:
             root = self.root
             envs_dir = root / self.config.envs_dir

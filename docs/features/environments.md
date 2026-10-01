@@ -3,14 +3,14 @@
 Workspace environments are named conda prefixes composed from one or
 more features. Features group dependencies, channels, PyPI dependencies,
 activation settings, platform constraints, and system requirements so a
-project can define several related environments in one manifest.
+workspace can define several related environments in one manifest.
 
 ## Environments
 
 ![multi-env demo](../../demos/multi-env.gif)
 
-Each environment is installed under `.conda/envs/<name>/` in your
-project.
+By default, each environment is installed under `.conda/envs/<name>/`
+in the workspace root.
 
 ```toml
 [environments]

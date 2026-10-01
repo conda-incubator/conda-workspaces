@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conda-workspaces"
-description = "Project-scoped multi-environment workspace management for conda, with pixi compatibility"
+description = "Multi-environment workspace management for conda, with pixi compatibility"
 requires-python = ">=3.10"
 readme = "README.md"
 license = "BSD-3-Clause"

@@ -22,8 +22,8 @@ spec.
 See the [Motivation](motivation.md) page for a detailed comparison. The
 key differences:
 
-1. conda-workspaces uses pixi's TOML manifest format rather than
-   inventing a new one, so projects can share manifests between tools.
+1. conda-workspaces reads pixi workspace manifests, so both tools can
+   use the supported workspace and task definitions in the same file.
 2. It integrates as a conda plugin rather than a standalone CLI.
 3. It includes `conda workspace import` commands to convert from both
    `conda-project.yml` and `anaconda-project.yml`.

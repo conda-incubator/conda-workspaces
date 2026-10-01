@@ -123,7 +123,7 @@ def generate_workspace_parser() -> argparse.ArgumentParser:
     """Build and return the workspace parser — used by sphinxarg.ext for docs."""
     parser = argparse.ArgumentParser(
         prog="conda workspace",
-        description="Manage project-scoped multi-environment workspaces.",
+        description="Manage multi-environment conda workspaces.",
         add_help=False,
     )
     configure_workspace_parser(parser)
@@ -1217,7 +1217,7 @@ def generate_task_parser() -> argparse.ArgumentParser:
     """Build and return the task parser — used by sphinxarg.ext for docs."""
     parser = argparse.ArgumentParser(
         prog="conda task",
-        description="Run, list, and manage project tasks.",
+        description="Run, list, and manage tasks.",
         add_help=False,
     )
     configure_task_parser(parser)

@@ -1,7 +1,7 @@
 # PyPI dependencies
 
-This guide walks through adding PyPI packages to a conda-workspaces
-project, including versioned dependencies, editable local packages,
+This guide walks through adding PyPI packages to a workspace,
+including versioned dependencies, editable local packages,
 and what to install for everything to work.
 
 ## Manifest compatibility with pixi
@@ -188,4 +188,4 @@ If the solver cannot find a PyPI package, check that:
 - {ref}`Features: PyPI dependencies <pypi-dependencies>` for
   the full reference on supported fields
 - [Configuration](../configuration.md) for all manifest options
-- [Your first project](first-project.md) for a complete walkthrough
+- [Your first workspace](first-project.md) for a complete walkthrough

@@ -281,7 +281,7 @@ depends-on = [{task = "prepare", environment = "test"}]
     assert not removal_workspace.with_name("conda.lock").exists()
 
 
-def test_remove_all_rejects_reference_from_separate_project_task_manifest(
+def test_remove_all_rejects_reference_from_separate_task_manifest(
     removal_workspace: Path,
 ) -> None:
     task_manifest = removal_workspace.with_name("conda.toml")

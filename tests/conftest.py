@@ -401,7 +401,7 @@ def tmp_workspace_env(tmp_env: TmpEnvFixture) -> Iterator[CreateWorkspaceEnv]:
 
 @pytest.fixture
 def tmp_project(tmp_path: Path) -> Path:
-    """A temporary directory acting as a project root."""
+    """A temporary directory for manifest parsing tests."""
     return tmp_path
 
 

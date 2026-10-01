@@ -1,8 +1,7 @@
 # Tasks
 
 Tasks are named shell commands that can live alongside workspace
-environment definitions or in a tasks-only manifest. They make common
-project commands discoverable, composable, and repeatable through
+environment definitions or in a tasks-only manifest. Run them with
 `conda task run`.
 
 ## Task commands
@@ -223,7 +222,7 @@ target alias can still use `default-environment` as its invocation fallback.
 ## User-level tasks
 
 Define tasks in `~/.config/conda/tasks.toml` to make them available in
-every project without repeating definitions:
+any directory without repeating definitions:
 
 ```toml
 [tasks]
@@ -232,8 +231,8 @@ clean = { cmd = "git clean -fdx -e .conda", description = "Remove untracked file
 check = { cmd = "ruff check --fix .", description = "Lint and auto-fix" }
 ```
 
-User tasks act as defaults. If a project defines a task with the same
-name, the project version takes precedence. `conda task list` marks
+User tasks act as defaults. If a local manifest defines a task with the
+same name, the manifest task takes precedence. `conda task list` marks
 user-sourced tasks with `(user)` so you can tell where each task comes
 from:
 
