@@ -291,7 +291,7 @@ different versions of the same packages without conflicting.
 
 ## Next steps
 
-- [Your first workspace](../first-project.md) — full walkthrough with
+- [Your first workspace](../first-workspace.md) — full walkthrough with
   environments and tasks
 - [Configuration](../../configuration.md) — all manifest fields and
   file formats

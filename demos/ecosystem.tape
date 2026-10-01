@@ -24,7 +24,7 @@ Enter
 Wait /\$/
 Show
 
-Type "# One manifest: workspaces + tasks"
+Type "# One manifest: workspace environments + tasks"
 Enter
 Sleep 500ms
 

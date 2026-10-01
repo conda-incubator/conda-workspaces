@@ -8,7 +8,7 @@ environments from the same `conda.lock`.
 
 - conda (>= 26.3) with conda-workspaces >= 0.8.0 installed
 - An existing workspace with a `conda.toml` (see [Your first
-  workspace](first-project.md) if you need one)
+  workspace](first-workspace.md) if you need one)
 
 ## Declare your platforms
 

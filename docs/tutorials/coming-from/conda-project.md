@@ -236,6 +236,6 @@ Beyond what conda-project offered, conda-workspaces adds:
 
 ## Next steps
 
-- [Your first workspace](../first-project.md) — full walkthrough
+- [Your first workspace](../first-workspace.md) — full walkthrough
 - [Coming from pixi](pixi.md) — if you also use pixi
 - [Features](../../features.md) — environments, tasks, caching, templates

@@ -188,4 +188,4 @@ If the solver cannot find a PyPI package, check that:
 - {ref}`Features: PyPI dependencies <pypi-dependencies>` for
   the full reference on supported fields
 - [Configuration](../configuration.md) for all manifest options
-- [Your first workspace](first-project.md) for a complete walkthrough
+- [Your first workspace](first-workspace.md) for a complete walkthrough

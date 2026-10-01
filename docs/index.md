@@ -207,7 +207,7 @@ and unknown keys.
 :caption: Tutorials
 
 quickstart
-tutorials/first-project
+tutorials/first-workspace
 tutorials/pypi-dependencies
 tutorials/multi-platform-locking
 tutorials/coming-from/index
