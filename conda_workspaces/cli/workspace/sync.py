@@ -10,9 +10,6 @@ environment for the canonical ``conda.lock``. The same logic backs
 from __future__ import annotations
 
 import os
-import tempfile
-from contextlib import nullcontext
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from conda.common.io import captured
@@ -149,24 +146,12 @@ def sync_environments(
                 )
         else:
             validate_lockfile_output(ctx, lockfile_path(ctx))
-            solve_prefix_context = (
-                tempfile.TemporaryDirectory(prefix="conda-workspaces-force-")
-                if force_reinstall
-                else nullcontext(None)
+            rendered_lockfile = render_lockfile(
+                ctx,
+                resolved_all,
+                config=config,
+                dry_run=dry_run,
             )
-            with solve_prefix_context as solve_root:
-                solve_prefixes = (
-                    {name: Path(solve_root) / name for name in names}
-                    if solve_root is not None
-                    else None
-                )
-                rendered_lockfile = render_lockfile(
-                    ctx,
-                    resolved_all,
-                    config=config,
-                    solve_prefixes=solve_prefixes,
-                    dry_run=dry_run,
-                )
 
         assert rendered_lockfile is not None
         rendered_lockfile_data = load_lockfile_data(rendered_lockfile.encode("utf-8"))

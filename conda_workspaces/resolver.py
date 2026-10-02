@@ -277,9 +277,9 @@ class ResolvedEnvironment:
         :func:`conda_workspaces.envs.install_environment`: PyPI deps
         are translated and merged, system requirements are added as
         virtual package constraints, and channel priority is honoured.
-        The default solve prunes prefix history so the manifest alone
-        defines lockfile contents. When *update_names* is supplied, the
-        existing prefix is treated as the locked baseline and only those
+        Full solves require an empty *prefix* so installed packages and
+        history cannot affect the result. When *update_names* is supplied,
+        *prefix* must contain that platform's locked baseline and only those
         direct roots are made eligible for an update.
 
         The solver is targeted at *platform* by (a) constructing it
@@ -297,11 +297,6 @@ class ResolvedEnvironment:
         env vars are left untouched, and ``[system-requirements]``
         versions are lifted into the override so ``__glibc >=2.28``
         in the manifest and the baseline record agree.
-
-        *prefix* is the environment prefix path the solver should
-        target — workspace-owned, so callers that run under a
-        :class:`~conda_workspaces.context.WorkspaceContext` pass
-        ``ctx.env_prefix(resolved.name)``.
 
         Raises :class:`~conda_workspaces.exceptions.SolveError` when
         the solver cannot satisfy the specs or no backend is

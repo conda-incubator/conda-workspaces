@@ -4,6 +4,14 @@ All notable changes to conda-workspaces will be documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Fixed
+
+- Prevent installed packages and environment history from changing full lock
+  solutions. Each target now solves in an empty temporary prefix, so native
+  packages cannot appear in another platform's lock entries. (#188)
+
 ## 0.11.0 — 2026-10-01
 
 ### Changed
