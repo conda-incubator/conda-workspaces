@@ -1615,32 +1615,66 @@ def test_generate_lockfile_dry_run_isolates_package_cache(
     assert not solver_caches[0][0].exists()
 
 
-def test_generate_lockfile_uses_solve_prefix_override(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "failure", [None, "raise", "skip"], ids=["success", "failure", "skip-unsolvable"]
+)
+def test_generate_lockfile_ignores_installed_prefix(
     workspace_ctx_factory: Callable[..., WorkspaceContext],
     resolved_envs_factory,
+    selective_lock_data: dict,
     monkeypatch: pytest.MonkeyPatch,
+    snapshot_tree: SnapshotTree,
+    failure: str | None,
 ) -> None:
-    ctx = workspace_ctx_factory(platform="linux-64", env_names=["default"])
-    resolved_envs = resolved_envs_factory(default=["linux-64"])
-    preview_prefix = tmp_path / ".default.dry-run"
+    ctx = workspace_ctx_factory(platform="osx-arm64")
+    resolved_envs = resolved_envs_factory(default=["linux-64", "osx-arm64"])
+    installed_prefix = ctx.env_prefix("default")
+    CondaLockLoader.seed_prefix_from_data(
+        selective_lock_data,
+        "default",
+        "osx-arm64",
+        installed_prefix,
+        [MatchSpec("python=3.10"), MatchSpec("certifi")],
+    )
+    before = snapshot_tree(installed_prefix)
+    output = lockfile_path(ctx)
+    output.write_bytes(b"previous lock")
     prefixes: list[Path] = []
+    histories: list[dict[str, MatchSpec]] = []
+    channel = "https://conda.anaconda.org/conda-forge"
 
     def fake_solve(self, platform, *, prefix):
-        prefixes.append(Path(prefix))
-        return []
+        prefix = Path(prefix)
+        prefixes.append(prefix)
+        histories.append(History(str(prefix)).get_requested_specs_map())
+        installed = list(PrefixData(str(prefix)).iter_records())
+        if failure is not None and platform == "linux-64":
+            raise SolveError(self.name, "solve failed", platform=platform)
+        return installed or [
+            _FakePkg("python", f"{channel}/{platform}/python-3.12.0-0.conda")
+        ]
 
     monkeypatch.setattr(ResolvedEnvironment, "solve_for_platform", fake_solve)
 
-    generate_lockfile(
-        ctx,
-        resolved_envs,
-        dry_run=True,
-        solve_prefixes={"default": preview_prefix},
-    )
+    if failure == "raise":
+        with pytest.raises(SolveError, match="solve failed"):
+            generate_lockfile(ctx, resolved_envs)
+        assert output.read_bytes() == b"previous lock"
+    else:
+        generate_lockfile(ctx, resolved_envs, skip_unsolvable=failure == "skip")
+        result = load_lockfile_data(output.read_bytes())
+        targets = ["osx-arm64"] if failure == "skip" else ["linux-64", "osx-arm64"]
+        assert result["environments"]["default"]["packages"] == {
+            platform: [{"conda": f"{channel}/{platform}/python-3.12.0-0.conda"}]
+            for platform in targets
+        }
 
-    assert prefixes == [preview_prefix]
-    assert not preview_prefix.exists()
+    assert snapshot_tree(installed_prefix) == before
+    assert histories == [{}] * len(prefixes)
+    assert len(prefixes) == (1 if failure == "raise" else 2)
+    assert len(set(prefixes)) == len(prefixes)
+    assert all(not prefix.exists() for prefix in prefixes)
+    assert not any(prefix in prefixes for prefix, _ in PrefixData._cache_)
 
 
 def test_generate_lockfile_rejects_manifest_output_before_solving(

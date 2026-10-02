@@ -560,10 +560,6 @@ def test_force_dry_run_validates_rendered_lock_without_removal(
     resolved_envs, lock_kwargs = lock_calls[0]
     assert set(resolved_envs) == {"default", "test"}
     assert lock_kwargs["dry_run"] is True
-    solve_prefixes = lock_kwargs["solve_prefixes"]
-    assert set(solve_prefixes) == {"test"}
-    assert solve_prefixes["test"].name == "test"
-    assert not solve_prefixes["test"].exists()
 
 
 @pytest.mark.parametrize(

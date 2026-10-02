@@ -1448,18 +1448,18 @@ def render_lockfile(
     progress: Callable[[str, str], None] | None = None,
     skip_unsolvable: bool = False,
     on_skip: Callable[[str, str, SolveError], None] | None = None,
-    solve_prefixes: Mapping[str, str | Path] | None = None,
     baseline_data: dict[str, Any] | None = None,
     update_targets: Mapping[tuple[str, str], set[str]] | None = None,
     dry_run: bool = False,
 ) -> str:
     """Solve workspace environments and serialize ``conda.lock`` content.
 
-    Each environment in *resolved_envs* is solved for every platform it
-    declares, intersected with *platforms* when given. When *config* is
-    supplied, each ``(environment, platform)`` pair is resolved from the
-    manifest just before solving so target-specific dependency tables only
-    apply to the platform they declare. Serialisation is delegated to
+    Each environment in *resolved_envs* is solved in an empty temporary
+    prefix for every declared platform, intersected with *platforms* when
+    given. Selective updates seed the prefix from that target's locked
+    packages. When *config* is supplied, each ``(environment, platform)``
+    pair is resolved from the manifest just before solving, so each target
+    uses its own dependency tables. Serialisation is delegated to
     :func:`.export.multiplatform_export` so this function and ``conda
     export --format=conda-workspaces-lock-v1`` produce byte-identical
     output. Solver chatter is silenced inside
@@ -1529,20 +1529,22 @@ def render_lockfile(
                     redact_channel_url(ch) for ch in target_resolved.channels
                 )
                 try:
-                    if update_targets is not None:
-                        solved_targets.add((name, target))
-                        update_names = update_targets[(name, target)]
-                        requested_specs = list(
-                            target_resolved.conda_dependencies.values()
-                        )
-                        from .envs import _build_pypi_specs
+                    with tempfile.TemporaryDirectory(
+                        prefix="conda-workspaces-lock-"
+                    ) as temp_dir:
+                        prefix = Path(temp_dir)
+                        try:
+                            if update_targets is not None:
+                                solved_targets.add((name, target))
+                                update_names = update_targets[(name, target)]
+                                requested_specs = list(
+                                    target_resolved.conda_dependencies.values()
+                                )
+                                from .envs import _build_pypi_specs
 
-                        requested_specs.extend(_build_pypi_specs(target_resolved))
-                        with tempfile.TemporaryDirectory(
-                            prefix="conda-workspaces-lock-update-"
-                        ) as temp_dir:
-                            prefix = Path(temp_dir)
-                            try:
+                                requested_specs.extend(
+                                    _build_pypi_specs(target_resolved)
+                                )
                                 try:
                                     records = CondaLockLoader.seed_prefix_from_data(
                                         baseline,
@@ -1571,20 +1573,13 @@ def render_lockfile(
                                     prefix=prefix,
                                     update_names=update_names,
                                 )
-                            finally:
-                                delete_prefix_from_linked_data(prefix)
-                    else:
-                        solve_prefix = (
-                            solve_prefixes.get(
-                                name, ctx.env_prefix(target_resolved.name)
-                            )
-                            if solve_prefixes is not None
-                            else ctx.env_prefix(target_resolved.name)
-                        )
-                        records = target_resolved.solve_for_platform(
-                            package_platform,
-                            prefix=solve_prefix,
-                        )
+                            else:
+                                records = target_resolved.solve_for_platform(
+                                    package_platform,
+                                    prefix=prefix,
+                                )
+                        finally:
+                            delete_prefix_from_linked_data(prefix)
                 except SolveError as exc:
                     if update_targets is not None or not skip_unsolvable:
                         raise
@@ -1645,7 +1640,6 @@ def generate_lockfile(
     on_skip: Callable[[str, str, SolveError], None] | None = None,
     output_path: Path | None = None,
     dry_run: bool = False,
-    solve_prefixes: Mapping[str, str | Path] | None = None,
     publish_lockfile: Callable[[str], None] | None = None,
 ) -> Path:
     """Solve workspace environments and write their ``conda.lock``.
@@ -1669,7 +1663,6 @@ def generate_lockfile(
         progress=progress,
         skip_unsolvable=skip_unsolvable,
         on_skip=on_skip,
-        solve_prefixes=solve_prefixes,
         dry_run=dry_run,
     )
     if dry_run:
