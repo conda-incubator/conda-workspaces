@@ -4,13 +4,21 @@ All notable changes to conda-workspaces will be documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## Unreleased
+## 0.11.1 — 2026-10-02
+
+### Changed
+
+- Removed the undocumented `solve_prefixes` keyword from `render_lockfile()`
+  and `generate_lockfile()`. Full lock generation now chooses its own temporary
+  prefixes. (#189)
 
 ### Fixed
 
-- Prevent installed packages and environment history from changing full lock
-  solutions. Each target now solves in an empty temporary prefix, so native
-  packages cannot appear in another platform's lock entries. (#188)
+- Fixed full lock generation reusing installed native packages for other
+  platforms. Each target now solves in an empty temporary prefix, independent
+  of installed packages and environment history. Run `conda workspace lock`
+  after upgrading to regenerate affected locks. Regeneration may update
+  package versions. (#188, #189)
 
 ## 0.11.0 — 2026-10-01
 
