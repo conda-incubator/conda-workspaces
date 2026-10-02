@@ -1,7 +1,6 @@
 Source demos/_settings.tape
 
 Output demos/pixi-compat.gif
-Output demos/pixi-compat.mp4
 
 Hide
 Type `eval "$(pixi shell-hook -s bash -e dev)"`
@@ -24,7 +23,7 @@ Enter
 Wait /\$/
 Show
 
-Type "# Got a pixi.toml? It works with conda-workspaces"
+Type "# conda-workspaces reads pixi.toml"
 Enter
 Sleep 500ms
 
@@ -33,7 +32,7 @@ Enter
 Wait /\$/
 Sleep 3s
 
-Type "# Install with conda — same manifest, familiar tooling"
+Type "# Install its environments with conda"
 Enter
 Sleep 500ms
 

@@ -1,7 +1,6 @@
 Source demos/_settings.tape
 
 Output demos/multi-env.gif
-Output demos/multi-env.mp4
 
 Hide
 Type `eval "$(pixi shell-hook -s bash -e dev)"`

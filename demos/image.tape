@@ -1,7 +1,6 @@
 Source demos/_settings.tape
 
 Output demos/image.gif
-Output demos/image.mp4
 
 Require docker
 Require pixi

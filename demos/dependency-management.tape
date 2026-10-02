@@ -1,7 +1,6 @@
 Source demos/_settings.tape
 
 Output demos/dependency-management.gif
-Output demos/dependency-management.mp4
 
 Hide
 Type `eval "$(pixi shell-hook -s bash -e dev)"`

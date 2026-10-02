@@ -1,7 +1,6 @@
 Source demos/_settings.tape
 
 Output demos/archives-receipt.gif
-Output demos/archives-receipt.mp4
 
 Hide
 Type `eval "$(pixi shell-hook -s bash -e dev)"`

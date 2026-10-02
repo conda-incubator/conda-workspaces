@@ -1,7 +1,6 @@
 Source demos/_settings.tape
 
 Output demos/shell.gif
-Output demos/shell.mp4
 
 Hide
 Type `eval "$(pixi shell-hook -s bash -e dev)"`
@@ -27,7 +26,7 @@ Enter
 Wait /\$/
 Show
 
-Type "# Spawn an interactive shell in a workspace env"
+Type "# Open an interactive shell in a workspace environment"
 Enter
 Sleep 500ms
 

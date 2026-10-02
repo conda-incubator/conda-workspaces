@@ -10,7 +10,7 @@ Animated terminal demos recorded with [VHS](https://github.com/charmbracelet/vhs
 |---|---|
 | `quickstart` | Init a workspace, add deps, declare an environment, list it, run a command |
 | `workspace-quickstart` | Single-command bootstrap with `conda workspace quickstart` |
-| `dependency-management` | Target feature, environment, and platform dependencies, then update safely |
+| `dependency-management` | Target feature, environment, and platform dependencies, then update a selected package |
 | `lockfile` | Install, lock, clean, reinstall from lockfile |
 | `export` | Export environment.yml, conda.toml, pyproject.toml, and conda-lock-v1 formats |
 | `ci-split` | Split locking across a CI matrix and merge fragments with `--merge` |
@@ -67,7 +67,6 @@ pixi run demos quickstart
 ## File structure
 
 - `_settings.tape`: shared VHS theme, font, and dimensions (sourced by all tapes)
-- `fixtures/`: TOML manifests used by demos that start from an existing workspace
+- `fixtures/`: manifest files copied into demos
 - `*.tape`: individual demo scripts
 - `*.gif`: generated animated GIFs (used in docs and README)
-- `*.mp4`: generated MP4 videos (higher quality)

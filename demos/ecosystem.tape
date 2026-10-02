@@ -1,7 +1,6 @@
 Source demos/_settings.tape
 
 Output demos/ecosystem.gif
-Output demos/ecosystem.mp4
 
 Hide
 Type `eval "$(pixi shell-hook -s bash -e dev)"`
@@ -24,7 +23,7 @@ Enter
 Wait /\$/
 Show
 
-Type "# One manifest: workspace environments + tasks"
+Type "# Define workspace environments and tasks in one manifest"
 Enter
 Sleep 500ms
 
@@ -54,8 +53,4 @@ Sleep 2s
 Type@80ms "conda task run -e default test"
 Enter
 Wait /\$/
-Sleep 3s
-
-Type "# One manifest. Workspace envs + task automation. All conda."
-Enter
 Sleep 3s

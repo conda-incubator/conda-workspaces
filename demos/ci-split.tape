@@ -1,7 +1,6 @@
 Source demos/_settings.tape
 
 Output demos/ci-split.gif
-Output demos/ci-split.mp4
 
 Hide
 Type `eval "$(pixi shell-hook -s bash -e dev)"`
@@ -43,7 +42,7 @@ Enter
 Wait /\$/
 Sleep 2s
 
-Type "# The coordinator stitches fragments into a single conda.lock — no solver"
+Type "# The coordinator merges fragments into one conda.lock without solving"
 Enter
 Sleep 500ms
 

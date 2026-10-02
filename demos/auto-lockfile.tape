@@ -1,7 +1,6 @@
 Source demos/_settings.tape
 
 Output demos/auto-lockfile.gif
-Output demos/auto-lockfile.mp4
 
 Hide
 Type `eval "$(pixi shell-hook -s bash -e dev)"`

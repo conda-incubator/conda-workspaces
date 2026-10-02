@@ -1,7 +1,6 @@
 Source demos/_settings.tape
 
 Output demos/quickstart.gif
-Output demos/quickstart.mp4
 
 Hide
 Type `eval "$(pixi shell-hook -s bash -e dev)"`

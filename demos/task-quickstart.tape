@@ -1,7 +1,6 @@
 Source demos/_settings.tape
 
 Output demos/task-quickstart.gif
-Output demos/task-quickstart.mp4
 
 Hide
 Type `eval "$(pixi shell-hook -s bash -e dev)"`
@@ -40,7 +39,7 @@ Enter
 Wait /\$/
 Show
 
-Type "# A simple conda.toml with tasks"
+Type "# Define tasks in conda.toml"
 Enter
 Sleep 500ms
 
@@ -58,7 +57,7 @@ Enter
 Wait /\$/
 Sleep 2s
 
-Type "# Run a task"
+Type "# Run tasks in your conda environment"
 Enter
 Sleep 500ms
 
@@ -70,8 +69,4 @@ Sleep 2s
 Type@80ms "conda task run lint"
 Enter
 Wait /\$/
-Sleep 2s
-
-Type "# That's it. Tasks run in your conda env."
-Enter
 Sleep 2s

@@ -1,7 +1,6 @@
 Source demos/_settings.tape
 
 Output demos/depends-on.gif
-Output demos/depends-on.mp4
 
 Hide
 Type `eval "$(pixi shell-hook -s bash -e dev)"`

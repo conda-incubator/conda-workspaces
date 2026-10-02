@@ -1,7 +1,6 @@
 Source demos/_settings.tape
 
 Output demos/task-pixi-compat.gif
-Output demos/task-pixi-compat.mp4
 
 Hide
 Type `eval "$(pixi shell-hook -s bash -e dev)"`
@@ -47,7 +46,7 @@ Enter
 Wait /\$/
 Show
 
-Type "# Got a pixi.toml with tasks?"
+Type "# Define tasks in pixi.toml"
 Enter
 Sleep 500ms
 
@@ -56,7 +55,7 @@ Enter
 Wait /\$/
 Sleep 3s
 
-Type "# conda task reads it natively"
+Type "# List and run them with conda task"
 Enter
 Sleep 500ms
 
@@ -70,7 +69,7 @@ Enter
 Wait /\$/
 Sleep 2s
 
-Type "# Export to conda-native format"
+Type "# Export the tasks to conda.toml"
 Enter
 Sleep 500ms
 
