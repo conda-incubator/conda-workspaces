@@ -1,7 +1,6 @@
 Source demos/_settings.tape
 
 Output demos/caching.gif
-Output demos/caching.mp4
 
 Hide
 Type `eval "$(pixi shell-hook -s bash -e dev)"`
@@ -46,7 +45,7 @@ Enter
 Wait /\$/
 Sleep 3s
 
-Type "# First run — executes the task"
+Type "# The first run executes the task"
 Enter
 Sleep 500ms
 
@@ -55,7 +54,7 @@ Enter
 Wait /\$/
 Sleep 2s
 
-Type "# Second run — cached, instant skip"
+Type "# The second run skips the unchanged task"
 Enter
 Sleep 500ms
 

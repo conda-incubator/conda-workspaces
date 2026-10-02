@@ -1,7 +1,6 @@
 Source demos/_settings.tape
 
 Output demos/lockfile.gif
-Output demos/lockfile.mp4
 
 Hide
 Type `eval "$(pixi shell-hook -s bash -e dev)"`
@@ -42,7 +41,7 @@ Enter
 Wait /\$/
 Sleep 3s
 
-Type "# All platforms live inside a single conda.lock file"
+Type "# A single conda.lock contains packages for all declared platforms"
 Enter
 Sleep 500ms
 
@@ -51,7 +50,7 @@ Enter
 Wait /\$/
 Sleep 3s
 
-Type "# Clean and reinstall from lock — no solving needed"
+Type "# Clean and reinstall from the lockfile without solving again"
 Enter
 Sleep 500ms
 

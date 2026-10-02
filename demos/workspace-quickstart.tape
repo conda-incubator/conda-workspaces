@@ -1,7 +1,6 @@
 Source demos/_settings.tape
 
 Output demos/workspace-quickstart.gif
-Output demos/workspace-quickstart.mp4
 
 Hide
 Type `eval "$(pixi shell-hook -s bash -e dev)"`
@@ -18,7 +17,7 @@ Enter
 Wait /\$/
 Show
 
-Type "# One command: init + add + install, without opening a shell"
+Type "# Initialize a workspace, add dependencies, and install without opening a shell"
 Enter
 Sleep 500ms
 
@@ -27,7 +26,7 @@ Enter
 Wait /\$/
 Sleep 3s
 
-Type "# The manifest quickstart wrote"
+Type "# Inspect the manifest written by quickstart"
 Enter
 Sleep 500ms
 
@@ -36,7 +35,7 @@ Enter
 Wait /\$/
 Sleep 3s
 
-Type "# --json gives a scriptable summary, skipping the shell"
+Type "# --json returns a summary for scripts without opening a shell"
 Enter
 Sleep 500ms
 

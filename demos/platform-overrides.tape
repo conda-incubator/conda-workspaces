@@ -1,7 +1,6 @@
 Source demos/_settings.tape
 
 Output demos/platform-overrides.gif
-Output demos/platform-overrides.mp4
 
 Hide
 Type `eval "$(pixi shell-hook -s bash -e dev)"`

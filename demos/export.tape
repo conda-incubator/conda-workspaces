@@ -1,7 +1,6 @@
 Source demos/_settings.tape
 
 Output demos/export.gif
-Output demos/export.mp4
 
 Hide
 Type `eval "$(pixi shell-hook -s bash -e dev)"`
@@ -24,7 +23,7 @@ Enter
 Wait /\$/
 Show
 
-Type "# conda workspace export plugs into conda's exporter plugin system"
+Type "# conda workspace export uses conda's exporter plugins"
 Enter
 Sleep 500ms
 
@@ -38,7 +37,7 @@ Enter
 Wait /\$/
 Sleep 3s
 
-Type "# Cross-format: emit conda.toml for the workspace across two platforms"
+Type "# Export the workspace to conda.toml for both platforms"
 Enter
 Sleep 500ms
 
@@ -47,7 +46,7 @@ Enter
 Wait /\$/
 Sleep 4s
 
-Type "# Same content, nested under [tool.conda] — drops straight into pyproject.toml"
+Type "# Export the same content under [tool.conda] for pyproject.toml"
 Enter
 Sleep 500ms
 
@@ -56,7 +55,7 @@ Enter
 Wait /\$/
 Sleep 4s
 
-Type "# Lock once, then re-emit in any format without re-solving"
+Type "# Export conda-lock-v1 from the lockfile without solving again"
 Enter
 Sleep 500ms
 

@@ -1,7 +1,6 @@
 Source demos/_settings.tape
 
 Output demos/archives.gif
-Output demos/archives.mp4
 
 Hide
 Type `eval "$(pixi shell-hook -s bash -e dev)"`
@@ -68,7 +67,7 @@ Enter
 Wait /\$/
 Sleep 2s
 
-Type "# Install from the lockfile -- no solving needed"
+Type "# Install from the lockfile without solving again"
 Enter
 Sleep 500ms
 

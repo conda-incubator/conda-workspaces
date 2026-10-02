@@ -1,7 +1,6 @@
 Source demos/_settings.tape
 
 Output demos/multi-platform.gif
-Output demos/multi-platform.mp4
 
 Hide
 Type `eval "$(pixi shell-hook -s bash -e dev)"`
@@ -24,7 +23,7 @@ Enter
 Wait /\$/
 Show
 
-Type "# Workspace targets linux-64 + osx-arm64, with win-64 added by a feature"
+Type "# The workspace targets linux-64 and osx-arm64. A feature adds win-64."
 Enter
 Sleep 500ms
 
@@ -33,7 +32,7 @@ Enter
 Wait /\$/
 Sleep 3s
 
-Type "# 'info' surfaces the reachable platform set across all envs"
+Type "# 'info' lists the platforms supported across all environments"
 Enter
 Sleep 500ms
 
@@ -42,7 +41,7 @@ Enter
 Wait /\$/
 Sleep 3s
 
-Type "# Default lock covers every (env, platform) pair"
+Type "# Lock every environment for each of its platforms"
 Enter
 Sleep 500ms
 
