@@ -7,9 +7,9 @@ already know.
 
 ## What stays the same
 
-conda-workspaces is a conda plugin — it uses conda's configured solver
-backend, channels, and package infrastructure under the hood. Your
-`.condarc` settings, channel configuration, and package cache all carry
+conda-workspaces is a conda plugin that uses conda's configured solver
+backend, channels, and package infrastructure. Your `.condarc` settings,
+channel configuration, and package cache all carry
 over. Environments are real conda prefixes you can inspect with
 `conda list`.
 
@@ -22,7 +22,7 @@ over. Environments are real conda prefixes you can inspect with
 | No lockfile (or separate conda-lock) | `conda.lock` generated automatically |
 | No built-in task runner | `conda task run` with dependencies, caching, templates |
 | `conda activate myenv` | `conda workspace shell -e myenv` |
-| Share `environment.yml` and hope it resolves | Share `conda.lock` for exact reproducibility |
+| Share `environment.yml` for others to solve | Share `conda.lock` for exact reproducibility |
 
 ## Command mapping
 
@@ -171,7 +171,7 @@ conda workspace install --locked       # install from lockfile (validates freshn
 conda workspace install --frozen       # install from lockfile (skip freshness check)
 ```
 
-`--locked` ensures the lockfile matches your manifest — if you've
+`--locked` checks that the lockfile matches your manifest. If you've
 changed dependencies since the lockfile was generated, the install
 fails and tells you to re-lock. `--frozen` skips that check and
 installs exactly what's in the lockfile, which is useful in CI where
@@ -190,10 +190,8 @@ conda env create --file conda.toml -n myenv    # solve and create from manifest
 conda env create --file conda.lock -n myenv    # install exact lockfile contents
 ```
 
-This means you can share a `conda.toml` or `conda.lock` with someone
-who has conda-workspaces installed and they can create an environment
-with the familiar `conda env create` command — no new workflow to
-learn.
+Anyone with conda-workspaces installed can use a shared `conda.toml`
+or `conda.lock` to create an environment with `conda env create`.
 
 The `conda.lock` loader used by `conda env create` rejects external package
 references because that interface cannot carry their verified artifacts into
@@ -202,8 +200,7 @@ conda's installer. Declare external dependencies in `conda.toml`, regenerate
 
 The companion [conda-lockfiles](https://github.com/conda/conda-lockfiles)
 plugin (installed as a dependency) adds the same `conda env create`
-support for `pixi.lock` and `conda-lock.yml` files. Together the two
-plugins cover all common lockfile formats:
+support for `pixi.lock` and `conda-lock.yml` files:
 
 | Plugin | Files | Format |
 |---|---|---|
@@ -241,8 +238,8 @@ docs = { features = ["docs"] }
 ```
 
 One `conda workspace install` creates all three environments, each
-with the right subset of dependencies. Features compose — the `test`
-environment includes everything in `default` plus pytest.
+with its declared dependencies. The `test` environment includes
+everything in `default` plus pytest.
 
 ## Adding tasks
 
@@ -265,7 +262,7 @@ conda task list                 # shows all available tasks
 ```
 
 Tasks support dependency graphs, input/output caching, Jinja2
-templates, and per-platform overrides — see [features](../../features.md)
+templates, and per-platform overrides. See [features](../../features.md)
 for details.
 
 <span id="project-local-environments"></span>
@@ -291,9 +288,9 @@ different versions of the same packages without conflicting.
 
 ## Next steps
 
-- [Your first workspace](../first-workspace.md) — full walkthrough with
+- [Your first workspace](../first-workspace.md) for a full walkthrough with
   environments and tasks
-- [Configuration](../../configuration.md) — all manifest fields and
+- [Configuration](../../configuration.md) for all manifest fields and
   file formats
-- [CI pipeline](../ci-pipeline.md) — using conda-workspaces in GitHub
+- [CI pipeline](../ci-pipeline.md) for using conda-workspaces in GitHub
   Actions

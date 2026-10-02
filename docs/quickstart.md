@@ -47,8 +47,8 @@ conda task run test    # runs build first, then test
 conda task list        # see all tasks
 ```
 
-Tasks run in your current conda environment. No workspace definition is
-required — you can start with tasks alone and add workspace features later.
+Tasks run in your current conda environment. You can start with tasks
+alone and add a workspace definition later.
 
 ## Your first workspace
 
@@ -56,12 +56,12 @@ required — you can start with tasks alone and add workspace features later.
 
 :::{versionadded} 0.4.0
 `conda workspace quickstart` composes `init`, `add`, `install`, and
-`shell` into a single bootstrap command; pass `--no-shell` for CI or
+`shell` into a single bootstrap command. Pass `--no-shell` for CI or
 `--json` for a scriptable summary.
 :::
 
-The fastest path from "empty directory" to "installed environment with
-an activated shell" is `conda workspace quickstart`:
+To create a workspace, install its environment, and open an activated
+shell, run `conda workspace quickstart`:
 
 ```bash
 conda workspace quickstart python=3.14 numpy
@@ -73,18 +73,18 @@ conda workspace quickstart --no-shell -e dev "python=3.12" pytest
 conda workspace quickstart --json --name demo "python=3.12"
 ```
 
-`quickstart` composes the other commands for you: it runs `init`
+`quickstart` runs `init`
 (unless you pass `--copy` / `--clone` to copy an existing workspace's
 manifest), adds any specs passed on the command line, installs the
 selected environment, and drops into a shell. It forwards the flags
-you already know from `init` (`--format`, `--name`, `-c/--channel`,
+from `init` (`--format`, `--name`, `-c/--channel`,
 `--override-channels`, `--platform`), `install` (`-e/--environment`,
 `--force-reinstall`, `--locked`, `--frozen`), and conda's shared flags
 (`--dry-run`, `--json`, `--yes`). Use `--no-shell` for CI or scripted
 runs. `--json` implies `--no-shell`, silences the status banners the
 nested `init` / `add` / `install` handlers would otherwise print, and
 emits a single structured `{workspace, environment, manifest,
-specs_added, shell_spawned}` payload on stdout — safe to pipe into
+specs_added, shell_spawned}` payload on stdout that you can pipe into
 `jq`.
 
 Positional specs are added as private dependencies of the selected
@@ -116,7 +116,7 @@ through Conda outside the repository.
 
 ![quickstart demo](../demos/quickstart.gif)
 
-If you prefer to wire the commands together yourself, start from
+To set up a workspace one step at a time, start with
 `conda workspace init`, add dependencies, then declare a named
 environment. Each `add` installs into the affected environment and
 refreshes `conda.lock`:
@@ -325,7 +325,7 @@ conda workspace lock
 ## Reproducible installs
 
 Use `--locked` to install from the lockfile. This validates that the
-lockfile is still fresh relative to the manifest — if the manifest has
+lockfile is still fresh relative to the manifest. If the manifest has
 changed, the install fails:
 
 ```bash
@@ -378,8 +378,8 @@ conda workspace add numpy
 ```
 
 `add` and `remove` update the manifest, install into the affected
-prefixes, and refresh a complete `conda.lock` in one go — the same
-shape as `pixi add` / `pixi remove`.
+prefixes, and refresh a complete `conda.lock` in one step, matching
+`pixi add` / `pixi remove`.
 
 For `conda workspace add`, a bare package name preserves an existing
 declaration. An explicit MatchSpec replaces the whole declaration, and
@@ -476,7 +476,7 @@ conda workspace add numpy --dry-run               # solve only, touch nothing on
 
 Running `add` or `remove` from inside `conda workspace shell` works,
 but an already-activated shell will not pick up new entries under
-`$PREFIX/etc/conda/activate.d/` — the command prints a hint asking
+`$PREFIX/etc/conda/activate.d/`. The command prints a hint asking
 you to exit and re-run `conda workspace shell` when that happens.
 
 ## List packages and environments
@@ -505,4 +505,4 @@ conda workspace info --json --packages  # include installed package records
 
 - Read about [features](features.md) to learn how environments and tasks work
 - See the [configuration](configuration.md) reference for all manifest options
-- Check out the [tutorials](tutorials/index.md) for more in-depth guides
+- Follow the [tutorials](tutorials/index.md) for step-by-step guides

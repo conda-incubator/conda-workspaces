@@ -33,9 +33,9 @@ definitions, and installation. Running `pixi install` uses rattler
 | Run commands in env | `pixi run CMD` | `conda workspace run -- CMD` or `conda workspace shell -e ENV -- CMD` |
 | Activate | `pixi shell` | `conda workspace shell` / `conda activate .conda/envs/<name>` |
 
-This approach has advantages:
+With conda handling environment management:
 
-- Uses conda's configured solver backend and mature package cache
+- Workspaces use conda's configured solver backend and package cache
 - Environments are standard conda prefixes (compatible with all conda tooling)
 - No additional resolver or package installation system to maintain
 - Works with existing conda channels, mirrors, and authentication
@@ -44,12 +44,9 @@ This approach has advantages:
 
 ## Tasks without workspaces
 
-Tasks can be used independently of workspaces. A `conda.toml` with only
-a `[tasks]` table is perfectly valid — no `[workspace]` or
-`[dependencies]` required. Tasks run in whatever conda environment is
-currently active.
-
-This makes it easy to start with tasks and add workspace features later:
+A `conda.toml` with only a `[tasks]` table is valid, without
+`[workspace]` or `[dependencies]`. Tasks run in the active conda
+environment, so you can start with tasks and add workspace features later:
 
 ```toml
 # A valid conda.toml — tasks only, no workspace
@@ -68,8 +65,7 @@ can use both tools when its manifest uses fields supported by both:
 - pixi users run `pixi install` and `pixi run` as usual
 - conda users run `conda workspace install` and `conda task run` using conda's solver
 
-This coexistence is possible because each tool stores environments in a
-different directory (`.pixi/envs/` vs `.conda/envs/`), so they don't
+Each tool stores environments in a different directory (`.pixi/envs/` vs `.conda/envs/`), so they don't
 interfere with each other.
 
 See [DESIGN.md](https://github.com/conda-incubator/conda-workspaces/blob/main/DESIGN.md)
@@ -120,14 +116,10 @@ conda-workspaces differs from all of the above in two ways:
 
 ### Task runner prior art
 
-The task runner in conda-workspaces draws from a broad set of prior
-work.
-
-[pixi](https://pixi.sh) was the first tool to ship a full-featured task
-runner tightly integrated with conda package management: task
-dependencies, platform overrides, input/output caching, template
-variables, and task arguments. Its task system is the direct inspiration
-for the task features in conda-workspaces. The key difference is that
+[pixi](https://pixi.sh) was the first tool to integrate task dependencies,
+platform overrides, input/output caching, template variables, and task
+arguments with conda package management. Its task system is the direct inspiration
+for the task features in conda-workspaces. For template rendering and execution,
 pixi uses MiniJinja (Rust) and `deno_task_shell` for cross-platform
 execution, while conda-workspaces uses Jinja2 (Python) and the native
 platform shell.
@@ -136,7 +128,7 @@ General-purpose Python task runners like [tox](https://tox.wiki),
 [nox](https://nox.thea.codes), [invoke](https://www.pyinvoke.org), and
 [hatch](https://hatch.pypa.io) each provide ways to define and run
 project tasks. tox and nox focus on test-matrix automation with
-virtualenvs; invoke is a general-purpose Make replacement; hatch offers
+virtualenvs. invoke is a general-purpose Make replacement. hatch offers
 scripts and environment matrices for Python projects. None of them
 integrate directly with conda environments or conda's plugin system.
 

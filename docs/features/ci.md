@@ -31,7 +31,7 @@ or `conda activate .conda/envs/<name>` directly.
 ## Optimizing disk usage with hardlinks
 
 conda hardlinks packages from its global cache into environment
-prefixes, which saves significant disk space. In CI and Docker the
+prefixes to save disk space. In CI and Docker the
 global cache is often on a different filesystem or volume from the
 workspace directory, causing conda to silently fall back to copying
 packages. That roughly doubles disk usage per environment.

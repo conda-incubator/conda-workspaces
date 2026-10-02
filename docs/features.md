@@ -1,9 +1,7 @@
 # Features
 
-conda-workspaces adds workspaces and task execution to conda
-without replacing conda's solver, package cache, or environment prefixes.
-This overview explains the main feature areas and points to the detailed
-explanation pages for each one.
+conda-workspaces adds workspaces and task execution to conda,
+using conda's solver, package cache, and environment prefixes.
 
 ## Choose a feature area
 

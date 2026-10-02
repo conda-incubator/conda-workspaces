@@ -2,8 +2,8 @@
 
 ![archive demo](../../demos/archives.gif)
 
-This tutorial walks through packaging a workspace into a portable
-archive and restoring it on another machine or in CI.
+Package a workspace into a portable archive, then restore it on another
+machine or in CI.
 
 ## Prerequisites
 
@@ -55,8 +55,7 @@ conda workspace archive -o my-project.tar.gz
 
 ## Exclude files
 
-Some files should not be included in archives. Configure permanent
-exclusions in your manifest:
+Configure permanent file exclusions in your manifest:
 
 ```toml
 [workspace.archive]
@@ -75,7 +74,7 @@ Both sources are combined. Built-in exclusions (`.git`, `__pycache__`,
 
 ## Extract an archive
 
-On the receiving end, extract the archive with:
+Extract the archive on the receiving machine:
 
 ```bash
 conda workspace unarchive my-project.tar.zst
@@ -111,8 +110,8 @@ from the lockfile in a single command:
 conda workspace unarchive my-project.tar.zst --target /path/to/destination --install
 ```
 
-This is equivalent to extracting, changing into the directory, and
-running `conda workspace install --locked`, but without the extra steps.
+This extracts the archive, then runs the equivalent of
+`conda workspace install --locked` in the extracted workspace.
 
 ## Install an environment to an explicit prefix
 
@@ -156,7 +155,7 @@ conda workspace archive --lock
 ```
 
 This is equivalent to running `conda workspace lock` followed by
-`conda workspace archive`, but in a single command.
+`conda workspace archive` in a single command.
 
 ## Preview archive operations
 
@@ -277,9 +276,9 @@ CONDA_OFFLINE=true conda workspace unarchive my-project-offline.tar.zst \
   --install
 ```
 
-The same empty-cache offline flow can be split into two commands. Run
+To install offline with an empty cache in two commands, run
 receipt-verified `unarchive` first to publish the package archives and their
-conda cache records, then run `conda workspace install --locked` from the
+conda cache records. Then run `conda workspace install --locked` from the
 extracted workspace.
 
 Omit `--install` when you only want to extract the files. Without a verified
@@ -317,11 +316,10 @@ reuse existing extracted cache contents.
 
 ### Trust model for bundled archives
 
-A bundled archive is *self-consistent*: the package hashes match the
-lockfile that ships inside the archive. However, the lockfile itself is
-not externally signed. If the archive came from an untrusted source, the
-lockfile inside it could have been tampered with to match altered
-packages.
+The package hashes in a bundled archive match the lockfile included in
+the archive. The lockfile itself is not externally signed. An untrusted
+source could alter both the packages and the lockfile so their hashes
+still match.
 
 To guard against this:
 
@@ -349,6 +347,6 @@ lockfile inventory.
 - {ref}`Archive configuration <archive-configuration>` for all archive settings
 - {ref}`Archives <archives>` for a feature overview
 - [Archive receipt reference](../reference/archive-receipts.md) for the
-  receipt JSON format and verification contract
+  receipt JSON format and verification rules
 - [CLI reference](../reference/cli.md) for the full `archive` and
   `unarchive` command-line options

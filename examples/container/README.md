@@ -17,7 +17,7 @@ docker run --rm --network none workspace-container-example
 docker run --rm --network none workspace-container-example python -m workspace_container_example "another argument"
 ```
 
-The application runs directly from the copied source file. It does not need a Python package build or an unreleased conda-pypi version.
+The application runs directly from the copied source file without a Python package build or an unreleased conda-pypi version.
 
 Use `--platform linux-aarch64` for Linux ARM64. The committed `conda.lock` covers both architectures. Cross-architecture builds require a builder that supports the target architecture. The image command creates a temporary Buildx builder unless `--builder` selects an existing one.
 

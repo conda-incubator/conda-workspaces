@@ -66,8 +66,8 @@ pixi run demos quickstart
 
 ## File structure
 
-- `_settings.tape` — shared VHS theme, font, and dimensions (sourced by all tapes)
-- `fixtures/` — TOML manifests used by demos that start from an existing workspace
-- `*.tape` — individual demo scripts
-- `*.gif` — generated animated GIFs (used in docs and README)
-- `*.mp4` — generated MP4 videos (higher quality)
+- `_settings.tape`: shared VHS theme, font, and dimensions (sourced by all tapes)
+- `fixtures/`: TOML manifests used by demos that start from an existing workspace
+- `*.tape`: individual demo scripts
+- `*.gif`: generated animated GIFs (used in docs and README)
+- `*.mp4`: generated MP4 videos (higher quality)

@@ -1,7 +1,7 @@
 # Use workspace archives from Python
 
 Use `conda_workspaces.archive.WorkspaceArchive` when another Python tool
-needs archive behavior without shelling out to `conda workspace archive`
+needs archive operations without shelling out to `conda workspace archive`
 or importing CLI handlers.
 
 ## Create an archive
@@ -147,9 +147,8 @@ workflows, not an automatic prefix-rewrite feature.
 
 ## Customize installation
 
-Pass `install_handler=` when an integration wants conda-workspaces to
-extract and verify an archive, but wants to control environment
-installation:
+Pass `install_handler=` to let conda-workspaces extract and verify an
+archive while your integration controls environment installation:
 
 ```python
 from pathlib import Path
@@ -180,4 +179,4 @@ when staging under `dest`.
 
 ## API reference
 
-See [](../reference/api/archive.md) for the formal API reference.
+See [](../reference/api/archive.md) for the API reference.

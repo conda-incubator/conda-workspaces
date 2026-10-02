@@ -2,10 +2,9 @@
 
 ![auto-lockfile demo](../../demos/auto-lockfile.gif)
 
-This tutorial walks through the automatic lockfile lifecycle: how
 `conda workspace install` keeps `conda.lock` current without extra
-commands, how to check lockfile status, and how to control the
-behavior in different scenarios.
+commands. Follow this tutorial to check lockfile status and choose
+when to update it.
 
 ## Prerequisites
 
@@ -29,8 +28,7 @@ conda workspace install
 ```
 
 Because no `conda.lock` exists, install runs the solver, creates
-the environment, and writes a fresh lockfile. You now have both
-the environment and a lockfile in one step.
+the environment, and writes a fresh lockfile in one step.
 
 ## Step 2: Check the lockfile status
 
@@ -40,7 +38,7 @@ Use `conda workspace info` to see whether the lockfile is current:
 conda workspace info
 ```
 
-The **Lockfile** row shows one of three states:
+The Lockfile row shows one of three states:
 
 | Status | Color | Meaning |
 |---|---|---|
@@ -118,10 +116,10 @@ conda workspace install
 ```
 
 This time the lockfile already satisfies the manifest, so install
-uses the locked package URLs directly. No solver runs, no network
-metadata fetch. Packages absent from the lock are removed, and only
-resolved manifest roots remain direct requests in prefix history. This
-is the fast path for day-to-day use.
+uses the locked package URLs directly, without running the solver or
+fetching network metadata. Packages absent from the lock are removed,
+and only resolved manifest roots remain direct requests in prefix history.
+This speeds up day-to-day installs.
 
 ## Step 5: Use `--locked` for strict mode
 
@@ -155,7 +153,9 @@ conda workspace lock
 conda workspace install --locked
 ```
 
-## Step 6: Use `--frozen` to skip all checks
+(step-6-use-frozen-to-skip-all-checks)=
+
+## Step 6: Use `--frozen` to skip freshness checks
 
 The `--frozen` flag installs whatever is in the lockfile without
 checking whether it satisfies the manifest. Use this when you know
@@ -196,17 +196,17 @@ caches remain unchanged.
 ## What triggers a re-solve?
 
 The staleness check compares the manifest against the lockfile
-contents, not file timestamps. Specifically it checks:
+contents, not file timestamps. It checks that:
 
-1. **Lockfile version** matches the expected schema version
-2. **Environments** declared in the manifest all exist in the lockfile
-3. **Channels** for each environment match between manifest and lockfile
-4. **Platforms** declared in the manifest are covered in the lockfile
-5. **Dependencies** for each environment on the current platform are
+1. The lockfile version matches the expected schema version
+2. All environments declared in the manifest exist in the lockfile
+3. Channels for each environment match between manifest and lockfile
+4. Platforms declared in the manifest are covered in the lockfile
+5. Dependencies for each environment on the current platform are
    present in the lockfile with a version that satisfies the manifest
    spec
 
-Changes that do **not** trigger a re-solve:
+These changes do not trigger a re-solve:
 
 - Editing comments or whitespace in the manifest
 - Reordering dependencies (same set, different order)

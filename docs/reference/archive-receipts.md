@@ -1,10 +1,10 @@
 # Archive receipt reference
 
-This page describes the external receipt format written by
+Archive receipts are external sidecar JSON documents written by
 `conda workspace archive --receipt` and verified by
 `conda workspace unarchive --receipt`.
 
-Archive receipts are sidecar JSON documents. They use the
+They use the
 [in-toto Statement v1][in-toto-statement] envelope and a
 conda-workspaces predicate schema that binds a workspace archive to the
 manifest, lockfile, and package inventory it was created from.
@@ -105,8 +105,6 @@ the archive command fails before writing the archive or receipt.
 
 ## Predicate
 
-The predicate contains three sections.
-
 | Section | Required fields | Description |
 |---|---|---|
 | `archive` | `formatVersion` | Receipt format version. `options` records archive options such as `bundle`, `lock`, `include`, `exclude`, and `compressionLevel` when available. |
@@ -115,7 +113,7 @@ The predicate contains three sections.
 
 Environment records may include `prefix`. Prefixes inside the workspace
 are stored as archive-relative POSIX paths such as
-`.conda/envs/default`; external runtime prefixes remain absolute, using
+`.conda/envs/default`. External runtime prefixes remain absolute, using
 POSIX or Windows syntax as appropriate.
 
 Package records are normalized from `conda.lock`. Records may include:

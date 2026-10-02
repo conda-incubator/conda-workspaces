@@ -64,8 +64,8 @@ multi-environment workspaces and a task runner with its own solver and
 environment management.
 
 conda-workspaces reads pixi-compatible manifests and delegates solving and
-installation to conda's own infrastructure. You get workspace management
-and task running inside the conda CLI without switching tools.
+installation to conda's own infrastructure. This adds workspace management
+and task running to the conda CLI.
 
 ## What it does
 

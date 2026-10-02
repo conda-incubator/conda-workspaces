@@ -1,8 +1,7 @@
 # Multi-platform locking
 
-This tutorial walks through locking a workspace for multiple platforms
-so that teammates on Linux, macOS, and Windows all get reproducible
-environments from the same `conda.lock`.
+Lock a workspace for multiple platforms so teammates on Linux, macOS,
+and Windows can reproduce their environments from the same `conda.lock`.
 
 ## Prerequisites
 
@@ -40,8 +39,9 @@ solve for.
 
 ## Add a platform to an existing workspace
 
-There is no dedicated CLI command to add a platform after the fact.
-Edit the `platforms` array in your `conda.toml` directly:
+To add a platform after creating the workspace, edit the `platforms`
+array in your `conda.toml` directly. There is no dedicated CLI command
+for this:
 
 ```toml
 [workspace]
@@ -79,7 +79,7 @@ single `conda.lock`. On a macOS ARM machine it will solve for
 `linux-64` and `win-64` in addition to `osx-arm64`, using conda's
 virtual package overrides to target the correct subdir.
 
-The output looks something like:
+Example output:
 
 ```
 Locking default for linux-64...

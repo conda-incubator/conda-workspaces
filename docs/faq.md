@@ -4,7 +4,7 @@
 
 conda-workspaces tracks the pixi manifest format and maintains
 compatibility. The format is also being standardized through a Conda
-Enhancement Proposal (CEP); see the [CEP tracker
+Enhancement Proposal (CEP). See the [CEP tracker
 issue](https://github.com/conda-incubator/conda-workspaces/issues/52)
 for progress.
 
@@ -20,11 +20,11 @@ spec.
 ## How does conda-workspaces differ from conda-project and anaconda-project?
 
 See the [Motivation](motivation.md) page for a detailed comparison. The
-key differences:
+main differences:
 
 1. conda-workspaces reads pixi workspace manifests, so both tools can
    use the supported workspace and task definitions in the same file.
-2. It integrates as a conda plugin rather than a standalone CLI.
+2. It integrates with conda through its plugin system.
 3. It includes `conda workspace import` commands to convert from both
    `conda-project.yml` and `anaconda-project.yml`.
 
@@ -39,4 +39,4 @@ in place.
 The JSON schema is stricter: it rejects unknown keys so `conda.toml` has
 a stable validation target for the fields conda-workspaces standardizes
 today. Put pixi-only metadata in `pixi.toml` or `[tool.pixi.*]` when you
-need pixi's full manifest surface.
+need all of pixi's manifest fields.

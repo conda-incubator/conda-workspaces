@@ -22,7 +22,7 @@ format names and aliases](format-aliases.md).
 | Schema URL | `https://schemas.conda.org/conda-toml-1.schema.json` |
 | Canonical plugin name | `conda-workspaces` (see [format-aliases.md](format-aliases.md)) |
 | Reference implementation | [`conda_workspaces.manifests.toml.CondaTomlParser`](https://github.com/conda-incubator/conda-workspaces/blob/main/conda_workspaces/manifests/toml.py) |
-| Standardisation track | Pre-CEP — see the [CEP tracker issue](https://github.com/conda-incubator/conda-workspaces/issues) |
+| Standardisation track | Pre-CEP. See the [CEP tracker issue](https://github.com/conda-incubator/conda-workspaces/issues) |
 
 ## Scope
 
@@ -33,12 +33,12 @@ the workspace manifest. A *project* is the code, data, or other work that
 uses those environments and tasks.
 
 `conda.toml` is the conda-native sibling of `pixi.toml`. The core workspace,
-dependency, feature, environment, and task tables deliberately overlap with pixi,
-while conda-workspaces also owns conda-specific extensions such as
-`default-environment` and `[workspace.archive]`. The reverse direction
-(pixi.toml → conda.toml) holds only when the `pixi.toml` keeps to the
+dependency, feature, environment, and task tables overlap with pixi.
+conda-workspaces adds conda-specific extensions such as
+`default-environment` and `[workspace.archive]`. Conversion from
+pixi.toml to conda.toml requires the `pixi.toml` to use only the
 fields described here. See *Pixi compatibility ladder* below for the
-precise asymmetry.
+compatibility details.
 
 Out of scope: package build recipes (use `recipe.yaml`), package
 distribution metadata (`pyproject.toml` `[project]`), and lockfile
@@ -50,20 +50,19 @@ below).
 A conda-workspaces tool MUST detect a workspace using one of these two
 forms, in order:
 
-1. A file named **`conda.toml`** at the workspace root that contains a
+1. A file named `conda.toml` at the workspace root that contains a
    top-level `[workspace]` table.
-2. A file named **`pyproject.toml`** at the workspace root that
+2. A file named `pyproject.toml` at the workspace root that
    contains a `[tool.conda.workspace]` table.
 
 A `conda.toml` without a `[workspace]` table is permitted: it is
-treated as a *tasks-only* manifest (see `[tasks]` below) and does not
+treated as a tasks-only manifest (see `[tasks]` below) and does not
 constitute a workspace on its own.
 
 For compatibility, conda-workspaces also reads `pixi.toml` (top-level
 `[workspace]` / `[project]`) and `pyproject.toml`
-`[tool.pixi.workspace]`.  That compatibility surface is not part of
-this specification — it is documented in
-[Configuration](../configuration.md).
+`[tool.pixi.workspace]`. This compatibility support is documented in
+[Configuration](../configuration.md) and is not part of this specification.
 
 ### Search order
 
@@ -81,7 +80,7 @@ wins.  When `pyproject.toml` contains both `[tool.conda]` and
 
 ## Top-level tables
 
-All tables are optional unless marked **required**.  Field types follow
+All tables are optional unless marked required. Field types follow
 TOML conventions: *string*, *integer*, *boolean*, *array*, *table*,
 *inline-table*.
 
@@ -94,8 +93,8 @@ Workspace metadata.
 | `name` | string | no | Workspace name.  Defaults to the workspace directory name. |
 | `version` | string | no | Workspace version. |
 | `description` | string | no | Short prose description. |
-| `channels` | array of *channel* | **yes** | Conda channels in priority order. |
-| `platforms` | array of *platform* | **yes** | Platforms the workspace targets.  Used to drive multi-platform solves. |
+| `channels` | array of *channel* | yes | Conda channels in priority order. |
+| `platforms` | array of *platform* | yes | Platforms the workspace targets. Used for multi-platform solves. |
 | `channel-priority` | string | no | One of `"strict"`, `"flexible"`, `"disabled"`.  Maps to conda's solver setting. |
 | `envs-dir` | string | no | Where per-env prefixes live, relative to and contained by the workspace root. Symbolic-link directories are rejected. Default: `.conda/envs`. |
 | `dependencies` | conda deps | no | Root-level dependency pool used by `{ workspace = true }` entries in dependency tables. |
@@ -176,8 +175,8 @@ cmake = { workspace = true, build = "h*" }
 The inherited entry uses the root spec as a base. Non-version fields such
 as `build`, `channel`, `subdir`, `md5`, `sha256`, `url`, `file-name`,
 `license`, `license-family`, `features`, and `track-features` may be
-set on the consuming dependency to layer on top. `version` is owned by
-the workspace entry. Setting both `workspace = true` and `version` is an
+set on the consuming dependency to add or override root fields. `version`
+comes from the workspace entry. Setting both `workspace = true` and `version` is an
 error. `workspace = false` is also rejected.
 
 ### `[dependencies]`
@@ -458,12 +457,12 @@ in that request.
 ## Lockfile relationship
 
 `conda workspace lock` and `conda workspace install` produce and
-consume **`conda.lock`** at the workspace root.  The lockfile schema is
+consume `conda.lock` at the workspace root. The lockfile schema is
 derived from [rattler-lock v6][rattler-lock] (the same schema
 `pixi.lock` uses) with one on-disk difference: `conda.lock` writes
 `version: 1` instead of `version: 6` so tools can identify the file as
-conda-workspaces-owned at a glance.  The remainder of the document —
-`environments`, `packages`, channels, platform package lists — is
+owned by conda-workspaces. The rest of the document,
+including `environments`, `packages`, channels, and platform package lists, is
 structure-compatible with rattler-lock v6.
 
 See [Plugin format names and aliases](format-aliases.md) for the
@@ -478,15 +477,15 @@ lockfile against the manifest to determine whether a re-solve is
 needed. The check is purely structural (no file timestamps) and
 runs in this order:
 
-1. **Schema version** -- the lockfile `version` field must match the
+1. The lockfile `version` field must match the
    expected version (`1`).
-2. **Environments** -- every environment declared in the manifest must
+2. Every environment declared in the manifest must
    have a corresponding entry in the lockfile.
-3. **Channels** -- the channel list for each environment in the lockfile
+3. The channel list for each environment in the lockfile
    must match the manifest (order-sensitive, URLs normalized).
-4. **Platforms** -- every platform declared in the manifest must be
+4. Every platform declared in the manifest must be
    present in each lockfile environment's `packages` section.
-5. **Dependencies** -- for each dependency in the manifest (on the
+5. For each dependency in the manifest (on the
    current platform), a locked package must exist whose version
    satisfies the manifest's version spec.
 
@@ -532,16 +531,15 @@ directory, `conda.toml` wins.  When a `pyproject.toml` contains both
 
 ## Pixi compatibility ladder
 
-`conda.toml` and `pixi.toml` share a deliberately overlapping table
-layout, but they are not byte-for-byte interchangeable.  The
-relationship is:
+`conda.toml` and `pixi.toml` share some tables but are not
+byte-for-byte interchangeable.
 
 | Direction | Holds? | Why |
 |---|---|---|
-| Every valid `conda.toml` is a valid `pixi.toml` (modulo filename). | **No** | The core workspace/dependency/task fields overlap intentionally, but conda-workspaces extensions such as `default-environment` and `[workspace.archive]` are not pixi schema guarantees. |
-| Every valid `pixi.toml` is a valid `conda.toml`. | **No** | Pixi's `[workspace]` accepts additional fields (`authors`, `license`, `readme`, `homepage`, `repository`, `documentation`, `requires-pixi`, `preview`, `build-variants`, `conda-pypi-map`, …) that this v1 schema does not list. The schema is a strict validation target and rejects unknown keys (`additionalProperties: false`). |
-| pixi reads our `default-environment` task field. | **No** | `default-environment` (in `[tasks]` and `[feature.*.tasks]`) is a conda-workspaces extension. Pixi may ignore it. |
-| conda-workspaces reads `pixi.toml`. | **Yes** | conda-workspaces ships a separate compatibility reader for `pixi.toml` and `[tool.pixi.*]`. That reader is *out of scope* for this spec and is documented in [Configuration](../configuration.md). |
+| Every valid `conda.toml` is a valid `pixi.toml` (modulo filename). | No | The core workspace/dependency/task fields overlap intentionally, but conda-workspaces extensions such as `default-environment` and `[workspace.archive]` are not pixi schema guarantees. |
+| Every valid `pixi.toml` is a valid `conda.toml`. | No | Pixi's `[workspace]` accepts additional fields (`authors`, `license`, `readme`, `homepage`, `repository`, `documentation`, `requires-pixi`, `preview`, `build-variants`, `conda-pypi-map`, …) that this v1 schema does not list. The schema is a strict validation target and rejects unknown keys (`additionalProperties: false`). |
+| pixi reads our `default-environment` task field. | No | `default-environment` (in `[tasks]` and `[feature.*.tasks]`) is a conda-workspaces extension. Pixi may ignore it. |
+| conda-workspaces reads `pixi.toml`. | Yes | conda-workspaces ships a separate compatibility reader for `pixi.toml` and `[tool.pixi.*]`. That reader is out of scope for this spec and is documented in [Configuration](../configuration.md). |
 
 Two intentional differences from `pixi.toml`:
 
@@ -566,7 +564,7 @@ canonical name (`conda-workspaces-v2`).  Aliases follow the rules in
 [`format-aliases.md`](format-aliases.md).
 
 Backwards-compatible additions (new optional fields, new platforms in
-the *platform* enum) do *not* bump the version.  The JSON schema is the
+the *platform* enum) do not bump the version. The JSON schema is the
 strict validation target for this version. The conda-workspaces runtime
 parser is intentionally more permissive for pixi and forward
 compatibility and may ignore unknown fields when reading manifests.
@@ -587,8 +585,8 @@ These are tracked for the CEP draft and are not part of `v1`:
   or in a separate "compatibility" CEP.
 - Whether `conda.toml` should exist as a separate filename at all, or
   whether the spec should describe a "conda-workspaces dialect of
-  `pixi.toml`" — i.e. a `pixi.toml` plus conda-workspaces extensions
+  `pixi.toml`", a `pixi.toml` plus conda-workspaces extensions
   such as `default-environment` and `[workspace.archive]`, without a
-  parallel filename or schema URL.  Trade-off: governance ownership
-  (conda community vs. Prefix.dev) versus format proliferation.  See
+  parallel filename or schema URL. The trade-off is governance ownership
+  (conda community vs. Prefix.dev) versus format proliferation. See
   the CEP tracker for discussion.

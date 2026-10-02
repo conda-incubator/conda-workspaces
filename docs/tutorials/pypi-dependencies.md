@@ -1,8 +1,7 @@
 # PyPI dependencies
 
-This guide walks through adding PyPI packages to a workspace,
-including versioned dependencies, editable local packages,
-and what to install for everything to work.
+Add versioned PyPI dependencies and editable local packages to a
+workspace. First, install the plugins that resolve and install them.
 
 ## Manifest compatibility with pixi
 
@@ -24,15 +23,15 @@ conda config --set solver rattler
 conda config --append channels conda-pypi
 ```
 
-**conda-pypi** translates PyPI package names to their conda equivalents
+conda-pypi translates PyPI package names to their conda equivalents
 and handles wheel extraction and editable installs.
 
-**conda-rattler-solver** is the solver backend that can resolve conda
+conda-rattler-solver is the solver backend that can resolve conda
 and PyPI packages together in a single pass. Since conda-pypi 0.9.0 it
 is no longer installed automatically, so you need to install it
 explicitly.
 
-**The `conda-pypi` channel** on `conda.anaconda.org` makes pure Python
+The `conda-pypi` channel on `conda.anaconda.org` makes pure Python
 packages from PyPI available as conda packages. It uses sharded
 repodata, which requires the rattler solver to read. Without this
 channel, the solver has no source for PyPI-originated packages.
@@ -95,8 +94,8 @@ httpx = { version = ">=0.27", extras = ["http2"] }
 
 ### Per-feature PyPI dependencies
 
-Just like conda dependencies, PyPI dependencies can be scoped to a
-feature:
+PyPI dependencies can be scoped to a feature, just like conda
+dependencies:
 
 ```toml
 [feature.test.pypi-dependencies]
