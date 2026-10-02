@@ -26,7 +26,8 @@ conda workspace init --format conda --name my-project \
   --platform linux-64 --platform osx-arm64 --platform win-64
 ```
 
-This creates a `conda.toml` with sensible defaults:
+This creates a `conda.toml` with the name, channel, and platforms you
+specified:
 
 ```toml
 [workspace]
@@ -40,8 +41,7 @@ platforms = ["linux-64", "osx-arm64", "win-64"]
 ## Add dependencies
 
 Each `conda workspace add` updates the manifest, installs into the
-affected prefixes, and refreshes a complete `conda.lock` — no separate
-install step is needed.
+affected prefixes, and refreshes a complete `conda.lock` in one step.
 
 Add your base dependencies:
 
@@ -90,7 +90,7 @@ test = { features = ["test"] }
 docs = { features = ["docs"] }
 ```
 
-And three conda environments now exist under `.conda/envs/`:
+Three conda environments now exist under `.conda/envs/`:
 
 ```
 .conda/envs/
@@ -99,8 +99,8 @@ And three conda environments now exist under `.conda/envs/`:
 └── docs/       # + sphinx, myst-parser
 ```
 
-Prefer to stage a batch of edits before solving? Pass
-`--no-lockfile-update` to each `add` / `remove`, then run
+To stage a batch of edits before solving, pass `--no-lockfile-update`
+to each `add` / `remove`, then run
 `conda workspace install` once to solve, install, and regenerate
 `conda.lock` for every environment:
 
@@ -110,8 +110,8 @@ conda workspace add --no-lockfile-update "numpy>=1.24" "scipy>=1.11"
 conda workspace install
 ```
 
-This is also how you reinstall everything on a fresh checkout (e.g.
-after cloning the repo on a new machine).
+Use the same install command on a fresh checkout, such as after
+cloning the repo on a new machine.
 
 ## Define tasks
 

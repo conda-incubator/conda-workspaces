@@ -25,7 +25,7 @@ selected = loader.select({"test": ["linux-64"]})
 Path("selected.lock").write_text(dumps(selected), encoding="utf-8")
 ```
 
-Selection preserves root, environment and package metadata and removes unused records. Selected external references, missing packages, inconsistent identities or hashes and invalid channels fail explicitly. The loader redacts URL credentials as on other read paths. Callers requiring unchanged authenticated URLs must reject credential-bearing input before construction.
+Selection preserves root, environment and package metadata and removes unused records. It rejects selected external references, missing packages, inconsistent identities or hashes, and invalid channels. The loader redacts URL credentials as on other read paths. Callers requiring unchanged authenticated URLs must reject credential-bearing input before construction.
 
 `package_platform_for(target, name)` returns the concrete conda subdir inferred from a saved target name and its package records. It returns `None` for a logical target with only noarch packages or no packages when the backing subdir is unknown. Source selection remains possible for that target, while an export requiring a concrete platform needs additional information. Pass a known subdir to `env_for(..., package_platform=subdir, metadata_only=True)` to keep the logical target separate from the package platform.
 
@@ -40,7 +40,7 @@ Selection preserves root, environment and package metadata and removes unused re
 
 Pass `environment="test"` to check package requirements only for that environment on the requested target. All workspace environment names, ordered channels and declared target names remain checked. This lets callers scope virtual package configuration independently for each environment and target without copying or removing declarations. An unknown environment raises `EnvironmentNotFoundError`.
 
-The checker uses conda's virtual package plugins and the active override configuration. Callers requiring host-independent results must configure target virtual packages before each call. Success describes manifest satisfiability, without checking for newer packages or verifying package archives.
+The checker uses conda's virtual package plugins and the active override configuration. Callers requiring host-independent results must configure target virtual packages before each call. A successful check means the lockfile satisfies the manifest. It does not check for newer packages or verify package archives.
 
 ```{eval-rst}
 .. autofunction:: conda_workspaces.lockfile.load_lockfile_data

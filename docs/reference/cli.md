@@ -1,4 +1,4 @@
-# CLI Reference
+# CLI reference
 
 ## conda workspace
 
@@ -136,8 +136,8 @@ by the containing `pypi_dependencies` collection. `environment` and `feature`
 are mutually exclusive, and all three fields are `null` for a top-level default
 declaration. `platform` is the manifest target key accepted by `--platform`,
 including a rich workspace platform name rather than only its resolved conda
-subdir. `table` remains the human-readable manifest location and should not be
-parsed as a machine contract.
+subdir. `table` is the human-readable manifest location and should not be
+parsed by programs.
 
 `inherited_from` appears only when the winning conda declaration uses
 `{ workspace = true }`. In that case, `location` still identifies the

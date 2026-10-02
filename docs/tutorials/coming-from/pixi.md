@@ -108,7 +108,7 @@ conda workspace init --format conda
 ```
 
 This creates a `conda.toml` file with the same workspace/feature/
-environment/task structure. The only difference is:
+environment/task structure, with these differences:
 
 - `conda.toml` uses `[workspace]` exclusively (no `[project]` fallback)
 - `conda.toml` is searched first, before `pixi.toml` and `pyproject.toml`
@@ -197,11 +197,10 @@ the solve, `osx-arm64` targets get `CONDA_OVERRIDE_OSX=11.0`, `osx-64`
 gets `10.15`, and `win-*` targets get a `CONDA_OVERRIDE_WIN=0`
 presence marker. This mirrors rattler's
 `VirtualPackages::detect_for_platform`, so most cross-compiles resolve
-out of the box without any manifest changes.
+without any manifest changes.
 
-Explicit knobs still win when you need them. Either export a
-`CONDA_OVERRIDE_*` environment variable or pin the minimum in
-`[system-requirements]`:
+To override these baselines, export a `CONDA_OVERRIDE_*` environment
+variable or pin the minimum in `[system-requirements]`:
 
 ```toml
 [system-requirements]
@@ -209,21 +208,20 @@ glibc = "2.28"
 cuda = "12.0"
 ```
 
-A `[system-requirements]` version is lifted into the baseline
-override so the solver's `__<pkg> >=<version>` spec and the virtual
-package record it matches against agree. `__cuda` and `__archspec`
-are *not* auto-seeded — opt in via `[system-requirements]` or
-`CONDA_OVERRIDE_*` when you need them. The `[system-requirements]`
-manifest form is shared with pixi. `CONDA_OVERRIDE_*` is conda-specific.
+A `[system-requirements]` version sets the baseline override so the
+solver's `__<pkg> >=<version>` spec matches the virtual package record.
+`__cuda` and `__archspec` are not auto-seeded. Set them through
+`[system-requirements]` or `CONDA_OVERRIDE_*` when you need them. The
+`[system-requirements]` manifest form is shared with pixi. `CONDA_OVERRIDE_*` is conda-specific.
 
 ## What's not supported
 
 Some pixi-only concepts don't apply to conda-workspaces:
 
-- `[package]` / pixi-build — use conda-build instead
-- `[host-dependencies]` / `[build-dependencies]` — part of pixi-build
-- `deno_task_shell` — conda-workspaces uses native platform shells
-- `solve-group` — accepted for compatibility but has no effect (conda's
+- `[package]` / pixi-build: use conda-build instead
+- `[host-dependencies]` / `[build-dependencies]`: part of pixi-build
+- `deno_task_shell`: conda-workspaces uses native platform shells
+- `solve-group`: accepted for compatibility but has no effect (conda's
   solver operates on a single environment at a time)
 
 See [DESIGN.md](https://github.com/conda-incubator/conda-workspaces/blob/main/DESIGN.md)

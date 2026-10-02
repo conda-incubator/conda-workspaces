@@ -21,8 +21,8 @@ build-alt = { cmd = ["python", "-m", "build", "--wheel"] }
 
 ![depends-on demo](../../demos/depends-on.gif)
 
-Tasks can depend on other tasks. Dependencies are resolved with
-topological ordering so everything runs in the right sequence:
+Tasks can depend on other tasks. Topological ordering makes each
+dependency run before the task that needs it:
 
 ```toml
 [tasks]
@@ -142,8 +142,8 @@ outputs = ["dist/*.whl"]
 ```
 
 :::{tip}
-The cache compares SHA-256 fingerprints for declared inputs and outputs,
-favoring correctness over timestamp shortcuts. The selected environment prefix,
+The cache compares SHA-256 fingerprints for declared inputs and outputs
+instead of timestamps. The selected environment prefix,
 or the current conda prefix when no environment is selected, is part of the
 cache identity, so switching environments reruns the task.
 :::

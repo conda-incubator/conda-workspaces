@@ -1,7 +1,7 @@
 # CI pipeline
 
-This tutorial shows how to use conda-workspaces in GitHub Actions to
-install environments, run tasks, and test your project.
+Use conda-workspaces in GitHub Actions to install environments and run
+tasks that test your project.
 
 ## Basic setup
 
@@ -43,13 +43,13 @@ jobs:
 When `CI=true` is set (as it is by default in GitHub Actions, GitLab
 CI, and most CI systems), `conda workspace install` automatically
 behaves like `--locked`. It installs from the lockfile and fails if
-it does not satisfy the manifest. No extra flags needed.
+it does not satisfy the manifest.
 :::
 
 ### What happens when the lockfile is stale in CI?
 
 If someone updates `conda.toml` without running `conda workspace lock`,
-the CI job fails with a clear error:
+the CI job fails with this error:
 
 ```text
 LockfileStaleError: Lockfile 'conda.lock' does not satisfy manifest 'conda.toml'.
@@ -59,7 +59,7 @@ Run 'conda workspace lock' to update it, or use --frozen to install anyway.
 ```
 
 The developer fixes this locally by running `conda workspace lock` (or
-just `conda workspace install`, which updates the lockfile
+`conda workspace install`, which updates the lockfile
 automatically) and committing the updated `conda.lock`.
 
 ## Caching environments
@@ -117,18 +117,17 @@ jobs:
 Requires `--output` and `--merge`, both introduced in 0.4.0.
 :::
 
-`conda workspace lock` can split solving across a matrix and stitch
-the per-platform fragments back into a single `conda.lock` on a
-coordinator job. This keeps lock refreshes fast as the platform
-list grows, and each runner only has to install the solver bits for
-the platforms it owns.
+`conda workspace lock` can split solving across a matrix and combine
+the per-platform fragments into a single `conda.lock` in a coordinator
+job. Solving in parallel speeds up lock refreshes as the platform list
+grows. Each runner only needs the solver dependencies for its platforms.
 
 `--output <path>` writes the solved lockfile to an arbitrary
-location so each matrix runner emits exactly one fragment;
+location so each matrix runner emits exactly one fragment.
 `--merge <glob>` (repeatable) combines fragments without running
-the solver. The merger validates schema-version agreement, each
-environment's channel list, and rejects overlapping `(environment,
-platform)` pairs — the resulting `conda.lock` is byte-stable with
+the solver. The merger checks that schema versions and each
+environment's channel list agree, and rejects overlapping `(environment,
+platform)` pairs. The resulting `conda.lock` is byte-stable with
 what a single-run `conda workspace lock` would produce. `--merge`
 is mutually exclusive with `--environment`, `--platform`,
 `--skip-unsolvable`, and `--output`.
@@ -194,12 +193,13 @@ jobs:
           path: conda.lock
 ```
 
-The coordinator never runs a solver, so it can stay on the
-lightest runner available. On failure, any fragment that violates
-schema or channel invariants raises `LockfileMergeError` and no
-`conda.lock` is written.
+The coordinator does not run a solver, so it can use the lightest
+runner available. A fragment with an incompatible schema or channel
+list raises `LockfileMergeError`, and no `conda.lock` is written.
 
-## Nightly lockfile refresh
+(nightly-lockfile-refresh)=
+
+## Scheduled lockfile refresh
 
 Set up a scheduled workflow that re-solves the lockfile and opens a
 pull request when package versions change. `conda workspace lock`
@@ -238,8 +238,8 @@ jobs:
           delete-branch: true
 ```
 
-This keeps your lockfile fresh with upstream releases while
-preserving the safety of locked installs on every other CI run.
+The scheduled workflow picks up upstream releases. Other CI runs
+continue to use locked installs.
 
 ## Task caching in CI
 
@@ -275,8 +275,8 @@ solve, even when `CI=true`:
 conda workspace install --no-lock
 ```
 
-This is useful for nightly jobs that pick up new upstream releases
-(see *Nightly lockfile refresh* above).
+This is useful for scheduled jobs that pick up new upstream releases
+(see *Scheduled lockfile refresh* above).
 
 ### When should I use `--locked` vs `--frozen`?
 
@@ -310,7 +310,7 @@ Skipped platforms are reported as warnings. The explicit fragment
 covers only the platforms that solved successfully. Merge it with
 fragments covering the remaining required pairs before using it as
 the canonical lock. CI jobs for skipped platforms will fail at
-install time with a clear `LockfileNotFoundError`.
+install time with `LockfileNotFoundError`.
 
 ### How do I manage disk space on long-lived CI runners?
 
@@ -326,15 +326,15 @@ conda workspace clean --yes
 conda clean --all -y
 ```
 
-When using GitHub Actions cache, the `key` tied to `conda.lock`
-means stale caches are automatically evicted when the lockfile
-changes.
+When using GitHub Actions cache, tying the `key` to `conda.lock`
+changes the cache key when the lockfile changes. Existing caches remain
+until they are deleted or evicted under
+[GitHub's retention and storage limits](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#usage-limits-and-eviction-policy).
 
 ## Tasks without workspaces
 
-If you use conda-workspaces only for task running (no workspace
-definition), your CI setup is simpler — just install dependencies
-manually and run tasks:
+If you use conda-workspaces for tasks without a workspace definition,
+install dependencies manually before running the tasks:
 
 ```yaml
       - run: conda install -n base conda-forge::conda-workspaces

@@ -128,8 +128,8 @@ default = []
 dev = { features = ["dev"] }
 ```
 
-Features compose automatically — `dev` inherits all base dependencies
-and adds its own. No need for separate files or duplicate entries.
+`dev` inherits all base dependencies and adds its own, without separate
+files or duplicate entries.
 
 ## Variables and environment
 
@@ -236,6 +236,6 @@ Beyond what conda-project offered, conda-workspaces adds:
 
 ## Next steps
 
-- [Your first workspace](../first-workspace.md) — full walkthrough
-- [Coming from pixi](pixi.md) — if you also use pixi
-- [Features](../../features.md) — environments, tasks, caching, templates
+- [Your first workspace](../first-workspace.md) for a full walkthrough
+- [Coming from pixi](pixi.md) if you also use pixi
+- [Features](../../features.md) for environments, tasks, caching, and templates

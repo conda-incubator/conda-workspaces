@@ -48,8 +48,8 @@ environment is solved independently.
 ## Environment lifecycle
 
 A managed environment has a declaration in the manifest, records in
-`conda.lock`, and an optional installed prefix. The environment commands keep
-these states distinct:
+`conda.lock`, and an optional installed prefix. Each command affects these
+differently:
 
 | Command | Manifest declaration | Lock records | Installed prefix |
 | --- | --- | --- | --- |
@@ -59,8 +59,8 @@ these states distinct:
 | `workspace remove -e NAME --all` | Remove | Refresh | Remove |
 
 Use `--no-install` or `--no-lockfile-update` with `workspace add` to stop
-before the corresponding later state. `--dry-run` previews the complete change
-without writing any of the three states.
+after updating the lockfile or manifest, respectively. `--dry-run` previews the
+complete change without writing the manifest, lockfile, or prefix.
 
 Declare an environment that composes existing features with repeatable
 `--with-feature` options:
@@ -84,7 +84,7 @@ The `default` environment cannot be removed because it is implicit when the
 manifest has no environment declarations.
 
 List installed prefixes that no longer have a manifest declaration, then
-remove an exact orphan safely:
+remove one by name:
 
 ```bash
 conda workspace envs --orphans
@@ -211,7 +211,7 @@ selected platform.
 ### Known vs. declared platforms
 
 :::{versionadded} 0.4.0
-`conda workspace info` surfaces the reachable platform set as a
+`conda workspace info` reports the reachable platform set as a
 `known_platforms` JSON key (and a matching `Known Platforms` row in
 the text view whenever a feature broadens the workspace-level set).
 `conda workspace lock --platform <subdir> --output <fragment>`
@@ -287,8 +287,7 @@ An environment can opt out of inheriting the default feature:
 minimal = { features = ["minimal"], no-default-feature = true }
 ```
 
-This is useful for environments that need a completely independent
-dependency set.
+Use this for environments that need an independent dependency set.
 
 ## Activation
 
@@ -312,7 +311,7 @@ paths. Replace linked `conda-meta/state`, `etc/conda`, or `activate.d`
 entries before installing the environment.
 
 Prefix generation checks reject links and replacements that remain
-visible at mutation boundaries. Conda and conda-pypi still receive
+visible when the prefix is modified. Conda and conda-pypi still receive
 filesystem paths, so these checks are not a sandbox against another
 process running as the same operating-system user that swaps and restores
 a prefix during one downstream call.
@@ -328,8 +327,8 @@ glibc = "2.17"
 ```
 
 System requirements are added as virtual package constraints
-(`__cuda >=12`, `__glibc >=2.17`) during environment solving. This
-ensures the solver only picks packages compatible with the declared
+(`__cuda >=12`, `__glibc >=2.17`) during environment solving. These
+constraints limit the solver to packages compatible with the declared
 system capabilities.
 
 ## Channel priority

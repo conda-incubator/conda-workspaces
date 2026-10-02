@@ -1,11 +1,11 @@
 # Manifests
 
-Manifest parsers and the detection/registry system.
+Manifest parsers, format detection, and the parser registry.
 
 Each parser handles both workspace configuration and task definitions
-for its file format.  The `manifests/` package is conda-workspaces'
-internal substrate; the package-root modules `env_spec.py`,
-`lockfile.py` and `export.py` sit on top and expose the public
+for its file format. The `manifests/` package contains the internal
+parser implementations. The package-root modules `env_spec.py`,
+`lockfile.py` and `export.py` expose the public
 plugin API.
 
 `parse_text(path, content)` parses supplied text without discovering another

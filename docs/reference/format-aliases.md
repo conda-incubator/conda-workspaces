@@ -1,26 +1,26 @@
 # Plugin format names and aliases
 
 Every conda-workspaces plugin registers itself under one canonical
-`FORMAT` string plus zero or more convenience `ALIASES`.  Users can
+`FORMAT` string plus zero or more convenience `ALIASES`. Users can
 pass either the canonical name or an alias wherever conda accepts a
 format identifier (`conda env create --format=...`, `conda export
 --format=...`).
 
 ## Naming policy
 
-conda-workspaces follows the naming policy that `conda-lockfiles`
-documents in [its own format-aliases
+conda-workspaces follows the `conda-lockfiles`
+naming policy in [its format-aliases
 reference](https://github.com/conda/conda-lockfiles/blob/main/docs/format-aliases.md):
 
-- The canonical `FORMAT` is **versioned** when the format has an
+- The canonical `FORMAT` is versioned when the format has an
   on-disk schema version byte (for example
-  `conda-workspaces-lock-v1`).  Versioned canonical names are stable
-  across future schema bumps — a future `v2` gets a sibling
+  `conda-workspaces-lock-v1`). Versioned canonical names are stable
+  across future schema bumps. A future `v2` gets a sibling
   `conda-workspaces-lock-v2` rather than replacing `v1` in place.
 
-- **Aliases** are unversioned shortcuts (for example
-  `conda-workspaces-lock`, `workspace-lock`).  They resolve to the
-  current canonical name today and may migrate to a newer version
+- Aliases are unversioned shortcuts (for example
+  `conda-workspaces-lock`, `workspace-lock`). They resolve to the
+  current canonical name and may migrate to a newer version
   later with a deprecation notice.
 
 - Manifests that have no on-disk schema version of their own
@@ -34,12 +34,12 @@ reference](https://github.com/conda/conda-lockfiles/blob/main/docs/format-aliase
 | `conda.toml`  | `conda-workspaces`            | —                                           |
 | `conda.lock`  | `conda-workspaces-lock-v1`    | `conda-workspaces-lock`, `workspace-lock`   |
 
-The single source of truth for these constants is
+These constants are defined in
 `conda_workspaces/env_spec.py` (manifest) and
-`conda_workspaces/lockfile.py` (lockfile); `plugin.py` and
-`export.py` import from there so the three code paths never drift.
+`conda_workspaces/lockfile.py` (lockfile). `plugin.py` and
+`export.py` import those definitions to keep the values consistent.
 
-For the normative description of the `conda.toml` format itself —
+For the normative description of the `conda.toml` format, including
 required fields, types, semantics, the `pyproject.toml` embedded form,
-and the `conda.lock` schema relationship — see the [`conda.toml`
+and the `conda.lock` schema relationship, see the [`conda.toml`
 specification](conda-toml-spec.md).

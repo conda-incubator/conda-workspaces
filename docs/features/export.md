@@ -47,27 +47,27 @@ for details about format coverage and compliance limits.
 
 `conda workspace export` converts a workspace environment into any
 format registered through conda's `conda_environment_exporters` plugin
-hook. The same exporter surface is available through `conda export`, so
+hook. The same exporters are available through `conda export`, so
 conda-workspaces does not need separate writers for each output format.
 
 ![export demo](../../demos/export.gif)
 
 :::{versionadded} 0.4.0
-`conda workspace export` plugs into conda's
+`conda workspace export` uses conda's
 `conda_environment_exporters` plugin hook, so every format
-reachable through `conda export` and anything registered by a
-third-party plugin such as `conda-lockfiles` is also reachable
+available through `conda export`, including formats registered by a
+third-party plugin such as `conda-lockfiles`, is also available
 through `conda workspace export`. `--from-lockfile` and
 `--from-prefix` select alternative sources. `--platform`
-(repeatable) drives multi-platform exports for exporters that opt
-into `multiplatform_export`.
+(repeatable) selects platforms for exporters that support
+`multiplatform_export`.
 :::
 
-The built-in exporter choices include the `environment-yaml` /
+Available exporters include the built-in `environment-yaml` /
 `environment-json` exporters, the `conda-workspaces-lock-v1` exporter
 registered by conda-workspaces itself, the `conda-toml` / `pixi-toml` /
 `pyproject-toml` manifest exporters, and any third-party exporter such
-as `conda-lockfiles`' rattler-lock-v6 the moment it is installed.
+as `conda-lockfiles`' rattler-lock-v6 once it is installed.
 
 ```bash
 # Default: environment-yaml from the declared manifest (no install needed)
@@ -100,12 +100,11 @@ conda workspace --file path/to/pixi.toml export \
 The global `--file` before `export` selects the source manifest. The
 subcommand's `--file` selects the export destination.
 
-Three sources feed the exporter:
+Choose from three export sources:
 
 - `Declared` (default) resolves the declared specs from the
-  manifest per platform. No solver, no installed environment required
-  — this is what makes the command useful before the first
-  `conda workspace install`.
+  manifest per platform. It needs no solver or installed environment,
+  so it works before the first `conda workspace install`.
 - `--from-lockfile` reconstructs `Environment` objects from an
   existing `conda.lock` via the `CondaLockLoader`.
 - `--from-prefix` reads the live installed prefix the same way
@@ -120,13 +119,13 @@ with the chosen subset. Passing multiple platforms requires an exporter
 that opts into `multiplatform_export`. The `conda-workspaces-lock-v1`,
 rattler-lock-v6, and the three manifest exporters (`conda-toml`,
 `pixi-toml`, `pyproject-toml`) do. The single-platform YAML and JSON
-exporters raise a clear error.
+exporters raise an error.
 
 ## Manifest-format exporters
 
 :::{versionadded} 0.4.0
-Three new exporter plugins — `conda-toml`, `pixi-toml`, and
-`pyproject-toml` — write one selected environment in any manifest
+Three new exporter plugins, `conda-toml`, `pixi-toml`, and
+`pyproject-toml`, write one selected environment in any manifest
 dialect conda-workspaces already reads.
 :::
 
@@ -135,14 +134,14 @@ declared dependencies across the requested platforms, but do not preserve the
 source workspace's named features, other environments, tasks, activation
 settings, or archive configuration. Write to a new file unless replacing that
 structure with a single flattened environment is intentional. Specs that appear
-on every requested platform land under the top-level `[dependencies]` /
-`[pypi-dependencies]` tables. Platform-specific deltas move under
+on every requested platform go under the top-level `[dependencies]` /
+`[pypi-dependencies]` tables. Platform-specific differences go under
 `[target.<platform>.*]`.
 The `pyproject-toml` exporter wraps the same content under
 `[tool.conda]`, and when the target `pyproject.toml` already exists it
-splices the `[tool.conda]` subtree into the existing document so peer
+inserts the `[tool.conda]` subtree into the existing document, preserving peer
 `[project]`, `[build-system]`, `[tool.ruff]`, `[tool.pixi]`, and
-friends survive untouched. Any existing `[tool.conda]` is replaced by the
+other tables. Any existing `[tool.conda]` is replaced by the
 flattened selected environment.
 `conda.toml` and `pixi.toml` keep the default overwrite semantics of
 every other conda exporter.

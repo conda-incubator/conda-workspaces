@@ -105,16 +105,13 @@ with its own solver and installation machinery. conda-workspaces reads
 pixi-compatible workspace manifests and uses conda to solve and install
 the environments.
 
-This means:
-
 - Workspaces and tasks read from `conda.toml`, `pixi.toml`, or
-  `pyproject.toml` — one manifest, multiple tools
+  `pyproject.toml`, so multiple tools can use one manifest
 - Environments are solved by conda's configured solver backend and
   installed as regular conda prefixes
 - Lock files (`conda.lock`) capture exact package URLs for reproducible
   installs without re-solving
-- Task dependencies, caching, Jinja2 templates, and platform overrides
-  all work out of the box
+- Supports task dependencies, caching, Jinja2 templates, and platform overrides
 - Ships as a conda plugin (`conda workspace` / `conda ws`, `conda task`) and
   standalone `cw` / `ct` CLIs
 
@@ -129,7 +126,7 @@ Read more in [](motivation.md).
 :link: quickstart
 :link-type: doc
 
-Set up your first workspace and tasks in under a minute.
+Set up your first workspace and tasks.
 :::
 
 :::{grid-item-card} {octicon}`mortar-board` Tutorials

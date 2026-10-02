@@ -1,8 +1,4 @@
-# DESIGN.md — conda-workspaces Architecture & Pixi Compatibility
-
-This document describes the design of conda-workspaces, its relationship
-to pixi's workspace model, and the challenges involved in bridging the
-two ecosystems.
+# conda-workspaces architecture and pixi compatibility
 
 ## Overview
 
@@ -19,25 +15,22 @@ shortcuts `cw` and `ct` are also available as aliases.
 
 ## Goals
 
-1. **Pixi-compatible manifest format** — read the same `pixi.toml` and
-   `[tool.pixi.*]` tables that pixi uses, so a workspace can use a single
-   manifest with both tools.
+1. Read the same `pixi.toml` and `[tool.pixi.*]` tables that pixi uses,
+   so a workspace can use a single manifest with both tools.
 
-2. **Workspace environments** — environments live in
-   `.conda/envs/<name>/` under the workspace root.
+2. Store environments in `.conda/envs/<name>/` under the workspace root.
 
-3. **Multi-environment support** — define multiple named environments
-   from composable features, matching pixi's feature/environment model.
+3. Define multiple named environments from composable features, matching
+   pixi's feature/environment model.
 
-4. **Conda-native solver** — use conda's configured solver backend
-   rather than bundling a separate resolver.
+4. Use conda's configured solver backend without bundling a separate resolver.
 
-5. **Plugin architecture** — integrate via conda's plugin system, adding
-   no overhead to unrelated conda operations.
+5. Integrate via conda's plugin system without adding overhead to unrelated
+   conda operations.
 
-## Pixi Compatibility Mapping
+## Pixi compatibility mapping
 
-### Fully Supported
+### Fully supported
 
 | Pixi concept | conda-workspaces equivalent | Notes |
 |---|---|---|
@@ -55,24 +48,24 @@ shortcuts `cw` and `ct` are also available as aliases.
 | Inline tables `{version = "...", build = "..."}` | Parsed via tomlkit | Dict-form deps |
 | `pixi add` / `pixi remove` | `conda workspace add` / `conda workspace remove` | Solves and installs by default. `--no-install` / `--no-lockfile-update` opt-outs |
 
-### Accepted but Ignored
+### Accepted but ignored
 
 | Pixi concept | Status |
 |---|---|
 | `solve-group` | Accepted in manifests for compatibility but has no effect. Conda's solver operates on one environment at a time and does not support cross-environment version coordination. |
 
-### Not Supported (Pixi-Only Concepts)
+### Not supported (pixi-only concepts)
 
 | Pixi concept | Reason |
 |---|---|
-| `[package]` / pixi-build | Pixi's build system uses rattler-build with custom backends. conda uses conda-build or rattler-build directly. These are fundamentally different build orchestration systems. |
+| `[package]` / pixi-build | Pixi's build system uses rattler-build with custom backends. conda uses conda-build or rattler-build directly. The two tools use different build orchestration systems. |
 | `[host-dependencies]` / `[build-dependencies]` | Part of the `[package]` build model. Not applicable outside pixi-build. |
 | `deno_task_shell` | Pixi tasks use a Deno-compatible shell for cross-platform execution. conda-workspaces uses the native platform shell (`sh` on Unix, `cmd` on Windows) and provides platform overrides and Jinja2 conditionals for cross-platform support. |
 | `tool.pixi.project.conda-pypi-map` | Pixi's custom mapping for conda↔PyPI name translation. conda-pypi handles this differently. |
 
-## Key Design Decisions
+## Key design decisions
 
-### 1. Environment Directory Layout
+### 1. Environment directory layout
 
 ```
 project/
@@ -86,21 +79,20 @@ project/
 └── ...
 ```
 
-**Rationale**: `.conda/envs/` keeps environments under the workspace
+`.conda/envs/` keeps environments under the workspace
 root. Pixi uses `.pixi/envs/`, so both tools can use the same workspace
 without overwriting each other's environments.
 
-### 2. Feature Composition Model
+### 2. Feature composition model
 
 Features compose via ordered merging: later features override earlier
 ones for the same package name.  The `default` feature is always
 prepended unless `no-default-feature = true`.
 
-This exactly matches pixi's composition semantics, ensuring that
-a manifest written for pixi produces the same dependency set when
-parsed by conda-workspaces.
+This matches pixi's composition rules, so both tools parse the same
+dependency set from a manifest.
 
-### 3. Solver Strategy
+### 3. Solver strategy
 
 conda-workspaces delegates all solving to conda's configured solver
 backend. For each environment:
@@ -111,7 +103,7 @@ backend. For each environment:
 3. Instantiate conda's active solver backend through the plugin manager
    and let it produce the solve/install transaction
 
-### 4. conda-native Format (conda.toml)
+### 4. conda-native format (conda.toml)
 
 While pixi.toml is the primary compatibility format, a `conda.toml` is
 also supported. Its core workspace, feature, environment, dependency,
@@ -122,7 +114,7 @@ and task tables use the same shape as pixi.toml, but it:
   `default-environment` and `[workspace.archive]`
 - Provides a non-pixi-branded option for teams that only use conda
 
-### 5. Standalone CLI Aliases (`cw` / `ct`)
+### 5. Standalone CLI aliases (`cw` / `ct`)
 
 The primary CLI forms are `conda workspace` and `conda task`.  For
 convenience, `cw` and `ct` console scripts provide standalone aliases
@@ -136,63 +128,59 @@ cw = "conda_workspaces.__main__:main"
 
 `ct` is the equivalent alias for `conda task`.
 
-### 6. Task System Architecture
+### 6. Task system architecture
 
 The task runner is built into conda-workspaces. Tasks are parsed from
 the same manifest files as
 workspace definitions and share the parser infrastructure.
 
-**Execution pipeline**:
+Task execution has six steps:
 
-1. **Parse** — manifest parsers produce `dict[str, Task]` via
+1. Manifest parsers produce `dict[str, Task]` via
    `detect_and_parse_tasks()`. Platform overrides are resolved for the
    current `context.subdir`.
-2. **Resolve** — `graph.resolve_execution_order()` builds a DAG from
+2. `graph.resolve_execution_order()` builds a DAG from
    `depends-on` declarations and returns a topologically sorted list.
-3. **Render** — `template.render()` expands Jinja2 variables
+3. `template.render()` expands Jinja2 variables
    (`{{ conda.platform }}`, task args) in command strings and env vars.
-4. **Cache check** — when `inputs` and `outputs` are declared,
+4. When `inputs` and `outputs` are declared,
    `cache.is_cached()` compares `(mtime, size, sha256)` fingerprints
    against a `.conda/task-cache/` store. Cached tasks are skipped.
-5. **Execute** — `runner.SubprocessShell.run()` executes the rendered
+5. `runner.SubprocessShell.run()` executes the rendered
    command in the native platform shell, optionally inside an activated
    conda environment via `conda.utils.wrap_subprocess_call`.
-6. **Cache save** — after successful execution, fingerprints are written
-   to the cache store.
+6. After successful execution, fingerprints are written to the cache store.
 
-**Design rationale**: Tasks use the native platform shell rather than a
-cross-platform shell runtime. This trades pixi's `deno_task_shell`
-portability for zero additional dependencies and familiar shell
-behaviour. Platform-specific commands are handled via `[target.<platform>.tasks]`
+Tasks use the native platform shell instead of a cross-platform runtime
+such as pixi's `deno_task_shell`. This avoids additional dependencies and
+keeps familiar shell behaviour, at the cost of portability. Platform-specific commands are handled via `[target.<platform>.tasks]`
 overrides or Jinja2 conditionals.
 
-### 7. Add/Remove Auto-Install
+### 7. Add/remove auto-install
 
 `conda workspace add` and `conda workspace remove` edit the manifest,
 install the changes into affected prefixes, and regenerate a complete
 `conda.lock` in a single step. This matches pixi's `pixi add` /
-`pixi remove` semantics and closes the loop between "I edited my
-manifest" and "my environment reflects that change", which matters
-most when working inside a `conda workspace shell`.
+`pixi remove` behaviour and applies manifest changes to the affected
+environments, including when run inside a `conda workspace shell`.
 
-Opt-outs are available for partial workflows:
+To control which steps run:
 
-- `--no-install` — update manifest and lockfile but skip the prefix install.
-- `--no-lockfile-update` — update only the manifest (the pre-0.x behaviour,
+- `--no-install`: update manifest and lockfile but skip the prefix install.
+- `--no-lockfile-update`: update only the manifest (the pre-0.x behaviour,
   equivalent to running `conda workspace add` followed by a separate
   `conda workspace install`).
-- `--force-reinstall` / `--dry-run` — forwarded to the underlying
+- `--force-reinstall` / `--dry-run`: forwarded to the underlying
   `install_environment` call, matching `conda workspace install`.
 
-**Affected environments**: editing the default feature (the default
+Editing the default feature (the default
 when no location selector is passed) selects every environment that
 does not set `no-default-feature = true` for prefix installation.
 Editing a named feature selects every composing environment. Editing
 private dependencies with `--environment` selects only that environment.
 All declared environments still feed lock generation. A shared helper
 `sync_environments` in `conda_workspaces/cli/workspace/sync.py` backs
-both commands as well as `conda workspace install`, so there is a
-single canonical synchronization pipeline.
+both commands and `conda workspace install`.
 
 On removal, synchronization first clears prefix requests that are no
 longer present in the resolved manifest, then installs the remaining
@@ -204,20 +192,20 @@ inheriting requested specs from an existing prefix. Installation from
 absent from the lock, and records resolved manifest roots rather than
 every locked package as direct requests.
 
-**Mutation locations**: dependency mutation is location-based, not
-resolution-based. `add` and `remove` never choose whichever composed
-declaration currently wins. The normative selector mapping, inheritance
-behavior, and wrong-location diagnostics are defined in the
+Dependency changes apply to the selected declaration. `add` and `remove`
+do not search for the declaration that takes precedence after feature
+composition. See the selector mapping, inheritance behavior, and
+wrong-location diagnostics in the
 [dependency mutation rules](docs/reference/conda-toml-spec.md#dependency-mutation-rules).
 
-**Shell re-spawn hint**: `conda-spawn` sources activation scripts once at
+`conda-spawn` sources activation scripts once at
 spawn time, so packages that ship `etc/conda/activate.d/*.sh` hooks need
 a re-spawn to take effect in an already-open `conda workspace shell`.
 When new files appear under `activate.d/` after an install and the
 command is running inside a spawned shell (`CONDA_SPAWN=1`), a hint is
 printed asking the user to exit and re-run `conda workspace shell`.
 
-**Lockfile scope**: prefix installation stays limited to the selected
+Prefix installation stays limited to the selected
 or affected environments. The canonical `conda.lock` is always
 regenerated from every declared environment and platform, including
 for `conda workspace install -e <env>` and `conda workspace add
@@ -225,74 +213,72 @@ for `conda workspace install -e <env>` and `conda workspace add
 artifact use `conda workspace lock -e <env> --output <fragment>` or a
 platform filter with an explicit output path.
 
-## Differences from Pixi
+## Differences from pixi
 
 ### Architectural
 
-1. **No bundled solver** — conda-workspaces uses conda's configured
-   solver backend. Pixi bundles rattler (a Rust-based solver), so
+1. conda-workspaces uses conda's configured solver backend. Pixi bundles rattler (a Rust-based solver), so
    solving behavior may differ slightly.
 
-2. **No package installation** — conda-workspaces creates real conda
-   environments using conda's install machinery.  Pixi uses rattler to
+2. conda-workspaces creates conda environments using conda's install
+   machinery.  Pixi uses rattler to
    install packages directly into `.pixi/envs/`, bypassing conda.
 
-3. **Lock files** — conda-workspaces generates a `conda.lock` using a
+3. conda-workspaces generates a `conda.lock` using a
    rattler-lock-derived schema after every install.  The YAML structure
    is shared with `pixi.lock`, but `conda.lock` carries a conda-
    workspaces-owned `version: 1` byte.  The `--locked` flag installs
    from the lockfile after freshness validation, `--frozen` installs it
    as-is, and `conda workspace lock` regenerates the lockfile on demand.
 
-4. **Plugin, not standalone** — conda-workspaces is a conda plugin.
+4. conda-workspaces is a conda plugin.
    pixi is a standalone tool that replaces conda entirely for its users.
 
 ### Behavioral
 
-1. **Channel resolution** — conda and pixi may resolve channel URLs
+1. conda and pixi may resolve channel URLs
    differently (e.g., conda's `defaults` channel vs pixi's strict
    conda-forge orientation).
 
-2. **Virtual packages** — conda's virtual package system
+2. conda's virtual package system
    (`__cuda`, `__glibc`, etc.) may produce different solve results
    than pixi's system-requirements handling.
 
-3. **Environment activation** — conda environments are activated via
+3. conda environments are activated via
    `conda activate`. pixi uses `pixi shell` or `pixi run`.
    conda-workspaces environments are standard conda prefixes and work
    with `conda activate <prefix>`.
 
-### Practical Challenges
+### Practical challenges
 
-1. **PyPI dependency installation** depends on conda-pypi being
+1. PyPI dependency installation depends on conda-pypi being
    installed.  Without it, PyPI deps are parsed but cannot be installed.
 
-2. **Platform parity** — pixi supports platforms that conda may not
+2. pixi supports platforms that conda may not
    have complete channel coverage for (e.g., `linux-aarch64` has
    fewer packages on some channels).
 
-3. **Manifest drift** — as pixi evolves its manifest format,
+3. As pixi evolves its manifest format,
    conda-workspaces must track changes to remain compatible.  Pixi's
    format is not formally standardized outside the pixi project.
 
-## Plugin Hook Integrations
+## Plugin hook integrations
 
-conda-workspaces registers three conda plugin hooks so that workspace
-manifests and lockfiles are first-class citizens in the wider conda
-ecosystem:
+conda-workspaces registers three conda plugin hooks for reading workspace
+manifests and lockfiles, and exporting environments:
 
-### Environment Specifiers (`conda_environment_specifiers`)
+### Environment specifiers (`conda_environment_specifiers`)
 
 Two environment specifiers are registered:
 
-**`conda-workspaces`** — handles `conda.toml` workspace manifests.
+`conda-workspaces` handles `conda.toml` workspace manifests.
 When a user runs `conda env create --file conda.toml`, the specifier
 parses the manifest, resolves the *default* environment's dependencies,
 and returns them as `requested_packages` (a list of `MatchSpec`
 objects).  conda's solver then resolves the full dependency tree.
 
-**`conda-workspaces-lock-v1`** (aliases: `conda-workspaces-lock`,
-`workspace-lock`) — handles `conda.lock` files.  When a user runs
+`conda-workspaces-lock-v1` (aliases: `conda-workspaces-lock`,
+`workspace-lock`) handles `conda.lock` files.  When a user runs
 `conda env create --file conda.lock`, the specifier parses the lockfile,
 selects the package URLs for the default environment on the requested
 platform, and returns them as `explicit_packages` (a list of
@@ -305,12 +291,12 @@ users should select formats explicitly with `--format` when detection is
 not enough. `--env-spec` / `--environment-specifier` are pending
 deprecation upstream.
 
-### Environment Exporter (`conda_environment_exporters`)
+### Environment exporter (`conda_environment_exporters`)
 
 One environment exporter is registered:
 
-**`conda-workspaces-lock-v1`** (aliases: `conda-workspaces-lock`,
-`workspace-lock`) — exports installed environments to `conda.lock` in
+`conda-workspaces-lock-v1` (aliases: `conda-workspaces-lock`,
+`workspace-lock`) exports installed environments to `conda.lock` in
 the conda-workspaces lockfile format. This allows
 `conda export --format=conda-workspaces-lock-v1 --file=conda.lock` to
 produce a lockfile from any conda environment, not just workspace-
@@ -341,18 +327,18 @@ version byte differs. A tool can translate between `conda.lock` and
 `pixi.lock` by changing the version field and filename. A plain rename
 is not enough.
 
-### conda-pypi Integration
+### conda-pypi integration
 
 PyPI dependencies are handled in two phases:
 
-1. **Standard PyPI deps** (version-spec only) are translated to conda
+1. Version-only PyPI dependencies are translated to conda
    package names via `conda-pypi`'s `pypi_to_conda_name` (using the
    grayskull mapping) and merged directly into the solver call alongside
    conda specs. With `conda-rattler-solver` configured and the
    `conda-pypi` channel available, these resolve and install in the
    conda transaction.
 
-2. **Path-based PyPI deps** (`path = ".", editable = true`) are built
+2. Path-based PyPI dependencies (`path = ".", editable = true`) are built
    into `.conda` packages via `conda-pypi`'s `pypa_to_conda` after the
    main solve completes, then installed with `install_ephemeral_conda`.
 
@@ -363,17 +349,17 @@ with warnings. If `conda-rattler-solver` is missing, version-only PyPI
 dependencies still become specs, but `install` warns because the
 `conda-pypi` channel requires the rattler solver backend.
 
-The environment specifiers also surface PyPI dependencies as
+The environment specifiers also report PyPI dependencies as
 `external_packages` (under the `"pip"` key) so that conda's own
 reporting and downstream tools can see them.
 
-### 7. Hardlink Optimization
+### 7. Hardlink optimization
 
 Workspace environments live under `.conda/envs/`, which may be on a
 different filesystem from conda's global package cache (`pkgs_dirs`).
 When they are, conda silently falls back from hardlinks to copies,
-significantly increasing disk usage — especially in CI and Docker
-where the global cache is often on a separate volume.
+increasing disk usage. This is common in CI and Docker, where the global
+cache is often on a separate volume.
 
 conda already provides the `CONDA_PKGS_DIRS` environment variable to
 redirect the package cache.  In CI/Docker, set it to a path on the
@@ -384,18 +370,16 @@ export CONDA_PKGS_DIRS="$PWD/.conda/pkgs"
 conda workspace install
 ```
 
-conda-workspaces does not manage this setting itself — it defers to
-conda's existing mechanism, which works regardless of whether
-conda-workspaces is installed.
+conda manages this setting, so it works with or without conda-workspaces.
 
-## Future Work
+## Future work
 
-- **conda-build integration**: Build packages from workspace members
+- conda-build integration: Build packages from workspace members
   using conda-build recipes.
-- **Multi-package workspaces**: Support monorepo layouts where
+- Multi-package workspaces: Support monorepo layouts where
   subdirectories are independent packages that can depend on each other
   (pixi's `[package]` concept, reimagined for conda-build).
-- **Upstream a cross-target virtual package helper in conda**: the
+- Upstream a cross-target virtual package helper in conda: the
   baseline defaults `conda-workspaces` applies when cross-compiling
   (see "Lockfile generation" below) duplicate logic from
   `rattler_virtual_packages::VirtualPackages::detect_for_platform`.
@@ -434,12 +418,12 @@ mirroring `rattler_virtual_packages::VirtualPackages::detect_for_platform`:
 `ResolvedEnvironment.virtual_package_overrides` seeds `CONDA_OVERRIDE_GLIBC`
 (`2.17` for non-native `linux-*`), `CONDA_OVERRIDE_OSX`
 (`11.0` for `osx-arm64`, `10.15` for `osx-64`), and
-`CONDA_OVERRIDE_WIN` (`0`) for the duration of the solve. User knobs
-win: an explicit `CONDA_OVERRIDE_*` in the environment is preserved,
+`CONDA_OVERRIDE_WIN` (`0`) for the duration of the solve. An explicit
+`CONDA_OVERRIDE_*` in the environment takes precedence,
 and a `[system-requirements]` entry for the same virtual package is
 lifted into the baseline override so the record that populates and
 the spec that checks agree on the version. `__cuda` and `__archspec`
-are never auto-baselined — callers who need them must opt in via
+have no automatic baseline. Callers who need them must opt in via
 `[system-requirements]` or `CONDA_OVERRIDE_*`.
 
 Cross-platform solves are fail-fast by default: the first unsatisfiable

@@ -201,5 +201,4 @@ command.
 
 Python path, Git, and URL dependencies, editable installs, and local conda
 channels are rejected. Container configuration schemas, multi-architecture
-image indexes, and task-oriented entrypoints are outside this command's
-initial scope.
+image indexes, and task-oriented entrypoints are not supported.

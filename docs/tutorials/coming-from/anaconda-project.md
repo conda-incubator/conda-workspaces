@@ -5,15 +5,14 @@ the original tool for encapsulating conda-based projects with
 environments, commands, variables, downloads, and services. It has been
 effectively sunset, with
 [conda-project](https://github.com/conda-incubator/conda-project) as
-its community successor and conda-workspaces continuing that evolution.
+its community successor, followed by conda-workspaces.
 
 If you are migrating from anaconda-project, this guide maps its
 concepts and commands to conda-workspaces equivalents.
 
 :::{tip}
-Also coming from conda-project? See
-[Coming from conda-project](conda-project.md) for the
-intermediate step in this lineage.
+For migration from anaconda-project's successor, see
+[Coming from conda-project](conda-project.md).
 :::
 
 ## Automatic conversion
@@ -29,8 +28,8 @@ with packages, env_specs (as features), commands (as tasks), variables,
 and downloads converted. Use `--dry-run` to preview the output without
 writing a file, or `-o custom.toml` to choose a different output path.
 
-Review the output and adjust as needed — some concepts like services
-and interactive variable prompting have no direct equivalent.
+Review the output and adjust as needed. Services and interactive
+variable prompting have no direct equivalent.
 
 ## Key differences
 
@@ -198,9 +197,8 @@ variables:
 process = "python process.py --data {{ env.DATA_DIR | default('/data') }}"
 ```
 
-For required variables without defaults, the task will fail with a
-clear Jinja2 error if the variable is not set — there is no
-interactive prompting.
+If a required variable has no default and is not set, the task fails
+with a Jinja2 error. It does not prompt for a value.
 
 ## Commands to tasks
 
@@ -233,8 +231,8 @@ depends-on = ["lint", "test"]
 description = "Run all checks"
 ```
 
-The multi-line `check` command in anaconda-project becomes a proper
-dependency graph — `conda task run check` runs lint before test, and
+The multi-line `check` command in anaconda-project becomes a
+dependency graph. `conda task run check` runs lint before test, and
 each step can be cached independently.
 
 For notebook and Bokeh app commands, use the equivalent shell commands
@@ -263,12 +261,12 @@ your workspace.
 
 Some anaconda-project concepts have no direct equivalent:
 
-- Interactive variable prompting — use environment variables or
+- Interactive variable prompting: use environment variables or
   Jinja2 defaults instead
-- `services:` — use tasks, Docker Compose, or external service
+- `services:`: use tasks, Docker Compose, or external service
   management
-- `downloads:` — use tasks with `curl`/`wget` and input/output caching
-- Bokeh/notebook command types — use the equivalent shell commands
+- `downloads:`: use tasks with `curl`/`wget` and input/output caching
+- Bokeh/notebook command types: use the equivalent shell commands
 
 ## What's new in conda-workspaces
 
@@ -286,7 +284,7 @@ Beyond what anaconda-project offered, conda-workspaces adds:
 
 ## Next steps
 
-- [Your first workspace](../first-workspace.md) — full walkthrough
-- [Coming from conda-project](conda-project.md) — the
-  intermediate successor
-- [Features](../../features.md) — environments, tasks, caching, templates
+- [Your first workspace](../first-workspace.md) for a full walkthrough
+- [Coming from conda-project](conda-project.md) for migration from
+  the intermediate successor
+- [Features](../../features.md) for environments, tasks, caching, and templates

@@ -1,8 +1,5 @@
 # Contributing to conda-workspaces
 
-Thank you for your interest in improving conda-workspaces! This document
-describes how to contribute to the project.
-
 ## Code of Conduct
 
 This project follows the [conda Organization Code of Conduct](CODE_OF_CONDUCT.md).
@@ -52,7 +49,7 @@ pixi run -e docs docs        # build documentation
 
 ### Testing
 
-- Tests are plain `pytest` functions — no `unittest.TestCase` classes.
+- Write tests as plain `pytest` functions, without `unittest.TestCase` classes.
 - Use `pytest.mark.parametrize` for multiple test cases with the same logic.
 - Use `monkeypatch` and native pytest fixtures instead of `unittest.mock`.
 - Tests mirror the source structure (e.g., tests for
@@ -79,15 +76,15 @@ To contribute to conda ecosystem projects, you need to sign the
 
 ## Generative AI
 
-You're welcome to use generative AI tools when contributing. However:
+You're welcome to use generative AI tools when contributing:
 
 - You are responsible for all of your contributions. Review and understand any
   AI-generated content before including it in a pull request.
-- Be prepared to discuss changes during review — do not paste AI responses
+- Be prepared to discuss changes during review. Do not paste AI responses
   verbatim.
 - Make minimal, focused changes that match the existing style and patterns.
-- Ensure AI-assisted changes actually fix the underlying problem rather than
-  altering tests to make them pass.
+- Fix the underlying problem in AI-assisted changes. Do not alter tests just
+  to make them pass.
 
 Pull requests consisting of unchecked AI-generated content may be closed.
 

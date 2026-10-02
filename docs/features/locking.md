@@ -105,10 +105,8 @@ installs directly from the lockfile with no solver needed. When the
 lockfile is missing or out of date, it falls back to a full solve and
 regenerates `conda.lock`.
 
-This means day-to-day installs are fast while the lockfile stays current
-when the manifest changes. The check compares the manifest's dependency
-specs against locked package versions, so whitespace or comment changes
-do not trigger a re-solve.
+The check compares the manifest's dependency specs against locked package
+versions, so whitespace or comment changes do not trigger a re-solve.
 
 With `-e` / `--environment`, only the selected prefix is installed or
 updated. The solve path covers every declared environment and platform
@@ -175,14 +173,14 @@ conda workspace install --no-lock
 :::{versionadded} 0.4.0
 `conda workspace lock --output <path>` writes the solved lockfile
 to an arbitrary path so matrix runners can each emit one fragment.
-`--merge <glob>` stitches fragments into a single `conda.lock`
-without running the solver, validating schema version, channel
-lists, and rejecting overlapping `(environment, platform)` pairs.
+`--merge <glob>` combines fragments into a single `conda.lock`
+without running the solver. It validates schema versions and channel
+lists and rejects overlapping `(environment, platform)` pairs.
 :::
 
 Solving every platform in one job becomes expensive as a workspace
 grows. `conda workspace lock` supports matrix pipelines that split
-solving across runners and stitch the fragments back together on a
+solving across runners and combine the fragments in a
 coordinator job:
 
 ```bash
@@ -199,7 +197,7 @@ conda workspace lock --merge "conda.lock.*"
 default `<workspace>/conda.lock`. It is required with `--environment`,
 `--platform`, and `--skip-unsolvable`, so filtered operations cannot
 silently replace the complete canonical lock. Each matrix runner can
-emit exactly one `(env, platform)` slice.
+emit exactly one `(env, platform)` pair.
 
 `--merge` loads every fragment, validates that they agree on schema
 version and on each shared environment's channel list, and rejects

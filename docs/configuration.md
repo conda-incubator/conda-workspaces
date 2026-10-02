@@ -13,21 +13,19 @@ exactly. It does not accept a directory or search from the selected path.
 
 For the normative description of every field accepted in `conda.toml` and
 the `[tool.conda.*]` embedded form, see the [`conda.toml`
-specification](reference/conda-toml-spec.md). This page is the
-how-to companion: it shows full examples and table summaries grouped by
-task.
+specification](reference/conda-toml-spec.md).
 
 ## Workspace search order
 
-1. `conda.toml` — conda-native workspace manifest
-2. `pixi.toml` — pixi-native format (workspace/task compatibility)
-3. `pyproject.toml` — embedded under `[tool.conda.*]` or `[tool.pixi.*]`
+1. `conda.toml`: conda-native workspace manifest
+2. `pixi.toml`: pixi-native format (workspace/task compatibility)
+3. `pyproject.toml`: embedded under `[tool.conda.*]` or `[tool.pixi.*]`
 
 ## Task search order
 
-1. `conda.toml` — conda-native task manifest
-2. `pixi.toml` — pixi-native format (reads `[tasks]` directly)
-3. `pyproject.toml` — reads `[tool.conda.tasks]` or `[tool.pixi.tasks]`
+1. `conda.toml`: conda-native task manifest
+2. `pixi.toml`: pixi-native format (reads `[tasks]` directly)
+3. `pyproject.toml`: reads `[tool.conda.tasks]` or `[tool.pixi.tasks]`
 
 `conda task add` and `conda task remove` edit whichever of these files
 is selected by that search order, using the same tables as above (for
@@ -57,7 +55,8 @@ manifest.
 2. `~/.config/conda/tasks.toml` (XDG default)
 3. `~/.conda/tasks.toml` (legacy fallback)
 
-First file found wins. If none exist, user-level tasks are not loaded.
+conda-workspaces loads user tasks from the first file it finds. If none
+exist, it loads no user tasks.
 
 The format is the same `[tasks]` table as in `conda.toml`:
 
@@ -104,19 +103,19 @@ strings accepted by `conda env create --file conda.lock` and
 
 Generated and merged lockfiles remove basic authentication, Anaconda
 `/t/<token>/` path segments, queries, and fragments from channel and package
-URLs. Selective updates also scrub unchanged slices copied from an older
-lockfile. Regenerate an existing credential-bearing `conda.lock`, rotate any
+URLs. Selective updates also remove credentials from unchanged environment
+and platform records copied from an older lockfile. Regenerate an existing credential-bearing `conda.lock`, rotate any
 exposed value, and keep replacement credentials in Conda's local configuration.
 
 ## File formats
 
 ### conda.toml
 
-The conda-native format. Its core workspace, feature, environment,
-dependency, and task tables follow the same shape as `pixi.toml`, but it
-uses `[workspace]` exclusively (no `[project]` fallback) and can include
-conda-workspaces-specific extensions. Supports both workspace and task
-definitions in a single file.
+The conda-native format supports workspace and task definitions in a single
+file. Its workspace, feature, environment, dependency, and task tables
+follow the same shape as `pixi.toml`. It uses `[workspace]` exclusively
+(no `[project]` fallback) and can include conda-workspaces-specific
+extensions.
 
 ```toml
 [workspace]
@@ -339,7 +338,7 @@ cmake = { workspace = true, build = "h*" }
 
 `conda workspace add`, `conda workspace update`, and
 `conda workspace remove` address one explicitly selected declaration
-instead of searching for the composed winner. See the
+without changing other declarations inherited through feature composition. See the
 {ref}`dependency mutation rules <dependency-mutation-rules>` for the
 selector mapping, inheritance behavior, and wrong-location diagnostics.
 
