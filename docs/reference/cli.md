@@ -70,6 +70,30 @@ builder. `--dry-run` previews the recipe and inputs without invoking Docker.
 and resulting image digests. See [Build a workspace image](../how-to/image.md)
 for the complete workflow and source restrictions.
 
+### Workspace launchers
+
+`conda workspace ship` delegates a selected locked environment to conda-ship.
+It requires `-e/--environment`, `--platform`, and `-o/--output DIR`. The
+command reads the existing `conda.lock` without solving, installing a local
+environment, or modifying the manifest or lockfile.
+
+`--delegate-executable` overrides the executable configured in
+`[tool.conda-ship]`. `--artifact-layout online|external|embedded` overrides the
+manifest's layout. Runtime naming and version settings remain in
+`[tool.conda-ship]`. The global `--file` option selects the exact source manifest.
+
+`--dry-run` previews the build without downloading packages or writing
+artifacts. `--json` emits a structured result on stdout while build diagnostics
+go to stderr. Named platform variants and local path, Git, or URL PyPI
+dependencies are unsupported. No project source files or manifest tasks are
+copied into the launcher.
+
+The launcher installs its managed environment on first use. Online artifacts
+download packages then, while external and embedded bundles download them
+during the build. This integration requires unreleased conda-ship support for
+explicit source selection. conda-ship 0.10.0 is insufficient. See
+[Ship a workspace environment](../how-to/ship.md) for prerequisites and examples.
+
 ### Importing manifests
 
 Without `-e/--environment`, `conda workspace import SOURCE` converts a

@@ -29,10 +29,18 @@ Python API.
 Package a locked Linux environment and application files with Docker Buildx.
 :::
 
+:::{grid-item-card} {octicon}`rocket` Ship a workspace environment
+:link: ship
+:link-type: doc
+
+Build a native launcher that installs a locked environment on first use.
+:::
+
 ::::
 
 ```{toctree}
 :hidden:
 
 image
+ship
 ```

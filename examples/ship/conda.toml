@@ -1,0 +1,16 @@
+[workspace]
+name = "workspace-python"
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-arm64", "win-64"]
+
+[dependencies]
+python = "3.13.*"
+
+[environments]
+runtime = []
+
+[tool.conda-ship]
+runtime-name = "workspace-python"
+runtime-version = "0.1.0"
+delegate-executable = "python"
+artifact-layout = "online"

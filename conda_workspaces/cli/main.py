@@ -806,6 +806,41 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         help="Default image command (use -- to separate from options).",
     )
 
+    ship_parser = sub.add_parser(
+        "ship",
+        help="Build a native launcher from a locked workspace environment.",
+        add_help=False,
+    )
+    add_parser_help(ship_parser)
+    add_output_and_prompt_options(ship_parser)
+    ship_parser.add_argument(
+        "-e",
+        "--environment",
+        required=True,
+        help="Workspace environment to package with conda-ship.",
+    )
+    ship_parser.add_argument(
+        "--platform",
+        required=True,
+        help="Conda platform from conda.lock, such as linux-64 or osx-arm64.",
+    )
+    ship_parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        required=True,
+        help="Directory for the launcher and conda-ship build outputs.",
+    )
+    ship_parser.add_argument(
+        "--delegate-executable",
+        help="Executable supplied by the locked packages (default: conda-ship config).",
+    )
+    ship_parser.add_argument(
+        "--artifact-layout",
+        choices=("online", "external", "embedded"),
+        help="Package layout (default: conda-ship config, otherwise online).",
+    )
+
     archive_parser = sub.add_parser(
         "archive",
         help="Create a workspace archive.",
@@ -1200,6 +1235,10 @@ def _dispatch_workspace(args: argparse.Namespace, subcmd: str) -> int:
         from .workspace.image import execute_image
 
         return execute_image(args)
+    elif subcmd == "ship":
+        from .workspace.ship import execute_ship
+
+        return execute_ship(args)
     elif subcmd == "unarchive":
         from .workspace.archive import execute_unarchive
 
