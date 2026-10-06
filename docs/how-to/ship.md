@@ -5,6 +5,8 @@ through [conda-ship](https://github.com/conda-incubator/conda-ship). The launche
 installs the locked packages into its managed prefix on first use, then runs
 an executable from that environment. Later invocations reuse the prefix.
 
+![Preview, build, and run a locked Python launcher](../../demos/ship.gif)
+
 ```{important}
 This integration requires a development build of conda-ship with the
 `--manifest`, `--source-lock`, and `--source-environment` build options.
@@ -93,6 +95,8 @@ The [shipping example](https://github.com/conda-incubator/conda-workspaces/tree/
 contains this Python launcher configuration.
 
 ## Choose where package archives live
+
+![Build embedded and external bundles and run both launchers offline](../../demos/ship-bundle.gif)
 
 `--artifact-layout` overrides `[tool.conda-ship].artifact-layout`. Without either
 setting, conda-ship uses `online`.
