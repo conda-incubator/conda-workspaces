@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 from importlib.machinery import ModuleSpec
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -14,11 +15,36 @@ from conda.base.context import reset_context
 from conda.models.dist import Dist
 from conda.models.records import PackageRecord
 
+from conda_workspaces.cli.main import generate_workspace_parser
 from conda_workspaces.cli.workspace import ship
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-    from pathlib import Path
+
+    from conda_workspaces.models import WorkspaceConfig
+
+
+@pytest.fixture
+def ship_args() -> Callable[..., argparse.Namespace]:
+    """Parse the common locked workspace selection for ship failure tests."""
+
+    def parse(config: WorkspaceConfig, *options: str) -> argparse.Namespace:
+        return generate_workspace_parser().parse_args(
+            [
+                "--file",
+                config.manifest_path,
+                "ship",
+                "-e",
+                "default",
+                "--platform",
+                "linux-64",
+                "-o",
+                str(Path(config.root) / "dist"),
+                *options,
+            ]
+        )
+
+    return parse
 
 
 @pytest.fixture

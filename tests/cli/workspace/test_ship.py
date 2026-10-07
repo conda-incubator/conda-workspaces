@@ -14,6 +14,7 @@ from conda_workspaces.cli.workspace.ship import execute_ship
 from conda_workspaces.exceptions import CondaWorkspacesError
 
 if TYPE_CHECKING:
+    import argparse
     from collections.abc import Callable
 
     from conda_workspaces.context import WorkspaceContext
@@ -185,6 +186,7 @@ def test_ship_selects_exact_manifest_and_environment(
 def test_ship_rejects_invalid_locks_before_running_builder(
     image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
     record_ship_builder: Callable[..., list[list[str]]],
+    ship_args: Callable[..., argparse.Namespace],
     snapshot_tree: SnapshotTree,
     problem: str,
 ) -> None:
@@ -210,19 +212,7 @@ def test_ship_rejects_invalid_locks_before_running_builder(
         lock.write_text(json.dumps(data))
     calls = record_ship_builder()
     before = snapshot_tree(ctx.root)
-    args = generate_workspace_parser().parse_args(
-        [
-            "--file",
-            config.manifest_path,
-            "ship",
-            "-e",
-            "default",
-            "--platform",
-            "linux-64",
-            "-o",
-            str(ctx.root / "dist"),
-        ]
-    )
+    args = ship_args(config)
     with pytest.raises(CondaWorkspacesError):
         execute_ship(args)
     assert calls == []
@@ -241,25 +231,14 @@ def test_ship_rejects_invalid_locks_before_running_builder(
 def test_ship_reports_unavailable_builder(
     image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
     record_ship_builder: Callable[..., list[list[str]]],
+    ship_args: Callable[..., argparse.Namespace],
     settings: dict[str, object],
     message: str,
     expected_calls: int,
 ) -> None:
-    config, ctx = image_workspace()
+    config, _ = image_workspace()
     calls = record_ship_builder(**settings)
-    args = generate_workspace_parser().parse_args(
-        [
-            "--file",
-            config.manifest_path,
-            "ship",
-            "-e",
-            "default",
-            "--platform",
-            "linux-64",
-            "-o",
-            str(ctx.root / "dist"),
-        ]
-    )
+    args = ship_args(config)
     with pytest.raises(CondaWorkspacesError, match=message):
         execute_ship(args)
     assert len(calls) == expected_calls
@@ -268,24 +247,12 @@ def test_ship_reports_unavailable_builder(
 def test_ship_preserves_builder_errors_and_exit_code(
     image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
     record_ship_builder: Callable[..., list[list[str]]],
+    ship_args: Callable[..., argparse.Namespace],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    config, ctx = image_workspace()
+    config, _ = image_workspace()
     record_ship_builder(exit_code=7)
-    args = generate_workspace_parser().parse_args(
-        [
-            "--file",
-            config.manifest_path,
-            "ship",
-            "-e",
-            "default",
-            "--platform",
-            "linux-64",
-            "-o",
-            str(ctx.root / "dist"),
-            "--json",
-        ]
-    )
+    args = ship_args(config, "--json")
     assert execute_workspace(args) == 7
     captured = capsys.readouterr()
     assert "unsupported dependency" in captured.err
@@ -321,25 +288,14 @@ def test_ship_rejects_named_platform_variants(
 def test_ship_rejects_unlocked_application_sources(
     image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
     record_ship_builder: Callable[..., list[list[str]]],
+    ship_args: Callable[..., argparse.Namespace],
     source: str,
 ) -> None:
-    config, ctx = image_workspace(
+    config, _ = image_workspace(
         manifest_extra=f"\n[pypi-dependencies]\napp = {{ {source} }}\n"
     )
     calls = record_ship_builder()
-    args = generate_workspace_parser().parse_args(
-        [
-            "--file",
-            config.manifest_path,
-            "ship",
-            "-e",
-            "default",
-            "--platform",
-            "linux-64",
-            "-o",
-            str(ctx.root / "dist"),
-        ]
-    )
+    args = ship_args(config)
     with pytest.raises(CondaWorkspacesError, match="app.*(path|Git|URL)"):
         execute_ship(args)
     assert calls == []
@@ -353,6 +309,7 @@ def test_ship_rejects_unlocked_application_sources(
 def test_ship_reports_invalid_lock_structure(
     image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
     record_ship_builder: Callable[..., list[list[str]]],
+    ship_args: Callable[..., argparse.Namespace],
     structure: object,
 ) -> None:
     config, ctx = image_workspace()
@@ -361,19 +318,7 @@ def test_ship_reports_invalid_lock_structure(
     data["environments"] = structure
     lock.write_text(json.dumps(data))
     calls = record_ship_builder()
-    args = generate_workspace_parser().parse_args(
-        [
-            "--file",
-            config.manifest_path,
-            "ship",
-            "-e",
-            "default",
-            "--platform",
-            "linux-64",
-            "-o",
-            str(ctx.root / "dist"),
-        ]
-    )
+    args = ship_args(config)
     with pytest.raises(CondaWorkspacesError):
         execute_ship(args)
     assert calls == []
@@ -382,27 +327,16 @@ def test_ship_reports_invalid_lock_structure(
 def test_ship_requires_pypi_translation_to_check_manifest_requirements(
     image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
     record_ship_builder: Callable[..., list[list[str]]],
+    ship_args: Callable[..., argparse.Namespace],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config, ctx = image_workspace(
+    config, _ = image_workspace(
         manifest_extra='\n[pypi-dependencies]\nrequests = ">=2"\n'
     )
     calls = record_ship_builder()
 
     monkeypatch.setitem(sys.modules, "conda_pypi.translate", None)
-    args = generate_workspace_parser().parse_args(
-        [
-            "--file",
-            config.manifest_path,
-            "ship",
-            "-e",
-            "default",
-            "--platform",
-            "linux-64",
-            "-o",
-            str(ctx.root / "dist"),
-        ]
-    )
+    args = ship_args(config)
     with pytest.raises(CondaWorkspacesError, match="conda-pypi"):
         execute_ship(args)
     assert calls == []
