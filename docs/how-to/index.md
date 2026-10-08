@@ -41,6 +41,7 @@ Build a native launcher that installs a locked environment on first use.
 ```{toctree}
 :hidden:
 
+sbom
 image
 ship
 ```

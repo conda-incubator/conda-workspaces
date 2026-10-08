@@ -75,6 +75,7 @@ and task running to the conda CLI.
 - Lockfile generation (`conda.lock`) using a rattler-lock-derived schema for reproducible installs
 - Workspace archives with optional receipt verification for portable handoff
 - [Runnable container images](https://conda-incubator.github.io/conda-workspaces/how-to/image/) from locked Linux environments and project files
+- [Native launchers](https://conda-incubator.github.io/conda-workspaces/how-to/ship/) for locked environments through conda-ship
 - Per-platform dependency overrides via `[target.<platform>]`
 - PyPI dependencies translated and resolved alongside conda packages via conda-pypi
 - Activation scripts and environment variables per feature
@@ -121,6 +122,7 @@ and also provides `cw` and `ct` as shorter aliases.
 | `conda workspace archive` | Create a portable workspace archive |
 | `conda workspace unarchive` | Extract and optionally verify a workspace archive |
 | `conda workspace image` | Build a runnable container image from a locked Linux environment |
+| `conda workspace ship` | Build a native launcher from a locked environment with conda-ship |
 
 ### Task commands
 

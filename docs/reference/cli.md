@@ -34,6 +34,16 @@ After a file is written, it returns the path in `file` instead:
 }
 ```
 
+(generated-file-permissions)=
+
+### Generated file permissions
+
+On POSIX systems, new manifests, lockfiles, export files, workspace archives,
+OCI archive files, and receipts use mode `0600`, or a more restrictive mode
+set by the process umask. Replacing an existing regular file preserves its
+read, write, and execute permission bits. To share a generated file with
+other users, set its permissions explicitly after writing it.
+
 ### Locked installation
 
 `conda workspace install --locked` requires a current lockfile. `--frozen`
@@ -101,6 +111,10 @@ supported source manifest into a complete new `conda.toml`. It does not merge
 with an existing workspace, update `conda.lock`, or install an environment.
 Use `-o/--output` to select another output path. The global `--file` option is
 not accepted in this conversion mode.
+
+When importing `pixi.toml` or `pyproject.toml`, the source must be a regular
+file without symbolic links in its directory path. This also applies to
+`--dry-run`.
 
 Use `-e/--environment` to import one `environment.yml` or `environment.yaml`
 as a new named environment in an existing workspace:

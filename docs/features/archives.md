@@ -3,10 +3,9 @@
 # Archives and portable workspaces
 
 Workspace archives package a workspace into a portable `.tar.zst`,
-`.tar.gz`, or `.tar.bz2` archive that includes the manifest and source
-files. An existing or newly generated lockfile can also be included,
-along with resolved conda package artifacts for offline deployment and
-receipts for integrity checks.
+`.tar.gz`, or `.tar.bz2` archive that includes the manifest and source files,
+with an optional lockfile. They can also bundle resolved conda package artifacts
+for offline deployment and emit receipts for integrity checks.
 
 ![archive demo](../../demos/archives.gif)
 
@@ -43,7 +42,7 @@ Extract an archive and install environments in one step:
 conda workspace unarchive my-project.tar.zst --target ./restored --install
 ```
 
-The extraction target path must be absent. Existing files, links, and
+The extraction target must be absent. Existing files, symbolic links, and
 directories, including empty directories, are not overwritten.
 
 Install one archived environment to a final runtime prefix, optionally
@@ -75,7 +74,7 @@ cache priming:
 
 ```bash
 conda workspace archive --lock --bundle --receipt -o offline.tar.zst
-CONDA_OFFLINE=true conda workspace unarchive offline.tar.zst --receipt --install
+conda workspace unarchive offline.tar.zst --receipt
 ```
 
 For handoff workflows that need a separate integrity record, `--receipt`

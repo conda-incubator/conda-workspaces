@@ -21,8 +21,8 @@ build-alt = { cmd = ["python", "-m", "build", "--wheel"] }
 
 ![depends-on demo](../../demos/depends-on.gif)
 
-Tasks can depend on other tasks. Topological ordering makes each
-dependency run before the task that needs it:
+Tasks can depend on other tasks. Dependencies are resolved with
+topological ordering so everything runs in the right sequence:
 
 ```toml
 [tasks]
@@ -43,7 +43,7 @@ Tasks with no `cmd` that only list dependencies act as aliases:
 
 ```toml
 [tasks.check]
-depends-on = ["test", "lint", "type-check"]
+depends-on = ["test", "lint", "typecheck"]
 description = "Run all checks"
 ```
 
@@ -89,9 +89,9 @@ Commands support Jinja2 templates with `conda.*` context variables:
 | Variable | Description |
 |---|---|
 | `{{ conda.platform }}` | Current platform (e.g. `osx-arm64`) |
-| `{{ conda.environment_name }}` | Selected task environment name, or active environment name when none is selected |
-| `{{ conda.environment.name }}` | Selected task environment name, or active environment name when none is selected |
-| `{{ conda.prefix }}` | Selected task environment prefix, or active target prefix when none is selected |
+| `{{ conda.environment_name }}` | Selected environment name, or the active environment when none is selected |
+| `{{ conda.environment.name }}` | Alias for `conda.environment_name` |
+| `{{ conda.prefix }}` | Target conda environment prefix path |
 | `{{ conda.version }}` | conda version |
 | `{{ conda.manifest_path }}` | Path to the task file |
 | `{{ conda.init_cwd }}` | Current working directory at rendering time |
@@ -102,11 +102,6 @@ Commands support Jinja2 templates with `conda.*` context variables:
 
 When reading from `pixi.toml`, `{{ pixi.platform }}` etc. also work as
 aliases.
-
-Each executable task renders these values from the environment in which it
-will run. This includes `-e`, `default-environment`, and an `environment`
-selector on a dependency. Dependency argument values and templated ad-hoc
-commands follow the same rule.
 
 ## Task environment variables
 
@@ -142,10 +137,8 @@ outputs = ["dist/*.whl"]
 ```
 
 :::{tip}
-The cache compares SHA-256 fingerprints for declared inputs and outputs
-instead of timestamps. The selected environment prefix,
-or the current conda prefix when no environment is selected, is part of the
-cache identity, so switching environments reruns the task.
+The cache compares SHA-256 fingerprints for declared inputs and outputs,
+favoring correctness over timestamp shortcuts.
 :::
 
 ## Platform-specific tasks
@@ -183,16 +176,13 @@ clean = "{% if conda.is_win %}rd /s /q build{% else %}rm -rf build/{% endif %}"
 
 :::{versionchanged} 0.4.0
 When a task is defined in a manifest that also declares workspace
-environments, `conda task run` now falls back to the workspace's `default`
-environment instead of whatever conda environment happens to be active. Tasks
-without a workspace (tasks-only manifests) still use the current conda
-environment. `-e <env>` and a task's `default-environment` key continue to take
-precedence.
+environments, `conda task run` uses the workspace's `default` environment
+if it is installed. Otherwise, it uses the current shell environment,
+as it does for tasks without a workspace. `-e <env>` and a task's
+`default-environment` key take precedence.
 :::
 
-Tasks defined alongside workspace environments run in the workspace's
-`default` environment when it is installed. If that environment is not
-installed, the task runs in the current shell. Override with `-e <env>`:
+Select a workspace environment explicitly with `-e <env>`:
 
 ```bash
 conda task run test -e myenv
@@ -205,19 +195,6 @@ Tasks can also declare a default environment:
 cmd = "pytest"
 default-environment = "py38-compat"
 ```
-
-Explicit environment selectors must name an installed workspace environment.
-This includes `-e <env>`, `default-environment`, and the `environment` field on
-a task dependency. A missing or uninstalled selected environment reports an
-error instead of silently running the command in the current shell. Tasks-only
-manifests do not define workspace environments, so these selectors require a
-workspace table.
-
-Aliases have no command to run in an environment. When an alias is another
-task's dependency, put `environment` or `default-environment` on each
-executable task inside the alias instead. Environment selectors on nested
-aliases are rejected rather than silently falling back to another shell. A
-target alias can still use `default-environment` as its invocation fallback.
 
 ## User-level tasks
 
