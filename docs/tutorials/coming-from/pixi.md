@@ -147,6 +147,9 @@ This reads the supported workspace and task fields from your
 `pixi.toml` and writes a `conda.toml`. Use `--dry-run` to preview the
 output, or `-o custom.toml` to choose a different output path.
 
+Use a regular `pixi.toml` file. Import rejects symbolic links in the source
+path, including during `--dry-run`.
+
 To export only tasks, use the task export command instead:
 
 ```bash

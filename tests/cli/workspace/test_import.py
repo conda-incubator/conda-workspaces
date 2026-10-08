@@ -18,6 +18,7 @@ from conda.utils import quote_for_shell
 from rich.console import Console
 
 import conda_workspaces.cli.workspace.import_manifest as import_manifest_mod
+from conda_workspaces import paths as paths_mod
 from conda_workspaces.cli.main import execute_workspace, generate_workspace_parser
 from conda_workspaces.cli.workspace.import_manifest import execute_import
 from conda_workspaces.exceptions import (
@@ -29,6 +30,7 @@ from conda_workspaces.exceptions import (
 from conda_workspaces.importers import EnvironmentYmlImporter, find_importer
 from conda_workspaces.importers import base as importer_base
 from conda_workspaces.importers.serialize import config_to_toml
+from conda_workspaces.manifests import base as manifest_base
 from conda_workspaces.manifests import find_parser as find_manifest_parser
 from conda_workspaces.models import WorkspaceConfig
 from conda_workspaces.runner import SubprocessShell
@@ -38,6 +40,9 @@ from ..conftest import make_args
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+    from typing import Any
+
+    from conda_workspaces.paths import FileGeneration
 
 
 _DEFAULTS = {
@@ -202,6 +207,7 @@ def test_import_manifest_produces_workspace(
         ),
     ],
 )
+@pytest.mark.parametrize("fallback", [False, True], ids=["native", "fallback"])
 def test_toml_import_uses_one_source_generation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -209,15 +215,18 @@ def test_toml_import_uses_one_source_generation(
     original: str,
     replacement: str,
     task_name: str,
+    fallback: bool,
 ) -> None:
+    if fallback:
+        monkeypatch.setattr(paths_mod, "_SUPPORTS_ANCHORED_DIRECTORY_OPERATIONS", False)
     path = tmp_path / filename
     path.write_text(original, encoding="utf-8")
     parser = find_importer(path)
     manifest_parser = find_manifest_parser(path)
-    read_manifest_text = manifest_parser.read_manifest_text
+    read_manifest_text = manifest_parser.read_manifest_text_with_generation
     reads = 0
 
-    def replace_after_read(candidate: Path) -> str:
+    def replace_after_read(candidate: Path) -> tuple[str, FileGeneration]:
         nonlocal reads
         reads += 1
         content = read_manifest_text(candidate)
@@ -226,7 +235,7 @@ def test_toml_import_uses_one_source_generation(
 
     monkeypatch.setattr(
         type(manifest_parser),
-        "read_manifest_text",
+        "read_manifest_text_with_generation",
         staticmethod(replace_after_read),
     )
 
@@ -236,6 +245,63 @@ def test_toml_import_uses_one_source_generation(
     assert doc["workspace"]["name"] != "replacement"
     assert task_name in doc["tasks"]
     assert "changed" not in doc["tasks"]
+
+
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [("pixi.toml", _PIXI_TOML), ("pyproject.toml", _PYPROJECT_TOML)],
+    ids=["pixi", "pyproject"],
+)
+@pytest.mark.parametrize("dry_run", [False, True], ids=["import", "preview"])
+@pytest.mark.parametrize("source_kind", ["file", "parent", "replaced"])
+def test_toml_import_rejects_linked_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    content: str,
+    dry_run: bool,
+    source_kind: str,
+) -> None:
+    private = tmp_path / "private"
+    private.mkdir()
+    manifest = private / filename
+    manifest.write_text(content.replace("demo", "private-marker"), encoding="utf-8")
+    source = tmp_path / "source"
+    if source_kind == "parent":
+        source.symlink_to(private, target_is_directory=True)
+    else:
+        source.mkdir()
+        if source_kind == "file":
+            (source / filename).symlink_to(manifest)
+        else:
+            (source / filename).write_text(content, encoding="utf-8")
+            read = manifest_base.read_regular_file_bytes_with_generation
+
+            def replace_before_read(
+                path: Path, **kwargs: Any
+            ) -> tuple[bytes, FileGeneration]:
+                path.unlink()
+                path.symlink_to(manifest)
+                return read(path, **kwargs)
+
+            monkeypatch.setattr(
+                manifest_base,
+                "read_regular_file_bytes_with_generation",
+                replace_before_read,
+            )
+    output = tmp_path / "conda.toml"
+    console = Console(file=StringIO())
+
+    with pytest.raises((ValueError, OSError)):
+        execute_import(
+            make_args(
+                _DEFAULTS, file=source / filename, output=output, dry_run=dry_run
+            ),
+            console=console,
+        )
+
+    assert not output.exists()
+    assert "private-marker" not in console.file.getvalue()
 
 
 @pytest.mark.parametrize(

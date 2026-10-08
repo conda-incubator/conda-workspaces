@@ -6,8 +6,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+import conda_workspaces.manifests as manifests_mod
 import conda_workspaces.manifests.base as base_mod
 import conda_workspaces.manifests.pyproject_toml as pyproject_mod
+from conda_workspaces import paths as paths_mod
 from conda_workspaces.exceptions import (
     ManifestExistsError,
     TaskParseError,
@@ -22,6 +24,8 @@ from conda_workspaces.models import Task
 if TYPE_CHECKING:
     from pathlib import Path
     from typing import Any
+
+    from conda_workspaces.paths import FileGeneration
 
 
 def test_copy_manifest_refuses_dangling_destination_symlink(tmp_path: Path) -> None:
@@ -64,6 +68,68 @@ def test_copy_manifest_does_not_replace_raced_creation(
         ManifestParser.copy_manifest(source, destination)
 
     assert target.read_text(encoding="utf-8") == "raced"
+
+
+@pytest.mark.parametrize("fallback", [False, True], ids=["native", "fallback"])
+@pytest.mark.parametrize("source_kind", ["file", "directory", "parent"])
+def test_copy_manifest_rejects_source_replaced_by_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_kind: str,
+    fallback: bool,
+) -> None:
+    if fallback:
+        monkeypatch.setattr(paths_mod, "_SUPPORTS_ANCHORED_DIRECTORY_OPERATIONS", False)
+    source = tmp_path / "source"
+    source.mkdir()
+    manifest = source / "conda.toml"
+    manifest.write_text("[workspace]\nname='source'\n", encoding="utf-8")
+    private = tmp_path / "private"
+    private.mkdir()
+    (private / manifest.name).write_text(
+        "[workspace]\nname='private-marker'\n",
+        encoding="utf-8",
+    )
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    if source_kind in ("file", "parent"):
+        read = base_mod.read_regular_file_bytes_with_generation
+
+        def replace_before_read(
+            path: Path, **kwargs: Any
+        ) -> tuple[bytes, FileGeneration]:
+            if source_kind == "file":
+                path.unlink()
+                path.symlink_to(private / path.name)
+            else:
+                path.parent.rename(tmp_path / "original")
+                path.parent.symlink_to(private, target_is_directory=True)
+            return read(path, **kwargs)
+
+        monkeypatch.setattr(
+            base_mod, "read_regular_file_bytes_with_generation", replace_before_read
+        )
+    else:
+        detect = manifests_mod.detect_workspace_file
+
+        def replace_before_discovery(path: Path, **kwargs: Any) -> Path:
+            path.rename(tmp_path / "original")
+            path.symlink_to(private, target_is_directory=True)
+            return detect(path, **kwargs)
+
+        monkeypatch.setattr(
+            manifests_mod, "detect_workspace_file", replace_before_discovery
+        )
+
+    if source_kind == "parent" and paths_mod.supports_anchored_directory_operations():
+        target = ManifestParser.copy_manifest(manifest, destination)
+        assert target.read_text(encoding="utf-8") == "[workspace]\nname='source'\n"
+    else:
+        with pytest.raises((ValueError, OSError, WorkspaceParseError)):
+            ManifestParser.copy_manifest(
+                source if source_kind == "directory" else manifest, destination
+            )
+        assert list(destination.iterdir()) == []
 
 
 def test_write_workspace_stub_does_not_replace_raced_creation(

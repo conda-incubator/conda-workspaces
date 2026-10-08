@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+import sys
+from importlib.machinery import ModuleSpec
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -11,9 +15,77 @@ from conda.base.context import reset_context
 from conda.models.dist import Dist
 from conda.models.records import PackageRecord
 
+from conda_workspaces.cli.main import generate_workspace_parser
+from conda_workspaces.cli.workspace import ship
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-    from pathlib import Path
+
+    from conda_workspaces.models import WorkspaceConfig
+
+
+@pytest.fixture
+def ship_args() -> Callable[..., argparse.Namespace]:
+    """Parse the common locked workspace selection for ship failure tests."""
+
+    def parse(config: WorkspaceConfig, *options: str) -> argparse.Namespace:
+        return generate_workspace_parser().parse_args(
+            [
+                "--file",
+                config.manifest_path,
+                "ship",
+                "-e",
+                "default",
+                "--platform",
+                "linux-64",
+                "-o",
+                str(Path(config.root) / "dist"),
+                *options,
+            ]
+        )
+
+    return parse
+
+
+@pytest.fixture
+def record_ship_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[..., list[list[str]]]:
+    """Record the external builder and simulate its output and failures."""
+
+    def record(
+        *,
+        available: bool = True,
+        help_text: str = "--manifest --source-lock --source-environment",
+        exit_code: int = 0,
+        execution_error: OSError | None = None,
+    ) -> list[list[str]]:
+        calls: list[list[str]] = []
+        monkeypatch.setattr(
+            ship,
+            "find_spec",
+            lambda name: ModuleSpec(name, None) if available else None,
+        )
+
+        def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(list(args))
+            assert args[:4] == [sys.executable, "-m", "conda_ship.cli", "build"]
+            assert not kwargs.get("shell")
+            if execution_error is not None:
+                raise execution_error
+            if args[-1] == "--help":
+                return subprocess.CompletedProcess(args, 0, stdout=help_text, stderr="")
+            assert kwargs["stdout"] is sys.stderr
+            assert kwargs["stderr"] is sys.stderr
+            print("conda-ship build output", file=sys.stderr)
+            if exit_code:
+                print("conda-ship: unsupported dependency", file=sys.stderr)
+            return subprocess.CompletedProcess(args, exit_code)
+
+        monkeypatch.setattr(ship.subprocess, "run", run)
+        return calls
+
+    return record
 
 
 @pytest.fixture

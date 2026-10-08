@@ -157,8 +157,8 @@ class PyprojectTomlParser(ManifestParser):
         tool["conda"] = exported_conda
         return tomlkit.dumps(doc)
 
-    def has_workspace(self, path: Path) -> bool:
-        data = self.load_toml(path)
+    def has_workspace(self, path: Path, *, reject_symlinks: bool = False) -> bool:
+        data = self.load_toml(path, reject_symlinks=reject_symlinks)
         tool = data.get("tool", {})
         return bool(
             tool.get("conda", {}).get("workspace")
@@ -211,8 +211,8 @@ class PyprojectTomlParser(ManifestParser):
         parse_features_and_envs(source, config, path, self)
         return config
 
-    def has_tasks(self, path: Path) -> bool:
-        data = self.load_toml(path)
+    def has_tasks(self, path: Path, *, reject_symlinks: bool = False) -> bool:
+        data = self.load_toml(path, reject_symlinks=reject_symlinks)
         tool = data.get("tool", {})
         return bool(
             tool.get("conda", {}).get("tasks") or tool.get("pixi", {}).get("tasks")

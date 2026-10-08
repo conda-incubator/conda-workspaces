@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import stat
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
@@ -34,7 +35,13 @@ from ..parsing import (
     read_limited_text,
     validate_document_limits,
 )
-from ..paths import atomic_write_text, read_regular_file_bytes_with_generation
+from ..paths import (
+    anchored_directory,
+    atomic_write_text,
+    read_regular_file_bytes_with_generation,
+    regular_file_generation,
+    validate_path_parent,
+)
 
 _PYPI_NAME_TAIL_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(.*)$")
 MATCH_SPEC_FIELD_ALIASES: dict[str, str] = {
@@ -225,12 +232,23 @@ class ManifestParser(ABC):
 
     @staticmethod
     def read_manifest_text_with_generation(path: Path) -> tuple[str, FileGeneration]:
-        """Read a mutable manifest without links and return its generation."""
-        content, generation = read_regular_file_bytes_with_generation(
-            path,
-            maximum_bytes=MAX_MANIFEST_BYTES,
-            label="Manifest TOML",
-        )
+        """Read a manifest for copying or mutation without following links."""
+        validate_path_parent(path)
+        with anchored_directory(path.parent) as descriptor:
+            expected_generation = (
+                regular_file_generation(path) if descriptor is None else None
+            )
+            content, generation = read_regular_file_bytes_with_generation(
+                path,
+                maximum_bytes=MAX_MANIFEST_BYTES,
+                label="Manifest TOML",
+                directory_descriptor=descriptor,
+            )
+            if descriptor is None and (
+                generation != expected_generation
+                or regular_file_generation(path) != expected_generation
+            ):
+                raise ValueError(f"Manifest TOML changed while it was read: {path}")
         return decode_limited_text(
             content,
             maximum_bytes=MAX_MANIFEST_BYTES,
@@ -268,8 +286,12 @@ class ManifestParser(ABC):
             raise WorkspaceParseError(path, redact_url_text(str(exc))) from exc
 
     @classmethod
-    def load_toml(cls, path: Path) -> tomlkit.TOMLDocument:
+    def load_toml(
+        cls, path: Path, *, reject_symlinks: bool = False
+    ) -> tomlkit.TOMLDocument:
         """Read and parse one repository manifest under explicit limits."""
+        if reject_symlinks:
+            return cls.load_toml_with_generation(path)[0]
         return cls.parse_toml_text(cls.read_manifest_text(path))
 
     @classmethod
@@ -323,7 +345,7 @@ class ManifestParser(ABC):
         )
 
     @classmethod
-    def resolve_source(cls, source: Path) -> Path:
+    def resolve_source(cls, source: Path, *, reject_symlinks: bool = False) -> Path:
         """Resolve *source* (directory or file) to a concrete manifest path.
 
         Directories are walked via
@@ -335,9 +357,23 @@ class ManifestParser(ABC):
         """
         from . import detect_workspace_file
 
-        if not source.exists():
-            raise FileNotFoundError(source)
-        return detect_workspace_file(source) if source.is_dir() else source
+        if reject_symlinks:
+            validate_path_parent(source)
+            mode = source.lstat().st_mode
+            if stat.S_ISLNK(mode):
+                raise WorkspaceParseError(
+                    source, "symbolic links are not supported for this operation"
+                )
+            is_directory = stat.S_ISDIR(mode)
+        else:
+            if not source.exists():
+                raise FileNotFoundError(source)
+            is_directory = source.is_dir()
+        return (
+            detect_workspace_file(source, reject_symlinks=reject_symlinks)
+            if is_directory
+            else source
+        )
 
     @classmethod
     def copy_manifest(cls, source: Path, dest_dir: Path) -> Path:
@@ -350,15 +386,12 @@ class ManifestParser(ABC):
         appropriate; callers layer their own dry-run / console policy
         on top.
         """
-        manifest = cls.resolve_source(source)
+        manifest = cls.resolve_source(source, reject_symlinks=True)
         target = dest_dir / manifest.name
         if target.exists() or target.is_symlink():
             raise ManifestExistsError(target)
-        atomic_write_text(
-            target,
-            cls.read_manifest_text(manifest),
-            expected_identity=None,
-        )
+        content, _ = cls.read_manifest_text_with_generation(manifest)
+        atomic_write_text(target, content, expected_identity=None)
         return target
 
     def write_workspace_stub(
@@ -791,7 +824,7 @@ class ManifestParser(ABC):
         """Return True if this parser can read *path*."""
 
     @abstractmethod
-    def has_workspace(self, path: Path) -> bool:
+    def has_workspace(self, path: Path, *, reject_symlinks: bool = False) -> bool:
         """Return True if *path* contains workspace configuration."""
 
     def parse(self, path: Path) -> WorkspaceConfig:
@@ -858,7 +891,7 @@ class ManifestParser(ABC):
     def parse_data(self, data: dict[str, Any], path: Path) -> WorkspaceConfig:
         """Parse already-loaded manifest *data* associated with *path*."""
 
-    def has_tasks(self, path: Path) -> bool:
+    def has_tasks(self, path: Path, *, reject_symlinks: bool = False) -> bool:
         """Return True if *path* contains task definitions."""
         return False
 
