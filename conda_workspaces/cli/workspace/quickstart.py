@@ -130,7 +130,9 @@ def execute_quickstart(
         # stays consistent.  The real work lives on :class:`ManifestParser`;
         # we only layer dry-run preview + Rich output on top.
         try:
-            source_manifest = ManifestParser.resolve_source(copy_from)
+            source_manifest = ManifestParser.resolve_source(
+                copy_from, reject_symlinks=True
+            )
             manifest_path = workspace_root / source_manifest.name
             if manifest_path.exists() or manifest_path.is_symlink():
                 raise ManifestExistsError(manifest_path)

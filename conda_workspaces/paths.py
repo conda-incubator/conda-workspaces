@@ -447,7 +447,7 @@ def atomic_binary_writer_at(
     except FileNotFoundError:
         initial_identity = None
         initial_generation = None
-        mode = 0o644
+        mode = None
     else:
         if not stat.S_ISREG(initial.st_mode):
             raise ValueError(f"Output path is not a regular file: {display_path}")
@@ -486,7 +486,8 @@ def atomic_binary_writer_at(
             yield stream
             stream.flush()
             os.fsync(stream.fileno())
-            os.fchmod(stream.fileno(), mode)
+            if mode is not None:
+                os.fchmod(stream.fileno(), mode)
             written = os.fstat(stream.fileno())
             temporary_identity = written.st_dev, written.st_ino
 
@@ -669,7 +670,10 @@ def atomic_binary_writer(
     expected_identity: FileIdentity | None | object = _ANY_FILE_IDENTITY,
     expected_generation: FileGeneration | None | object = _ANY_FILE_GENERATION,
 ) -> Iterator[BinaryIO]:
-    """Yield a binary stream and atomically publish it as a regular file."""
+    """Publish a regular file atomically, keeping new files private.
+
+    Replacements retain the existing file's ordinary permission bits.
+    """
     path = canonicalize_system_path_alias(path)
     if path.is_symlink():
         raise ValueError(f"Output path cannot be a symbolic link: {path}")
@@ -739,13 +743,12 @@ def atomic_binary_writer(
             yield cast("BinaryIO", stream)
             stream.flush()
             os.fsync(stream.fileno())
-            mode = (
-                stat.S_IMODE(initial.st_mode) & 0o777 if initial is not None else 0o644
-            )
-            if hasattr(os, "fchmod"):
-                os.fchmod(stream.fileno(), mode)
-            else:
-                os.chmod(temp_name, mode)
+            if initial is not None:
+                mode = stat.S_IMODE(initial.st_mode) & 0o777
+                if hasattr(os, "fchmod"):
+                    os.fchmod(stream.fileno(), mode)
+                else:
+                    os.chmod(temp_name, mode)
         current = path.lstat() if path.exists() else None
         if (
             path.is_symlink()

@@ -209,6 +209,48 @@ def test_quickstart_copy_from_file(
     assert orchestrated["runners"]["init"].calls == []
 
 
+@pytest.mark.parametrize("dry_run", [False, True], ids=["copy", "preview"])
+@pytest.mark.parametrize(
+    "source_kind",
+    ["file", "directory", "parent", "discovered"],
+)
+def test_quickstart_rejects_linked_copy_source(
+    orchestrated: dict,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    dry_run: bool,
+    source_kind: str,
+) -> None:
+    private = tmp_path / "private"
+    private.mkdir()
+    manifest = private / "conda.toml"
+    manifest.write_text("[workspace]\nname='private-marker'\n", encoding="utf-8")
+    source = tmp_path / "source"
+    source.mkdir()
+    linked = source / "conda.toml"
+    linked.symlink_to(
+        manifest if source_kind in ("file", "discovered") else private,
+        target_is_directory=source_kind in ("directory", "parent"),
+    )
+    copy_from = (
+        source
+        if source_kind == "discovered"
+        else linked / "conda.toml"
+        if source_kind == "parent"
+        else linked
+    )
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    monkeypatch.chdir(destination)
+
+    with pytest.raises((ValueError, OSError, CondaWorkspacesError)):
+        orchestrated["run"](copy_from=copy_from, dry_run=dry_run)
+
+    assert list(destination.iterdir()) == []
+    assert "private-marker" not in orchestrated["console"].file.getvalue()
+    assert all(not runner.calls for runner in orchestrated["runners"].values())
+
+
 def test_quickstart_copy_rejects_override_without_channel(
     orchestrated: dict,
     tmp_path: Path,
