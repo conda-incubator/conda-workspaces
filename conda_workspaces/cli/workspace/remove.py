@@ -275,7 +275,9 @@ def execute_remove(args: argparse.Namespace, *, console: Console | None = None) 
         current = parser.parse_data_with_redacted_errors(doc.unwrap(), manifest_path)
         if location.environment is not None:
             current.get_environment(location.environment)
-        location.validate_platform(current, source, allow_existing=True)
+        location.validate_platform(
+            current, source, namespace=namespace, allow_existing=True
+        )
         selected = location.find_table(source)
         selected_dependencies = (
             selected.get(dep_key, {}) if selected is not None else {}

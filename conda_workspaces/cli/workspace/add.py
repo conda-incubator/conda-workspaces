@@ -117,7 +117,7 @@ def execute_add(args: argparse.Namespace, *, console: Console | None = None) -> 
         if feature_name not in current.features:
             assert environment is not None
             raise FeatureNotFoundError(feature_name, environment)
-    location.validate_platform(current, source)
+    location.validate_platform(current, source, namespace=namespace)
     added_names = _add_to_toml(
         source,
         specs,

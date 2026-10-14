@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import tomlkit
+from conda.base.constants import KNOWN_SUBDIRS
 from conda.utils import quote_for_shell
 from tomlkit.items import InlineTable, Table
 
@@ -15,7 +17,6 @@ from ...resolver import resolve_environment
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from pathlib import Path
     from typing import Any
 
     from ...models import WorkspaceConfig
@@ -205,14 +206,22 @@ class DependencyLocation:
         config: WorkspaceConfig,
         source: tomlkit.TOMLDocument | Table | InlineTable,
         *,
+        namespace: tuple[str, ...] = (),
         allow_existing: bool = False,
     ) -> None:
         """Reject a platform selector that cannot affect this workspace."""
         if self.platform is None:
             return
+        scoped_features: dict[str, Feature] = {}
         if self.environment is not None:
             if self.environment in config.environments:
                 available = set(resolve_environment(config, self.environment).platforms)
+                scoped_features.update(
+                    (feature.name, feature)
+                    for feature in config.resolve_features(
+                        config.environments[self.environment]
+                    )
+                )
             else:
                 prospective = replace(
                     config,
@@ -224,6 +233,12 @@ class DependencyLocation:
                 available = set(
                     resolve_environment(prospective, self.environment).platforms
                 )
+                scoped_features.update(
+                    (feature.name, feature)
+                    for feature in prospective.resolve_features(
+                        prospective.environments[self.environment]
+                    )
+                )
         elif self.feature is not None:
             available = set()
             feature_is_used = False
@@ -231,6 +246,10 @@ class DependencyLocation:
                 if self.feature in environment.features:
                     feature_is_used = True
                     available.update(resolve_environment(config, name).platforms)
+                    scoped_features.update(
+                        (feature.name, feature)
+                        for feature in config.resolve_features(environment)
+                    )
             if not feature_is_used:
                 prospective = replace(
                     config,
@@ -252,6 +271,12 @@ class DependencyLocation:
                 available.update(
                     resolve_environment(prospective, self.feature).platforms
                 )
+                scoped_features.update(
+                    (feature.name, feature)
+                    for feature in prospective.resolve_features(
+                        prospective.environments[self.feature]
+                    )
+                )
         else:
             available = set(config.platforms)
             for name, environment in config.environments.items():
@@ -262,7 +287,44 @@ class DependencyLocation:
             return
         if allow_existing and self.has_declared_platform(source):
             return
-        raise PlatformError(self.platform, sorted(available))
+        known = set(KNOWN_SUBDIRS).union(config.platforms, available)
+        known.update(
+            platform
+            for feature in config.features.values()
+            for platform in feature.platforms
+        )
+        suggested = PlatformError.suggest_platform(self.platform, known)
+        declared = self.platform if self.platform in known else suggested
+        hints: list[str] = []
+        if declared is not None and declared not in available:
+            filename = Path(config.manifest_path).name
+            restrictions = [
+                feature
+                for feature in scoped_features.values()
+                if feature.platforms
+                and declared not in feature.platforms
+                and declared
+                not in {config.platform_subdir(name) for name in feature.platforms}
+            ]
+            if restrictions:
+                for feature in sorted(restrictions, key=lambda feature: feature.name):
+                    keys = (
+                        namespace
+                        if feature.is_default
+                        else (*namespace, "feature", feature.name)
+                    )
+                    table = ".".join(str(tomlkit.key(key)) for key in keys)
+                    setting = f"[{table}].platforms" if table else "top-level platforms"
+                    hints.append(
+                        f"To support '{declared}', review {setting} in {filename}."
+                    )
+            else:
+                workspace_key = "workspace" if "workspace" in source else "project"
+                table = ".".join((*namespace, workspace_key))
+                hints.append(f"Add '{declared}' to [{table}].platforms in {filename}.")
+        raise PlatformError(
+            self.platform, sorted(available), known_platforms=known, hints=hints
+        )
 
     def has_declared_platform(
         self,

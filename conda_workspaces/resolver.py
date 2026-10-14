@@ -140,7 +140,11 @@ class ResolvedEnvironment:
         ]
         if matches:
             return matches[0]
-        raise PlatformError(requested, sorted(candidates))
+        raise PlatformError(
+            requested,
+            sorted(candidates),
+            known_platforms=(*self.platforms, *self.platform_subdirs),
+        )
 
     def system_requirement_version(self, name: str) -> str | None:
         """Look up a system requirement by conda or Pixi-facing virtual name."""
