@@ -8,7 +8,8 @@ accept the same subcommands, flags, and arguments.
 ### Structured output
 
 Successful commands that advertise `--json` emit exactly one JSON
-value on stdout. Successful `add`, `update`, `remove`, `install`,
+value on stdout. Successful `add`, `update`, `remove`, `platform add`,
+`platform remove`, `install`,
 `lock`, `clean`, `import`, `archive`, and `unarchive` operations
 return:
 
@@ -52,6 +53,45 @@ removing, or updating environment prefixes or building local Python packages.
 It requires `--locked` or `--frozen`. Locked installation with `--dry-run`
 fetches packages into a temporary cache to complete validation without changing
 the environment, with or without `--download-only`.
+
+(feature-platforms)=
+### Feature platforms
+
+Use `platform add` and `platform remove` to edit an existing named feature's
+explicit platform list:
+
+```bash
+conda workspace platform add --feature tools linux-64
+conda workspace platform remove --feature tools linux-64
+conda workspace --file pyproject.toml platform add --feature tools win-64
+```
+
+Both commands require `--feature` and accept one or more platform names. They
+edit `[feature.NAME].platforms`, or the corresponding selected `[tool.conda]`
+or `[tool.pixi]` table in `pyproject.toml`. Names must be recognized conda
+platforms or custom platform names already declared in the workspace. Typo
+suggestions are advisory. The commands do not create features or edit the
+workspace's platform list, and `--feature default` is not supported.
+
+Changing a shared feature affects every environment that includes it. Adding
+the first explicit platform starts a new list with the requested names. It
+does not copy the inherited workspace platforms. Removing the last explicit
+platform removes the setting, so environments derive their supported platforms
+from their other features or the workspace. Removing a platform that
+is only inherited is an error. Adding an already listed platform has no effect.
+
+By default, these commands update `conda.lock` without installing or changing
+any environment prefix. Existing solutions for retained targets stay unchanged,
+new targets are solved, and removed targets are dropped. If the lockfile is
+stale, refresh it with `conda workspace lock` before editing feature platforms.
+A missing lockfile is generated for the complete resulting workspace.
+
+Use `--no-lockfile-update` to edit only the manifest. `--dry-run` validates
+and previews the change without writing the manifest, lockfile, or prefixes.
+Combining both flags previews only the manifest change.
+
+The dependency command `conda workspace add --platform` continues to select
+a platform-specific dependency table. It does not declare platform support.
 
 ### Workspace images
 

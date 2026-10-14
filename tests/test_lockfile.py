@@ -1318,6 +1318,145 @@ def test_render_lockfile_selective_update_only_replaces_target(
     assert result["environments"]["test"] == baseline["environments"]["test"]
 
 
+@pytest.mark.parametrize("change", ["add", "remove", "rich-target"])
+def test_render_lockfile_preserves_existing_platform_solutions(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    selective_lock_data: dict,
+    resolved_envs_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    channel = "https://conda.anaconda.org/conda-forge"
+    certifi = f"{channel}/noarch/certifi-2026.1-pyhd_0.conda"
+    selective_lock_data["metadata"] = {"source": "existing lock"}
+    selective_lock_data["environments"]["default"]["metadata"] = {"retain": True}
+    shared_record = next(
+        record
+        for record in selective_lock_data["packages"]
+        if record.get("conda") == certifi
+    )
+    shared_record["license"] = "original metadata"
+    baseline = deepcopy(selective_lock_data)
+    added = "linux-64-cuda" if change == "rich-target" else "win-64"
+    platforms = ["linux-64"]
+    if change != "remove":
+        platforms.extend(["osx-arm64", added])
+    resolved = resolved_envs_factory(default=platforms, test=["linux-64"])
+    resolved["default"].platform_subdirs[added] = (
+        "linux-64" if change == "rich-target" else "win-64"
+    )
+    calls: list[tuple[str, str]] = []
+
+    def solve(self, platform, *, prefix):
+        calls.append((self.name, platform))
+        return [
+            _FakePkg("certifi", certifi, md5="d" * 32, license="new metadata"),
+            _FakePkg("python", f"{channel}/{platform}/python-3.12.0-new_0.conda"),
+        ]
+
+    monkeypatch.setattr(ResolvedEnvironment, "solve_for_platform", solve)
+    ctx = workspace_ctx_factory(env_names=["default", "test"])
+
+    result = load_lockfile_data(
+        render_lockfile(
+            ctx,
+            resolved,
+            baseline_data=selective_lock_data,
+            preserve_existing=True,
+        )
+    )
+
+    assert selective_lock_data == baseline
+    assert calls == (
+        []
+        if change == "remove"
+        else [("default", "linux-64" if change == "rich-target" else "win-64")]
+    )
+    assert result["metadata"] == baseline["metadata"]
+    assert result["environments"]["test"] == baseline["environments"]["test"]
+    result_env = result["environments"]["default"]
+    assert result_env["metadata"] == baseline["environments"]["default"]["metadata"]
+    assert set(result_env["packages"]) == set(platforms)
+    for target in set(platforms) & {"linux-64", "osx-arm64"}:
+        assert (
+            result_env["packages"][target]
+            == baseline["environments"]["default"]["packages"][target]
+        )
+    packages = {
+        record.get("conda") or record.get("pypi"): record
+        for record in result["packages"]
+    }
+    assert packages[certifi] == shared_record
+    assert f"{channel}/noarch/orphan-1.0-0.conda" not in packages
+    if change == "remove":
+        assert f"{channel}/osx-arm64/python-3.10.0-h2_0.conda" not in packages
+
+
+@pytest.mark.parametrize("failure", ["solve", "shared-hash-conflict"])
+def test_render_lockfile_preservation_failure_keeps_baseline(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    selective_lock_data: dict,
+    resolved_envs_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    baseline = deepcopy(selective_lock_data)
+    prefixes: list[Path] = []
+
+    def solve(self, platform, *, prefix):
+        prefixes.append(Path(prefix))
+        if failure == "solve":
+            raise SolveError(self.name, "unsatisfiable", platform=platform)
+        return [
+            _FakePkg(
+                "certifi",
+                "https://conda.anaconda.org/conda-forge/noarch/certifi-2026.1-pyhd_0.conda",
+                md5="f" * 32,
+            )
+        ]
+
+    monkeypatch.setattr(ResolvedEnvironment, "solve_for_platform", solve)
+    error = SolveError if failure == "solve" else ValueError
+    match = "unsatisfiable" if failure == "solve" else "Conflicting package metadata"
+    with pytest.raises(error, match=match):
+        render_lockfile(
+            workspace_ctx_factory(env_names=["default", "test"]),
+            resolved_envs_factory(
+                default=["linux-64", "osx-arm64", "win-64"], test=["linux-64"]
+            ),
+            baseline_data=selective_lock_data,
+            preserve_existing=True,
+        )
+
+    assert selective_lock_data == baseline
+    assert len(prefixes) == 1
+    assert not prefixes[0].exists()
+    assert not any(prefix == prefixes[0] for prefix, _ in PrefixData._cache_)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {},
+        {"baseline_data": {}, "update_targets": {}},
+        {"baseline_data": {}, "platforms": ("linux-64",)},
+        {"baseline_data": {}, "skip_unsolvable": True},
+    ],
+    ids=[
+        "missing-baseline",
+        "selective-updates",
+        "partial-platforms",
+        "partial-solves",
+    ],
+)
+def test_render_lockfile_rejects_incomplete_preservation_modes(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    options: dict,
+) -> None:
+    with pytest.raises(ValueError, match="preserv"):
+        render_lockfile(workspace_ctx_factory(), {}, preserve_existing=True, **options)
+
+
 @pytest.mark.parametrize("failure", ["seed", "missing-root", "solve"])
 def test_render_lockfile_releases_temporary_prefix_after_update_failure(
     workspace_ctx_factory: Callable[..., WorkspaceContext],

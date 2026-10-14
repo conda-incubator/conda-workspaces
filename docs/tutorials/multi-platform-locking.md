@@ -66,6 +66,47 @@ fragments for the other platforms in a matrix workflow, or re-run
 `conda workspace lock` without filters to regenerate the full lockfile
 from scratch.
 
+## Change a feature's platforms
+
+A feature can declare its own platform list. For example, add a tools feature
+and an environment that uses it to your manifest:
+
+```toml
+[feature.tools]
+platforms = ["osx-arm64"]
+
+[feature.tools.dependencies]
+ruff = "*"
+
+[environments]
+tools = { features = ["tools"], no-default-feature = true }
+```
+
+Generate a current lockfile, then add Linux support to this feature:
+
+```bash
+conda workspace lock
+conda workspace platform add --feature tools linux-64
+```
+
+The second command edits `[feature.tools].platforms` and solves the newly
+needed lock targets. It retains the existing solutions and leaves installed
+environments unchanged. Every environment that includes `tools` sees the
+updated platform list.
+
+Preview removing Linux support before making the change:
+
+```bash
+conda workspace platform remove --feature tools linux-64 --dry-run
+conda workspace platform remove --feature tools linux-64
+```
+
+If you remove the last explicit platform, environments that use the feature
+derive their supported platforms from their other features or the workspace.
+The command explains this in its output. Use `--no-lockfile-update` to edit only the
+manifest and lock later. See {ref}`Feature platforms <feature-platforms>`
+for all options.
+
 ## Generate the lockfile
 
 Run `conda workspace lock` from the workspace root:

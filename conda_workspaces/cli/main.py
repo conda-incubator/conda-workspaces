@@ -682,6 +682,36 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         help="Remove and recreate the affected environment(s) from scratch.",
     )
 
+    platform_parser = sub.add_parser(
+        "platform",
+        help="Edit supported platforms for an existing named feature.",
+        add_help=False,
+    )
+    add_parser_help(platform_parser)
+    platform_commands = platform_parser.add_subparsers(
+        dest="platform_action", required=True
+    )
+    for action in ("add", "remove"):
+        command = platform_commands.add_parser(
+            action,
+            help=f"{action.capitalize()} explicit feature platforms.",
+            add_help=False,
+        )
+        add_parser_help(command)
+        add_output_and_prompt_options(command)
+        command.add_argument(
+            "--feature", required=True, help="Existing named feature to modify."
+        )
+        command.add_argument(
+            "platforms", nargs="+", metavar="PLATFORM", help="Platform names to edit."
+        )
+        command.add_argument(
+            "--no-lockfile-update",
+            action="store_true",
+            default=False,
+            help="Only update the manifest. Skip solving and lockfile updates.",
+        )
+
     clean_parser = sub.add_parser(
         "clean",
         help="Remove installed workspace environments.",
@@ -1091,6 +1121,7 @@ def execute_workspace(args: argparse.Namespace) -> int:
 
     json_result = bool(getattr(args, "json", False)) and subcmd in {
         "add",
+        "platform",
         "update",
         "remove",
         "install",
@@ -1172,6 +1203,10 @@ def _dispatch_workspace(args: argparse.Namespace, subcmd: str) -> int:
         from .workspace.remove import execute_remove
 
         return execute_remove(args)
+    elif subcmd == "platform":
+        from .workspace.platform import execute_platform
+
+        return execute_platform(args)
     elif subcmd == "clean":
         from .workspace.clean import execute_clean
 

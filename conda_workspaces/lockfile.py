@@ -1114,17 +1114,55 @@ class CondaLockLoader(EnvironmentSpecBase):
         cls,
         baseline: dict[str, Any],
         envs: Iterable[_SolvedEnvironment],
+        *,
+        platforms_by_environment: Mapping[str, Sequence[str]] | None = None,
     ) -> dict[str, Any]:
-        """Replace solved environment slices and canonicalize package records."""
+        """Replace solutions and canonicalize referenced package records.
+
+        *platforms_by_environment* reconciles platform declarations while
+        retaining existing solutions and their metadata. New targets may be
+        added, removed targets are discarded, and shared package hashes must
+        still agree with newly solved records.
+        """
         result = cls.redact_data_urls(baseline)
+        retained_urls: set[str] = set()
+        if platforms_by_environment is not None:
+            environments = result.get("environments", {})
+            for name in platforms_by_environment:
+                if name not in environments:
+                    raise ValueError(
+                        f"Environment {name!r} is missing from the lockfile"
+                    )
+            result["environments"] = {
+                name: environment
+                for name, environment in environments.items()
+                if name in platforms_by_environment
+            }
+            for name, environment in result["environments"].items():
+                environment["packages"] = {
+                    platform: refs
+                    for platform, refs in environment.get("packages", {}).items()
+                    if platform in platforms_by_environment[name]
+                }
+                for refs in environment["packages"].values():
+                    for ref in refs:
+                        url = ref.get("conda") or ref.get("url") or ref.get("pypi")
+                        if url:
+                            retained_urls.add(url)
         updates = cls.compose(envs)
         for name, update in updates["environments"].items():
             if name not in result.get("environments", {}):
                 raise ValueError(f"Environment {name!r} is missing from the lockfile")
             result_env = result["environments"][name]
-            result_env["channels"] = update["channels"]
+            if platforms_by_environment is None:
+                result_env["channels"] = update["channels"]
             for platform, refs in update["packages"].items():
-                if platform not in result_env.get("packages", {}):
+                allowed = (
+                    result_env.get("packages", {})
+                    if platforms_by_environment is None
+                    else platforms_by_environment[name]
+                )
+                if platform not in allowed:
                     raise ValueError(
                         f"Environment {name!r} does not include platform {platform!r}"
                     )
@@ -1137,11 +1175,13 @@ class CondaLockLoader(EnvironmentSpecBase):
             if existing_record is None:
                 packages_by_url[url] = update_record
                 continue
-            packages_by_url[url] = cls.merge_package_records(
+            merged = cls.merge_package_records(
                 existing_record,
                 update_record,
                 url,
             )
+            if url not in retained_urls:
+                packages_by_url[url] = merged
         packages: list[dict[str, Any]] = []
         seen_urls: set[str] = set()
         for environment in result.get("environments", {}).values():
@@ -1450,6 +1490,7 @@ def render_lockfile(
     on_skip: Callable[[str, str, SolveError], None] | None = None,
     baseline_data: dict[str, Any] | None = None,
     update_targets: Mapping[tuple[str, str], set[str]] | None = None,
+    preserve_existing: bool = False,
     dry_run: bool = False,
 ) -> str:
     """Solve workspace environments and serialize ``conda.lock`` content.
@@ -1478,6 +1519,11 @@ def render_lockfile(
 
     Returns the serialized lockfile without writing it. When *dry_run* is
     true, solver package-cache writes use disposable storage.
+    *preserve_existing* retains declared solutions from *baseline_data*,
+    solves missing targets, and removes undeclared targets. The caller must
+    validate the baseline against the previous manifest first. This mode
+    requires the complete environment set and cannot be combined with
+    selective updates, a platform filter, or skipped solver failures.
     """
     from conda.common.serialize.yaml import dumps as yaml_dumps
     from conda.models.environment import EnvironmentConfig
@@ -1491,18 +1537,34 @@ def render_lockfile(
 
     if update_targets is not None and baseline_data is None:
         raise ValueError("Selective lock updates require baseline lockfile data")
+    if preserve_existing:
+        if baseline_data is None:
+            raise ValueError("Lock preservation requires baseline lockfile data")
+        if update_targets is not None or platforms is not None or skip_unsolvable:
+            raise ValueError(
+                "Lock preservation requires complete platform reconciliation"
+            )
     baseline = {} if baseline_data is None else baseline_data
-    if update_targets is not None:
+    if update_targets is not None or preserve_existing:
         baseline = CondaLockLoader.redact_data_urls(baseline)
 
+    platforms_by_environment = {
+        name: sorted(set(resolved.platforms or [host_platform]))
+        for name, resolved in resolved_envs.items()
+    }
     solved_targets: set[tuple[str, str]] = set()
     with isolated_package_cache(dry_run):
         for name, resolved in resolved_envs.items():
-            declared = sorted(set(resolved.platforms or [host_platform]))
+            declared = platforms_by_environment[name]
             if update_targets is not None:
                 targets = [
                     target for target in declared if update_targets.get((name, target))
                 ]
+            elif preserve_existing:
+                locked = (
+                    baseline.get("environments", {}).get(name, {}).get("packages", {})
+                )
+                targets = [target for target in declared if target not in locked]
             elif platforms is None:
                 targets = declared
             else:
@@ -1597,16 +1659,23 @@ def render_lockfile(
                     )
                 )
 
-    if update_targets is not None:
-        missing_targets = {
-            target for target, names in update_targets.items() if names
-        } - solved_targets
-        if missing_targets:
-            targets = ", ".join(
-                f"{name}/{platform}" for name, platform in sorted(missing_targets)
-            )
-            raise ValueError(f"Selective lock targets are not declared: {targets}")
-        updated = CondaLockLoader.replace_solutions(baseline, envs)
+    if update_targets is not None or preserve_existing:
+        if update_targets is not None:
+            missing_targets = {
+                target for target, names in update_targets.items() if names
+            } - solved_targets
+            if missing_targets:
+                targets = ", ".join(
+                    f"{name}/{platform}" for name, platform in sorted(missing_targets)
+                )
+                raise ValueError(f"Selective lock targets are not declared: {targets}")
+        updated = CondaLockLoader.replace_solutions(
+            baseline,
+            envs,
+            platforms_by_environment=(
+                platforms_by_environment if preserve_existing else None
+            ),
+        )
         if config is not None:
             declared_platforms = {
                 platform
