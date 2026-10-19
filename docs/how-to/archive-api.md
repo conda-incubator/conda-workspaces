@@ -77,6 +77,16 @@ with `tarfile.data_filter`. Repack sparse or metadata-heavy inputs as ordinary
 files, split an archive, or exclude unneeded files when a trusted workspace
 exceeds one of these safety limits.
 
+Extraction stops at 4 GiB of raw archive bytes or expanded regular files and
+possible link fallbacks by default. For an archive you trust, pass
+`--allow-large-archive` to
+`conda workspace unarchive` or `allow_large_archive=True` to
+`WorkspaceArchive.extract()`, `WorkspaceArchive.install()`, or `extract_archive()`.
+The 100 GiB hard limit still applies. Extraction checks free space before
+snapshotting the archive, writing expanded files, and copying bundled packages
+to a private installation cache. Each check preserves 64 MiB for other disk
+use. These checks cannot account for concurrent disk use.
+
 When a receipt is configured, its archive digest is verified before member
 inspection. Archive creation also rejects a symbolic-link workspace manifest
 before reading its target. It refuses credentials embedded in the manifest or

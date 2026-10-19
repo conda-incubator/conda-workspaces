@@ -204,7 +204,7 @@ def execute_platform(
                             break
                         for platform in declared_platforms:
                             lock_status = check_lockfile_satisfiability(
-                                current, baseline, platform, environment=name
+                                current, loader, platform, environment=name
                             )
                             if lock_status.status != LockfileStatus.UP_TO_DATE:
                                 stale_reason = (

@@ -135,6 +135,12 @@ MAX_ARCHIVE_PAX_RECORDS: Final = 100_000
 MAX_ARCHIVE_EXPANDED_BYTES: Final = 100 * 1024**3
 """Maximum combined expanded size of regular archive members, in bytes."""
 
+DEFAULT_ARCHIVE_EXTRACT_BYTES: Final = 4 * 1024**3
+"""Maximum expanded bytes extracted without explicit trust in the archive."""
+
+ARCHIVE_STAGING_RESERVE_BYTES: Final = 64 * 1024**2
+"""Minimum free space retained after archive staging copies."""
+
 MAX_ARCHIVE_RAW_BYTES: Final = 100 * 1024**3
 """Maximum byte size accepted for one compressed or uncompressed archive."""
 
@@ -1284,6 +1290,7 @@ class WorkspaceArchive:
         prime_cache: bool = False,
         package_cache: str | Path | None = None,
         dry_run: bool = False,
+        allow_large_archive: bool = False,
     ) -> WorkspaceArchiveExtractResult:
         """Extract without cache publication. *package_cache* is ignored."""
         if prime_cache:
@@ -1297,6 +1304,7 @@ class WorkspaceArchive:
             prime_cache=False,
             package_cache=None,
             dry_run=dry_run,
+            allow_large_archive=allow_large_archive,
         )
 
     def _extract(
@@ -1307,6 +1315,7 @@ class WorkspaceArchive:
         prime_cache: bool,
         package_cache: str | Path | None,
         dry_run: bool,
+        allow_large_archive: bool,
         validate_workspace: Callable[[Path, ArchiveReceipt | None], None] | None = None,
         validate_install: Callable[[], None] | None = None,
     ) -> WorkspaceArchiveExtractResult:
@@ -1342,10 +1351,21 @@ class WorkspaceArchive:
             dir=temporary_parent,
         ) as temporary:
             snapshot_path = Path(temporary) / archive_path.name
-            self.snapshot_archive(archive_path, snapshot_path)
+            self.snapshot_archive(
+                archive_path,
+                snapshot_path,
+                allow_large_archive=allow_large_archive,
+            )
             if receipt is not None:
                 receipt.verify_archive(snapshot_path)
-            info = inspect_archive(snapshot_path)
+            info = inspect_archive(
+                snapshot_path,
+                max_expanded_bytes=(
+                    MAX_ARCHIVE_EXPANDED_BYTES
+                    if allow_large_archive
+                    else DEFAULT_ARCHIVE_EXTRACT_BYTES
+                ),
+            )
             if not info["has_manifest"]:
                 raise ArchiveError(
                     "Not a workspace archive: no manifest found.",
@@ -1369,13 +1389,17 @@ class WorkspaceArchive:
                                 f"Receipt {label} is not a regular archive member."
                             )
 
-            staged = extract_archive(snapshot_path, Path(temporary) / "workspace")
+            staged = extract_archive(
+                snapshot_path,
+                Path(temporary) / "workspace",
+                allow_large_archive=allow_large_archive,
+            )
             if receipt is not None:
                 receipt.verify_extracted(staged, require_sha256=require_sha256)
             cache_priming_skipped = bool(
                 info["has_packages"] and not (prime_cache and receipt is not None)
             )
-            cache_plan: list[tuple[str, Path, str]] = []
+            cache_plan: list[tuple[str, Path, str, int]] = []
             cache_packages: list[tuple[Path, dict[str, object]]] = []
             cache_records: list[tuple[Path, Path, dict[str, object]]] = []
             cache_path = None
@@ -1455,7 +1479,14 @@ class WorkspaceArchive:
                                 actual=actual,
                             )
                     else:
-                        cache_plan.append((package.name, destination, expected))
+                        cache_plan.append(
+                            (
+                                package.name,
+                                destination,
+                                expected,
+                                package.lstat().st_size,
+                            )
+                        )
                     extracted = cache_path / extracted_name
                     if extracted.exists() or extracted.is_symlink():
                         if not self.package_cache_record_matches(
@@ -1476,7 +1507,7 @@ class WorkspaceArchive:
                 validate_workspace(staged, receipt)
 
             primed_packages = len(
-                {name for name, _, _ in cache_plan}
+                {name for name, _, _, _ in cache_plan}
                 | {package.name for package, _, _ in cache_records}
             )
             if dry_run:
@@ -1490,7 +1521,46 @@ class WorkspaceArchive:
                             try:
                                 os.link(package, preview_package)
                             except OSError:
-                                shutil.copy2(package, preview_package)
+                                expected_size = package.lstat().st_size
+                                require_archive_staging_space(
+                                    preview_cache, expected_size
+                                )
+                                with (
+                                    open_stable_regular_file(
+                                        package,
+                                        label="Bundled package source",
+                                        maximum_bytes=expected_size,
+                                    ) as input_stream,
+                                    atomic_binary_writer(
+                                        preview_package,
+                                        expected_identity=None,
+                                    ) as output_stream,
+                                ):
+                                    if (
+                                        os.fstat(input_stream.fileno()).st_size
+                                        != expected_size
+                                    ):
+                                        raise ArchiveError(
+                                            "Bundled package source changed during"
+                                            " cache staging."
+                                        )
+                                    remaining = expected_size
+                                    while remaining:
+                                        chunk = input_stream.read(
+                                            min(1024 * 1024, remaining)
+                                        )
+                                        if not chunk:
+                                            raise ArchiveError(
+                                                "Bundled package source changed"
+                                                " during cache staging."
+                                            )
+                                        output_stream.write(chunk)
+                                        remaining -= len(chunk)
+                                    if input_stream.read(1):
+                                        raise ArchiveError(
+                                            "Bundled package source changed during"
+                                            " cache staging."
+                                        )
                             self.publish_package_cache_record(
                                 preview_package,
                                 receipt_record,
@@ -1509,7 +1579,15 @@ class WorkspaceArchive:
                         validate_install()
                 extracted = target_path
             else:
-                for name, destination, expected in cache_plan:
+                if cache_plan and cache_path is not None:
+                    cache_space_path = cache_path
+                    while not cache_space_path.exists():
+                        cache_space_path = cache_space_path.parent
+                    require_archive_staging_space(
+                        cache_space_path,
+                        sum(size for _, _, _, size in cache_plan),
+                    )
+                for name, destination, expected, expected_size in cache_plan:
                     source = staged / "packages" / name
                     try:
                         with atomic_binary_writer(
@@ -1519,13 +1597,34 @@ class WorkspaceArchive:
                             with open_stable_regular_file(
                                 source,
                                 label="Bundled package source",
+                                maximum_bytes=expected_size,
                             ) as input_stream:
+                                if (
+                                    os.fstat(input_stream.fileno()).st_size
+                                    != expected_size
+                                ):
+                                    raise ArchiveError(
+                                        "Bundled package source changed during"
+                                        " cache staging."
+                                    )
                                 hashing_reader = _HashingReader(input_stream)
-                                shutil.copyfileobj(
-                                    hashing_reader,
-                                    output_stream,
-                                    length=1024 * 1024,
-                                )
+                                remaining = expected_size
+                                while remaining:
+                                    chunk = hashing_reader.read(
+                                        min(1024 * 1024, remaining)
+                                    )
+                                    if not chunk:
+                                        raise ArchiveError(
+                                            "Bundled package source changed during"
+                                            " cache staging."
+                                        )
+                                    output_stream.write(chunk)
+                                    remaining -= len(chunk)
+                                if input_stream.read(1):
+                                    raise ArchiveError(
+                                        "Bundled package source changed during"
+                                        " cache staging."
+                                    )
                                 actual = hashing_reader.digest.hexdigest()
                                 if actual != expected:
                                     raise ArchiveHashMismatchError(
@@ -1707,6 +1806,7 @@ class WorkspaceArchive:
         install_handler: Callable[[Path, str | None, Path | None, str | None], int]
         | None = None,
         dry_run: bool = False,
+        allow_large_archive: bool = False,
     ) -> WorkspaceArchiveInstallResult:
         """Extract the archive and install environments from its lockfile.
 
@@ -1854,6 +1954,7 @@ class WorkspaceArchive:
                 prime_cache=prime_cache,
                 package_cache=private_cache,
                 dry_run=dry_run,
+                allow_large_archive=allow_large_archive,
                 validate_workspace=validate_workspace,
                 validate_install=validate_install,
             )
@@ -1990,7 +2091,12 @@ class WorkspaceArchive:
         return self.path
 
     @staticmethod
-    def snapshot_archive(source: Path, destination: Path) -> None:
+    def snapshot_archive(
+        source: Path,
+        destination: Path,
+        *,
+        allow_large_archive: bool = False,
+    ) -> None:
         """Copy one no-follow archive generation into private staging."""
         try:
             with atomic_binary_writer(
@@ -2002,11 +2108,25 @@ class WorkspaceArchive:
                     label="Archive",
                     maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
                 ) as input_stream:
-                    shutil.copyfileobj(
-                        input_stream,
-                        output_stream,
-                        length=1024 * 1024,
-                    )
+                    source_size = os.fstat(input_stream.fileno()).st_size
+                    if (
+                        not allow_large_archive
+                        and source_size > DEFAULT_ARCHIVE_EXTRACT_BYTES
+                    ):
+                        raise ArchiveError(
+                            "Archive exceeds the default extraction limit of"
+                            f" {DEFAULT_ARCHIVE_EXTRACT_BYTES:,} raw bytes."
+                        )
+                    require_archive_staging_space(destination.parent, source_size)
+                    remaining = source_size
+                    while remaining:
+                        chunk = input_stream.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            raise ArchiveError("Archive changed during snapshot.")
+                        output_stream.write(chunk)
+                        remaining -= len(chunk)
+                    if input_stream.read(1):
+                        raise ArchiveError("Archive changed during snapshot.")
         except (OSError, ValueError) as exc:
             raise ArchiveError(
                 f"Archive cannot be snapshotted safely: {source}"
@@ -2945,8 +3065,8 @@ def validate_tar_member(
 def validate_tar_members(
     members: list[tarfile.TarInfo],
     target: Path | None = None,
-) -> None:
-    """Validate the paths and extraction topology of all archive *members*."""
+) -> int:
+    """Validate all archive *members* and return their maximum extracted bytes."""
     if len(members) > MAX_ARCHIVE_MEMBERS:
         raise ArchiveError(
             f"Archive contains more than {MAX_ARCHIVE_MEMBERS:,} members."
@@ -3048,6 +3168,7 @@ def validate_tar_members(
                     "Archive regular files and link fallbacks expand beyond the"
                     f" maximum size of {MAX_ARCHIVE_EXPANDED_BYTES:,} bytes."
                 )
+    return expanded_bytes
 
 
 def validate_tar_member_limits(
@@ -3099,10 +3220,17 @@ def validate_tar_member_limits(
     return expanded_bytes
 
 
-def read_tar_members(tf: tarfile.TarFile) -> list[tarfile.TarInfo]:
+def read_tar_members(
+    tf: tarfile.TarFile,
+    *,
+    max_expanded_bytes: int | None = None,
+) -> list[tarfile.TarInfo]:
     """Read archive members while enforcing resource limits before advancing."""
     members: list[tarfile.TarInfo] = []
     expanded_bytes = 0
+    limit = (
+        MAX_ARCHIVE_EXPANDED_BYTES if max_expanded_bytes is None else max_expanded_bytes
+    )
     while member := tf.next():
         if len(members) >= MAX_ARCHIVE_MEMBERS:
             raise ArchiveError(
@@ -3112,6 +3240,11 @@ def read_tar_members(tf: tarfile.TarFile) -> list[tarfile.TarInfo]:
             raw_size = getattr(member, "_workspace_raw_size", member.size)
             expanded_bytes += max(0, raw_size - member.size)
         expanded_bytes = validate_tar_member_limits(member, expanded_bytes)
+        if expanded_bytes > limit:
+            raise ArchiveError(
+                f"Archive exceeds the default extraction limit of {limit:,}"
+                " expanded bytes."
+            )
         members.append(member)
     return members
 
@@ -3192,13 +3325,21 @@ def open_stable_regular_file(
 
 
 @contextmanager
-def open_tar(archive_path: Path) -> Iterator[tarfile.TarFile]:
+def open_tar(
+    archive_path: Path,
+    *,
+    max_raw_bytes: int | None = None,
+) -> Iterator[tarfile.TarFile]:
     """Open one stable archive generation without following filesystem links."""
     compression = detect_compression(archive_path)
     with open_stable_regular_file(
         archive_path,
         label="Archive",
-        maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
+        maximum_bytes=(
+            MAX_ARCHIVE_RAW_BYTES
+            if max_raw_bytes is None
+            else min(MAX_ARCHIVE_RAW_BYTES, max_raw_bytes)
+        ),
     ) as archive_stream:
         if compression == "zst" and not tarfile_supports_zstd():
             with zstd_module().open(archive_stream, "rb") as compressed:
@@ -3433,11 +3574,29 @@ def extract_tar_members(
             raise ArchiveError("Archive extraction staging changed while extracting.")
 
 
-def extract_archive(archive_path: Path, target: Path) -> Path:
+def require_archive_staging_space(directory: Path, required_bytes: int) -> None:
+    """Check free space for snapshot, direct extraction, and cache staging."""
+    try:
+        free_bytes = shutil.disk_usage(directory).free
+    except OSError as exc:
+        raise ArchiveError(
+            "Cannot determine available space for archive staging."
+        ) from exc
+    if required_bytes + ARCHIVE_STAGING_RESERVE_BYTES >= free_bytes:
+        raise ArchiveError("Archive staging needs more free space than is available.")
+
+
+def extract_archive(
+    archive_path: Path,
+    target: Path,
+    *,
+    allow_large_archive: bool = False,
+) -> Path:
     """Extract *archive_path* into *target* with path traversal protection.
 
     Every member is validated before extraction. Ownership and unsafe mode
-    bits are discarded on every supported Python version.
+    bits are discarded on every supported Python version. Archives larger than
+    the default expanded-size limit require explicit trust from the caller.
     """
     ensure_extract_target_empty(target)
     target = target.expanduser().absolute().resolve(strict=False)
@@ -3451,9 +3610,31 @@ def extract_archive(archive_path: Path, target: Path) -> Path:
         staged = Path(temporary) / "workspace"
         staged.mkdir()
         staged_identity = staged.lstat()
-        with open_tar(archive_path) as tf:
-            members = read_tar_members(tf)
-            validate_tar_members(members, target)
+        with open_tar(
+            archive_path,
+            max_raw_bytes=(
+                MAX_ARCHIVE_RAW_BYTES
+                if allow_large_archive
+                else DEFAULT_ARCHIVE_EXTRACT_BYTES
+            ),
+        ) as tf:
+            limit = (
+                MAX_ARCHIVE_EXPANDED_BYTES
+                if allow_large_archive
+                else DEFAULT_ARCHIVE_EXTRACT_BYTES
+            )
+            members = read_tar_members(tf, max_expanded_bytes=limit)
+            expanded_bytes = validate_tar_members(members, target)
+            if expanded_bytes > limit:
+                raise ArchiveError(
+                    "Archive exceeds the default extraction limit of"
+                    f" {limit:,} expanded bytes.",
+                    hints=[
+                        "For a trusted archive, pass --allow-large-archive or set"
+                        " allow_large_archive=True."
+                    ],
+                )
+            require_archive_staging_space(staged, expanded_bytes)
             if not hasattr(tarfile, "data_filter"):
                 raise ArchiveError(
                     "Safe archive extraction requires Python's tar data filter.",
@@ -3735,11 +3916,20 @@ def verify_package_hashes(
             )
 
 
-def inspect_archive(archive_path: Path) -> dict[str, object]:
+def inspect_archive(
+    archive_path: Path,
+    *,
+    max_expanded_bytes: int | None = None,
+) -> dict[str, object]:
     """Validate archive members and return metadata without extracting."""
     with open_tar(archive_path) as tf:
-        members = read_tar_members(tf)
-        validate_tar_members(members)
+        members = read_tar_members(tf, max_expanded_bytes=max_expanded_bytes)
+        expanded_bytes = validate_tar_members(members)
+        if max_expanded_bytes is not None and expanded_bytes > max_expanded_bytes:
+            raise ArchiveError(
+                "Archive exceeds the default extraction limit of"
+                f" {max_expanded_bytes:,} expanded bytes."
+            )
     manifest_members = [
         member
         for member in members

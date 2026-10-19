@@ -254,29 +254,27 @@ def execute_update(args: argparse.Namespace, *, console: Console | None = None) 
                     for resolved in resolved_current.values()
                     for platform in (resolved.platforms or [ctx.platform])
                 }
-                statuses = [
-                    check_lockfile_satisfiability(current, candidate, platform)
-                    for platform in platforms
-                ]
                 complete = set(lock_environments) == set(current.environments) and all(
                     set(lock_environments[name].get("packages", {}))
                     == set(resolved_current[name].platforms or [ctx.platform])
                     for name in current.environments
                 )
-                complete = complete and all(
-                    status.status == LockfileStatus.UP_TO_DATE for status in statuses
-                )
                 if complete:
                     try:
-                        for (env_name, platform), names in update_targets.items():
-                            records = CondaLockLoader.package_records_for_env_data(
-                                candidate,
-                                env_name,
-                                platform,
-                            )
-                            if names - {record.name for record in records}:
-                                complete = False
-                                break
+                        loader = CondaLockLoader(baseline_path, data=candidate)
+                        complete = all(
+                            check_lockfile_satisfiability(
+                                current, loader, platform
+                            ).status
+                            == LockfileStatus.UP_TO_DATE
+                            for platform in sorted(platforms)
+                        )
+                        if complete:
+                            for (env_name, platform), names in update_targets.items():
+                                records = loader.package_records_for(env_name, platform)
+                                if names - {record.name for record in records}:
+                                    complete = False
+                                    break
                     except ValueError:
                         complete = False
                 if complete:

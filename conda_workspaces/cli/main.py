@@ -960,6 +960,12 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         default=False,
         help="Require package records verified by --receipt to include SHA-256.",
     )
+    unarchive_parser.add_argument(
+        "--allow-large-archive",
+        action="store_true",
+        default=False,
+        help="Allow a trusted archive to exceed the default expanded-size limit.",
+    )
 
     quickstart_parser = sub.add_parser(
         "quickstart",

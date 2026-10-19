@@ -855,3 +855,10 @@ def test_unarchive_subparser_receipt() -> None:
 
     assert ns.receipt == Path("project.receipt.json")
     assert ns.require_sha256 is True
+
+
+def test_unarchive_subparser_allows_trusted_large_archives() -> None:
+    parser = generate_workspace_parser()
+    ns = parser.parse_args(["unarchive", "project.tar.gz", "--allow-large-archive"])
+
+    assert ns.allow_large_archive is True

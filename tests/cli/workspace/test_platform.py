@@ -12,7 +12,11 @@ from conda.base.context import context, reset_context
 from conda_workspaces.cli.main import execute_workspace, generate_workspace_parser
 from conda_workspaces.cli.workspace.platform import execute_platform
 from conda_workspaces.exceptions import CondaWorkspacesError, PlatformError, SolveError
-from conda_workspaces.lockfile import load_lockfile_data
+from conda_workspaces.lockfile import (
+    CondaLockLoader,
+    check_lockfile_satisfiability,
+    load_lockfile_data,
+)
 from conda_workspaces.manifests import find_parser
 from conda_workspaces.resolver import ResolvedEnvironment, resolve_environment
 
@@ -22,6 +26,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from conda.models.records import PackageRecord
+
+    from conda_workspaces.models import LockfileStatus, WorkspaceConfig
 
 _DEFAULTS = {
     "manifest_file": None,
@@ -668,6 +674,7 @@ def test_workspace_platform_lock_preserves_feature_solutions(
     platform_manifest: Path,
     platform_solves: list[tuple[str, str]],
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
     action: str,
 ) -> None:
     document = tomlkit.parse(platform_manifest.read_text(encoding="utf-8"))
@@ -683,11 +690,38 @@ def test_workspace_platform_lock_preserves_feature_solutions(
     assert execute_platform(args) == 0
     lock_path = platform_manifest.parent / "conda.lock"
     baseline = load_lockfile_data(lock_path.read_bytes())
+    checked: list[tuple[int, str, str]] = []
+
+    def record_status(
+        config: WorkspaceConfig,
+        loader: CondaLockLoader,
+        platform: str,
+        *,
+        environment: str,
+    ) -> LockfileStatus:
+        assert isinstance(loader, CondaLockLoader)
+        checked.append((id(loader), environment, platform))
+        return check_lockfile_satisfiability(
+            config, loader, platform, environment=environment
+        )
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.platform.check_lockfile_satisfiability",
+        record_status,
+    )
     platform_solves.clear()
     capsys.readouterr()
     args.platform_action = action
     args.platforms = ["osx-arm64"] if action == "add" else ["win-64"]
     assert execute_platform(args) == 0
+    expected_checks = {
+        (name, platform)
+        for name, env_data in baseline["environments"].items()
+        for platform in env_data["packages"]
+    }
+    assert {(name, platform) for _, name, platform in checked} == expected_checks
+    assert len(checked) == len(expected_checks)
+    assert len({loader_id for loader_id, _, _ in checked}) == 1
     updated = load_lockfile_data(lock_path.read_bytes())
     expected = (
         {"linux-64", "win-64", "osx-64", "osx-arm64"}

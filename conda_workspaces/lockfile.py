@@ -246,7 +246,7 @@ def lockfile_status(
 
 def check_lockfile_satisfiability(
     config: WorkspaceConfig,
-    lockfile_data: dict[str, Any],
+    lockfile_data: dict[str, Any] | CondaLockLoader,
     current_platform: str,
     *,
     environment: str | None = None,
@@ -260,7 +260,9 @@ def check_lockfile_satisfiability(
 
     Set *environment* to check package requirements only for that environment
     on *current_platform*. Environment names, channels and declared platforms
-    are still checked across the complete workspace.
+    are still checked across the complete workspace. A prepared
+    :class:`CondaLockLoader` reuses its sanitized data and package URL index
+    across repeated target checks.
     """
     _stale = LockfileStatus.OUT_OF_DATE
     remaining_match_attempts = MAX_LOCKFILE_MATCH_ATTEMPTS
@@ -268,7 +270,12 @@ def check_lockfile_satisfiability(
         config.get_environment(environment)
 
     try:
-        lockfile_data = CondaLockLoader.redact_data_urls(lockfile_data)
+        if isinstance(lockfile_data, CondaLockLoader):
+            loader = lockfile_data
+            lockfile_data = loader._data
+        else:
+            loader = None
+            lockfile_data = CondaLockLoader.redact_data_urls(lockfile_data)
         version = lockfile_data.get("version")
         if type(version) is not int:
             raise ValueError("Lockfile version must be an integer")
@@ -377,9 +384,23 @@ def check_lockfile_satisfiability(
             )
             channel_locations = CondaLockLoader._channel_locations(channel_urls)
             if records_by_url is None:
-                records_by_url = CondaLockLoader.package_records_by_url_from_data(
-                    lockfile_data
+                records_by_url = (
+                    loader._records_index()
+                    if loader is not None
+                    else CondaLockLoader.package_records_by_url_from_data(lockfile_data)
                 )
+            if loader is not None:
+                remaining_items, remaining_strings = loader._environment_budget(
+                    env_name, lock_env
+                )
+            else:
+                environment_budget = DocumentExpansionBudget(
+                    items=MAX_LOCKFILE_ITEMS,
+                    strings=MAX_LOCKFILE_BYTES,
+                )
+                environment_budget.consume({"environment": lock_env}, label="Lockfile")
+                remaining_items = environment_budget.items
+                remaining_strings = environment_budget.strings
             records = CondaLockLoader._package_records_from_refs(
                 lock_env,
                 platform_refs,
@@ -387,6 +408,8 @@ def check_lockfile_satisfiability(
                 current_lock_platform,
                 records_by_url,
                 package_platform=package_platform,
+                remaining_items=remaining_items,
+                remaining_strings=remaining_strings,
             )
         except ValueError as exc:
             return LockfileStatus(status=_stale, reason=str(exc))
@@ -560,6 +583,7 @@ class CondaLockLoader(EnvironmentSpecBase):
         self._data_cache = self.redact_data_urls(data) if data is not None else None
         self._environment_names_cache: tuple[str, ...] | None = None
         self._records_by_url_cache: dict[str, dict[str, Any]] | None = None
+        self._environment_budgets: dict[str, tuple[int, int]] = {}
 
     def can_handle(self) -> bool:
         if self.path.name not in DEFAULT_FILENAMES:
@@ -1004,6 +1028,19 @@ class CondaLockLoader(EnvironmentSpecBase):
             )
         return self._records_by_url_cache
 
+    def _environment_budget(
+        self, name: str, env_data: dict[str, Any]
+    ) -> tuple[int, int]:
+        """Cache resources left after accounting for an environment's refs."""
+        if name not in self._environment_budgets:
+            budget = DocumentExpansionBudget(
+                items=MAX_LOCKFILE_ITEMS,
+                strings=MAX_LOCKFILE_BYTES,
+            )
+            budget.consume({"environment": env_data}, label="Lockfile")
+            self._environment_budgets[name] = budget.items, budget.strings
+        return self._environment_budgets[name]
+
     @staticmethod
     def package_records_by_url_from_data(
         data: dict[str, Any],
@@ -1091,7 +1128,21 @@ class CondaLockLoader(EnvironmentSpecBase):
         deliberately avoids :meth:`env_for`, whose generic rattler-lock
         conversion may fetch package archives to fill missing metadata.
         """
-        data = cls.redact_data_urls(data)
+        return cls(LOCKFILE_NAME, data=data).package_records_for(
+            name,
+            platform,
+            package_platform=package_platform,
+        )
+
+    def package_records_for(
+        self,
+        name: str,
+        platform: str,
+        *,
+        package_platform: str | None = None,
+    ) -> list[PackageRecord]:
+        """Reconstruct one target using the sanitized lockfile and cached index."""
+        data = self._data
         environments = data.get("environments", {})
         env_data = environments.get(name)
         if not isinstance(env_data, dict):
@@ -1102,14 +1153,17 @@ class CondaLockLoader(EnvironmentSpecBase):
                 f"Environment {name!r} does not include platform {platform!r}"
             )
 
-        records_by_url = cls.package_records_by_url_from_data(data)
-        return cls._package_records_from_refs(
+        records_by_url = self._records_index()
+        remaining_items, remaining_strings = self._environment_budget(name, env_data)
+        return self._package_records_from_refs(
             env_data,
             refs,
             name,
             platform,
             records_by_url,
             package_platform=package_platform,
+            remaining_items=remaining_items,
+            remaining_strings=remaining_strings,
         )
 
     @classmethod
@@ -1122,8 +1176,14 @@ class CondaLockLoader(EnvironmentSpecBase):
         records_by_url: Mapping[str, dict[str, Any]],
         *,
         package_platform: str | None = None,
+        remaining_items: int,
+        remaining_strings: int,
     ) -> list[PackageRecord]:
-        """Reconstruct one target from credential-free data and a shared index."""
+        """Reconstruct one target from sanitized data and a shared index.
+
+        Callers account for expanded environment refs once. This method charges
+        selected package records against the remaining expansion budget.
+        """
         from conda.base.context import context
         from conda.models.records import PackageRecord
 
@@ -1134,10 +1194,10 @@ class CondaLockLoader(EnvironmentSpecBase):
                 if isinstance(url, str) and url in records_by_url:
                     selected_metadata.append(records_by_url[url])
         DocumentExpansionBudget(
-            items=MAX_LOCKFILE_ITEMS,
-            strings=MAX_LOCKFILE_BYTES,
+            items=remaining_items,
+            strings=remaining_strings,
         ).consume(
-            {"environment": env_data, "packages": selected_metadata},
+            {"packages": selected_metadata},
             label="Lockfile",
         )
         records: list[PackageRecord] = []
@@ -1203,7 +1263,7 @@ class CondaLockLoader(EnvironmentSpecBase):
     @classmethod
     def seed_prefix_from_data(
         cls,
-        data: dict[str, Any],
+        data: dict[str, Any] | CondaLockLoader,
         name: str,
         platform: str,
         prefix: Path,
@@ -1211,16 +1271,16 @@ class CondaLockLoader(EnvironmentSpecBase):
         *,
         package_platform: str | None = None,
     ) -> list[PackageRecord]:
-        """Create a metadata-only prefix from one canonical lockfile slice."""
+        """Create a metadata-only prefix from one lockfile target."""
         from conda.core.prefix_data import PrefixData
         from conda.history import History
         from conda.models.records import PrefixRecord
 
-        records = cls.package_records_for_env_data(
-            data,
-            name,
-            platform,
-            package_platform=package_platform,
+        loader = (
+            data if isinstance(data, CondaLockLoader) else cls(LOCKFILE_NAME, data=data)
+        )
+        records = loader.package_records_for(
+            name, platform, package_platform=package_platform
         )
         (prefix / "conda-meta").mkdir(parents=True)
         prefix_data = PrefixData(str(prefix))
@@ -1773,8 +1833,10 @@ def render_lockfile(
                 "Lock preservation requires complete platform reconciliation"
             )
     baseline = {} if baseline_data is None else baseline_data
+    baseline_loader: CondaLockLoader | None = None
     if update_targets is not None or preserve_existing:
-        baseline = CondaLockLoader.redact_data_urls(baseline)
+        baseline_loader = CondaLockLoader(lockfile_path(ctx), data=baseline)
+        baseline = baseline_loader._data
 
     platforms_by_environment = {
         name: sorted(set(resolved.platforms or [host_platform]))
@@ -1837,7 +1899,9 @@ def render_lockfile(
                                 )
                                 try:
                                     records = CondaLockLoader.seed_prefix_from_data(
-                                        baseline,
+                                        baseline_loader
+                                        if baseline_loader is not None
+                                        else baseline,
                                         name,
                                         target,
                                         prefix,
@@ -1905,13 +1969,14 @@ def render_lockfile(
             ),
         )
         if config is not None:
+            updated_loader = CondaLockLoader(lockfile_path(ctx), data=updated)
             declared_platforms = {
                 platform
                 for resolved in resolved_envs.values()
                 for platform in (resolved.platforms or [host_platform])
             }
             for platform in declared_platforms:
-                status = check_lockfile_satisfiability(config, updated, platform)
+                status = check_lockfile_satisfiability(config, updated_loader, platform)
                 if status.status != LockfileStatus.UP_TO_DATE:
                     raise LockfileStaleError(
                         config.manifest_path,

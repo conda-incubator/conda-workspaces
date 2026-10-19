@@ -169,12 +169,14 @@ def execute_unarchive(
             prime_cache=not args.no_install,
             install_handler=install_from_archive_cli(console),
             dry_run=dry_run,
+            allow_large_archive=getattr(args, "allow_large_archive", False),
         )
     else:
         result = archive.extract(
             target=args.target,
             require_sha256=getattr(args, "require_sha256", False),
             dry_run=dry_run,
+            allow_large_archive=getattr(args, "allow_large_archive", False),
         )
 
     if result.verified:

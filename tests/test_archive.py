@@ -10,6 +10,7 @@ import subprocess
 import tarfile
 from contextlib import contextmanager
 from pathlib import Path, PureWindowsPath
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -804,6 +805,121 @@ def test_extract_archive_basic(project_dir: Path, tmp_path: Path) -> None:
     assert (target / "src" / "main.py").is_file()
 
 
+@pytest.mark.parametrize(
+    ("allow_large_archive", "succeeds"),
+    [(False, False), (True, True)],
+    ids=["default-limit", "trusted-opt-in"],
+)
+def test_extract_archive_requires_opt_in_above_default_expanded_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    allow_large_archive: bool,
+    succeeds: bool,
+) -> None:
+    archive_path = tmp_path / "test.tar.gz"
+    payload = b"x" * 100_000
+    with tarfile.open(archive_path, "w:gz") as tf:
+        member = tarfile.TarInfo("data")
+        member.size = len(payload)
+        tf.addfile(member, io.BytesIO(payload))
+    raw_size = archive_path.stat().st_size
+    assert raw_size < len(payload)
+    monkeypatch.setattr(archive_module, "DEFAULT_ARCHIVE_EXTRACT_BYTES", raw_size)
+    target = tmp_path / "extracted"
+
+    if succeeds:
+        extract_archive(archive_path, target, allow_large_archive=allow_large_archive)
+        assert (target / "data").read_bytes() == payload
+    else:
+        with pytest.raises(ArchiveError, match="default extraction limit"):
+            extract_archive(
+                archive_path, target, allow_large_archive=allow_large_archive
+            )
+        assert not target.exists()
+
+
+@pytest.mark.parametrize(
+    ("allow_large_archive", "succeeds"),
+    [(False, False), (True, True)],
+    ids=["default-raw-limit", "trusted-opt-in"],
+)
+def test_extract_archive_requires_opt_in_above_default_raw_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    allow_large_archive: bool,
+    succeeds: bool,
+) -> None:
+    archive_path = tmp_path / "test.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as tf:
+        member = tarfile.TarInfo("data")
+        member.size = 1
+        tf.addfile(member, io.BytesIO(b"x"))
+    monkeypatch.setattr(
+        archive_module, "DEFAULT_ARCHIVE_EXTRACT_BYTES", archive_path.stat().st_size - 1
+    )
+    target = tmp_path / "extracted"
+
+    if succeeds:
+        extract_archive(archive_path, target, allow_large_archive=allow_large_archive)
+        assert (target / "data").read_bytes() == b"x"
+    else:
+        with pytest.raises(ArchiveError, match="maximum size"):
+            extract_archive(
+                archive_path, target, allow_large_archive=allow_large_archive
+            )
+        assert not target.exists()
+
+
+@pytest.mark.parametrize("allow_large_archive", [False, True])
+def test_extract_archive_checks_free_space_before_writing_members(
+    project_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    allow_large_archive: bool,
+) -> None:
+    archive_path = tmp_path / "test.tar.gz"
+    create_archive(project_dir, archive_path, ArchiveConfig())
+    monkeypatch.setattr(
+        archive_module.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=1),
+    )
+    target = tmp_path / "extracted"
+
+    with pytest.raises(ArchiveError, match="more free space"):
+        extract_archive(archive_path, target, allow_large_archive=allow_large_archive)
+
+    assert not target.exists()
+
+
+def test_read_tar_members_stops_before_next_payload_at_extract_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_path = tmp_path / "test.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as tf:
+        for name in ("first", "second"):
+            payload = b"12345"
+            member = tarfile.TarInfo(name)
+            member.size = len(payload)
+            tf.addfile(member, io.BytesIO(payload))
+
+    with tarfile.open(archive_path, "r:gz") as tf:
+        original_next = tf.next
+        calls = 0
+
+        def record_next() -> tarfile.TarInfo | None:
+            nonlocal calls
+            calls += 1
+            return original_next()
+
+        monkeypatch.setattr(tf, "next", record_next)
+        with pytest.raises(ArchiveError, match="default extraction limit"):
+            read_tar_members(tf, max_expanded_bytes=4)
+
+    assert calls == 1
+
+
 def test_extract_archive_rejects_concurrent_target_creation(
     project_dir: Path,
     tmp_path: Path,
@@ -1160,6 +1276,9 @@ def test_validate_tar_members_counts_link_fallback_size(
 
     with pytest.raises(ArchiveError, match="link fallbacks"):
         validate_tar_members([payload, link])
+
+    monkeypatch.setattr(archive_module, "MAX_ARCHIVE_EXPANDED_BYTES", 8)
+    assert validate_tar_members([payload, link]) == 8
 
 
 def test_validate_tar_members_rejects_hardlinks() -> None:
@@ -3137,9 +3256,14 @@ def test_workspace_archive_extract_uses_one_immutable_snapshot(
     original_snapshot = WorkspaceArchive.snapshot_archive
     replaced = False
 
-    def replace_after_snapshot(source: Path, destination: Path) -> None:
+    def replace_after_snapshot(
+        source: Path,
+        destination: Path,
+        *,
+        allow_large_archive: bool = False,
+    ) -> None:
         nonlocal replaced
-        original_snapshot(source, destination)
+        original_snapshot(source, destination, allow_large_archive=allow_large_archive)
         replacement.replace(source)
         replaced = True
 
@@ -3169,6 +3293,54 @@ def test_workspace_archive_snapshot_rejects_oversized_input(
 
     with pytest.raises(ArchiveError, match="maximum size"):
         WorkspaceArchive.snapshot_archive(source, tmp_path / "snapshot.tar")
+
+
+def test_workspace_archive_snapshot_checks_space_before_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "archive.tar"
+    source.write_bytes(b"12345")
+    before = {path.name for path in tmp_path.iterdir()}
+    monkeypatch.setattr(
+        archive_module.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=4),
+    )
+
+    with pytest.raises(ArchiveError, match="more free space"):
+        WorkspaceArchive.snapshot_archive(source, tmp_path / "snapshot.tar")
+
+    assert {path.name for path in tmp_path.iterdir()} == before
+
+
+@pytest.mark.parametrize(
+    ("allow_large_archive", "succeeds"),
+    [(False, False), (True, True)],
+    ids=["default-raw-limit", "trusted-opt-in"],
+)
+def test_workspace_archive_snapshot_requires_opt_in_above_default_raw_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    allow_large_archive: bool,
+    succeeds: bool,
+) -> None:
+    source = tmp_path / "archive.tar"
+    source.write_bytes(b"12345")
+    destination = tmp_path / "snapshot.tar"
+    monkeypatch.setattr(archive_module, "DEFAULT_ARCHIVE_EXTRACT_BYTES", 4)
+
+    if succeeds:
+        WorkspaceArchive.snapshot_archive(
+            source, destination, allow_large_archive=allow_large_archive
+        )
+        assert destination.read_bytes() == source.read_bytes()
+    else:
+        with pytest.raises(ArchiveError, match="default extraction limit"):
+            WorkspaceArchive.snapshot_archive(
+                source, destination, allow_large_archive=allow_large_archive
+            )
+        assert not destination.exists()
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO requires POSIX")
@@ -3324,8 +3496,13 @@ def test_workspace_archive_extract_rejects_target_swap(
     outside.mkdir()
     extract = extract_archive
 
-    def swap_target(archive_path: Path, staged: Path) -> Path:
-        result = extract(archive_path, staged)
+    def swap_target(
+        archive_path: Path,
+        staged: Path,
+        *,
+        allow_large_archive: bool = False,
+    ) -> Path:
+        result = extract(archive_path, staged, allow_large_archive=allow_large_archive)
         if target.exists():
             target.rmdir()
         target.symlink_to(outside, target_is_directory=True)
@@ -3676,7 +3853,7 @@ def test_workspace_archive_install_revalidates_cache_source_during_copy(
                 path.unlink()
                 os.mkfifo(path)
             else:
-                path.write_bytes(b"tampered")
+                path.write_bytes(b"x" * path.stat().st_size)
         with original_open(
             path,
             label=label,
@@ -3819,6 +3996,86 @@ def test_workspace_archive_installs_bundle_from_empty_cache_offline(
     assert (
         target / ".conda" / "envs" / "default" / "share" / "offline-demo.txt"
     ).read_text(encoding="utf-8") == "installed offline\n"
+
+
+def test_workspace_archive_install_checks_private_cache_space_before_copy(
+    installable_bundled_archive: WorkspaceArchive,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_disk_usage = archive_module.shutil.disk_usage
+    original_open = archive_module.open_stable_regular_file
+    source_opened = False
+
+    def limited_cache_space(path: Path):
+        if "conda-workspaces-pkgs-" in path.name:
+            return SimpleNamespace(free=1)
+        return original_disk_usage(path)
+
+    @contextmanager
+    def record_source_open(
+        path: Path,
+        *,
+        label: str,
+        maximum_bytes: int | None = None,
+    ):
+        nonlocal source_opened
+        if label == "Bundled package source":
+            source_opened = True
+        with original_open(path, label=label, maximum_bytes=maximum_bytes) as stream:
+            yield stream
+
+    monkeypatch.setattr(archive_module.shutil, "disk_usage", limited_cache_space)
+    monkeypatch.setattr(archive_module, "open_stable_regular_file", record_source_open)
+    target = tmp_path / "extracted"
+
+    with pytest.raises(ArchiveError, match="more free space"):
+        installable_bundled_archive.install(target=target)
+
+    assert source_opened is False
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["install", "preview"])
+def test_workspace_archive_install_rejects_package_growth_after_space_check(
+    installable_bundled_archive: WorkspaceArchive,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    dry_run: bool,
+) -> None:
+    original_open = archive_module.open_stable_regular_file
+    changed = False
+
+    @contextmanager
+    def grow_package_before_open(
+        path: Path,
+        *,
+        label: str,
+        maximum_bytes: int | None = None,
+    ):
+        nonlocal changed
+        if label == "Bundled package source" and not changed:
+            path.write_bytes(path.read_bytes() + b"extra")
+            changed = True
+        with original_open(path, label=label, maximum_bytes=maximum_bytes) as stream:
+            yield stream
+
+    if dry_run:
+
+        def reject_link(_source: Path, _target: Path) -> None:
+            raise OSError("hard links unavailable")
+
+        monkeypatch.setattr(archive_module.os, "link", reject_link)
+    monkeypatch.setattr(
+        archive_module, "open_stable_regular_file", grow_package_before_open
+    )
+    target = tmp_path / "extracted"
+
+    with pytest.raises(ArchiveError, match="maximum size"):
+        installable_bundled_archive.install(target=target, dry_run=dry_run)
+
+    assert changed is True
+    assert not target.exists()
 
 
 def test_workspace_archive_install_rejects_cache_archive_changed_during_preflight(

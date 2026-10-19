@@ -2161,6 +2161,139 @@ def test_render_lockfile_selective_update_only_replaces_target(
     assert result["environments"]["test"] == baseline["environments"]["test"]
 
 
+def test_render_lockfile_reuses_prepared_baseline_for_multiple_update_targets(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    resolved_envs_factory,
+    selective_lock_data: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = workspace_ctx_factory(env_names=["default", "test"])
+    resolved = resolved_envs_factory(
+        default=["linux-64", "osx-arm64"], test=["linux-64"]
+    )
+    seeded_loaders: list[CondaLockLoader] = []
+    environment_expansions: list[int] = []
+    selected_records: list[int] = []
+    baseline_copies = 0
+    original_seed = CondaLockLoader.seed_prefix_from_data
+    original_redact = CondaLockLoader.redact_data_urls
+    original_consume = parsing_module.DocumentExpansionBudget.consume
+
+    def record_seed(data, *args, **kwargs):
+        assert isinstance(data, CondaLockLoader)
+        seeded_loaders.append(data)
+        return original_seed(data, *args, **kwargs)
+
+    def record_redaction(data: dict[str, Any]) -> dict[str, Any]:
+        nonlocal baseline_copies
+        if data is selective_lock_data:
+            baseline_copies += 1
+        return original_redact(data)
+
+    def record_expansion(
+        budget: parsing_module.DocumentExpansionBudget,
+        value: object,
+        *,
+        label: str,
+    ) -> None:
+        if isinstance(value, dict) and set(value) == {"environment"}:
+            environment_expansions.append(
+                sum(len(refs) for refs in value["environment"]["packages"].values())
+            )
+        elif isinstance(value, dict) and set(value) == {"packages"}:
+            selected_records.append(len(value["packages"]))
+        return original_consume(budget, value, label=label)
+
+    def solve(self, platform, *, prefix, update_names=None):
+        package = "python" if self.name == "default" else "pytest"
+        return [
+            _FakePkg(
+                package,
+                f"https://conda.anaconda.org/conda-forge/{platform}/"
+                f"{package}-9.0-0.conda",
+            )
+        ]
+
+    monkeypatch.setattr(CondaLockLoader, "seed_prefix_from_data", record_seed)
+    monkeypatch.setattr(
+        CondaLockLoader, "redact_data_urls", staticmethod(record_redaction)
+    )
+    monkeypatch.setattr(ResolvedEnvironment, "solve_for_platform", solve)
+    monkeypatch.setattr(
+        parsing_module.DocumentExpansionBudget, "consume", record_expansion
+    )
+
+    rendered = render_lockfile(
+        ctx,
+        resolved,
+        baseline_data=selective_lock_data,
+        update_targets={
+            ("default", "linux-64"): {"python"},
+            ("default", "osx-arm64"): {"python"},
+            ("test", "linux-64"): {"pytest"},
+        },
+    )
+
+    assert len(seeded_loaders) == 3
+    assert seeded_loaders[0] is seeded_loaders[1] is seeded_loaders[2]
+    assert baseline_copies == 1
+    assert environment_expansions == [5, 2]
+    assert selected_records == [2, 2, 2]
+    updated = load_lockfile_data(rendered)
+    for name, platform, package in (
+        ("default", "linux-64", "python"),
+        ("default", "osx-arm64", "python"),
+        ("test", "linux-64", "pytest"),
+    ):
+        refs = updated["environments"][name]["packages"][platform]
+        assert any(f"{package}-9.0-0.conda" in ref["conda"] for ref in refs)
+
+
+@pytest.mark.parametrize(
+    ("target_count", "rejected"),
+    [(2, False), (4, True)],
+    ids=["within-expanded-limit", "aliased-targets-exceed-limit"],
+)
+def test_prepared_lockfile_checks_expanded_environment_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_count: int,
+    rejected: bool,
+) -> None:
+    url = "https://repo.example.test/channel/linux-64/python-3.12.0-0.conda"
+    targets = f"      target-0: &refs\n      - conda: {url}\n"
+    targets += "".join(
+        f"      target-{index}: *refs\n" for index in range(1, target_count)
+    )
+    content = (
+        "version: 1\n"
+        "environments:\n"
+        "  default:\n"
+        "    channels:\n"
+        "    - url: https://repo.example.test/channel\n"
+        "    packages:\n"
+        f"{targets}"
+        "packages:\n"
+        f"- conda: {url}\n"
+        f"  sha256: {'a' * 64}\n"
+    )
+    monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_ITEMS", 20)
+    data = load_lockfile_data(content)
+    loader = CondaLockLoader(tmp_path / LOCKFILE_NAME, data=data)
+
+    if rejected:
+        with pytest.raises(ValueError, match="expanded collection items"):
+            loader.package_records_for(
+                "default", "target-0", package_platform="linux-64"
+            )
+    else:
+        records = loader.package_records_for(
+            "default", "target-0", package_platform="linux-64"
+        )
+        assert len(records) == 1
+        assert records[0].name == "python"
+
+
 @pytest.mark.parametrize("change", ["add", "remove", "rich-target"])
 def test_render_lockfile_preserves_existing_platform_solutions(
     workspace_ctx_factory: Callable[..., WorkspaceContext],
@@ -5638,17 +5771,23 @@ def satisfiability_config_factory(tmp_path: Path):
         ),
     ],
 )
+@pytest.mark.parametrize("prepared", [False, True], ids=["raw", "prepared"])
 def test_satisfiability(
     satisfiability_config_factory,
     lockfile_data_factory,
+    tmp_path: Path,
     config_kwargs: dict,
     data_kwargs: dict,
     expected_ok: bool,
     reason_fragment: str,
+    prepared: bool,
 ) -> None:
     config = satisfiability_config_factory(**config_kwargs)
     data = lockfile_data_factory(**data_kwargs)
-    result = check_lockfile_satisfiability(config, data, "linux-64")
+    input_data = (
+        CondaLockLoader(tmp_path / LOCKFILE_NAME, data=data) if prepared else data
+    )
+    result = check_lockfile_satisfiability(config, input_data, "linux-64")
     if expected_ok:
         assert result.status == LockfileStatus.UP_TO_DATE
         assert result.reason == ""
@@ -5692,6 +5831,48 @@ def test_satisfiability_processes_shared_lockfile_data_once(
     assert status.status == LockfileStatus.UP_TO_DATE
     assert redactions == [2]
     assert indexes == [2]
+
+
+def test_satisfiability_reuses_prepared_lockfile_across_targets(
+    satisfiability_config_factory,
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = satisfiability_config_factory(
+        environments={"default": [], "dev": []},
+    )
+    data = lockfile_data_factory()
+    data["environments"]["dev"] = deepcopy(data["environments"]["default"])
+    original = deepcopy(data)
+    redactions: list[int] = []
+    indexes: list[int] = []
+    original_redact = CondaLockLoader.redact_data_urls
+    original_index = CondaLockLoader.package_records_by_url_from_data
+
+    def record_redaction(value: dict[str, Any]) -> dict[str, Any]:
+        redactions.append(len(value["packages"]))
+        return original_redact(value)
+
+    def record_index(value: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        indexes.append(len(value["packages"]))
+        return original_index(value)
+
+    monkeypatch.setattr(
+        CondaLockLoader, "redact_data_urls", staticmethod(record_redaction)
+    )
+    monkeypatch.setattr(
+        CondaLockLoader, "package_records_by_url_from_data", staticmethod(record_index)
+    )
+
+    loader = CondaLockLoader(tmp_path / LOCKFILE_NAME, data=data)
+    for platform in ("linux-64", "osx-arm64"):
+        status = check_lockfile_satisfiability(config, loader, platform)
+        assert status.status == LockfileStatus.UP_TO_DATE
+
+    assert redactions == [2]
+    assert indexes == [2]
+    assert data == original
 
 
 @pytest.mark.parametrize(
@@ -6096,10 +6277,18 @@ def test_satisfiability_selection_keeps_complete_workspace_declaration_checks(
     assert affected_environment in result.reason
 
 
+@pytest.mark.parametrize("prepared", [False, True], ids=["raw", "prepared"])
 def test_satisfiability_rejects_unknown_environment(
     satisfiability_environment_pair,
+    tmp_path: Path,
+    prepared: bool,
 ) -> None:
     config, data = satisfiability_environment_pair
+    input_data = (
+        CondaLockLoader(tmp_path / LOCKFILE_NAME, data=data) if prepared else data
+    )
 
     with pytest.raises(EnvironmentNotFoundError, match="unknown"):
-        check_lockfile_satisfiability(config, data, "linux-64", environment="unknown")
+        check_lockfile_satisfiability(
+            config, input_data, "linux-64", environment="unknown"
+        )

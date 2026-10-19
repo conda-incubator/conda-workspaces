@@ -15,6 +15,7 @@ import pytest
 from conda.base.context import context
 from rich.console import Console
 
+import conda_workspaces.archive as archive_module
 from conda_workspaces.archive import (
     create_archive,
     file_contains_bytes,
@@ -781,12 +782,16 @@ def test_execute_unarchive_require_sha256_requires_receipt(
 
 
 @pytest.mark.parametrize("install", [False, True], ids=["extract", "install"])
-def test_execute_unarchive_dry_run_preserves_tree(
+@pytest.mark.parametrize(
+    "allow_large_archive", [False, True], ids=["default-limit", "trusted-opt-in"]
+)
+def test_execute_unarchive_dry_run_enforces_expanded_limit_and_preserves_tree(
     archive_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     snapshot_tree: SnapshotTree,
     install: bool,
+    allow_large_archive: bool,
 ) -> None:
     monkeypatch.chdir(archive_workspace)
     archive = tmp_path / "dry-run.tar.gz"
@@ -802,29 +807,34 @@ def test_execute_unarchive_dry_run_preserves_tree(
     dest = tmp_path / "staging"
     before = snapshot_tree(tmp_path)
     stream = StringIO()
+    monkeypatch.setattr(archive_module, "DEFAULT_ARCHIVE_EXTRACT_BYTES", 1)
 
-    result = execute_unarchive(
-        make_args(
-            _UNARCHIVE_DEFAULTS,
-            archive_path=archive,
-            target=target,
-            receipt=True,
-            install=install,
-            environment="default" if install else None,
-            prefix="/opt/runtime" if install else None,
-            dest=dest if install else None,
-            dry_run=True,
-        ),
-        console=Console(file=stream, width=200, highlight=False),
+    args = make_args(
+        _UNARCHIVE_DEFAULTS,
+        archive_path=archive,
+        target=target,
+        receipt=True,
+        install=install,
+        environment="default" if install else None,
+        prefix="/opt/runtime" if install else None,
+        dest=dest if install else None,
+        dry_run=True,
+        allow_large_archive=allow_large_archive,
     )
+    console = Console(file=stream, width=200, highlight=False)
+    if allow_large_archive:
+        result = execute_unarchive(args, console=console)
+        assert result == 0
+        assert "Would extract" in stream.getvalue()
+        if install:
+            assert "Would install" in stream.getvalue()
+    else:
+        with pytest.raises(ArchiveError, match="default extraction limit"):
+            execute_unarchive(args, console=console)
 
-    assert result == 0
     assert snapshot_tree(tmp_path) == before
     assert not target.exists()
     assert not dest.exists()
-    assert "Would extract" in stream.getvalue()
-    if install:
-        assert "Would install" in stream.getvalue()
 
 
 def test_execute_unarchive_dry_run_resolves_relative_target(

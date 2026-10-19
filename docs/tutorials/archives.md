@@ -92,6 +92,11 @@ The target path must be absent. `unarchive` refuses to extract over an
 existing file, link, or directory, including an empty directory. Remove an
 empty target before retrying.
 
+Extraction is limited to 4 GiB of raw and expanded bytes by default. Use
+`--allow-large-archive` only for a trusted archive that needs more space.
+The 100 GiB hard limit still applies. Unarchive checks available disk space
+before snapshotting and writing extracted files or bundled package copies.
+
 After extraction, install the environments from the lockfile:
 
 ```bash

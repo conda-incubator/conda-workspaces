@@ -16,6 +16,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Reuse sanitized lockfile data and package URL indexes across platform checks,
+  workspace updates, and lockfile rendering while retaining wildcard and YAML
+  alias limits. (#200)
+- Limit archive extraction to 4 GiB of raw and expanded bytes by default, check free
+  space before snapshotting, extracting, and staging bundled packages, and
+  require `--allow-large-archive` for trusted archives above the default limit.
+  The 100 GiB hard limit still applies. (#200)
 - Stream archive candidates and bound file selection and pattern matching before
   archive member validation. (#200)
 - Enforce YAML collection and depth limits while composing nodes, before large
