@@ -6220,6 +6220,82 @@ def test_satisfiability_batch_bounds_repeated_manifest_dependencies(
     assert resolved_names == ["default", "dev"]
 
 
+def test_satisfiability_batch_reuses_channel_locations_for_rich_platforms(
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    platforms = [f"linux-64-{index}" for index in range(4)]
+    config = WorkspaceConfig(
+        channels=[Channel("conda-forge")],
+        platforms=platforms,
+        platform_subdirs={platform: "linux-64" for platform in platforms},
+        features={"default": Feature(name="default")},
+        environments={"default": Environment(name="default")},
+        root=str(tmp_path),
+        manifest_path=str(tmp_path / "conda.toml"),
+    )
+    data = lockfile_data_factory()
+    data["environments"]["default"]["packages"] = {
+        platform: [] for platform in platforms
+    }
+    data["packages"] = []
+    loader = CondaLockLoader(tmp_path / "conda.lock", data=data)
+    original = CondaLockLoader.channel_urls_for_env_data
+    expanded_platforms: list[str] = []
+
+    def record_channel_urls(env_data, platform, *, path=None):
+        expanded_platforms.append(platform)
+        return original(env_data, platform, path=path)
+
+    monkeypatch.setattr(
+        CondaLockLoader, "channel_urls_for_env_data", record_channel_urls
+    )
+
+    status = loader.check_targets(
+        config,
+        (("default", platform) for platform in platforms),
+        match_budget_scope="platform",
+    )
+
+    assert status.status == LockfileStatus.UP_TO_DATE
+    assert expanded_platforms == ["linux-64"]
+
+
+@pytest.mark.parametrize(
+    ("limit", "limit_value", "reason"),
+    [
+        ("MAX_LOCKFILE_BATCH_PACKAGE_REFS", 1, "package references"),
+        (
+            "MAX_LOCKFILE_BATCH_EXPANDED_ITEMS",
+            4,
+            "expanded collection items",
+        ),
+    ],
+    ids=["shared-reference-limit", "shared-metadata-limit"],
+)
+def test_satisfiability_standalone_bounds_aliased_environment_refs(
+    satisfiability_config_factory,
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    limit: str,
+    limit_value: int,
+    reason: str,
+) -> None:
+    config = satisfiability_config_factory(
+        platforms=["linux-64"],
+        environments={"default": [], "test": []},
+    )
+    data = lockfile_data_factory()
+    data["environments"]["test"] = data["environments"]["default"]
+    monkeypatch.setattr(lockfile_module, limit, limit_value)
+
+    status = check_lockfile_satisfiability(config, data, "linux-64")
+
+    assert status.status == LockfileStatus.OUT_OF_DATE
+    assert reason in status.reason
+
+
 @pytest.mark.parametrize(
     ("limit", "limit_value", "reason"),
     [

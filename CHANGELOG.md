@@ -18,8 +18,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 - Check lockfile environment and platform declarations once per platform edit,
   workspace update, or lockfile rendering operation, then check exact targets
-  with an aggregate wildcard limit. Reuse sanitized lockfile data and package
-  URL indexes while retaining YAML alias limits. (#200)
+  with aggregate wildcard, package reference, and metadata limits. Apply the
+  same limits to standalone status checks and reuse channel locations for
+  platforms that share a conda subdir. (#200)
 - Cap filesystem entries created by archive extraction, reserve disk space for
   file and directory metadata, and check available inodes before writing. (#200)
 - Limit archive extraction to 4 GiB of raw and expanded bytes by default, check free

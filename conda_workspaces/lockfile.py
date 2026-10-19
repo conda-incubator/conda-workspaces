@@ -259,6 +259,7 @@ def check_lockfile_satisfiability(
     _match_budget: list[int] | None = None,
     _total_match_budget: list[int] | None = None,
     _batch_expansion_budget: DocumentExpansionBudget | None = None,
+    _channel_locations_cache: dict[tuple[int, str], ChannelLocations] | None = None,
     _exact_target: bool = False,
 ) -> LockfileStatus:
     """Check whether *lockfile_data* satisfies the manifest's requirements.
@@ -277,6 +278,19 @@ def check_lockfile_satisfiability(
     _stale = LockfileStatus.OUT_OF_DATE
     match_budget = (
         _match_budget if _match_budget is not None else [MAX_LOCKFILE_MATCH_ATTEMPTS]
+    )
+    standalone = _validated_envs is None
+    package_refs = 0
+    batch_expansion_budget = (
+        _batch_expansion_budget
+        if _batch_expansion_budget is not None
+        else DocumentExpansionBudget(
+            items=MAX_LOCKFILE_BATCH_EXPANDED_ITEMS,
+            strings=MAX_LOCKFILE_BYTES,
+        )
+    )
+    channel_locations_cache = (
+        _channel_locations_cache if _channel_locations_cache is not None else {}
     )
     if environment is not None:
         config.get_environment(environment)
@@ -320,6 +334,18 @@ def check_lockfile_satisfiability(
         platform_refs = lock_packages.get(current_lock_platform)
         if platform_refs is None:
             continue
+        if standalone:
+            if not isinstance(platform_refs, list):
+                return LockfileStatus(
+                    status=_stale,
+                    reason="Lockfile package references must be a list",
+                )
+            package_refs += len(platform_refs)
+            if package_refs > MAX_LOCKFILE_BATCH_PACKAGE_REFS:
+                return LockfileStatus(
+                    status=_stale,
+                    reason="Lockfile package references exceed the allowed limit",
+                )
         for ref in platform_refs:
             if not isinstance(ref, dict) or set(ref) != {"conda"}:
                 return LockfileStatus(
@@ -332,11 +358,15 @@ def check_lockfile_satisfiability(
         package_platform = config.platform_subdir(current_lock_platform)
 
         try:
-            channel_urls = CondaLockLoader.channel_urls_for_env_data(
-                lock_env,
-                package_platform,
-            )
-            channel_locations = CondaLockLoader._channel_locations(channel_urls)
+            channel_key = (id(lock_env), package_platform)
+            channel_locations = channel_locations_cache.get(channel_key)
+            if channel_locations is None:
+                channel_urls = CondaLockLoader.channel_urls_for_env_data(
+                    lock_env,
+                    package_platform,
+                )
+                channel_locations = CondaLockLoader._channel_locations(channel_urls)
+                channel_locations_cache[channel_key] = channel_locations
             if records_by_url is None:
                 records_by_url = loader._records_index()
             remaining_items, remaining_strings = loader._environment_budget(lock_env)
@@ -349,7 +379,7 @@ def check_lockfile_satisfiability(
                 package_platform=package_platform,
                 remaining_items=remaining_items,
                 remaining_strings=remaining_strings,
-                batch_expansion_budget=_batch_expansion_budget,
+                batch_expansion_budget=batch_expansion_budget,
             )
         except ValueError as exc:
             return LockfileStatus(status=_stale, reason=str(exc))
@@ -761,6 +791,7 @@ class CondaLockLoader(EnvironmentSpecBase):
             items=MAX_LOCKFILE_BATCH_EXPANDED_ITEMS,
             strings=MAX_LOCKFILE_BYTES,
         )
+        channel_locations_cache: dict[tuple[int, str], ChannelLocations] = {}
         seen: set[tuple[str, str]] = set()
         package_refs = 0
         for inspected, (name, platform) in enumerate(targets, 1):
@@ -810,6 +841,7 @@ class CondaLockLoader(EnvironmentSpecBase):
                 _match_budget=match_budget,
                 _total_match_budget=total_budget,
                 _batch_expansion_budget=expansion_budget,
+                _channel_locations_cache=channel_locations_cache,
                 _exact_target=True,
             )
             if status.status != LockfileStatus.UP_TO_DATE:
