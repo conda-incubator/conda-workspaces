@@ -4,6 +4,14 @@ All notable changes to conda-workspaces will be documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Added
+
+- Added `conda workspace ship` to build native launchers from a selected locked
+  workspace environment through conda-ship, with online, external, and embedded
+  package layouts. (#194)
+
 ## 0.11.1 — 2026-10-02
 
 ### Changed
