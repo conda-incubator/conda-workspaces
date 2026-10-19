@@ -74,9 +74,7 @@ def _show_workspace_info(
     include_packages: bool,
 ) -> int:
     """Show workspace-level overview."""
-    # Resolving is cheap (no solver, just feature merging) and lets us
-    # surface the reachable platform set when features broaden it
-    # beyond ``config.platforms``.
+    # Feature platforms can broaden the reachable set beyond config.platforms.
     resolved_envs = resolve_all_environments(config)
     known = sorted(known_platforms(config, resolved_envs.values()))
 

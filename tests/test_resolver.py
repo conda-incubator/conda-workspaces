@@ -7,7 +7,12 @@ from typing import TYPE_CHECKING
 import pytest
 from conda.models.records import PackageRecord
 
-from conda_workspaces.exceptions import EnvironmentNotFoundError, PlatformError
+import conda_workspaces.resolver as resolver_module
+from conda_workspaces.exceptions import (
+    CondaWorkspacesError,
+    EnvironmentNotFoundError,
+    PlatformError,
+)
 from conda_workspaces.models import (
     Channel,
     Environment,
@@ -100,6 +105,60 @@ def test_resolve_channels(sample_config):
 def test_resolve_all(sample_config):
     all_resolved = resolve_all_environments(sample_config)
     assert set(all_resolved) == {"default", "test", "docs"}
+
+
+@pytest.mark.parametrize(
+    ("feature_count", "environment_count", "limit"),
+    [(0, 3, 12), (3, 2, 20)],
+    ids=["shared-default-feature", "overlapping-named-features"],
+)
+def test_resolve_all_bounds_feature_merge_work(
+    monkeypatch: pytest.MonkeyPatch,
+    feature_count: int,
+    environment_count: int,
+    limit: int,
+) -> None:
+    dependency_names = ("python", "numpy", "scipy", "pandas")
+    features = {
+        "default": Feature(
+            name="default",
+            conda_dependencies=(
+                {dep: MatchSpec(dep) for dep in dependency_names}
+                if feature_count == 0
+                else {}
+            ),
+        )
+    }
+    feature_names = ("one", "two", "three")[:feature_count]
+    for name in feature_names:
+        features[name] = Feature(
+            name=name,
+            conda_dependencies={dep: MatchSpec(dep) for dep in dependency_names},
+        )
+    environment_names = ("default", "dev", "test")[:environment_count]
+    config = WorkspaceConfig(
+        channels=[Channel("conda-forge")],
+        platforms=["linux-64"],
+        features=features,
+        environments={
+            name: Environment(name=name, features=list(feature_names))
+            for name in environment_names
+        },
+    )
+    monkeypatch.setattr(resolver_module, "MAX_RESOLUTION_WORK_ITEMS", limit)
+    original_resolve = resolver_module.resolve_environment
+    resolved_names: list[str] = []
+
+    def record_resolve(config, name, platform=None, **kwargs):
+        resolved_names.append(name)
+        return original_resolve(config, name, platform, **kwargs)
+
+    monkeypatch.setattr(resolver_module, "resolve_environment", record_resolve)
+
+    with pytest.raises(CondaWorkspacesError, match="resolution work exceeds"):
+        resolve_all_environments(config)
+
+    assert resolved_names == ["default", "dev"]
 
 
 @pytest.mark.parametrize(
