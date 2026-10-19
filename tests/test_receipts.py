@@ -735,10 +735,12 @@ def test_receipt_inventory_bounds_normalization_across_platform_aliases(
     assert len(recorded_package_normalizations) < 4
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_archive_receipt_rejects_alias_expansion_before_inventory_comparison(
     receipt_workspace: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    newline: str,
 ) -> None:
     archive_path = tmp_path / "workspace.tar.gz"
     create_archive(receipt_workspace, archive_path, ArchiveConfig())
@@ -751,10 +753,11 @@ def test_archive_receipt_rejects_alias_expansion_before_inventory_comparison(
         "        - {name: sample, version: '1', build: '0'}\n"
         + "".join(f"  env{index}: *shared\n" for index in range(16))
     )
-    target.joinpath("conda.lock").write_text(lockfile, encoding="utf-8")
+    lockfile_bytes = lockfile.replace("\n", newline).encode()
+    target.joinpath("conda.lock").write_bytes(lockfile_bytes)
     for subject in statement["subject"]:
         if subject["name"] == "conda.lock":
-            subject["digest"]["sha256"] = hashlib.sha256(lockfile.encode()).hexdigest()
+            subject["digest"]["sha256"] = hashlib.sha256(lockfile_bytes).hexdigest()
     statement["predicate"]["environments"] = [
         {"name": f"env{index}", "packages": []} for index in range(16)
     ]
