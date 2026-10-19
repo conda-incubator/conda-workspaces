@@ -14,7 +14,6 @@ from conda_workspaces.cli.workspace.platform import execute_platform
 from conda_workspaces.exceptions import CondaWorkspacesError, PlatformError, SolveError
 from conda_workspaces.lockfile import (
     CondaLockLoader,
-    check_lockfile_satisfiability,
     load_lockfile_data,
 )
 from conda_workspaces.manifests import find_parser
@@ -690,24 +689,26 @@ def test_workspace_platform_lock_preserves_feature_solutions(
     assert execute_platform(args) == 0
     lock_path = platform_manifest.parent / "conda.lock"
     baseline = load_lockfile_data(lock_path.read_bytes())
-    checked: list[tuple[int, str, str]] = []
+    checked: list[tuple[int, tuple[tuple[str, str], ...], str]] = []
+    original_check_targets = CondaLockLoader.check_targets
 
-    def record_status(
-        config: WorkspaceConfig,
+    def record_targets(
         loader: CondaLockLoader,
-        platform: str,
+        config: WorkspaceConfig,
+        targets: tuple[tuple[str, str], ...],
         *,
-        environment: str,
+        match_budget_scope: str,
     ) -> LockfileStatus:
-        assert isinstance(loader, CondaLockLoader)
-        checked.append((id(loader), environment, platform))
-        return check_lockfile_satisfiability(
-            config, loader, platform, environment=environment
+        pairs = tuple(targets)
+        checked.append((id(loader), pairs, match_budget_scope))
+        return original_check_targets(
+            loader, config, pairs, match_budget_scope=match_budget_scope
         )
 
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.platform.check_lockfile_satisfiability",
-        record_status,
+        CondaLockLoader,
+        "check_targets",
+        record_targets,
     )
     platform_solves.clear()
     capsys.readouterr()
@@ -719,9 +720,11 @@ def test_workspace_platform_lock_preserves_feature_solutions(
         for name, env_data in baseline["environments"].items()
         for platform in env_data["packages"]
     }
-    assert {(name, platform) for _, name, platform in checked} == expected_checks
-    assert len(checked) == len(expected_checks)
-    assert len({loader_id for loader_id, _, _ in checked}) == 1
+    assert len(checked) == 2
+    assert set(checked[0][1]) == expected_checks
+    assert len(checked[0][1]) == len(expected_checks)
+    assert checked[0][2] == "target"
+    assert checked[1][2] == "platform"
     updated = load_lockfile_data(lock_path.read_bytes())
     expected = (
         {"linux-64", "win-64", "osx-64", "osx-arm64"}

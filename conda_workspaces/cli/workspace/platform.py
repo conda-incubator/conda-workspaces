@@ -18,7 +18,6 @@ from ...exceptions import CondaWorkspacesError, PlatformError
 from ...lockfile import (
     MAX_LOCKFILE_BYTES,
     CondaLockLoader,
-    check_lockfile_satisfiability,
     load_lockfile_data,
     lockfile_path,
     render_lockfile,
@@ -192,7 +191,8 @@ def execute_platform(
                     }
                     if set(locked_platforms) != set(current.environments):
                         stale_reason = "Locked environments do not match the manifest."
-                    for name, resolved in resolve_all_environments(current).items():
+                    resolved_envs = resolve_all_environments(current)
+                    for name, resolved in resolved_envs.items():
                         if stale_reason:
                             break
                         declared_platforms = set(resolved.platforms or [ctx.platform])
@@ -202,16 +202,19 @@ def execute_platform(
                                 " do not match its declarations."
                             )
                             break
-                        for platform in declared_platforms:
-                            lock_status = check_lockfile_satisfiability(
-                                current, loader, platform, environment=name
+                    if stale_reason is None:
+                        targets = (
+                            (name, platform)
+                            for name, resolved in resolved_envs.items()
+                            for platform in (resolved.platforms or [ctx.platform])
+                        )
+                        lock_status = loader.check_targets(
+                            current, targets, match_budget_scope="target"
+                        )
+                        if lock_status.status != LockfileStatus.UP_TO_DATE:
+                            stale_reason = (
+                                lock_status.reason or "The lockfile needs refreshing."
                             )
-                            if lock_status.status != LockfileStatus.UP_TO_DATE:
-                                stale_reason = (
-                                    lock_status.reason
-                                    or "The lockfile needs refreshing."
-                                )
-                                break
                 except ValueError as exc:
                     stale_reason = str(exc)
                 if stale_reason:

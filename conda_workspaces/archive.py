@@ -96,6 +96,9 @@ CONDA_PACKAGE_SUFFIXES: tuple[str, ...] = (".conda", ".tar.bz2")
 MAX_ARCHIVE_MEMBERS: Final = 100_000
 """Maximum number of members accepted from one workspace archive."""
 
+MAX_ARCHIVE_FILESYSTEM_ENTRIES: Final = 100_000
+"""Maximum distinct files, links, and directories one archive may create."""
+
 MAX_ARCHIVE_CANDIDATES: Final = 200_000
 """Maximum directory entries or tracked paths examined for one archive."""
 
@@ -141,6 +144,9 @@ DEFAULT_ARCHIVE_EXTRACT_BYTES: Final = 4 * 1024**3
 ARCHIVE_STAGING_RESERVE_BYTES: Final = 64 * 1024**2
 """Minimum free space retained after archive staging copies."""
 
+ARCHIVE_STAGING_ENTRY_BYTES: Final = 16 * 1024
+"""Conservative disk-space allowance per extracted file or directory."""
+
 MAX_ARCHIVE_RAW_BYTES: Final = 100 * 1024**3
 """Maximum byte size accepted for one compressed or uncompressed archive."""
 
@@ -179,6 +185,13 @@ class _ArchiveWriteLimits:
         self.members += 1
         self.expanded_bytes = expanded_bytes
         self.path_components = path_components
+
+
+@dataclass
+class _ArchiveMemberUsage:
+    """Collect extraction metadata while validating member paths."""
+
+    filesystem_entries: int = 0
 
 
 @dataclass
@@ -1514,6 +1527,11 @@ class WorkspaceArchive:
                 if validate_install is not None:
                     if cache_packages:
                         preview_cache = Path(temporary) / "package-cache"
+                        require_archive_staging_space(
+                            Path(temporary),
+                            0,
+                            filesystem_entries=3 + 4 * len(cache_packages),
+                        )
                         preview_cache.mkdir()
                         (preview_cache / "urls.txt").write_text("", encoding="utf-8")
                         for package, receipt_record in cache_packages:
@@ -1579,14 +1597,24 @@ class WorkspaceArchive:
                         validate_install()
                 extracted = target_path
             else:
-                if cache_plan and cache_path is not None:
+                if cache_path is not None:
                     cache_space_path = cache_path
+                    missing_cache_directories = 0
                     while not cache_space_path.exists():
                         cache_space_path = cache_space_path.parent
-                    require_archive_staging_space(
-                        cache_space_path,
-                        sum(size for _, _, _, size in cache_plan),
+                        missing_cache_directories += 1
+                    cache_entries = (
+                        missing_cache_directories
+                        + len(cache_plan)
+                        + 3 * len(cache_records)
+                        + int(not (cache_path / "urls.txt").exists())
                     )
+                    if cache_entries:
+                        require_archive_staging_space(
+                            cache_space_path,
+                            sum(size for _, _, _, size in cache_plan),
+                            filesystem_entries=cache_entries + 1,
+                        )
                 for name, destination, expected, expected_size in cache_plan:
                     source = staged / "packages" / name
                     try:
@@ -3065,6 +3093,8 @@ def validate_tar_member(
 def validate_tar_members(
     members: list[tarfile.TarInfo],
     target: Path | None = None,
+    *,
+    usage: _ArchiveMemberUsage | None = None,
 ) -> int:
     """Validate all archive *members* and return their maximum extracted bytes."""
     if len(members) > MAX_ARCHIVE_MEMBERS:
@@ -3075,6 +3105,7 @@ def validate_tar_members(
     expanded_bytes = 0
     path_components = 0
     children: list[dict[str, int]] = [{}]
+    filesystem_children: list[dict[str, int]] = [{}]
     node_members: dict[int, tarfile.TarInfo] = {}
     first_descendants: dict[int, tarfile.TarInfo] = {}
     members_by_path: dict[
@@ -3094,8 +3125,9 @@ def validate_tar_members(
             )
 
         node = 0
+        filesystem_node = 0
         ancestors: list[int] = []
-        for part in path_key:
+        for part, filesystem_part in zip(path_key, member_path.parts, strict=True):
             parent_member = node_members.get(node)
             if parent_member is not None and not parent_member.isdir():
                 raise ArchiveError(
@@ -3109,6 +3141,17 @@ def validate_tar_members(
                 children[node][part] = child
                 children.append({})
             node = child
+            filesystem_child = filesystem_children[filesystem_node].get(filesystem_part)
+            if filesystem_child is None:
+                if len(filesystem_children) > MAX_ARCHIVE_FILESYSTEM_ENTRIES:
+                    raise ArchiveError(
+                        "Archive member paths require more than"
+                        f" {MAX_ARCHIVE_FILESYSTEM_ENTRIES:,} filesystem entries."
+                    )
+                filesystem_child = len(filesystem_children)
+                filesystem_children[filesystem_node][filesystem_part] = filesystem_child
+                filesystem_children.append({})
+            filesystem_node = filesystem_child
 
         if node in node_members:
             raise ArchiveError(f"Archive contains duplicate member: {member.name}")
@@ -3168,6 +3211,8 @@ def validate_tar_members(
                     "Archive regular files and link fallbacks expand beyond the"
                     f" maximum size of {MAX_ARCHIVE_EXPANDED_BYTES:,} bytes."
                 )
+    if usage is not None:
+        usage.filesystem_entries = len(filesystem_children) - 1
     return expanded_bytes
 
 
@@ -3574,16 +3619,39 @@ def extract_tar_members(
             raise ArchiveError("Archive extraction staging changed while extracting.")
 
 
-def require_archive_staging_space(directory: Path, required_bytes: int) -> None:
-    """Check free space for snapshot, direct extraction, and cache staging."""
+def require_archive_staging_space(
+    directory: Path,
+    required_bytes: int,
+    *,
+    filesystem_entries: int = 0,
+) -> None:
+    """Check free space and available inodes before archive staging writes."""
+    if filesystem_entries > MAX_ARCHIVE_FILESYSTEM_ENTRIES:
+        raise ArchiveError(
+            "Archive staging requires more than"
+            f" {MAX_ARCHIVE_FILESYSTEM_ENTRIES:,} filesystem entries."
+        )
     try:
         free_bytes = shutil.disk_usage(directory).free
     except OSError as exc:
         raise ArchiveError(
             "Cannot determine available space for archive staging."
         ) from exc
+    required_bytes += filesystem_entries * ARCHIVE_STAGING_ENTRY_BYTES
     if required_bytes + ARCHIVE_STAGING_RESERVE_BYTES >= free_bytes:
         raise ArchiveError("Archive staging needs more free space than is available.")
+    statvfs = getattr(os, "statvfs", None)
+    if filesystem_entries and statvfs is not None:
+        try:
+            filesystem = statvfs(directory)
+        except OSError as exc:
+            raise ArchiveError(
+                "Cannot determine available filesystem entries for archive staging."
+            ) from exc
+        if filesystem.f_files and filesystem_entries >= filesystem.f_favail:
+            raise ArchiveError(
+                "Archive staging needs more free filesystem entries than are available."
+            )
 
 
 def extract_archive(
@@ -3624,7 +3692,8 @@ def extract_archive(
                 else DEFAULT_ARCHIVE_EXTRACT_BYTES
             )
             members = read_tar_members(tf, max_expanded_bytes=limit)
-            expanded_bytes = validate_tar_members(members, target)
+            usage = _ArchiveMemberUsage()
+            expanded_bytes = validate_tar_members(members, target, usage=usage)
             if expanded_bytes > limit:
                 raise ArchiveError(
                     "Archive exceeds the default extraction limit of"
@@ -3634,7 +3703,11 @@ def extract_archive(
                         " allow_large_archive=True."
                     ],
                 )
-            require_archive_staging_space(staged, expanded_bytes)
+            require_archive_staging_space(
+                staged,
+                expanded_bytes,
+                filesystem_entries=usage.filesystem_entries,
+            )
             if not hasattr(tarfile, "data_filter"):
                 raise ArchiveError(
                     "Safe archive extraction requires Python's tar data filter.",

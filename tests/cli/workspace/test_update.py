@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 import tomlkit
@@ -17,10 +18,12 @@ from conda_workspaces.exceptions import (
     CondaWorkspacesError,
     EnvironmentNotInstalledError,
 )
-from conda_workspaces.lockfile import CondaLockLoader
 from conda_workspaces.models import LockfileStatus
 
 from ..conftest import make_args
+
+if TYPE_CHECKING:
+    from conda_workspaces.lockfile import CondaLockLoader
 
 _DEFAULTS = {
     "manifest_file": None,
@@ -985,8 +988,16 @@ def test_update_dry_run_uses_replacement_without_writing_manifest(
         ("missing-root", "rendered", 1),
         ("missing-target", "rendered", 1),
         ("incomplete-targets", "rendered", 1),
+        ("feature-platforms", "existing", 0),
     ],
-    ids=["complete", "stale", "missing-root", "missing-target", "incomplete-targets"],
+    ids=[
+        "complete",
+        "stale",
+        "missing-root",
+        "missing-target",
+        "incomplete-targets",
+        "feature-platforms",
+    ],
 )
 def test_update_selects_only_a_complete_current_lock_as_baseline(
     layered_manifest: Path,
@@ -996,14 +1007,30 @@ def test_update_selects_only_a_complete_current_lock_as_baseline(
     expected_source: str,
     render_count: int,
 ) -> None:
+    if mode == "feature-platforms":
+        text = layered_manifest.read_text(encoding="utf-8")
+        layered_manifest.write_text(
+            text.replace(
+                "[feature.dev.dependencies]",
+                '[feature.dev]\nplatforms = ["linux-64"]\n\n[feature.dev.dependencies]',
+            ),
+            encoding="utf-8",
+        )
     layered_manifest.with_name("conda.lock").write_bytes(b"existing-lock")
-    checked_platforms: list[str] = []
+    checked_batches: list[list[tuple[str, str]]] = []
     checked_loaders: list[CondaLockLoader] = []
 
-    def fake_status(config, data, platform: str) -> LockfileStatus:
-        assert isinstance(data, CondaLockLoader)
-        checked_loaders.append(data)
-        checked_platforms.append(platform)
+    def fake_status(
+        loader: CondaLockLoader,
+        config,
+        targets,
+        *,
+        match_budget_scope: str,
+    ) -> LockfileStatus:
+        assert match_budget_scope == "platform"
+        assert set(config.environments) == {"default", "dev", "private", "isolated"}
+        checked_loaders.append(loader)
+        checked_batches.append(list(targets))
         status = (
             LockfileStatus.OUT_OF_DATE if mode == "stale" else LockfileStatus.UP_TO_DATE
         )
@@ -1026,6 +1053,9 @@ def test_update_selects_only_a_complete_current_lock_as_baseline(
     }
     if mode == "incomplete-targets":
         del existing["environments"]["dev"]["packages"]["osx-arm64"]
+    elif mode == "feature-platforms":
+        for name in ("dev", "private"):
+            del existing["environments"][name]["packages"]["osx-arm64"]
 
     def fake_load(content: bytes):
         if content == b"existing-lock":
@@ -1033,7 +1063,7 @@ def test_update_selects_only_a_complete_current_lock_as_baseline(
         return {"source": "rendered"}
 
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.update.check_lockfile_satisfiability",
+        "conda_workspaces.cli.workspace.update.CondaLockLoader.check_targets",
         fake_status,
     )
     monkeypatch.setattr(
@@ -1058,12 +1088,18 @@ def test_update_selects_only_a_complete_current_lock_as_baseline(
     )
 
     if mode == "incomplete-targets":
-        assert checked_platforms == []
+        assert checked_batches == []
         assert checked_loaders == []
-    elif mode == "stale":
-        assert len(checked_platforms) == 1
     else:
-        assert set(checked_platforms) == {"linux-64", "osx-arm64"}
+        assert len(checked_batches) == 1
+        assert set(checked_batches[0]) == {
+            (name, platform)
+            for name in ("default", "dev", "private", "isolated")
+            for platform in ("linux-64", "osx-arm64")
+            if mode != "feature-platforms"
+            or name not in {"dev", "private"}
+            or platform == "linux-64"
+        }
     assert len({id(loader) for loader in checked_loaders}) <= 1
     assert len(update_runtime.render_calls) == render_count
     baseline = update_runtime.sync_calls[0]["baseline_lockfile"]

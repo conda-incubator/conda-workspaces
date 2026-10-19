@@ -50,7 +50,7 @@ import tempfile
 from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from urllib.parse import unquote, urlsplit
@@ -104,7 +104,7 @@ from .paths import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Sequence
-    from typing import Any, ClassVar, Final, TypeAlias
+    from typing import Any, ClassVar, Final, Literal, TypeAlias
 
     from conda.common.path import PathType
     from conda.core.link import PrefixSetup
@@ -148,6 +148,11 @@ MAX_LOCKFILE_DEPTH: Final = 128
 MAX_LOCKFILE_COLLECTION_ITEMS: Final = 100_000
 MAX_LOCKFILE_ITEMS: Final = 1_000_000
 MAX_LOCKFILE_MATCH_ATTEMPTS: Final = 100_000
+MAX_LOCKFILE_BATCH_MATCH_ATTEMPTS: Final = MAX_LOCKFILE_ITEMS
+MAX_LOCKFILE_BATCH_TARGETS: Final = 10_000
+MAX_LOCKFILE_BATCH_PACKAGE_REFS: Final = MAX_LOCKFILE_COLLECTION_ITEMS
+MAX_LOCKFILE_BATCH_EXPANDED_ITEMS: Final = MAX_LOCKFILE_COLLECTION_ITEMS
+MAX_LOCKFILE_DECLARATION_ITEMS: Final = MAX_LOCKFILE_COLLECTION_ITEMS
 _CURRENT_LOCKFILE_OUTPUT_GENERATION = object()
 
 
@@ -250,6 +255,11 @@ def check_lockfile_satisfiability(
     current_platform: str,
     *,
     environment: str | None = None,
+    _validated_envs: Mapping[str, ResolvedEnvironment] | None = None,
+    _match_budget: list[int] | None = None,
+    _total_match_budget: list[int] | None = None,
+    _batch_expansion_budget: DocumentExpansionBudget | None = None,
+    _exact_target: bool = False,
 ) -> LockfileStatus:
     """Check whether *lockfile_data* satisfies the manifest's requirements.
 
@@ -260,12 +270,14 @@ def check_lockfile_satisfiability(
 
     Set *environment* to check package requirements only for that environment
     on *current_platform*. Environment names, channels and declared platforms
-    are still checked across the complete workspace. A prepared
-    :class:`CondaLockLoader` reuses its sanitized data and package URL index
-    across repeated target checks.
+    are still checked across the complete workspace. Use
+    :meth:`CondaLockLoader.check_targets` to check several exact targets after
+    validating those declarations once.
     """
     _stale = LockfileStatus.OUT_OF_DATE
-    remaining_match_attempts = MAX_LOCKFILE_MATCH_ATTEMPTS
+    match_budget = (
+        _match_budget if _match_budget is not None else [MAX_LOCKFILE_MATCH_ATTEMPTS]
+    )
     if environment is not None:
         config.get_environment(environment)
 
@@ -274,95 +286,37 @@ def check_lockfile_satisfiability(
             loader = lockfile_data
             lockfile_data = loader._data
         else:
-            loader = None
-            lockfile_data = CondaLockLoader.redact_data_urls(lockfile_data)
-        version = lockfile_data.get("version")
-        if type(version) is not int:
-            raise ValueError("Lockfile version must be an integer")
+            loader = CondaLockLoader(LOCKFILE_NAME, data=lockfile_data)
+            lockfile_data = loader._data
     except ValueError as exc:
         return LockfileStatus(status=_stale, reason=str(exc))
 
-    if version != LOCKFILE_VERSION:
-        return LockfileStatus(
-            status=_stale,
-            reason=(
-                f"Lockfile version {version!r} "
-                f"does not match expected version {LOCKFILE_VERSION}"
-            ),
-        )
+    if _validated_envs is None:
+        declaration_status, validated_envs = loader._validate_manifest(config)
+        if declaration_status is not None:
+            return declaration_status
+    else:
+        validated_envs = _validated_envs
 
-    from .resolver import resolve_environment
-
-    lock_envs = lockfile_data.get("environments", {})
+    lock_envs = lockfile_data["environments"]
     records_by_url: dict[str, dict[str, Any]] | None = None
-    extra_envs = sorted(set(lock_envs) - set(config.environments))
-    if extra_envs:
-        names = ", ".join(f"'{name}'" for name in extra_envs)
-        return LockfileStatus(
-            status=_stale,
-            reason=(
-                f"Environment{'' if len(extra_envs) == 1 else 's'} {names} "
-                f"{'is' if len(extra_envs) == 1 else 'are'} present in the "
-                "lockfile but not declared in the manifest"
-            ),
-        )
-    for env_name, env_obj in config.environments.items():
-        if env_name not in lock_envs:
-            return LockfileStatus(
-                status=_stale,
-                reason=(
-                    f"Environment '{env_name}' is declared in the manifest "
-                    f"but missing from the lockfile"
-                ),
-            )
-
+    env_names = (environment,) if environment is not None else config.environments
+    for env_name in env_names:
         lock_env = lock_envs[env_name]
-
-        manifest_channels = _manifest_channel_entries(config, env_obj)
-        manifest_urls = _normalize_channel_urls(
-            entry["url"] for entry in manifest_channels
-        )
-        lock_channel_entries = lock_env.get("channels", [])
-        lock_urls = _normalize_channel_urls(
-            entry.get("url", "") for entry in lock_channel_entries
-        )
-        if manifest_urls != lock_urls:
-            return LockfileStatus(
-                status=_stale,
-                reason=(
-                    f"Channel mismatch for environment '{env_name}': "
-                    "manifest declares "
-                    f"{[redact_channel_name(url) for url in manifest_urls]} "
-                    "but lockfile has "
-                    f"{[redact_channel_name(url) for url in lock_urls]}"
-                ),
-            )
-
-        lock_platforms = set(lock_env.get("packages", {}))
-        resolved_platforms = resolve_environment(config, env_name).platforms
-        manifest_platforms = resolved_platforms or config.platforms
-        for platform in manifest_platforms:
-            if platform not in lock_platforms:
-                return LockfileStatus(
-                    status=_stale,
-                    reason=(
-                        f"Platform '{platform}' is declared in the "
-                        f"manifest but missing from environment "
-                        f"'{env_name}' in the lockfile"
-                    ),
-                )
-
-        if environment is not None and env_name != environment:
-            continue
+        base_resolved = validated_envs[env_name]
+        manifest_platforms = base_resolved.platforms or config.platforms
 
         lock_packages = lock_env.get("packages", {})
-        try:
-            current_lock_platform = config.resolve_platform_name(
-                current_platform,
-                manifest_platforms,
-            )
-        except PlatformError:
+        if _exact_target:
             current_lock_platform = current_platform
+        else:
+            try:
+                current_lock_platform = config.resolve_platform_name(
+                    current_platform,
+                    manifest_platforms,
+                )
+            except PlatformError:
+                current_lock_platform = current_platform
         platform_refs = lock_packages.get(current_lock_platform)
         if platform_refs is None:
             continue
@@ -384,23 +338,8 @@ def check_lockfile_satisfiability(
             )
             channel_locations = CondaLockLoader._channel_locations(channel_urls)
             if records_by_url is None:
-                records_by_url = (
-                    loader._records_index()
-                    if loader is not None
-                    else CondaLockLoader.package_records_by_url_from_data(lockfile_data)
-                )
-            if loader is not None:
-                remaining_items, remaining_strings = loader._environment_budget(
-                    env_name, lock_env
-                )
-            else:
-                environment_budget = DocumentExpansionBudget(
-                    items=MAX_LOCKFILE_ITEMS,
-                    strings=MAX_LOCKFILE_BYTES,
-                )
-                environment_budget.consume({"environment": lock_env}, label="Lockfile")
-                remaining_items = environment_budget.items
-                remaining_strings = environment_budget.strings
+                records_by_url = loader._records_index()
+            remaining_items, remaining_strings = loader._environment_budget(lock_env)
             records = CondaLockLoader._package_records_from_refs(
                 lock_env,
                 platform_refs,
@@ -410,6 +349,7 @@ def check_lockfile_satisfiability(
                 package_platform=package_platform,
                 remaining_items=remaining_items,
                 remaining_strings=remaining_strings,
+                batch_expansion_budget=_batch_expansion_budget,
             )
         except ValueError as exc:
             return LockfileStatus(status=_stale, reason=str(exc))
@@ -450,11 +390,28 @@ def check_lockfile_satisfiability(
 
         from .envs import _build_pypi_specs
 
-        target_resolved = resolve_environment(
-            config,
-            env_name,
-            current_lock_platform,
-        )
+        if _exact_target:
+            env_obj = config.get_environment(env_name)
+            target_resolved = replace(
+                base_resolved,
+                conda_dependencies=config.merged_conda_dependencies(
+                    env_obj, current_lock_platform
+                ),
+                pypi_dependencies=config.merged_pypi_dependencies(
+                    env_obj, current_lock_platform
+                ),
+                system_requirements=config.merged_system_requirements(
+                    env_obj, current_lock_platform
+                ),
+            )
+        else:
+            from .resolver import resolve_environment
+
+            target_resolved = resolve_environment(
+                config,
+                env_name,
+                current_lock_platform,
+            )
         requested_specs = [
             *target_resolved.conda_dependencies.values(),
             *_build_pypi_specs(target_resolved),
@@ -522,14 +479,23 @@ def check_lockfile_satisfiability(
             if dep_name is None:
                 satisfied = False
                 for candidate in candidates:
-                    if remaining_match_attempts == 0:
+                    if match_budget[0] == 0:
                         return LockfileStatus(
                             status=_stale,
                             reason=(
                                 "Lockfile dependency matching exceeds the allowed limit"
                             ),
                         )
-                    remaining_match_attempts -= 1
+                    if _total_match_budget is not None and _total_match_budget[0] == 0:
+                        return LockfileStatus(
+                            status=_stale,
+                            reason=(
+                                "Lockfile dependency matching exceeds the batch limit"
+                            ),
+                        )
+                    match_budget[0] -= 1
+                    if _total_match_budget is not None:
+                        _total_match_budget[0] -= 1
                     if spec.match(candidate):
                         satisfied = True
                         break
@@ -583,7 +549,7 @@ class CondaLockLoader(EnvironmentSpecBase):
         self._data_cache = self.redact_data_urls(data) if data is not None else None
         self._environment_names_cache: tuple[str, ...] | None = None
         self._records_by_url_cache: dict[str, dict[str, Any]] | None = None
-        self._environment_budgets: dict[str, tuple[int, int]] = {}
+        self._environment_budgets: dict[int, tuple[int, int]] = {}
 
     def can_handle(self) -> bool:
         if self.path.name not in DEFAULT_FILENAMES:
@@ -601,6 +567,254 @@ class CondaLockLoader(EnvironmentSpecBase):
         if self._data_cache is None:
             self._data_cache = self.redact_data_urls(load_lockfile_path(self.path))
         return self._data_cache
+
+    def _validate_manifest(
+        self, config: WorkspaceConfig
+    ) -> tuple[LockfileStatus | None, dict[str, ResolvedEnvironment]]:
+        """Check lock metadata once and retain each environment's platform list."""
+        stale = LockfileStatus.OUT_OF_DATE
+        data = self._data
+        version = data.get("version")
+        if type(version) is not int:
+            return (
+                LockfileStatus(
+                    status=stale, reason="Lockfile version must be an integer"
+                ),
+                {},
+            )
+        if version != LOCKFILE_VERSION:
+            return (
+                LockfileStatus(
+                    status=stale,
+                    reason=(
+                        f"Lockfile version {version!r} "
+                        f"does not match expected version {LOCKFILE_VERSION}"
+                    ),
+                ),
+                {},
+            )
+
+        from .resolver import resolve_environment
+
+        lock_envs = data.get("environments", {})
+        extra_envs = sorted(set(lock_envs) - set(config.environments))
+        if extra_envs:
+            names = ", ".join(f"'{name}'" for name in extra_envs)
+            return (
+                LockfileStatus(
+                    status=stale,
+                    reason=(
+                        f"Environment{'' if len(extra_envs) == 1 else 's'} {names} "
+                        f"{'is' if len(extra_envs) == 1 else 'are'} present in the "
+                        "lockfile but not declared in the manifest"
+                    ),
+                ),
+                {},
+            )
+
+        resolved_envs: dict[str, ResolvedEnvironment] = {}
+        platform_sets: dict[int, set[str]] = {}
+        declaration_items = 0
+        target_count = 0
+        for env_name, env_obj in config.environments.items():
+            if env_name not in lock_envs:
+                return (
+                    LockfileStatus(
+                        status=stale,
+                        reason=(
+                            f"Environment '{env_name}' is declared in the manifest "
+                            "but missing from the lockfile"
+                        ),
+                    ),
+                    {},
+                )
+
+            lock_env = lock_envs[env_name]
+            manifest_channels = _manifest_channel_entries(config, env_obj)
+            manifest_urls = _normalize_channel_urls(
+                entry["url"] for entry in manifest_channels
+            )
+            lock_channel_entries = lock_env.get("channels", [])
+            declaration_items += len(manifest_channels) + len(lock_channel_entries)
+            if declaration_items > MAX_LOCKFILE_DECLARATION_ITEMS:
+                return (
+                    LockfileStatus(
+                        status=stale,
+                        reason="Lockfile declaration work exceeds the allowed limit",
+                    ),
+                    {},
+                )
+            lock_urls = _normalize_channel_urls(
+                entry.get("url", "") for entry in lock_channel_entries
+            )
+            if manifest_urls != lock_urls:
+                return (
+                    LockfileStatus(
+                        status=stale,
+                        reason=(
+                            f"Channel mismatch for environment '{env_name}': "
+                            "manifest declares "
+                            f"{[redact_channel_name(url) for url in manifest_urls]} "
+                            "but lockfile has "
+                            f"{[redact_channel_name(url) for url in lock_urls]}"
+                        ),
+                    ),
+                    {},
+                )
+
+            resolved = resolve_environment(config, env_name)
+            declaration_items += (
+                len(resolved.conda_dependencies)
+                + len(resolved.pypi_dependencies)
+                + len(resolved.system_requirements)
+                + len(resolved.channels)
+                + len(resolved.platform_subdirs)
+                + len(resolved.activation_scripts)
+                + len(resolved.activation_env)
+            )
+            if declaration_items > MAX_LOCKFILE_DECLARATION_ITEMS:
+                return (
+                    LockfileStatus(
+                        status=stale,
+                        reason="Lockfile declaration work exceeds the allowed limit",
+                    ),
+                    {},
+                )
+            manifest_platforms = resolved.platforms or config.platforms
+            target_count += len(manifest_platforms) or 1
+            declaration_items += len(manifest_platforms)
+            if target_count > MAX_LOCKFILE_BATCH_TARGETS:
+                return (
+                    LockfileStatus(
+                        status=stale,
+                        reason="Lockfile status target count exceeds the allowed limit",
+                    ),
+                    {},
+                )
+            if declaration_items > MAX_LOCKFILE_DECLARATION_ITEMS:
+                return (
+                    LockfileStatus(
+                        status=stale,
+                        reason="Lockfile declaration work exceeds the allowed limit",
+                    ),
+                    {},
+                )
+            lock_packages = lock_env.get("packages", {})
+            lock_platforms = platform_sets.get(id(lock_packages))
+            if lock_platforms is None:
+                declaration_items += len(lock_packages)
+                if declaration_items > MAX_LOCKFILE_DECLARATION_ITEMS:
+                    return (
+                        LockfileStatus(
+                            status=stale,
+                            reason=(
+                                "Lockfile declaration work exceeds the allowed limit"
+                            ),
+                        ),
+                        {},
+                    )
+                lock_platforms = set(lock_packages)
+                platform_sets[id(lock_packages)] = lock_platforms
+            for platform in manifest_platforms:
+                if platform not in lock_platforms:
+                    return (
+                        LockfileStatus(
+                            status=stale,
+                            reason=(
+                                f"Platform '{platform}' is declared in the "
+                                f"manifest but missing from environment "
+                                f"'{env_name}' in the lockfile"
+                            ),
+                        ),
+                        {},
+                    )
+            resolved_envs[env_name] = resolved
+
+        return None, resolved_envs
+
+    def check_targets(
+        self,
+        config: WorkspaceConfig,
+        targets: Iterable[tuple[str, str]],
+        *,
+        match_budget_scope: Literal["target", "platform"],
+    ) -> LockfileStatus:
+        """Check exact environment/platform targets after one manifest validation.
+
+        Platform management retains its prior per-target wildcard budget.
+        Lockfile rendering retains a shared budget for each platform. Both
+        modes also enforce one operation-wide wildcard comparison limit.
+        """
+        if match_budget_scope not in ("target", "platform"):
+            raise ValueError("Invalid lockfile match budget scope")
+        declaration_status, resolved_envs = self._validate_manifest(config)
+        if declaration_status is not None:
+            return declaration_status
+
+        declared = {
+            name: set(resolved.platforms or config.platforms)
+            for name, resolved in resolved_envs.items()
+        }
+        platform_budgets: dict[str, list[int]] = {}
+        total_budget = [MAX_LOCKFILE_BATCH_MATCH_ATTEMPTS]
+        expansion_budget = DocumentExpansionBudget(
+            items=MAX_LOCKFILE_BATCH_EXPANDED_ITEMS,
+            strings=MAX_LOCKFILE_BYTES,
+        )
+        seen: set[tuple[str, str]] = set()
+        package_refs = 0
+        for inspected, (name, platform) in enumerate(targets, 1):
+            if inspected > MAX_LOCKFILE_BATCH_TARGETS:
+                return LockfileStatus(
+                    status=LockfileStatus.OUT_OF_DATE,
+                    reason="Lockfile status target count exceeds the allowed limit",
+                )
+            if (name, platform) in seen:
+                continue
+            seen.add((name, platform))
+            config.get_environment(name)
+            if declared[name] and platform not in declared[name]:
+                return LockfileStatus(
+                    status=LockfileStatus.OUT_OF_DATE,
+                    reason=(
+                        f"Platform '{platform}' is not declared for "
+                        f"environment '{name}'"
+                    ),
+                )
+            refs = self._data["environments"][name].get("packages", {}).get(platform)
+            if refs is not None:
+                if not isinstance(refs, list):
+                    return LockfileStatus(
+                        status=LockfileStatus.OUT_OF_DATE,
+                        reason="Lockfile package references must be a list",
+                    )
+                package_refs += len(refs)
+                if package_refs > MAX_LOCKFILE_BATCH_PACKAGE_REFS:
+                    return LockfileStatus(
+                        status=LockfileStatus.OUT_OF_DATE,
+                        reason="Lockfile package references exceed the allowed limit",
+                    )
+            match_budget = (
+                [MAX_LOCKFILE_MATCH_ATTEMPTS]
+                if match_budget_scope == "target"
+                else platform_budgets.setdefault(
+                    platform, [MAX_LOCKFILE_MATCH_ATTEMPTS]
+                )
+            )
+            status = check_lockfile_satisfiability(
+                config,
+                self,
+                platform,
+                environment=name,
+                _validated_envs=resolved_envs,
+                _match_budget=match_budget,
+                _total_match_budget=total_budget,
+                _batch_expansion_budget=expansion_budget,
+                _exact_target=True,
+            )
+            if status.status != LockfileStatus.UP_TO_DATE:
+                return status
+        return LockfileStatus(status=LockfileStatus.UP_TO_DATE)
 
     @property
     def available_platforms(self) -> tuple[str, ...]:
@@ -1028,18 +1242,17 @@ class CondaLockLoader(EnvironmentSpecBase):
             )
         return self._records_by_url_cache
 
-    def _environment_budget(
-        self, name: str, env_data: dict[str, Any]
-    ) -> tuple[int, int]:
+    def _environment_budget(self, env_data: dict[str, Any]) -> tuple[int, int]:
         """Cache resources left after accounting for an environment's refs."""
-        if name not in self._environment_budgets:
+        identity = id(env_data)
+        if identity not in self._environment_budgets:
             budget = DocumentExpansionBudget(
                 items=MAX_LOCKFILE_ITEMS,
                 strings=MAX_LOCKFILE_BYTES,
             )
             budget.consume({"environment": env_data}, label="Lockfile")
-            self._environment_budgets[name] = budget.items, budget.strings
-        return self._environment_budgets[name]
+            self._environment_budgets[identity] = budget.items, budget.strings
+        return self._environment_budgets[identity]
 
     @staticmethod
     def package_records_by_url_from_data(
@@ -1154,7 +1367,7 @@ class CondaLockLoader(EnvironmentSpecBase):
             )
 
         records_by_url = self._records_index()
-        remaining_items, remaining_strings = self._environment_budget(name, env_data)
+        remaining_items, remaining_strings = self._environment_budget(env_data)
         return self._package_records_from_refs(
             env_data,
             refs,
@@ -1178,6 +1391,7 @@ class CondaLockLoader(EnvironmentSpecBase):
         package_platform: str | None = None,
         remaining_items: int,
         remaining_strings: int,
+        batch_expansion_budget: DocumentExpansionBudget | None = None,
     ) -> list[PackageRecord]:
         """Reconstruct one target from sanitized data and a shared index.
 
@@ -1193,6 +1407,11 @@ class CondaLockLoader(EnvironmentSpecBase):
                 url = ref.get("conda")
                 if isinstance(url, str) and url in records_by_url:
                     selected_metadata.append(records_by_url[url])
+        if batch_expansion_budget is not None:
+            batch_expansion_budget.consume(
+                {"packages": selected_metadata},
+                label="Lockfile batch",
+            )
         DocumentExpansionBudget(
             items=remaining_items,
             strings=remaining_strings,
@@ -1970,19 +2189,22 @@ def render_lockfile(
         )
         if config is not None:
             updated_loader = CondaLockLoader(lockfile_path(ctx), data=updated)
-            declared_platforms = {
-                platform
-                for resolved in resolved_envs.values()
+            from .resolver import resolve_all_environments
+
+            targets = (
+                (name, platform)
+                for name, resolved in resolve_all_environments(config).items()
                 for platform in (resolved.platforms or [host_platform])
-            }
-            for platform in declared_platforms:
-                status = check_lockfile_satisfiability(config, updated_loader, platform)
-                if status.status != LockfileStatus.UP_TO_DATE:
-                    raise LockfileStaleError(
-                        config.manifest_path,
-                        lockfile_path(ctx),
-                        reason=status.reason,
-                    )
+            )
+            status = updated_loader.check_targets(
+                config, targets, match_budget_scope="platform"
+            )
+            if status.status != LockfileStatus.UP_TO_DATE:
+                raise LockfileStaleError(
+                    config.manifest_path,
+                    lockfile_path(ctx),
+                    reason=status.reason,
+                )
         return yaml_dumps(updated)
 
     if failures and not envs:

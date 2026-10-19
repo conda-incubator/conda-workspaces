@@ -892,6 +892,136 @@ def test_extract_archive_checks_free_space_before_writing_members(
     assert not target.exists()
 
 
+@pytest.mark.parametrize("allow_large_archive", [False, True])
+@pytest.mark.parametrize(
+    "names",
+    [
+        pytest.param(("first/child", "second/child"), id="distinct"),
+        pytest.param(("First/child", "first/other"), id="case-variants"),
+        pytest.param(
+            (
+                "caf\N{LATIN SMALL LETTER E WITH ACUTE}/child",
+                "cafe\N{COMBINING ACUTE ACCENT}/other",
+            ),
+            id="unicode-variants",
+        ),
+    ],
+)
+def test_extract_archive_bounds_implicit_directories_before_writing_members(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    allow_large_archive: bool,
+    names: tuple[str, str],
+) -> None:
+    archive_path = tmp_path / "test.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as tf:
+        for name in names:
+            tf.addfile(tarfile.TarInfo(name))
+    monkeypatch.setattr(
+        archive_module, "MAX_ARCHIVE_FILESYSTEM_ENTRIES", 3, raising=False
+    )
+    target = tmp_path / "extracted"
+
+    with pytest.raises(ArchiveError, match="filesystem entries"):
+        extract_archive(
+            archive_path,
+            target,
+            allow_large_archive=allow_large_archive,
+        )
+
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("explicit_directory", [False, True])
+def test_extract_archive_accepts_exact_filesystem_entry_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    explicit_directory: bool,
+) -> None:
+    archive_path = tmp_path / "test.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as tf:
+        if explicit_directory:
+            directory = tarfile.TarInfo("shared")
+            directory.type = tarfile.DIRTYPE
+            tf.addfile(directory)
+        for name in ("shared/first", "shared/second"):
+            tf.addfile(tarfile.TarInfo(name))
+    monkeypatch.setattr(archive_module, "MAX_ARCHIVE_FILESYSTEM_ENTRIES", 3)
+    target = tmp_path / "extracted"
+
+    extract_archive(archive_path, target)
+
+    assert (target / "shared" / "first").is_file()
+    assert (target / "shared" / "second").is_file()
+
+
+@pytest.mark.parametrize("allow_large_archive", [False, True])
+@pytest.mark.parametrize(
+    ("resource", "message"),
+    [
+        pytest.param("metadata-bytes", "more free space", id="metadata-bytes"),
+        pytest.param("inodes", "free filesystem entries", id="inodes"),
+    ],
+)
+def test_extract_archive_preflights_filesystem_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    allow_large_archive: bool,
+    resource: str,
+    message: str,
+) -> None:
+    archive_path = tmp_path / "test.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as tf:
+        for name in ("first/child", "second/child"):
+            tf.addfile(tarfile.TarInfo(name))
+    if resource == "metadata-bytes":
+        monkeypatch.setattr(
+            archive_module, "ARCHIVE_STAGING_ENTRY_BYTES", 10, raising=False
+        )
+        free_bytes = archive_module.ARCHIVE_STAGING_RESERVE_BYTES + 39
+        monkeypatch.setattr(
+            archive_module.shutil,
+            "disk_usage",
+            lambda _path: SimpleNamespace(free=free_bytes),
+        )
+    else:
+        monkeypatch.setattr(
+            archive_module.shutil,
+            "disk_usage",
+            lambda _path: SimpleNamespace(free=10**12),
+        )
+        monkeypatch.setattr(
+            archive_module.os,
+            "statvfs",
+            lambda _path: SimpleNamespace(f_files=10, f_favail=3),
+            raising=False,
+        )
+    target = tmp_path / "extracted"
+
+    with pytest.raises(ArchiveError, match=message):
+        extract_archive(
+            archive_path,
+            target,
+            allow_large_archive=allow_large_archive,
+        )
+
+    assert not target.exists()
+
+
+def test_archive_staging_space_bounds_filesystem_entry_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(archive_module, "MAX_ARCHIVE_FILESYSTEM_ENTRIES", 3)
+
+    with pytest.raises(ArchiveError, match="filesystem entries"):
+        archive_module.require_archive_staging_space(
+            tmp_path,
+            0,
+            filesystem_entries=4,
+        )
+
+
 def test_read_tar_members_stops_before_next_payload_at_extract_limit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4033,6 +4163,38 @@ def test_workspace_archive_install_checks_private_cache_space_before_copy(
         installable_bundled_archive.install(target=target)
 
     assert source_opened is False
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["install", "preview"])
+def test_workspace_archive_install_preflights_cache_entries(
+    installable_bundled_archive: WorkspaceArchive,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    dry_run: bool,
+) -> None:
+    monkeypatch.setattr(
+        archive_module.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=10**12),
+    )
+
+    def available_entries(path: Path) -> SimpleNamespace:
+        name = Path(path).name
+        low_cache = (
+            name.startswith("conda-workspaces-")
+            and not name.startswith("conda-workspaces-pkgs-")
+            if dry_run
+            else name.startswith("conda-workspaces-pkgs-")
+        )
+        return SimpleNamespace(f_files=10, f_favail=1 if low_cache else 10)
+
+    monkeypatch.setattr(archive_module.os, "statvfs", available_entries, raising=False)
+    target = tmp_path / "extracted"
+
+    with pytest.raises(ArchiveError, match="free filesystem entries"):
+        installable_bundled_archive.install(target=target, dry_run=dry_run)
+
     assert not target.exists()
 
 

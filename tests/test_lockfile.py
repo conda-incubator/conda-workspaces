@@ -32,6 +32,7 @@ from conda_lockfiles.load_yaml import load_yaml
 import conda_workspaces.lockfile as lockfile_module
 import conda_workspaces.parsing as parsing_module
 import conda_workspaces.paths as paths_module
+import conda_workspaces.resolver as resolver_module
 from conda_workspaces._lockfile_compat import WorkspaceLock
 from conda_workspaces.context import WorkspaceContext
 from conda_workspaces.exceptions import (
@@ -6064,21 +6065,41 @@ def test_satisfiability_accepts_wildcard_dependency_name(
 
 
 @pytest.mark.parametrize(
-    ("environment_count", "dependency_count", "comparison_limit", "expected_status"),
+    (
+        "environment_count",
+        "dependency_count",
+        "comparison_limit",
+        "budget_scope",
+        "batch_limit",
+        "expected_status",
+    ),
     [
-        (1, 1, 3, LockfileStatus.UP_TO_DATE),
-        (1, 2, 3, LockfileStatus.OUT_OF_DATE),
-        (2, 1, 3, LockfileStatus.OUT_OF_DATE),
+        (1, 1, 3, None, None, LockfileStatus.UP_TO_DATE),
+        (1, 2, 3, None, None, LockfileStatus.OUT_OF_DATE),
+        (2, 1, 3, None, None, LockfileStatus.OUT_OF_DATE),
+        (2, 1, 3, "target", None, LockfileStatus.UP_TO_DATE),
+        (2, 1, 3, "platform", None, LockfileStatus.OUT_OF_DATE),
+        (2, 1, 3, "target", 3, LockfileStatus.OUT_OF_DATE),
     ],
-    ids=["normal-wildcard", "repeated-wildcards", "multiple-environments"],
+    ids=[
+        "normal-wildcard",
+        "repeated-wildcards",
+        "multiple-environments",
+        "batch-per-target",
+        "batch-per-platform",
+        "batch-total-limit",
+    ],
 )
 def test_satisfiability_bounds_wildcard_package_comparisons(
     satisfiability_config_factory,
     lockfile_data_factory,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     environment_count: int,
     dependency_count: int,
     comparison_limit: int,
+    budget_scope: str | None,
+    batch_limit: int | None,
     expected_status: str,
 ) -> None:
     names = ("default", "test")[:environment_count]
@@ -6096,12 +6117,248 @@ def test_satisfiability_bounds_wildcard_package_comparisons(
     monkeypatch.setattr(
         lockfile_module, "MAX_LOCKFILE_MATCH_ATTEMPTS", comparison_limit
     )
+    if batch_limit is not None:
+        monkeypatch.setattr(
+            lockfile_module, "MAX_LOCKFILE_BATCH_MATCH_ATTEMPTS", batch_limit
+        )
 
-    result = check_lockfile_satisfiability(config, data, "linux-64")
+    if budget_scope is None:
+        result = check_lockfile_satisfiability(config, data, "linux-64")
+    else:
+        loader = CondaLockLoader(tmp_path / "conda.lock", data=data)
+        result = loader.check_targets(
+            config,
+            [(name, "linux-64") for name in names],
+            match_budget_scope=budget_scope,
+        )
 
     assert result.status == expected_status
     if expected_status == LockfileStatus.OUT_OF_DATE:
         assert "dependency matching exceeds" in result.reason
+
+
+def test_satisfiability_batch_resolves_named_platforms_once(
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    platforms = [f"linux-64-{index}" for index in range(24)]
+    config = WorkspaceConfig(
+        name="rich-batch",
+        channels=[Channel("conda-forge")],
+        platforms=platforms,
+        platform_subdirs={name: "linux-64" for name in platforms},
+        root=str(tmp_path),
+        manifest_path=str(tmp_path / "conda.toml"),
+    )
+    data = lockfile_data_factory()
+    linux_refs = data["environments"]["default"]["packages"]["linux-64"]
+    data["environments"]["default"]["packages"] = {
+        name: linux_refs for name in platforms
+    }
+    original_resolve = resolver_module.resolve_environment
+    resolved_platforms: list[str | None] = []
+
+    def record_resolve(config, name, platform=None):
+        resolved_platforms.append(platform)
+        return original_resolve(config, name, platform)
+
+    monkeypatch.setattr(resolver_module, "resolve_environment", record_resolve)
+    loader = CondaLockLoader(tmp_path / "conda.lock", data=data)
+
+    status = loader.check_targets(
+        config,
+        (("default", platform) for platform in platforms),
+        match_budget_scope="target",
+    )
+
+    assert status.status == LockfileStatus.UP_TO_DATE
+    assert resolved_platforms == [None]
+
+
+def test_satisfiability_batch_bounds_repeated_manifest_dependencies(
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    names = ("default", "dev", "test")
+    config = WorkspaceConfig(
+        channels=[Channel("conda-forge")],
+        platforms=["linux-64"],
+        features={
+            "default": Feature(
+                name="default",
+                conda_dependencies={
+                    name: MatchSpec(name)
+                    for name in ("python", "numpy", "scipy", "pandas")
+                },
+            )
+        },
+        environments={name: Environment(name=name) for name in names},
+        root=str(tmp_path),
+        manifest_path=str(tmp_path / "conda.toml"),
+    )
+    data = lockfile_data_factory()
+    data["environments"] = {name: data["environments"]["default"] for name in names}
+    monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_DECLARATION_ITEMS", 16)
+    resolved_names: list[str] = []
+    original_resolve = resolver_module.resolve_environment
+
+    def record_resolve(config, name, platform=None):
+        resolved_names.append(name)
+        return original_resolve(config, name, platform)
+
+    monkeypatch.setattr(resolver_module, "resolve_environment", record_resolve)
+    loader = CondaLockLoader(tmp_path / "conda.lock", data=data)
+
+    status = loader.check_targets(
+        config, [("default", "linux-64")], match_budget_scope="target"
+    )
+
+    assert status.status == LockfileStatus.OUT_OF_DATE
+    assert "declaration work" in status.reason
+    assert resolved_names == ["default", "dev"]
+
+
+@pytest.mark.parametrize(
+    ("limit", "limit_value", "reason"),
+    [
+        ("MAX_LOCKFILE_BATCH_TARGETS", 2, "target count"),
+        ("MAX_LOCKFILE_BATCH_PACKAGE_REFS", 2, "package references"),
+        ("MAX_LOCKFILE_BATCH_EXPANDED_ITEMS", 8, "expanded collection items"),
+    ],
+    ids=["target-count", "reused-package-refs", "reused-package-metadata"],
+)
+def test_satisfiability_batch_bounds_reused_targets(
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    limit: str,
+    limit_value: int,
+    reason: str,
+) -> None:
+    platforms = ["linux-64-a", "linux-64-b", "linux-64-c"]
+    config = WorkspaceConfig(
+        name="bounded-batch",
+        channels=[Channel("conda-forge")],
+        platforms=platforms,
+        platform_subdirs={name: "linux-64" for name in platforms},
+        root=str(tmp_path),
+        manifest_path=str(tmp_path / "conda.toml"),
+    )
+    data = lockfile_data_factory()
+    shared_refs = data["environments"]["default"]["packages"]["linux-64"]
+    data["environments"]["default"]["packages"] = {
+        name: shared_refs for name in platforms
+    }
+    monkeypatch.setattr(lockfile_module, limit, limit_value, raising=False)
+    loader = CondaLockLoader(tmp_path / "conda.lock", data=data)
+
+    status = loader.check_targets(
+        config,
+        (("default", platform) for platform in platforms),
+        match_budget_scope="target",
+    )
+
+    assert status.status == LockfileStatus.OUT_OF_DATE
+    assert reason in status.reason
+
+
+@pytest.mark.parametrize(
+    ("platform", "expected_status"),
+    [
+        ("linux-64-a", LockfileStatus.UP_TO_DATE),
+        ("linux-64-b", LockfileStatus.OUT_OF_DATE),
+    ],
+    ids=["matching-rich-target", "mismatching-rich-target"],
+)
+def test_satisfiability_batch_uses_exact_rich_target_dependencies(
+    lockfile_data_factory,
+    tmp_path: Path,
+    platform: str,
+    expected_status: str,
+) -> None:
+    platforms = ["linux-64-a", "linux-64-b"]
+    config = WorkspaceConfig(
+        name="rich-dependencies",
+        channels=[Channel("conda-forge")],
+        platforms=platforms,
+        platform_subdirs={name: "linux-64" for name in platforms},
+        features={
+            "default": Feature(
+                name="default",
+                target_conda_dependencies={
+                    "linux-64-a": {"python": MatchSpec("python >=3.10")},
+                    "linux-64-b": {"python": MatchSpec("python >=4")},
+                },
+            )
+        },
+        root=str(tmp_path),
+        manifest_path=str(tmp_path / "conda.toml"),
+    )
+    data = lockfile_data_factory()
+    linux_refs = data["environments"]["default"]["packages"]["linux-64"]
+    data["environments"]["default"]["packages"] = {
+        name: linux_refs for name in platforms
+    }
+    loader = CondaLockLoader(tmp_path / "conda.lock", data=data)
+
+    status = loader.check_targets(
+        config, [("default", platform)], match_budget_scope="target"
+    )
+
+    assert status.status == expected_status
+    if expected_status == LockfileStatus.OUT_OF_DATE:
+        assert platform in status.reason
+
+
+@pytest.mark.parametrize(
+    ("target_limit", "expected_status", "cached_budgets"),
+    [
+        (3, LockfileStatus.OUT_OF_DATE, 0),
+        (4, LockfileStatus.UP_TO_DATE, 1),
+    ],
+    ids=["aliased-target-cap", "shared-environment-budget"],
+)
+def test_satisfiability_batch_bounds_aliased_environment_targets(
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    target_limit: int,
+    expected_status: str,
+    cached_budgets: int,
+) -> None:
+    config = WorkspaceConfig(
+        name="aliased-environments",
+        channels=[Channel("conda-forge")],
+        platforms=["linux-64", "osx-arm64"],
+        environments={
+            "default": Environment(name="default"),
+            "extra": Environment(name="extra"),
+        },
+        root=str(tmp_path),
+        manifest_path=str(tmp_path / "conda.toml"),
+    )
+    data = lockfile_data_factory()
+    data["environments"]["extra"] = data["environments"]["default"]
+    monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_BATCH_TARGETS", target_limit)
+    loader = CondaLockLoader(tmp_path / "conda.lock", data=data)
+    assert (
+        loader._data["environments"]["default"] is loader._data["environments"]["extra"]
+    )
+
+    status = loader.check_targets(
+        config,
+        (
+            (name, platform)
+            for name in ("default", "extra")
+            for platform in ("linux-64", "osx-arm64")
+        ),
+        match_budget_scope="target",
+    )
+
+    assert status.status == expected_status
+    assert len(loader._environment_budgets) == cached_budgets
 
 
 def test_satisfiability_validates_translated_pypi_roots(

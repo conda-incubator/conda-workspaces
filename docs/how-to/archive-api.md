@@ -66,8 +66,9 @@ receipt.
 
 ## Extract an archive
 
-Archive inspection and extraction reject more than 100,000 members, member
-paths or link targets deeper than 256 components or longer than 4,096 UTF-8
+Archive inspection and extraction reject more than 100,000 members or 100,000
+distinct filesystem entries, member paths or link targets deeper than 256
+components or longer than 4,096 UTF-8
 bytes, more than 128 consecutive GNU or PAX extension headers, more than 100,000
 PAX records, more than 64 MiB of expanded GNU and PAX metadata, and more than
 100 GiB of declared regular-file data including possible link fallbacks. GNU
@@ -84,8 +85,10 @@ possible link fallbacks by default. For an archive you trust, pass
 `WorkspaceArchive.extract()`, `WorkspaceArchive.install()`, or `extract_archive()`.
 The 100 GiB hard limit still applies. Extraction checks free space before
 snapshotting the archive, writing expanded files, and copying bundled packages
-to a private installation cache. Each check preserves 64 MiB for other disk
-use. These checks cannot account for concurrent disk use.
+to a private installation cache. It reserves 16 KiB per extracted file or
+directory and checks available inodes where the filesystem reports them. Each
+space check preserves 64 MiB for other disk use. These checks cannot account
+for concurrent disk use.
 
 When a receipt is configured, its archive digest is verified before member
 inspection. Archive creation also rejects a symbolic-link workspace manifest

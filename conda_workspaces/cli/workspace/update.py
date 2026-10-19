@@ -20,7 +20,6 @@ from ...exceptions import (
 )
 from ...lockfile import (
     CondaLockLoader,
-    check_lockfile_satisfiability,
     load_lockfile_data,
     lockfile_path,
     render_lockfile,
@@ -249,11 +248,6 @@ def execute_update(args: argparse.Namespace, *, console: Console | None = None) 
             if baseline_path.is_file():
                 candidate = load_lockfile_data(publication.read_lockfile_bytes())
                 lock_environments = candidate.get("environments", {})
-                platforms = {
-                    platform
-                    for resolved in resolved_current.values()
-                    for platform in (resolved.platforms or [ctx.platform])
-                }
                 complete = set(lock_environments) == set(current.environments) and all(
                     set(lock_environments[name].get("packages", {}))
                     == set(resolved_current[name].platforms or [ctx.platform])
@@ -262,12 +256,16 @@ def execute_update(args: argparse.Namespace, *, console: Console | None = None) 
                 if complete:
                     try:
                         loader = CondaLockLoader(baseline_path, data=candidate)
-                        complete = all(
-                            check_lockfile_satisfiability(
-                                current, loader, platform
+                        targets = (
+                            (name, platform)
+                            for name, resolved in resolved_current.items()
+                            for platform in (resolved.platforms or [ctx.platform])
+                        )
+                        complete = (
+                            loader.check_targets(
+                                current, targets, match_budget_scope="platform"
                             ).status
                             == LockfileStatus.UP_TO_DATE
-                            for platform in sorted(platforms)
                         )
                         if complete:
                             for (env_name, platform), names in update_targets.items():

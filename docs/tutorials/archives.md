@@ -96,6 +96,9 @@ Extraction is limited to 4 GiB of raw and expanded bytes by default. Use
 `--allow-large-archive` only for a trusted archive that needs more space.
 The 100 GiB hard limit still applies. Unarchive checks available disk space
 before snapshotting and writing extracted files or bundled package copies.
+Before extraction, it also checks available inodes and limits the number of
+files and directories an archive can create, including directories implied by
+member paths.
 
 After extraction, install the environments from the lockfile:
 
