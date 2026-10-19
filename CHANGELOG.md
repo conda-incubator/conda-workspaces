@@ -16,6 +16,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Prevented named task arguments from being inserted into shell command source.
+  Commands that reference named arguments must use the list form of `cmd`.
+  Task environment values continue to support named arguments. (#200)
+- Bounded lockfile URL redaction work for shared YAML aliases, including
+  shared channel lists, while preserving aliases and removing credentials. (#200)
+
 - Workspace commands preserve interleaved tool tables when editing
   `pyproject.toml` manifests. (#200)
 

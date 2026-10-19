@@ -247,12 +247,12 @@ def test_execute_run_dry_run_command_display(tmp_path, capsys, task_body, expect
     [
         (
             (
-                '[tasks.test]\ncmd = "python -m pytest {{ target }}"\n'
+                '[tasks.test]\ncmd = ["python", "-m", "pytest", "{{ target }}"]\n'
                 'args = [{ arg = "target" }]\n'
             ),
             "test",
             ["tests/unit; echo ARG_PWN"],
-            f"python -m pytest {quote_for_shell('tests/unit; echo ARG_PWN')}",
+            ["python", "-m", "pytest", "tests/unit; echo ARG_PWN"],
         ),
         (
             '[tasks.build]\ncmd = ["python", "-c", "print(1); echo ARRAY_PWN"]\n',
@@ -261,9 +261,9 @@ def test_execute_run_dry_run_command_display(tmp_path, capsys, task_body, expect
             ["python", "-c", "print(1); echo ARRAY_PWN"],
         ),
     ],
-    ids=["shell-template-arg-quoted", "argv-list-preserved"],
+    ids=["argv-template-arg", "argv-list-preserved"],
 )
-def test_execute_run_command_contract(
+def test_execute_run_command_arguments(
     tmp_path,
     fake_shell,
     task_body,
@@ -271,7 +271,7 @@ def test_execute_run_command_contract(
     task_args,
     expected_cmd,
 ):
-    """Task run quotes shell-template args and preserves argv-list commands."""
+    """Task run preserves argument values in argv-list commands."""
     task_file = tmp_path / "conda.toml"
     task_file.write_text(task_body)
 
@@ -283,19 +283,38 @@ def test_execute_run_command_contract(
 
 @pytest.mark.parametrize(
     "command_form",
-    ["shell-template-arg", "argv-list"],
-    ids=["shell-template-arg", "argv-list"],
+    ["argv-template-arg", "argv-list"],
+    ids=["argv-template-arg", "argv-list"],
 )
-def test_execute_run_treats_task_values_as_data(tmp_path, command_form):
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "$(printf injected)",
+        "`printf injected`",
+        "single' and double\" quotes",
+        "safe & python -c \"from pathlib import Path; Path('pwned.txt').touch()\"",
+        "two words",
+        "",
+        "ordinary",
+    ],
+    ids=[
+        "substitution",
+        "backticks",
+        "quotes",
+        "operator",
+        "spaces",
+        "empty",
+        "ordinary",
+    ],
+)
+def test_execute_run_treats_task_values_as_data(tmp_path, command_form, payload):
     """Task values with shell metacharacters are passed as data."""
     recorder = (
         "from pathlib import Path; import sys; Path('seen.txt').write_text(sys.argv[1])"
     )
-    pwned = "from pathlib import Path; Path('pwned.txt').write_text('bad')"
-    payload = f'safe & python -c "{pwned}"'
     task_file = tmp_path / "conda.toml"
-    if command_form == "shell-template-arg":
-        command = f'python -c "{recorder}" {{{{ value }}}}'
+    if command_form == "argv-template-arg":
+        command = ["python", "-c", recorder, "{{ value }}"]
         task_file.write_text(
             "[tasks.probe]\n"
             f"cmd = {json.dumps(command)}\n"
@@ -315,6 +334,74 @@ def test_execute_run_treats_task_values_as_data(tmp_path, command_form):
     assert result == 0
     assert (tmp_path / "seen.txt").read_text() == payload
     assert not (tmp_path / "pwned.txt").exists()
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["execute", "dry-run"])
+@pytest.mark.parametrize(
+    "argument_source", ["cli", "default", "dependency-positional", "dependency-named"]
+)
+@pytest.mark.parametrize(
+    "command",
+    ['echo "{{ value }}"', "echo '{{ value }}'", "echo {{ value | upper }}"],
+    ids=["double-quoted", "single-quoted", "filtered"],
+)
+def test_execute_run_rejects_shell_argument_interpolation(
+    tmp_path, fake_shell, command, argument_source, dry_run
+):
+    payload = "$(printf injected)"
+    task_file = tmp_path / "conda.toml"
+    task_body = f"[tasks.probe]\ncmd = {json.dumps(command)}\n"
+    task_name = "probe"
+    task_args = []
+    if argument_source == "default":
+        task_body += f'args = [{{ arg = "value", default = {json.dumps(payload)} }}]\n'
+    else:
+        task_body += 'args = [{ arg = "value" }]\n'
+        if argument_source == "cli":
+            task_args = [payload]
+        else:
+            forwarded = json.dumps(payload)
+            if argument_source == "dependency-named":
+                forwarded = "{ value = " + forwarded + " }"
+            task_body += (
+                "[tasks.parent]\n"
+                'depends-on = [{ task = "probe", args = [' + forwarded + "] }]\n"
+            )
+            task_name = "parent"
+    task_file.write_text(task_body)
+
+    with pytest.raises(CondaWorkspacesError, match="array of strings"):
+        execute_run(
+            _run_args(
+                task_file, task_name=task_name, task_args=task_args, dry_run=dry_run
+            )
+        )
+    assert not fake_shell.calls
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["execute", "dry-run"])
+def test_execute_run_shell_task_keeps_arguments_in_environment(
+    tmp_path, fake_shell, dry_run
+):
+    task_file = tmp_path / "conda.toml"
+    task_file.write_text(
+        '[tasks.probe]\ncmd = "python read_value.py"\n'
+        'args = [{ arg = "value" }]\nenv = { VALUE = "{{ value }}" }\n'
+    )
+    payload = "$(printf injected)"
+
+    assert (
+        execute_run(
+            _run_args(
+                task_file, task_name="probe", task_args=[payload], dry_run=dry_run
+            )
+        )
+        == 0
+    )
+    if dry_run:
+        assert not fake_shell.calls
+    else:
+        assert fake_shell.calls[0][:2] == ("python read_value.py", {"VALUE": payload})
 
 
 def test_execute_run_single_zero_chrome(tmp_path, capsys, fake_shell):
@@ -589,7 +676,7 @@ def test_execute_run_templates_use_selected_environment(
     elif selector == "dependency":
         task_body = (
             "[tasks.setup]\n"
-            'cmd = "echo {{ prefix }} {{ name }} {{ nested }}"\n'
+            'cmd = ["echo", "{{ prefix }}", "{{ name }}", "{{ nested }}"]\n'
             'args = [{ arg = "prefix" }, { arg = "name" }, '
             '{ arg = "nested" }]\n\n'
             '[tasks.greet]\ncmd = "echo hello"\n'
@@ -609,7 +696,8 @@ def test_execute_run_templates_use_selected_environment(
     workspace_task_file.write_text(f"{workspace}{task_body}")
     selected_prefix = tmp_path / ".conda" / "envs" / "myenv"
     env_prefix_stub["myenv"] = selected_prefix
-    expected_command = f"echo {selected_prefix} myenv myenv"
+    expected_argv = ["echo", str(selected_prefix), "myenv", "myenv"]
+    expected_command = quote_for_shell(*expected_argv)
 
     result = execute_run(
         _run_args(workspace_task_file, dry_run=dry_run, **overrides),
@@ -621,7 +709,8 @@ def test_execute_run_templates_use_selected_environment(
         assert expected_command in rich_console.file.getvalue()
         assert fake_shell.calls == []
     else:
-        assert (expected_command, selected_prefix) in [
+        expected = expected_argv if selector == "dependency" else expected_command
+        assert (expected, selected_prefix) in [
             (call[0], call[3]) for call in fake_shell.calls
         ]
 

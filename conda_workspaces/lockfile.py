@@ -1072,12 +1072,17 @@ class CondaLockLoader(EnvironmentSpecBase):
         result = deepcopy(data)
 
         environments = result.get("environments")
+        normalized_channels: set[int] = set()
         if isinstance(environments, dict):
             for environment in environments.values():
                 if not isinstance(environment, dict):
                     continue
                 channels = environment.get("channels")
-                if isinstance(channels, list):
+                if (
+                    isinstance(channels, list)
+                    and id(channels) not in normalized_channels
+                ):
+                    normalized_channels.add(id(channels))
                     for index, entry in enumerate(channels):
                         if isinstance(entry, str):
                             channels[index] = {"url": redact_channel_name(entry)}
@@ -1086,9 +1091,13 @@ class CondaLockLoader(EnvironmentSpecBase):
                             url = channel_entry.get("url")
                             if isinstance(url, str):
                                 channel_entry["url"] = redact_channel_name(url)
+        visited: set[int] = set()
         values: list[dict[str, Any] | list[Any]] = [result]
         while values:
             container = values.pop()
+            if id(container) in visited:
+                continue
+            visited.add(id(container))
             if isinstance(container, dict):
                 for key, value in list(container.items()):
                     if has_url_credentials(key):

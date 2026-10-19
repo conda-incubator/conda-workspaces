@@ -12,6 +12,7 @@ import pytest
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from typing import Any
 
     from tests.conftest import SnapshotTree
 
@@ -1161,6 +1162,161 @@ def test_conda_lock_loader_redacts_unknown_url_fields() -> None:
 
     assert result["metadata"]["mirror"] == "https://repo.example/channel"
     assert data["metadata"]["mirror"].startswith("https://user:password@")
+
+
+@pytest.fixture(params=["in-memory", "yaml"])
+def lockfile_data_source(
+    request: pytest.FixtureRequest,
+) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    def prepare(data: dict[str, Any]) -> dict[str, Any]:
+        if request.param == "yaml":
+            content = io.StringIO()
+            yaml_dump(data, content)
+            return load_lockfile_data(content.getvalue())
+        return data
+
+    return prepare
+
+
+@pytest.mark.parametrize("container_type", ["mapping", "sequence"])
+def test_conda_lock_loader_redacts_shared_containers_once(
+    monkeypatch: pytest.MonkeyPatch,
+    lockfile_data_source: Callable[[dict[str, Any]], dict[str, Any]],
+    container_type: str,
+) -> None:
+    url = "https://user:password@repo.example/t/token/channel?secret=yes"
+    leaf: dict[str, Any] | list[Any] = (
+        {"url": url} if container_type == "mapping" else [url]
+    )
+    graph = leaf
+    for _ in range(10):
+        graph = (
+            {"left": graph, "right": graph}
+            if container_type == "mapping"
+            else [graph, graph]
+        )
+    data = lockfile_data_source({"version": 1, "metadata": graph, "leaf": leaf})
+    baseline = deepcopy(data)
+    calls: list[str] = []
+    original_redact_url = lockfile_module.redact_url
+
+    def record_redaction(value: str) -> str:
+        calls.append(value)
+        return original_redact_url(value)
+
+    monkeypatch.setattr(lockfile_module, "redact_url", record_redaction)
+
+    result = CondaLockLoader.redact_data_urls(data)
+
+    assert calls == [url]
+    assert data == baseline
+    assert not lockfile_module.has_url_credentials_in_data(result)
+    current = result["metadata"]
+    for _ in range(10):
+        left, right = (
+            (current["left"], current["right"])
+            if container_type == "mapping"
+            else current
+        )
+        assert left is right
+        current = left
+    assert current is result["leaf"]
+    assert current == (
+        {"url": "https://repo.example/channel"}
+        if container_type == "mapping"
+        else ["https://repo.example/channel"]
+    )
+
+
+@pytest.mark.parametrize("container_type", ["mapping", "sequence"])
+def test_conda_lock_loader_redacts_cyclic_in_memory_data_once(
+    monkeypatch: pytest.MonkeyPatch,
+    container_type: str,
+) -> None:
+    url = "https://user:password@repo.example/channel"
+    container: dict[str, Any] | list[Any]
+    if container_type == "mapping":
+        container = {"url": url}
+        container["self"] = container
+    else:
+        container = [url]
+        container.append(container)
+    data = {"version": 1, "metadata": container}
+    calls: list[str] = []
+    original_redact_url = lockfile_module.redact_url
+
+    def record_redaction(value: str) -> str:
+        calls.append(value)
+        assert len(calls) == 1, "Revisited a cyclic container"
+        return original_redact_url(value)
+
+    monkeypatch.setattr(lockfile_module, "redact_url", record_redaction)
+
+    result = CondaLockLoader.redact_data_urls(data)
+
+    assert calls == [url]
+    assert not lockfile_module.has_url_credentials_in_data(result)
+    redacted = result["metadata"]
+    assert redacted is not container
+    if isinstance(container, dict):
+        assert redacted["self"] is redacted
+        assert redacted["url"] == "https://repo.example/channel"
+        assert container["self"] is container
+        assert container["url"] == url
+    else:
+        assert redacted[1] is redacted
+        assert redacted[0] == "https://repo.example/channel"
+        assert container[1] is container
+        assert container[0] == url
+
+
+@pytest.mark.parametrize("alias_type", ["environment", "channels"])
+@pytest.mark.parametrize("entry_type", ["string", "mapping"])
+def test_conda_lock_loader_normalizes_shared_channels_once(
+    monkeypatch: pytest.MonkeyPatch,
+    lockfile_data_source: Callable[[dict[str, Any]], dict[str, Any]],
+    alias_type: str,
+    entry_type: str,
+) -> None:
+    urls = [f"https://user:password@repo.example/channel-{index}" for index in range(4)]
+    channels = urls if entry_type == "string" else [{"url": url} for url in urls]
+    environment = {"channels": channels}
+    data = lockfile_data_source(
+        {
+            "version": 1,
+            "environments": {
+                f"env-{index}": (
+                    environment
+                    if alias_type == "environment"
+                    else {"channels": channels}
+                )
+                for index in range(32)
+            },
+        }
+    )
+    baseline = deepcopy(data)
+    calls: list[str] = []
+    original_redact_channel_name = lockfile_module.redact_channel_name
+
+    def record_redaction(value: str) -> str:
+        calls.append(value)
+        return original_redact_channel_name(value)
+
+    monkeypatch.setattr(lockfile_module, "redact_channel_name", record_redaction)
+
+    result = CondaLockLoader.redact_data_urls(data)
+
+    assert calls == urls
+    assert data == baseline
+    assert not lockfile_module.has_url_credentials_in_data(result)
+    first_environment = result["environments"]["env-0"]
+    assert first_environment["channels"] == [
+        {"url": f"https://repo.example/channel-{index}"} for index in range(4)
+    ]
+    for current in result["environments"].values():
+        assert current["channels"] is first_environment["channels"]
+        if alias_type == "environment":
+            assert current is first_environment
 
 
 def test_conda_lock_loader_rejects_credentials_in_structured_metadata() -> None:
