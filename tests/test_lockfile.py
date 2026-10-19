@@ -6,14 +6,14 @@ import io
 import os
 from copy import deepcopy
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
+from ruamel.yaml.composer import Composer
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import PurePosixPath
-    from typing import Any
 
     from tests.conftest import SnapshotTree
 
@@ -201,6 +201,57 @@ def test_load_lockfile_data_enforces_shape_limits(
 
     with pytest.raises(ValueError, match=match):
         load_lockfile_data(content)
+
+
+@pytest.mark.parametrize(
+    ("content", "collection_limit", "item_limit", "maximum_scalar_nodes"),
+    [
+        (
+            "root:\n" + "".join(f"  - value{i}\n" for i in range(256)),
+            4,
+            1000,
+            5,
+        ),
+        (
+            "root:\n" + "".join(f"  key{i}: value{i}\n" for i in range(256)),
+            4,
+            1000,
+            9,
+        ),
+        (
+            "root:\n" + "".join(f"  - value{i}\n" for i in range(256)),
+            1000,
+            4,
+            4,
+        ),
+    ],
+    ids=["sequence", "mapping", "total-items"],
+)
+def test_load_lockfile_data_limits_collection_during_composition(
+    monkeypatch: pytest.MonkeyPatch,
+    content: str,
+    collection_limit: int,
+    item_limit: int,
+    maximum_scalar_nodes: int,
+) -> None:
+    monkeypatch.setattr(
+        lockfile_module, "MAX_LOCKFILE_COLLECTION_ITEMS", collection_limit
+    )
+    monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_ITEMS", item_limit)
+    original_compose = Composer.compose_scalar_node
+    composed_scalars = 0
+
+    def count_scalar(self: Composer, anchor: str | None) -> object:
+        nonlocal composed_scalars
+        composed_scalars += 1
+        return original_compose(self, anchor)
+
+    monkeypatch.setattr(Composer, "compose_scalar_node", count_scalar)
+
+    with pytest.raises(ValueError, match="maximum collection items"):
+        load_lockfile_data(content)
+
+    assert composed_scalars <= maximum_scalar_nodes
 
 
 def test_load_lockfile_data_wraps_parser_recursion_error(
@@ -1236,6 +1287,18 @@ def test_package_records_by_url_validates_shared_site_packages_path_once(
         1 if record_shape == "alias" else count
     )
     assert calls == [site_packages_path]
+
+
+def test_package_record_index_is_not_mutated_by_returned_mapping(
+    tmp_path: Path,
+    lockfile_data_factory,
+) -> None:
+    loader = CondaLockLoader(tmp_path / LOCKFILE_NAME, data=lockfile_data_factory())
+    records = loader.package_records_by_url()
+    records.clear()
+
+    assert len(loader.package_records_by_url()) == 2
+    assert len(loader.explicit_package_specs_for("linux-64")) == 1
 
 
 @pytest.mark.parametrize("count", [1, 8, 32], ids=["single", "eight", "thirty-two"])
@@ -3801,6 +3864,21 @@ def test_install_from_lockfile_rejects_invalid_prefix_before_writes(
             False,
             id="encoded-path-separators",
         ),
+        pytest.param(
+            "https://example.com/channel/linux-64",
+            False,
+            id="channel-is-not-its-own-child",
+        ),
+        pytest.param(
+            "https://example.com/channel/linux-64-other/package.conda",
+            False,
+            id="channel-segment-prefix-is-not-child",
+        ),
+        pytest.param(
+            "https://user@example.com/channel/linux-64/package.conda",
+            False,
+            id="different-url-credentials",
+        ),
     ],
 )
 def test_url_matches_channel_rejects_path_escapes(
@@ -3814,6 +3892,38 @@ def test_url_matches_channel_rejects_path_escapes(
         )
         is expected
     )
+
+
+@pytest.mark.parametrize("channel_count", [1, 500], ids=["few", "many"])
+def test_channel_lookup_work_depends_on_package_path_depth(
+    channel_count: int,
+) -> None:
+    channel_urls = tuple(
+        f"https://example.com/other-{index}/linux-64" for index in range(channel_count)
+    ) + ("https://example.com/selected/linux-64",)
+    package_url = "https://example.com/selected/linux-64/package.conda"
+    locations = CondaLockLoader._channel_locations(channel_urls)
+    probes: list[object] = []
+
+    class CountingTree(dict[str, Any]):
+        def __contains__(self, key: object) -> bool:
+            probes.append(key)
+            return super().__contains__(key)
+
+        def get(self, key: str, default: Any = None) -> Any:
+            probes.append(key)
+            return super().get(key, default)
+
+    def count_probes(node: dict[str, Any]) -> CountingTree:
+        return CountingTree({key: count_probes(child) for key, child in node.items()})
+
+    package_location = CondaLockLoader.url_location(package_url)
+    assert package_location is not None
+    origin, package_path = package_location
+    locations[origin] = count_probes(locations[origin])
+
+    assert CondaLockLoader._url_matches_locations(package_url, locations)
+    assert len(probes) <= 2 * len(package_path)
 
 
 @pytest.mark.parametrize(
@@ -5545,6 +5655,89 @@ def test_satisfiability(
     else:
         assert result.status == LockfileStatus.OUT_OF_DATE
         assert reason_fragment in result.reason.lower()
+
+
+def test_satisfiability_processes_shared_lockfile_data_once(
+    satisfiability_config_factory,
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = satisfiability_config_factory(
+        environments={"default": [], "dev": []},
+    )
+    data = lockfile_data_factory()
+    data["environments"]["dev"] = deepcopy(data["environments"]["default"])
+    redactions: list[int] = []
+    indexes: list[int] = []
+    original_redact = CondaLockLoader.redact_data_urls
+    original_index = CondaLockLoader.package_records_by_url_from_data
+
+    def record_redaction(value: dict[str, Any]) -> dict[str, Any]:
+        redactions.append(len(value["packages"]))
+        return original_redact(value)
+
+    def record_index(value: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        indexes.append(len(value["packages"]))
+        return original_index(value)
+
+    monkeypatch.setattr(
+        CondaLockLoader, "redact_data_urls", staticmethod(record_redaction)
+    )
+    monkeypatch.setattr(
+        CondaLockLoader, "package_records_by_url_from_data", staticmethod(record_index)
+    )
+
+    status = check_lockfile_satisfiability(config, data, "linux-64")
+
+    assert status.status == LockfileStatus.UP_TO_DATE
+    assert redactions == [2]
+    assert indexes == [2]
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["status", "explicit", "conversion"],
+    ids=["status", "exact-install", "export-conversion"],
+)
+def test_lockfile_channel_urls_parsed_once_per_target(
+    satisfiability_config_factory,
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    config = satisfiability_config_factory()
+    data = lockfile_data_factory()
+    package_url = "https://conda.anaconda.org/conda-forge/linux-64/numpy-1.0-0.conda"
+    data["environments"]["default"]["packages"]["linux-64"].append(
+        {"conda": package_url}
+    )
+    data["packages"].append({"conda": package_url, "sha256": "c" * 64})
+    channel_urls = CondaLockLoader.channel_urls_for_env_data(
+        data["environments"]["default"], "linux-64"
+    )
+    channel_parses = dict.fromkeys(channel_urls, 0)
+    original_location = CondaLockLoader.url_location
+
+    def record_location(url: str) -> Any:
+        if url in channel_parses:
+            channel_parses[url] += 1
+        return original_location(url)
+
+    monkeypatch.setattr(CondaLockLoader, "url_location", staticmethod(record_location))
+
+    if operation == "status":
+        status = check_lockfile_satisfiability(config, data, "linux-64")
+        assert status.status == LockfileStatus.UP_TO_DATE
+    else:
+        loader = CondaLockLoader(tmp_path / LOCKFILE_NAME, data=data)
+        if operation == "explicit":
+            specs = loader.explicit_package_specs_for("linux-64")
+            assert len(specs) == 2
+        else:
+            loader.validate_env_for_conversion(loader._data, "default", "linux-64")
+    assert channel_parses
+    assert set(channel_parses.values()) == {1}
 
 
 @pytest.mark.parametrize(

@@ -349,6 +349,142 @@ def test_collect_files_non_git(project_dir: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("tracked", "removed"),
+    [(False, False), (True, False), (True, True)],
+    ids=["filesystem", "git", "git-missing-files"],
+)
+def test_collect_files_bounds_excluded_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracked: bool,
+    removed: bool,
+) -> None:
+    for index in range(3):
+        (tmp_path / f"excluded-{index}.txt").write_text("data")
+    if tracked:
+        subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=tmp_path, check=True, capture_output=True
+        )
+    if removed:
+        for index in range(3):
+            (tmp_path / f"excluded-{index}.txt").unlink()
+    monkeypatch.setattr(archive_module, "MAX_ARCHIVE_CANDIDATES", 2)
+
+    with pytest.raises(ArchiveError, match="candidate"):
+        collect_archive_files(tmp_path, ArchiveConfig(exclude=("*",)))
+
+
+@pytest.mark.parametrize(
+    "exit_during_kill", [False, True], ids=["running", "exited-before-kill"]
+)
+def test_git_tracked_files_stops_subprocess_when_selection_aborts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exit_during_kill: bool,
+) -> None:
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("data")
+
+    class RecordingStdout:
+        closed = False
+
+        def read(self, _size: int) -> bytes:
+            return b"tracked.txt\0"
+
+        def close(self) -> None:
+            self.closed = True
+
+    class RecordingProcess:
+        stdout = RecordingStdout()
+        killed = False
+        waited = False
+
+        def poll(self) -> int | None:
+            return -9 if self.killed else None
+
+        def kill(self) -> None:
+            self.killed = True
+            if exit_during_kill:
+                raise ProcessLookupError
+
+        def wait(self) -> int:
+            self.waited = True
+            return -9 if self.killed else 0
+
+    process = RecordingProcess()
+    monkeypatch.setattr(archive_module.subprocess, "Popen", lambda *_a, **_k: process)
+
+    files = archive_module.git_tracked_files(tmp_path)
+    assert next(files) == tracked
+    files.close()
+
+    assert process.killed
+    assert process.waited
+    assert process.stdout.closed
+
+
+def test_collect_files_bounds_pattern_comparisons(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "data.txt").write_text("data")
+    monkeypatch.setattr(archive_module, "MAX_ARCHIVE_USER_PATTERN_MATCHES", 100)
+    config = ArchiveConfig(include=tuple(f"absent-{index}" for index in range(101)))
+
+    with pytest.raises(ArchiveError, match="pattern"):
+        collect_archive_files(tmp_path, config)
+
+
+def test_collect_files_bounds_builtin_pattern_comparisons(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "data.txt").write_text("data")
+    monkeypatch.setattr(archive_module, "MAX_ARCHIVE_PATTERN_MATCHES", 1)
+
+    with pytest.raises(ArchiveError, match="pattern comparison"):
+        collect_archive_files(tmp_path, ArchiveConfig())
+
+
+def test_collect_files_bounds_long_pattern_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "data.txt").write_text("data")
+    monkeypatch.setattr(archive_module, "BUILTIN_SENSITIVE_EXCLUDE_EXCEPTIONS", ())
+    monkeypatch.setattr(archive_module, "BUILTIN_SENSITIVE_EXCLUDE_PATTERNS", ())
+    monkeypatch.setattr(archive_module, "MAX_ARCHIVE_PATTERN_CHARACTERS", 10)
+
+    with pytest.raises(ArchiveError, match="pattern character work"):
+        collect_archive_files(tmp_path, ArchiveConfig(include=("missing",)))
+
+
+def test_collect_files_checks_candidate_path_length_before_matching(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "overlong-name.txt").write_text("data")
+    monkeypatch.setattr(archive_module, "MAX_ARCHIVE_PATH_BYTES", 8)
+
+    with pytest.raises(ArchiveError, match="candidate path"):
+        collect_archive_files(tmp_path, ArchiveConfig())
+
+
+def test_collect_files_bounds_pattern_count_before_scanning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(archive_module, "MAX_ARCHIVE_SELECTION_PATTERNS", 2)
+
+    with pytest.raises(ArchiveError, match="patterns"):
+        collect_archive_files(
+            tmp_path,
+            ArchiveConfig(include=("first", "second", "third")),
+        )
+
+
+@pytest.mark.parametrize(
     "relative_path",
     [
         ".env",

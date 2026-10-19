@@ -22,6 +22,7 @@ from conda_workspaces.exceptions import (
     LockfileNotFoundError,
     LockfileStaleError,
 )
+from conda_workspaces.lockfile import CondaLockLoader
 from conda_workspaces.models import LockfileStatus
 
 from ..conftest import make_args
@@ -440,10 +441,10 @@ def test_install_frozen_uses_one_lock_snapshot_for_all_environments(
     monkeypatch.chdir(pixi_workspace)
     write_stub_lockfile(pixi_workspace)
     lockfile = pixi_workspace / "conda.lock"
-    snapshots: list[tuple[str, bool, dict]] = []
+    snapshots: list[tuple[str, bool, CondaLockLoader]] = []
 
     def record_install(phase, ctx, name, kwargs) -> None:
-        snapshots.append((name, phase == "prepare", kwargs["lockfile_data"]))
+        snapshots.append((name, phase == "prepare", kwargs["lockfile_loader"]))
         if len(snapshots) == 1:
             lockfile.write_text(
                 "version: 1\nenvironments:\n  changed: {}\npackages: []\n",
@@ -463,7 +464,7 @@ def test_install_frozen_uses_one_lock_snapshot_for_all_environments(
         ("test", False),
     ]
     assert all(data is snapshots[0][2] for _, _, data in snapshots)
-    assert snapshots[0][2]["environments"] == {}
+    assert snapshots[0][2]._data["environments"] == {}
 
 
 def test_install_prevalidates_all_environments_before_mutation(
@@ -534,6 +535,25 @@ def test_install_fetches_every_environment_before_mutation(
         encoding="utf-8",
     )
     fetches: list[int] = []
+    redactions: list[int] = []
+    indexes: list[int] = []
+    original_redact = CondaLockLoader.redact_data_urls
+    original_index = CondaLockLoader.package_records_by_url_from_data
+
+    def record_redaction(value: dict) -> dict:
+        redactions.append(len(value["packages"]))
+        return original_redact(value)
+
+    def record_index(value: dict) -> dict:
+        indexes.append(len(value["packages"]))
+        return original_index(value)
+
+    monkeypatch.setattr(
+        CondaLockLoader, "redact_data_urls", staticmethod(record_redaction)
+    )
+    monkeypatch.setattr(
+        CondaLockLoader, "package_records_by_url_from_data", staticmethod(record_index)
+    )
 
     def fetch_records(urls):
         fetches.append(len(list(urls)))
@@ -555,6 +575,8 @@ def test_install_fetches_every_environment_before_mutation(
         execute_install(make_args(_DEFAULTS, frozen=True))
 
     assert fetches == [0, 0]
+    assert redactions == [0]
+    assert indexes == [0]
     assert mutations == []
     assert not (pixi_workspace / ".pixi" / "envs" / "default").exists()
 

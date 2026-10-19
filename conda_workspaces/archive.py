@@ -21,6 +21,7 @@ import tempfile
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from io import BytesIO
+from itertools import chain
 from os.path import expanduser
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, cast
@@ -69,7 +70,7 @@ from .paths import (
 from .publication import WorkspacePublication
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Callable, Generator, Iterator, Mapping
     from typing import Any, BinaryIO, Final
 
     from .context import WorkspaceContext
@@ -94,6 +95,21 @@ CONDA_PACKAGE_SUFFIXES: tuple[str, ...] = (".conda", ".tar.bz2")
 
 MAX_ARCHIVE_MEMBERS: Final = 100_000
 """Maximum number of members accepted from one workspace archive."""
+
+MAX_ARCHIVE_CANDIDATES: Final = 200_000
+"""Maximum directory entries or tracked paths examined for one archive."""
+
+MAX_ARCHIVE_SELECTION_PATTERNS: Final = 10_000
+"""Maximum user include and exclude patterns for one workspace archive."""
+
+MAX_ARCHIVE_PATTERN_MATCHES: Final = 50_000_000
+"""Maximum glob comparisons while selecting workspace archive members."""
+
+MAX_ARCHIVE_USER_PATTERN_MATCHES: Final = 10_000_000
+"""Maximum user include and exclude glob comparisons for one archive."""
+
+MAX_ARCHIVE_PATTERN_CHARACTERS: Final = 10_000_000_000
+"""Maximum combined path and pattern characters examined by glob matching."""
 
 MAX_ARCHIVE_PATH_DEPTH: Final = 256
 """Maximum number of path components accepted for one archive member."""
@@ -2148,25 +2164,122 @@ def is_git_repo(root: Path) -> bool:
         return False
 
 
-def git_tracked_files(root: Path) -> list[Path]:
-    """Return absolute paths for all git-tracked files under *root*."""
-    result = subprocess.run(
+def git_tracked_files(root: Path) -> Generator[Path, None, None]:
+    """Yield existing git-tracked files without buffering the full index output."""
+    process = subprocess.Popen(
         ["git", "ls-files", "-z"],
         cwd=root,
-        capture_output=True,
-        text=True,
-        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
     )
-    paths = []
-    for entry in result.stdout.split("\0"):
-        if entry:
-            full = root / entry
-            if full.is_file():
-                paths.append(full)
-    return paths
+    try:
+        assert process.stdout is not None
+        pending = b""
+        entries_seen = 0
+        while chunk := process.stdout.read(64 * 1024):
+            entries = (pending + chunk).split(b"\0")
+            pending = entries.pop()
+            if len(pending) > MAX_ARCHIVE_PATH_BYTES:
+                raise ArchiveError("A tracked archive candidate path is too long.")
+            for entry in entries:
+                if not entry:
+                    continue
+                entries_seen += 1
+                if entries_seen > MAX_ARCHIVE_CANDIDATES:
+                    raise ArchiveError(
+                        "Archive selection exceeds the maximum candidate count"
+                        f" of {MAX_ARCHIVE_CANDIDATES:,}."
+                    )
+                if len(entry) > MAX_ARCHIVE_PATH_BYTES:
+                    raise ArchiveError("A tracked archive candidate path is too long.")
+                path = root / os.fsdecode(entry)
+                if path.is_file():
+                    yield path
+        if pending or process.wait() != 0:
+            raise ArchiveError("Could not enumerate tracked archive files.")
+    finally:
+        try:
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            process.wait()
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
 
 
-def is_excluded_by_builtins(rel_path: str) -> bool:
+@dataclass
+class _ArchiveSelectionBudget:
+    """Bound candidate scans and glob comparisons before archive validation."""
+
+    candidates: int = 0
+    pattern_matches: int = 0
+    user_pattern_matches: int = 0
+    pattern_characters: int = 0
+
+    def reserve_candidate(self) -> None:
+        self.candidates += 1
+        if self.candidates > MAX_ARCHIVE_CANDIDATES:
+            raise ArchiveError(
+                "Archive selection exceeds the maximum candidate count"
+                f" of {MAX_ARCHIVE_CANDIDATES:,}."
+            )
+
+    def matches_patterns(
+        self,
+        rel_path: str,
+        patterns: tuple[str, ...],
+        *,
+        user_patterns: bool = False,
+    ) -> bool:
+        """Match a path or ancestor while charging each glob comparison."""
+        if not patterns:
+            return False
+        ancestors = []
+        parent = ""
+        for component in rel_path.split("/")[:-1]:
+            parent = f"{parent}/{component}" if parent else component
+            ancestors.append(parent)
+        paths = (rel_path, *ancestors)
+        for pattern in patterns:
+            for path in paths:
+                if self.pattern_matches >= MAX_ARCHIVE_PATTERN_MATCHES:
+                    raise ArchiveError(
+                        "Archive selection exceeds the maximum pattern"
+                        f" comparison count of {MAX_ARCHIVE_PATTERN_MATCHES:,}."
+                    )
+                if (
+                    user_patterns
+                    and self.user_pattern_matches >= MAX_ARCHIVE_USER_PATTERN_MATCHES
+                ):
+                    raise ArchiveError(
+                        "Archive selection exceeds the maximum user pattern"
+                        f" comparison count of {MAX_ARCHIVE_USER_PATTERN_MATCHES:,}."
+                    )
+                comparison_characters = len(path) + len(pattern)
+                if (
+                    self.pattern_characters + comparison_characters
+                    > MAX_ARCHIVE_PATTERN_CHARACTERS
+                ):
+                    raise ArchiveError(
+                        "Archive selection exceeds the maximum pattern"
+                        f" character work of {MAX_ARCHIVE_PATTERN_CHARACTERS:,}."
+                    )
+                self.pattern_matches += 1
+                if user_patterns:
+                    self.user_pattern_matches += 1
+                self.pattern_characters += comparison_characters
+                if fnmatch.fnmatch(path, pattern):
+                    return True
+        return False
+
+
+def is_excluded_by_builtins(
+    rel_path: str,
+    budget: _ArchiveSelectionBudget,
+) -> bool:
     """Return True if *rel_path* falls under a builtin-excluded directory."""
     normalized_path = "/".join(portable_path_key(PurePosixPath(rel_path)))
     for excl in BUILTIN_EXCLUDE_DIRS:
@@ -2178,25 +2291,12 @@ def is_excluded_by_builtins(rel_path: str) -> bool:
     normalized_exceptions = tuple(
         pattern.casefold() for pattern in BUILTIN_SENSITIVE_EXCLUDE_EXCEPTIONS
     )
-    if matches_patterns(normalized_path, normalized_exceptions):
+    if budget.matches_patterns(normalized_path, normalized_exceptions):
         return False
     normalized_patterns = tuple(
         pattern.casefold() for pattern in BUILTIN_SENSITIVE_EXCLUDE_PATTERNS
     )
-    return matches_patterns(normalized_path, normalized_patterns)
-
-
-def matches_patterns(rel_path: str, patterns: tuple[str, ...]) -> bool:
-    """Return True if *rel_path* or any parent matches one glob pattern."""
-    for pattern in patterns:
-        if fnmatch.fnmatch(rel_path, pattern):
-            return True
-        parts = rel_path.split("/")
-        for i in range(len(parts)):
-            partial = "/".join(parts[: i + 1])
-            if fnmatch.fnmatch(partial, pattern):
-                return True
-    return False
+    return budget.matches_patterns(normalized_path, normalized_patterns)
 
 
 def collect_archive_files(
@@ -2212,25 +2312,60 @@ def collect_archive_files(
     when they are untracked or not written yet. Builtin and user filters
     apply to every candidate.
     """
-    if is_git_repo(root):
-        candidates = git_tracked_files(root)
-    else:
-        candidates = [p for p in root.rglob("*") if p.is_file()]
-    candidates.extend(extra_files)
+    pattern_count = len(archive_config.include) + len(archive_config.exclude)
+    if pattern_count > MAX_ARCHIVE_SELECTION_PATTERNS:
+        raise ArchiveError(
+            "Archive selection exceeds the maximum number of patterns"
+            f" of {MAX_ARCHIVE_SELECTION_PATTERNS:,}."
+        )
+    for pattern in chain(archive_config.include, archive_config.exclude):
+        if len(pattern) > MAX_ARCHIVE_PATH_BYTES or (
+            len(pattern.encode("utf-8")) > MAX_ARCHIVE_PATH_BYTES
+        ):
+            raise ArchiveError("An archive selection pattern is too long.")
 
+    budget = _ArchiveSelectionBudget()
     result: list[Path] = []
-    for path in set(candidates):
-        try:
-            rel = path.relative_to(root).as_posix()
-        except ValueError:
-            continue
-        if is_excluded_by_builtins(rel):
-            continue
-        if archive_config.include and not matches_patterns(rel, archive_config.include):
-            continue
-        if matches_patterns(rel, archive_config.exclude):
-            continue
-        result.append(path)
+    seen: set[Path] = set()
+    git_candidates = git_tracked_files(root) if is_git_repo(root) else None
+    candidates = git_candidates if git_candidates is not None else root.rglob("*")
+    try:
+        for path, is_extra in chain(
+            ((path, False) for path in candidates),
+            ((path, True) for path in extra_files),
+        ):
+            budget.reserve_candidate()
+            if not is_extra and not path.is_file():
+                continue
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                rel = path.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            if len(rel) > MAX_ARCHIVE_PATH_BYTES or (
+                len(rel.encode("utf-8")) > MAX_ARCHIVE_PATH_BYTES
+            ):
+                raise ArchiveError("An archive candidate path is too long.")
+            if len(PurePosixPath(rel).parts) > MAX_ARCHIVE_PATH_DEPTH:
+                raise ArchiveError("An archive candidate path is too deep.")
+            if is_excluded_by_builtins(rel, budget):
+                continue
+            if archive_config.include and not budget.matches_patterns(
+                rel, archive_config.include, user_patterns=True
+            ):
+                continue
+            if budget.matches_patterns(rel, archive_config.exclude, user_patterns=True):
+                continue
+            if len(result) >= MAX_ARCHIVE_MEMBERS:
+                raise ArchiveError(
+                    f"Archive contains more than {MAX_ARCHIVE_MEMBERS:,} members."
+                )
+            result.append(path)
+    finally:
+        if git_candidates is not None:
+            git_candidates.close()
 
     return sorted(result)
 

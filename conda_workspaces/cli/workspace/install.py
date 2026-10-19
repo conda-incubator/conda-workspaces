@@ -16,6 +16,7 @@ from ...exceptions import (
 )
 from ...lockfile import (
     MAX_LOCKFILE_BYTES,
+    CondaLockLoader,
     LockfileInstallPlan,
     check_lockfile_satisfiability,
     load_lockfile_data,
@@ -194,6 +195,7 @@ def install_from_lockfile_all(
                 path,
                 reason=current.reason,
             )
+    lockfile_loader = CondaLockLoader(path, data=lockfile_data)
     with isolated_package_cache(dry_run):
         plans = []
         for name in env_names:
@@ -204,7 +206,7 @@ def install_from_lockfile_all(
                     prefix=prefix,
                     platform=platform,
                     target_prefix_override=target_prefix_override,
-                    lockfile_data=lockfile_data,
+                    lockfile_loader=lockfile_loader,
                     replace_existing=force_reinstall,
                     validate_workspace=validate_workspace,
                 )

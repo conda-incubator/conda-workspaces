@@ -16,6 +16,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Stream archive candidates and bound file selection and pattern matching before
+  archive member validation. (#200)
+- Enforce YAML collection and depth limits while composing nodes, before large
+  documents can be built in memory. (#200)
+- Reuse lockfile package indexes and parsed channels across status checks and
+  bulk installs. (#200)
 - Bound wildcard lockfile dependency checks and reuse validated lockfile data
   across export targets to avoid excessive work with large lockfiles. (#200)
 - Deduplicate workspace features by name so large manifests do not trigger

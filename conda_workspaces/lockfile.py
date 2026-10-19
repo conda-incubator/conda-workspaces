@@ -104,7 +104,7 @@ from .paths import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Sequence
-    from typing import Any, ClassVar, Final
+    from typing import Any, ClassVar, Final, TypeAlias
 
     from conda.common.path import PathType
     from conda.core.link import PrefixSetup
@@ -122,6 +122,11 @@ if TYPE_CHECKING:
 #: schema version so that tools can tell a conda-workspaces-owned lock
 #: from a pixi-owned one at a glance.
 LOCKFILE_VERSION: Final = 1
+
+UrlOrigin: TypeAlias = tuple[str, str, int | None, str | None, str | None]
+UrlLocation: TypeAlias = tuple[UrlOrigin, tuple[str, ...]]
+ChannelPathTree: TypeAlias = dict[str, "ChannelPathTree"]
+ChannelLocations: TypeAlias = dict[UrlOrigin, ChannelPathTree]
 
 #: The canonical lockfile filename.
 LOCKFILE_NAME: Final = "conda.lock"
@@ -282,6 +287,7 @@ def check_lockfile_satisfiability(
     from .resolver import resolve_environment
 
     lock_envs = lockfile_data.get("environments", {})
+    records_by_url: dict[str, dict[str, Any]] | None = None
     extra_envs = sorted(set(lock_envs) - set(config.environments))
     if extra_envs:
         names = ", ".join(f"'{name}'" for name in extra_envs)
@@ -369,10 +375,17 @@ def check_lockfile_satisfiability(
                 lock_env,
                 package_platform,
             )
-            records = CondaLockLoader.package_records_for_env_data(
-                lockfile_data,
+            channel_locations = CondaLockLoader._channel_locations(channel_urls)
+            if records_by_url is None:
+                records_by_url = CondaLockLoader.package_records_by_url_from_data(
+                    lockfile_data
+                )
+            records = CondaLockLoader._package_records_from_refs(
+                lock_env,
+                platform_refs,
                 env_name,
                 current_lock_platform,
+                records_by_url,
                 package_platform=package_platform,
             )
         except ValueError as exc:
@@ -389,7 +402,7 @@ def check_lockfile_satisfiability(
                         f"package ref on '{current_lock_platform}'"
                     ),
                 )
-            if not CondaLockLoader.url_matches_channel(url, channel_urls):
+            if not CondaLockLoader._url_matches_locations(url, channel_locations):
                 return LockfileStatus(
                     status=_stale,
                     reason=(
@@ -545,6 +558,8 @@ class CondaLockLoader(EnvironmentSpecBase):
     def __init__(self, path: PathType, *, data: dict[str, Any] | None = None) -> None:
         self.path = Path(path).resolve()
         self._data_cache = self.redact_data_urls(data) if data is not None else None
+        self._environment_names_cache: tuple[str, ...] | None = None
+        self._records_by_url_cache: dict[str, dict[str, Any]] | None = None
 
     def can_handle(self) -> bool:
         if self.path.name not in DEFAULT_FILENAMES:
@@ -571,6 +586,8 @@ class CondaLockLoader(EnvironmentSpecBase):
     @property
     def available_environments(self) -> tuple[str, ...]:
         """Return the environment names declared in this lockfile."""
+        if self._environment_names_cache is not None:
+            return self._environment_names_cache
         data = self._data
         version = data.get("version")
         if type(version) is not int:
@@ -585,7 +602,8 @@ class CondaLockLoader(EnvironmentSpecBase):
             isinstance(name, str) and name for name in environments
         ):
             raise ValueError("Lockfile environments must be a mapping of names")
-        return tuple(sorted(environments))
+        self._environment_names_cache = tuple(sorted(environments))
+        return self._environment_names_cache
 
     def platforms_for(self, name: str = "default") -> tuple[str, ...]:
         """Return the platforms declared for lockfile environment *name*."""
@@ -827,6 +845,7 @@ class CondaLockLoader(EnvironmentSpecBase):
             package_platform or platform,
             path=self.path,
         )
+        channel_locations = self._channel_locations(channel_urls)
         if records_by_url is None:
             try:
                 records_by_url = self.package_records_by_url_from_data(data)
@@ -857,7 +876,7 @@ class CondaLockLoader(EnvironmentSpecBase):
                     self.path,
                     f"environment {name!r} has an invalid conda package ref",
                 )
-            if not self.url_matches_channel(url, channel_urls):
+            if not self._url_matches_locations(url, channel_locations):
                 raise LockfileIntegrityError(
                     self.path,
                     f"package URL {redact_url(url)!r} is not under any channel "
@@ -925,11 +944,12 @@ class CondaLockLoader(EnvironmentSpecBase):
                 f"Environment {name!r} does not include packages for {platform!r}"
             )
 
-        records_by_url = self.package_records_by_url()
+        records_by_url = self._records_index()
         channel_urls = self.channel_urls_for(
             env_data,
             package_platform or platform,
         )
+        channel_locations = self._channel_locations(channel_urls)
         explicit_specs: list[str] = []
         for ref in platform_refs:
             if not isinstance(ref, dict):
@@ -955,7 +975,7 @@ class CondaLockLoader(EnvironmentSpecBase):
                     self.path,
                     f"environment {name!r} has an invalid conda package ref",
                 )
-            if not self.url_matches_channel(url, channel_urls):
+            if not self._url_matches_locations(url, channel_locations):
                 raise LockfileIntegrityError(
                     self.path,
                     f"package URL {redact_url(url)!r} is not under any channel "
@@ -974,7 +994,15 @@ class CondaLockLoader(EnvironmentSpecBase):
 
     def package_records_by_url(self) -> dict[str, dict[str, Any]]:
         """Return top-level conda package records keyed by their exact URL."""
-        return self.package_records_by_url_from_data(self._data)
+        return dict(self._records_index())
+
+    def _records_index(self) -> dict[str, dict[str, Any]]:
+        """Cache the package URL index for repeated target selection."""
+        if self._records_by_url_cache is None:
+            self._records_by_url_cache = self.package_records_by_url_from_data(
+                self._data
+            )
+        return self._records_by_url_cache
 
     @staticmethod
     def package_records_by_url_from_data(
@@ -1057,15 +1085,12 @@ class CondaLockLoader(EnvironmentSpecBase):
         *,
         package_platform: str | None = None,
     ) -> list[PackageRecord]:
-        """Reconstruct package records for one lockfile environment slice.
+        """Reconstruct package records for one lockfile environment target.
 
         This path uses the metadata already embedded in ``conda.lock``. It
         deliberately avoids :meth:`env_for`, whose generic rattler-lock
         conversion may fetch package archives to fill missing metadata.
         """
-        from conda.base.context import context
-        from conda.models.records import PackageRecord
-
         data = cls.redact_data_urls(data)
         environments = data.get("environments", {})
         env_data = environments.get(name)
@@ -1078,6 +1103,30 @@ class CondaLockLoader(EnvironmentSpecBase):
             )
 
         records_by_url = cls.package_records_by_url_from_data(data)
+        return cls._package_records_from_refs(
+            env_data,
+            refs,
+            name,
+            platform,
+            records_by_url,
+            package_platform=package_platform,
+        )
+
+    @classmethod
+    def _package_records_from_refs(
+        cls,
+        env_data: dict[str, Any],
+        refs: list[dict[str, Any]],
+        name: str,
+        platform: str,
+        records_by_url: Mapping[str, dict[str, Any]],
+        *,
+        package_platform: str | None = None,
+    ) -> list[PackageRecord]:
+        """Reconstruct one target from credential-free data and a shared index."""
+        from conda.base.context import context
+        from conda.models.records import PackageRecord
+
         selected_metadata: list[dict[str, Any]] = []
         for ref in refs:
             if isinstance(ref, dict):
@@ -1406,13 +1455,7 @@ class CondaLockLoader(EnvironmentSpecBase):
     @staticmethod
     def url_location(
         url: str,
-    ) -> (
-        tuple[
-            tuple[str, str, int | None, str | None, str | None],
-            tuple[str, ...],
-        ]
-        | None
-    ):
+    ) -> UrlLocation | None:
         """Return a normalized URL origin and traversal-safe path segments."""
         try:
             parsed = urlsplit(url)
@@ -1454,21 +1497,44 @@ class CondaLockLoader(EnvironmentSpecBase):
     @classmethod
     def url_matches_channel(cls, url: str, channel_urls: tuple[str, ...]) -> bool:
         """Return whether *url* is a traversal-safe child of a declared channel."""
+        return cls._url_matches_locations(url, cls._channel_locations(channel_urls))
+
+    @classmethod
+    def _channel_locations(cls, channel_urls: Iterable[str]) -> ChannelLocations:
+        """Index declared channel paths by origin and decoded segments."""
+        locations: ChannelLocations = {}
+        for channel_url in channel_urls:
+            location = cls.url_location(channel_url)
+            if location is not None:
+                origin, path = location
+                node = locations.setdefault(origin, {})
+                for segment in path:
+                    node = node.setdefault(segment, {})
+                # Empty segments are omitted by url_location, so this marks
+                # a complete channel path without colliding with a URL segment.
+                node[""] = {}
+        return locations
+
+    @classmethod
+    def _url_matches_locations(
+        cls,
+        url: str,
+        channel_locations: ChannelLocations,
+    ) -> bool:
+        """Follow a package path through declared channels for its URL origin."""
         package_location = cls.url_location(url)
         if package_location is None:
             return False
         package_origin, package_path = package_location
-        for channel_url in channel_urls:
-            channel_location = cls.url_location(channel_url)
-            if channel_location is None:
-                continue
-            channel_origin, channel_path = channel_location
-            if (
-                package_origin == channel_origin
-                and len(package_path) > len(channel_path)
-                and package_path[: len(channel_path)] == channel_path
-            ):
+        node = channel_locations.get(package_origin)
+        if node is None:
+            return False
+        for segment in package_path:
+            if "" in node:
                 return True
+            node = node.get(segment)
+            if node is None:
+                return False
         return False
 
     def digest_fragment_for(self, record: dict[str, Any], url: str) -> str:
@@ -2153,6 +2219,7 @@ def merge_lockfiles(
                         {"channels": channels},
                         package_platform,
                     )
+                    channel_locations = CondaLockLoader._channel_locations(channel_urls)
                 except ValueError as exc:
                     raise LockfileMergeError(
                         f"environment '{env_name}' channels in fragment "
@@ -2173,7 +2240,9 @@ def merge_lockfiles(
                             f"environment '{env_name}' contains an invalid "
                             f"package ref on '{platform}' in fragment '{path}'"
                         )
-                    if not CondaLockLoader.url_matches_channel(url, channel_urls):
+                    if not CondaLockLoader._url_matches_locations(
+                        url, channel_locations
+                    ):
                         raise LockfileMergeError(
                             f"package URL '{redact_url(url)}' in environment "
                             f"'{env_name}' on '{platform}' is not under any "
@@ -2374,6 +2443,7 @@ class LockfileInstallPlan:
         platform: str | None = None,
         target_prefix_override: str | Path | None = None,
         lockfile_data: dict[str, Any] | None = None,
+        lockfile_loader: CondaLockLoader | None = None,
         update_names: set[str] | None = None,
         prune: bool = True,
         replace_existing: bool = False,
@@ -2389,23 +2459,26 @@ class LockfileInstallPlan:
         from conda.models.match_spec import MatchSpec
 
         path = lockfile_path(ctx)
-        if lockfile_data is None:
-            try:
-                if validate_workspace is not None:
-                    validate_workspace()
-                lockfile_data = load_lockfile_data(
-                    read_regular_file_bytes(
-                        path,
-                        maximum_bytes=MAX_LOCKFILE_BYTES,
-                        label="workspace lockfile",
+        if lockfile_loader is not None and lockfile_data is not None:
+            raise ValueError("Provide either lockfile data or a prepared loader")
+        if lockfile_loader is None:
+            if lockfile_data is None:
+                try:
+                    if validate_workspace is not None:
+                        validate_workspace()
+                    lockfile_data = load_lockfile_data(
+                        read_regular_file_bytes(
+                            path,
+                            maximum_bytes=MAX_LOCKFILE_BYTES,
+                            label="workspace lockfile",
+                        )
                     )
-                )
-                if validate_workspace is not None:
-                    validate_workspace()
-            except (OSError, ValueError) as exc:
-                raise LockfileNotFoundError("(all)", path) from exc
+                    if validate_workspace is not None:
+                        validate_workspace()
+                except (OSError, ValueError) as exc:
+                    raise LockfileNotFoundError("(all)", path) from exc
+            lockfile_loader = CondaLockLoader(path, data=lockfile_data)
 
-        loader = CondaLockLoader(path, data=lockfile_data)
         lock_platform = platform or ctx.platform
         package_platform = ctx.config.platform_subdir(lock_platform)
         resolved: ResolvedEnvironment | None = None
@@ -2433,7 +2506,7 @@ class LockfileInstallPlan:
                     f"Cannot install platform '{lock_platform}' on this machine "
                     f"({conda_context._native_subdir()})."
                 )
-            urls = loader.explicit_package_specs_for(
+            urls = lockfile_loader.explicit_package_specs_for(
                 lock_platform,
                 env_name,
                 package_platform=package_platform,

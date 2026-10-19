@@ -30,6 +30,7 @@ from conda_workspaces.cli.workspace.archive import (
     warn_staging_prefix_references,
 )
 from conda_workspaces.exceptions import ArchiveError
+from conda_workspaces.lockfile import CondaLockLoader
 from conda_workspaces.models import ArchiveConfig
 from conda_workspaces.receipts import ArchiveReceipt
 
@@ -957,11 +958,13 @@ platforms = ["{platform}"]
     assert preview_environment == environment == "default"
     assert preview_phase == "prepare"
     assert install_phase == "execute"
-    assert preview_kwargs["lockfile_data"] is install_kwargs["lockfile_data"]
+    assert preview_kwargs["lockfile_loader"] is install_kwargs["lockfile_loader"]
     assert install_ctx.root == target
     assert Path(install_ctx.config.manifest_path) == target / "conda.toml"
     expected_override = None if str(Path(prefix)) == prefix else prefix
-    lockfile_data = install_kwargs.pop("lockfile_data")
+    lockfile_loader = install_kwargs.pop("lockfile_loader")
+    assert isinstance(lockfile_loader, CondaLockLoader)
+    lockfile_data = lockfile_loader._data
     assert lockfile_data["version"] == 1
     assert lockfile_data["environments"]["default"]["packages"][platform] == []
     validate_workspace = install_kwargs.pop("validate_workspace")

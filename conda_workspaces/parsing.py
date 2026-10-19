@@ -10,7 +10,9 @@ from datetime import date, datetime
 from typing import TYPE_CHECKING, cast
 
 from ruamel.yaml import YAML
+from ruamel.yaml.composer import Composer
 from ruamel.yaml.constructor import SafeConstructor
+from ruamel.yaml.events import MappingStartEvent, SequenceStartEvent
 from ruamel.yaml.nodes import MappingNode, ScalarNode, SequenceNode
 
 if TYPE_CHECKING:
@@ -102,6 +104,35 @@ class DocumentExpansionBudget:
         self.strings -= strings
 
 
+class _BoundedComposer(Composer):
+    """Reject oversized collections before composing their next child node."""
+
+    maximum_depth: int
+    maximum_collection_items: int
+    remaining_items: int
+    label: str
+    depth: int
+
+    def compose_node(self, parent: Node | None, index: object) -> Node:
+        if isinstance(parent, SequenceNode) or (
+            isinstance(parent, MappingNode) and index is None
+        ):
+            if len(parent.value) >= self.maximum_collection_items:
+                raise ValueError(f"{self.label} exceeds the maximum collection items")
+            self.remaining_items -= 1
+            if self.remaining_items < 0:
+                raise ValueError(f"{self.label} exceeds the maximum collection items")
+        self.depth += 1
+        try:
+            if self.depth > self.maximum_depth and self.parser.check_event(
+                SequenceStartEvent, MappingStartEvent
+            ):
+                raise ValueError(f"{self.label} exceeds the maximum nesting depth")
+            return cast("Node", super().compose_node(parent, index))
+        finally:
+            self.depth -= 1
+
+
 class _BoundedSafeConstructor(SafeConstructor):
     """Reserve merge entries before ruamel expands them, once per source node."""
 
@@ -176,7 +207,14 @@ class BoundedYamlLoader:
             content, maximum_bytes=self.maximum_bytes, label=self.label
         )
         parser = YAML(typ="safe", pure=True)
+        parser.Composer = _BoundedComposer
         parser.Constructor = _BoundedSafeConstructor
+        composer = cast("_BoundedComposer", parser.composer)
+        composer.maximum_depth = self.maximum_depth
+        composer.maximum_collection_items = self.maximum_collection_items
+        composer.remaining_items = self.maximum_items
+        composer.label = self.label
+        composer.depth = -1
         try:
             node = parser.compose(text)
             self.validate_nodes(node)
