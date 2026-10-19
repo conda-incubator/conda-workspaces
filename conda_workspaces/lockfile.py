@@ -94,6 +94,7 @@ from .paths import (
     atomic_write_text,
     canonicalize_system_path_alias,
     output_paths_collide,
+    parse_relative_posix_path,
     read_regular_file_bytes,
     regular_file_generation,
     validate_directory_output,
@@ -260,14 +261,15 @@ def check_lockfile_satisfiability(
 
     try:
         lockfile_data = CondaLockLoader.redact_data_urls(lockfile_data)
+        version = CondaLockLoader.version_from_data(lockfile_data)
     except ValueError as exc:
         return LockfileStatus(status=_stale, reason=str(exc))
 
-    if lockfile_data.get("version") != LOCKFILE_VERSION:
+    if version != LOCKFILE_VERSION:
         return LockfileStatus(
             status=_stale,
             reason=(
-                f"Lockfile version {lockfile_data.get('version')!r} "
+                f"Lockfile version {version!r} "
                 f"does not match expected version {LOCKFILE_VERSION}"
             ),
         )
@@ -527,13 +529,21 @@ class CondaLockLoader(EnvironmentSpecBase):
         self.path = Path(path).resolve()
         self._data_cache = self.redact_data_urls(data) if data is not None else None
 
+    @staticmethod
+    def version_from_data(data: dict[str, Any]) -> int:
+        """Read a scalar schema version without expanding malformed YAML aliases."""
+        version = data.get("version")
+        if type(version) is not int:
+            raise ValueError("Lockfile version must be an integer")
+        return version
+
     def can_handle(self) -> bool:
         if self.path.name not in DEFAULT_FILENAMES:
             return False
         if not self.path.exists():
             return False
         try:
-            return self._data.get("version") == LOCKFILE_VERSION
+            return self.version_from_data(self._data) == LOCKFILE_VERSION
         except Exception:
             return False
 
@@ -552,9 +562,10 @@ class CondaLockLoader(EnvironmentSpecBase):
     def available_environments(self) -> tuple[str, ...]:
         """Return the environment names declared in this lockfile."""
         data = self._data
-        if data.get("version") != LOCKFILE_VERSION:
+        version = self.version_from_data(data)
+        if version != LOCKFILE_VERSION:
             raise ValueError(
-                f"Unsupported {LOCKFILE_NAME} version: {data.get('version')!r} "
+                f"Unsupported {LOCKFILE_NAME} version: {version!r} "
                 f"(expected {LOCKFILE_VERSION})"
             )
         environments = data.get("environments")
@@ -819,7 +830,12 @@ class CondaLockLoader(EnvironmentSpecBase):
             raise ValueError(
                 f"Lockfile environment {name!r} has invalid target packages"
             )
-        channels = env_data.get("channels")
+        self.validate_channel_entries(env_data.get("channels"), name)
+        return env_data
+
+    @staticmethod
+    def validate_channel_entries(channels: Any, name: str) -> list[dict[str, Any]]:
+        """Reject non-string channel URLs before normalization or conversion."""
         if not isinstance(channels, list) or not all(
             isinstance(channel, dict)
             and isinstance(channel.get("url"), str)
@@ -827,7 +843,7 @@ class CondaLockLoader(EnvironmentSpecBase):
             for channel in channels
         ):
             raise ValueError(f"Lockfile environment {name!r} has invalid channels")
-        return env_data
+        return channels
 
     def explicit_package_specs_for(
         self,
@@ -910,6 +926,17 @@ class CondaLockLoader(EnvironmentSpecBase):
                 continue
             url = record.get("conda") or record.get("url") or record.get("pypi")
             if isinstance(url, str) and url:
+                site_packages_path = record.get("python_site_packages_path")
+                if site_packages_path is not None:
+                    try:
+                        if not isinstance(site_packages_path, str):
+                            raise ValueError
+                        parse_relative_posix_path(site_packages_path)
+                    except ValueError:
+                        raise ValueError(
+                            "Lockfile python_site_packages_path must be a relative "
+                            "POSIX path"
+                        ) from None
                 existing = records_by_url.get(url)
                 if existing is not None and not document_values_equal(
                     existing,
@@ -1929,9 +1956,9 @@ def merge_lockfiles(
                     f"{MAX_LOCKFILE_ITEMS:,} aggregate collection items"
                 )
             data = CondaLockLoader.redact_data_urls(data)
+            version = CondaLockLoader.version_from_data(data)
         except ValueError as exc:
             raise LockfileMergeError(str(exc)) from exc
-        version = data.get("version")
         if version != LOCKFILE_VERSION:
             raise LockfileMergeError(
                 f"fragment '{path}' has version {version!r}, "
@@ -1963,12 +1990,18 @@ def merge_lockfiles(
                 )
 
         for env_name, env_data in (data.get("environments") or {}).items():
-            channels = list(env_data.get("channels") or [])
+            channels = env_data.get("channels")
+            try:
+                channels = CondaLockLoader.validate_channel_entries(
+                    [] if channels is None else channels, env_name
+                )
+            except ValueError as exc:
+                raise LockfileMergeError(str(exc)) from exc
             manifest_channels = manifest_env_channels.get(env_name)
             if manifest_channels is not None:
                 manifest_urls = manifest_env_channel_urls[env_name]
                 fragment_urls = _normalize_channel_urls(
-                    str(entry.get("url", "")) for entry in channels
+                    entry["url"] for entry in channels
                 )
                 next_index = 0
                 for url in fragment_urls:

@@ -1071,10 +1071,11 @@ def test_read_tar_members_checks_size_before_advancing(
 ) -> None:
     archive = tmp_path / "too-large.tar.gz"
     with tarfile.open(archive, "w:gz") as tf:
-        first = tarfile.TarInfo("first")
-        first.size = 4
-        tf.addfile(first, io.BytesIO(b"data"))
-        tf.addfile(tarfile.TarInfo("second"))
+        tf.addfile(tarfile.TarInfo("first"))
+        second = tarfile.TarInfo("second")
+        second.size = 4
+        tf.addfile(second, io.BytesIO(b"data"))
+        tf.addfile(tarfile.TarInfo("third"))
     monkeypatch.setattr(archive_module, "MAX_ARCHIVE_EXPANDED_BYTES", 3)
 
     with open_tar(archive) as tf:
@@ -1090,7 +1091,139 @@ def test_read_tar_members_checks_size_before_advancing(
         with pytest.raises(ArchiveError, match="maximum size"):
             read_tar_members(tf)
 
-    assert calls == 1
+    assert calls == 2
+
+
+@pytest.mark.parametrize(
+    "pax_size", ["0", "1", "invalid"], ids=["zero", "one", "invalid"]
+)
+@pytest.mark.parametrize(
+    "member_sizes", [(2048,), (1024, 1024)], ids=["single", "cumulative"]
+)
+@pytest.mark.parametrize("long_name", [False, True], ids=["plain", "gnu-longname"])
+def test_open_tar_bounds_raw_sizes_before_global_pax_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pax_size: str,
+    member_sizes: tuple[int, ...],
+    long_name: bool,
+) -> None:
+    archive = tmp_path / "global-pax-size.tar.gz"
+    contents = bytearray(tarfile.TarInfo.create_pax_global_header({"size": pax_size}))
+    for index, size in enumerate(member_sizes):
+        member = tarfile.TarInfo(f"file-{index}" + ("x" * 150 if long_name else ""))
+        member.size = size
+        contents.extend(member.tobuf(format=tarfile.GNU_FORMAT))
+        contents.extend(b"x" * size)
+    contents.extend(b"\0" * (tarfile.BLOCKSIZE * 2))
+    archive.write_bytes(gzip.compress(contents))
+    monkeypatch.setattr(archive_module, "MAX_ARCHIVE_EXPANDED_BYTES", 1024)
+
+    with pytest.raises(ArchiveError, match="maximum size"):
+        with open_tar(archive) as tf:
+            read_tar_members(tf)
+
+
+@pytest.mark.parametrize("raw_first", [False, True], ids=["pax-first", "raw-first"])
+def test_read_tar_members_counts_mixed_raw_and_pax_sizes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    raw_first: bool,
+) -> None:
+    archive = tmp_path / "mixed-pax-size.tar.gz"
+    contents = bytearray(tarfile.TarInfo.create_pax_global_header({"size": "0"}))
+    for index, raw_size in enumerate((1024, 0) if raw_first else (0, 1024)):
+        member = tarfile.TarInfo(f"file-{index}")
+        member.size = raw_size
+        if not raw_size:
+            member.pax_headers = {"size": "1024"}
+        contents.extend(member.tobuf(format=tarfile.PAX_FORMAT))
+        contents.extend(b"x" * 1024)
+    contents.extend(b"\0" * (tarfile.BLOCKSIZE * 2))
+    archive.write_bytes(gzip.compress(contents))
+    monkeypatch.setattr(archive_module, "MAX_ARCHIVE_EXPANDED_BYTES", 1024)
+
+    with open_tar(archive) as tf, pytest.raises(ArchiveError, match="maximum size"):
+        read_tar_members(tf)
+
+
+@pytest.mark.parametrize("global_header", [False, True], ids=["local", "global"])
+def test_read_tar_members_bounds_pax_expanded_sizes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    global_header: bool,
+) -> None:
+    archive = tmp_path / "expanded-pax-size.tar.gz"
+    member = tarfile.TarInfo("file")
+    contents = bytearray()
+    if global_header:
+        contents.extend(tarfile.TarInfo.create_pax_global_header({"size": "2048"}))
+    else:
+        member.pax_headers = {"size": "2048"}
+    contents.extend(member.tobuf(format=tarfile.PAX_FORMAT))
+    contents.extend(b"x" * 2048)
+    contents.extend(b"\0" * (tarfile.BLOCKSIZE * 2))
+    archive.write_bytes(gzip.compress(contents))
+    monkeypatch.setattr(archive_module, "MAX_ARCHIVE_EXPANDED_BYTES", 1024)
+
+    with open_tar(archive) as tf, pytest.raises(ArchiveError, match="maximum size"):
+        read_tar_members(tf)
+
+
+@pytest.mark.parametrize("bounded", [False, True], ids=["stdlib", "bounded"])
+@pytest.mark.parametrize(
+    ("global_size", "local_headers", "raw_size", "long_name"),
+    [
+        ("4", None, 4, False),
+        (None, {"size": "4"}, 0, False),
+        ("0", {"size": "4"}, 0, False),
+        ("4", {"comment": "local"}, 0, False),
+        ("4", None, 4, True),
+    ],
+    ids=[
+        "global",
+        "local",
+        "local-overrides-global",
+        "local-inherits-global",
+        "gnu-longname",
+    ],
+)
+def test_open_tar_preserves_pax_file_sizes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    global_size: str | None,
+    local_headers: dict[str, str] | None,
+    raw_size: int,
+    long_name: bool,
+    bounded: bool,
+) -> None:
+    archive = tmp_path / "supported-pax-size.tar.gz"
+    contents = bytearray()
+    if global_size is not None:
+        contents.extend(tarfile.TarInfo.create_pax_global_header({"size": global_size}))
+    names = [f"file-{index}" + ("x" * 150 if long_name else "") for index in range(2)]
+    for name in names:
+        member = tarfile.TarInfo(name)
+        member.size = raw_size
+        if local_headers is not None:
+            member.pax_headers = local_headers
+        contents.extend(
+            member.tobuf(format=tarfile.GNU_FORMAT if long_name else tarfile.PAX_FORMAT)
+        )
+        contents.extend(b"data" + b"\0" * (tarfile.BLOCKSIZE - 4))
+    contents.extend(b"\0" * (tarfile.BLOCKSIZE * 2))
+    archive.write_bytes(gzip.compress(contents))
+    monkeypatch.setattr(archive_module, "MAX_ARCHIVE_EXPANDED_BYTES", 8)
+
+    with open_tar(archive) if bounded else tarfile.open(archive) as tf:
+        members = read_tar_members(tf)
+        assert [member.name for member in members] == names
+        assert [member.size for member in members] == [4, 4]
+        for member in members:
+            stream = tf.extractfile(member)
+            assert stream is not None
+            with stream:
+                assert stream.read() == b"data"
 
 
 def test_open_tar_rejects_symlink_input(project_dir: Path, tmp_path: Path) -> None:

@@ -215,7 +215,7 @@ EXTENDED_TAR_TYPES: frozenset[bytes] = frozenset(
 
 
 class _BoundedTarInfo(tarfile.TarInfo):
-    """Reject oversized GNU and PAX metadata before tarfile reads its payload."""
+    """Bound metadata and raw file sizes before tarfile processes their headers."""
 
     def _proc_member(self, archive: tarfile.TarFile) -> tarfile.TarInfo:
         limits = getattr(archive, "_workspace_pax_limits", None)
@@ -277,6 +277,18 @@ class _BoundedTarInfo(tarfile.TarInfo):
                     f" {MAX_ARCHIVE_METADATA_BYTES:,} bytes."
                 )
             setattr(archive, "_workspace_metadata_bytes", expanded)
+        if self.isreg():
+            if self.size < 0:
+                raise ArchiveError(f"Archive member '{self.name}' has a negative size.")
+            self._workspace_raw_size = self.size
+            expanded = getattr(archive, "_workspace_raw_file_bytes", 0) + self.size
+            if expanded > MAX_ARCHIVE_EXPANDED_BYTES:
+                raise ArchiveError(
+                    "Archive regular files expand beyond the maximum size of"
+                    f" {MAX_ARCHIVE_EXPANDED_BYTES:,} bytes."
+                )
+            # tarfile computes the skip offset before global PAX replaces size.
+            setattr(archive, "_workspace_raw_file_bytes", expanded)
         return super()._proc_member(archive)  # ty: ignore[unresolved-attribute]
 
     def _proc_pax(self, archive: tarfile.TarFile) -> tarfile.TarInfo:
@@ -2961,6 +2973,9 @@ def read_tar_members(tf: tarfile.TarFile) -> list[tarfile.TarInfo]:
             raise ArchiveError(
                 f"Archive contains more than {MAX_ARCHIVE_MEMBERS:,} members."
             )
+        if member.isreg():
+            raw_size = getattr(member, "_workspace_raw_size", member.size)
+            expanded_bytes += max(0, raw_size - member.size)
         expanded_bytes = validate_tar_member_limits(member, expanded_bytes)
         members.append(member)
     return members

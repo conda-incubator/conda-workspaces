@@ -25,6 +25,7 @@ from .models import (
     has_url_credentials,
     redact_url_text,
 )
+from .terminal import escape_for_console
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -448,7 +449,7 @@ def resolve_environment(
             log.warning(
                 "Feature platform intersection for environment '%s' is empty; "
                 "falling back to workspace platforms",
-                env_name,
+                escape_for_console(env_name),
             )
         resolved_platforms = list(config.platforms)
 

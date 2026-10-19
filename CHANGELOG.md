@@ -16,6 +16,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Reject malformed lockfile versions and channel URLs before converting values
+  to strings, preventing repeated expansion of YAML aliases. (#200)
+- Validate lockfile Python site-packages paths before package conversion so
+  noarch files stay within the selected installation prefix. (#200)
+- Count raw and PAX-overridden tar member sizes together when enforcing archive
+  decompression limits. (#200)
+- Escape manifest environment names in platform intersection warnings. (#200)
 - Bound YAML merge construction and expanded manifest imports, including
   referenced environment files. Preserve supported aliases and merge precedence.
   (#200)

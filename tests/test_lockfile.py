@@ -483,13 +483,17 @@ def fake_records_factory(monkeypatch: pytest.MonkeyPatch):
     calls: list[dict] = []
 
     class FakeRecord:
-        def __init__(self, url: str):
+        def __init__(self, url: str, metadata: dict):
             self.url = url
             self.name = "python"
+            self.python_site_packages_path = metadata.get("python_site_packages_path")
+            self.sha256 = metadata.get("sha256")
 
     def fake_records_from_conda_urls(metadata_by_url, **kwargs):
         calls.append(dict(metadata_by_url))
-        return tuple(FakeRecord(url) for url in metadata_by_url)
+        return tuple(
+            FakeRecord(url, metadata) for url, metadata in metadata_by_url.items()
+        )
 
     monkeypatch.setattr(
         "conda_lockfiles.rattler_lock.v6.records_from_conda_urls",
@@ -1023,6 +1027,117 @@ def test_package_records_by_url_reuses_shared_metadata_comparisons(
 
     assert records == {url: first}
     assert comparisons == 1
+
+
+@pytest.mark.parametrize(
+    "site_packages_path",
+    [
+        "../outside",
+        "lib/../../outside",
+        "/outside",
+        "C:/outside",
+        "C:outside",
+        "\\\\server\\share\\outside",
+        "\\outside",
+        "lib\\site-packages",
+        "",
+        ".",
+        "lib/\0outside",
+        42,
+        False,
+        ["TEST_ONLY_SECRET"],
+        {"TEST_ONLY_SECRET": []},
+    ],
+    ids=[
+        "parent",
+        "nested-parent",
+        "absolute",
+        "windows-absolute",
+        "windows-drive",
+        "windows-unc",
+        "windows-root",
+        "backslash",
+        "empty",
+        "current-directory",
+        "nul",
+        "integer",
+        "boolean",
+        "list",
+        "mapping",
+    ],
+)
+@pytest.mark.parametrize("source", ["conda", "url"], ids=["conda", "legacy-url"])
+@pytest.mark.parametrize("route", ["generic", "metadata-only", "records"])
+def test_conda_lock_loader_rejects_unsafe_python_site_packages_path(
+    lockfile_with_platforms: Path,
+    fake_records_factory: list[dict[str, object]],
+    site_packages_path: object,
+    source: str,
+    route: str,
+) -> None:
+    data = load_lockfile_data(lockfile_with_platforms.read_bytes())
+    metadata = data["packages"][0]
+    metadata[source] = metadata.pop("conda")
+    metadata["python_site_packages_path"] = site_packages_path
+    loader = CondaLockLoader(lockfile_with_platforms, data=data)
+
+    with pytest.raises(
+        (ValueError, LockfileIntegrityError),
+        match="python_site_packages_path must be a relative POSIX path",
+    ) as exc_info:
+        if route == "records":
+            loader.package_records_for_env_data(data, "default", "linux-64")
+        else:
+            loader.env_for("linux-64", metadata_only=route == "metadata-only")
+
+    assert "TEST_ONLY_SECRET" not in str(exc_info.value)
+    assert fake_records_factory == []
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {},
+        {"python_site_packages_path": None},
+        {"python_site_packages_path": "Lib/site-packages"},
+        {"python_site_packages_path": "lib/python3.13t/site-packages"},
+    ],
+    ids=["omitted", "null", "windows", "free-threaded"],
+)
+@pytest.mark.parametrize(
+    ("route", "source"),
+    [
+        ("generic", "conda"),
+        ("metadata-only", "conda"),
+        ("records", "conda"),
+        ("records", "url"),
+    ],
+    ids=["generic", "metadata-only", "records", "legacy-records"],
+)
+def test_conda_lock_loader_preserves_python_site_packages_path(
+    lockfile_with_platforms: Path,
+    fake_records_factory: list[dict[str, object]],
+    metadata: dict[str, str | None],
+    route: str,
+    source: str,
+) -> None:
+    data = load_lockfile_data(lockfile_with_platforms.read_bytes())
+    record_data = data["packages"][0]
+    record_data[source] = record_data.pop("conda")
+    record_data.update(metadata)
+    loader = CondaLockLoader(lockfile_with_platforms, data=data)
+
+    if route == "records":
+        records = loader.package_records_for_env_data(data, "default", "linux-64")
+    else:
+        records = loader.env_for(
+            "linux-64", metadata_only=route == "metadata-only"
+        ).explicit_packages
+
+    assert records[0].python_site_packages_path == metadata.get(
+        "python_site_packages_path"
+    )
+    assert records[0].sha256 == "a" * 64
 
 
 def test_conda_lock_loader_reconstructs_package_records_from_metadata(
@@ -4409,6 +4524,84 @@ def test_merge_lockfiles_missing_file(
     ctx = workspace_ctx_factory()
     with pytest.raises(LockfileMergeError, match="does not exist"):
         merge_lockfiles([tmp_path / "missing.lock"], ctx)
+
+
+@pytest.fixture(params=["list", "mapping"], ids=["aliased-list", "aliased-mapping"])
+def aliased_lockfile_scalar(request: pytest.FixtureRequest) -> str:
+    """A small YAML graph that expands when converted to a string."""
+    content = "a0: &a0 [value]\n"
+    for depth in range(1, 9):
+        alias = f"*a{depth - 1}"
+        value = (
+            f"[{alias}, {alias}]"
+            if request.param == "list"
+            else f"{{left: {alias}, right: {alias}}}"
+        )
+        content += f"a{depth}: &a{depth} {value}\n"
+    return content
+
+
+@pytest.mark.parametrize(
+    "consumer",
+    ["status", "environments", "merge"],
+    ids=["satisfiability", "discovery", "fragment-merge"],
+)
+@pytest.mark.parametrize(
+    "version",
+    ["*a8", "true", "1.0", '"1"', "null"],
+    ids=["alias", "boolean", "float", "string", "missing"],
+)
+def test_lockfile_rejects_noninteger_version_without_expanding_aliases(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    aliased_lockfile_scalar: str,
+    consumer: str,
+    version: str,
+) -> None:
+    ctx = workspace_ctx_factory()
+    content = aliased_lockfile_scalar + (
+        f"version: {version}\nenvironments: {{}}\npackages: []\n"
+    )
+    path = tmp_path / LOCKFILE_NAME
+    path.write_text(content, encoding="utf-8")
+    data = load_lockfile_data(content)
+    loader = CondaLockLoader(path, data=data)
+    assert loader.can_handle() is False
+
+    if consumer == "status":
+        result = check_lockfile_satisfiability(ctx.config, data, "linux-64")
+        assert result.status == LockfileStatus.OUT_OF_DATE
+        message = result.reason
+    else:
+        with pytest.raises((ValueError, LockfileMergeError)) as exc_info:
+            if consumer == "environments":
+                _ = loader.available_environments
+            else:
+                merge_lockfiles([path], ctx, dry_run=True)
+        message = str(exc_info.value)
+    assert "version" in message.lower()
+    assert len(message) < 512
+
+
+@pytest.mark.parametrize(
+    "environment", ["default", "unlisted"], ids=["known", "unknown"]
+)
+def test_merge_lockfiles_rejects_aliased_channel_urls(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    aliased_lockfile_scalar: str,
+    environment: str,
+) -> None:
+    ctx = workspace_ctx_factory()
+    fragment = tmp_path / "fragment.lock"
+    fragment.write_text(
+        aliased_lockfile_scalar + f"version: 1\nenvironments:\n  {environment}:\n"
+        "    channels: [{url: *a8}]\n    packages: {}\npackages: []\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(LockfileMergeError, match="invalid channels"):
+        merge_lockfiles([fragment], ctx, dry_run=True)
+    assert not lockfile_path(ctx).exists()
 
 
 def test_merge_lockfiles_rejects_wrong_version(
