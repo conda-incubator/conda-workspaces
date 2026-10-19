@@ -12,6 +12,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
+from conda.base.constants import DEFAULT_JSON_REPORTER_BACKEND
 from conda.base.context import context as conda_context
 from conda.cli.helpers import (
     LazyChoicesAction,
@@ -684,7 +685,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
 
     platform_parser = sub.add_parser(
         "platform",
-        help="Edit supported platforms for an existing named feature.",
+        help="Edit workspace or named-feature platforms.",
         add_help=False,
     )
     add_parser_help(platform_parser)
@@ -694,13 +695,13 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
     for action in ("add", "remove"):
         command = platform_commands.add_parser(
             action,
-            help=f"{action.capitalize()} explicit feature platforms.",
+            help=f"{action.capitalize()} workspace or named-feature platforms.",
             add_help=False,
         )
         add_parser_help(command)
         add_output_and_prompt_options(command)
         command.add_argument(
-            "--feature", required=True, help="Existing named feature to modify."
+            "--feature", help="Existing named feature to modify (default: workspace)."
         )
         command.add_argument(
             "platforms", nargs="+", metavar="PLATFORM", help="Platform names to edit."
@@ -1119,7 +1120,10 @@ def execute_workspace(args: argparse.Namespace) -> int:
         generate_workspace_parser().print_help()
         return 0
 
-    json_result = bool(getattr(args, "json", False)) and subcmd in {
+    json_result = (
+        bool(getattr(args, "json", False))
+        or conda_context.console == DEFAULT_JSON_REPORTER_BACKEND
+    ) and subcmd in {
         "add",
         "platform",
         "update",

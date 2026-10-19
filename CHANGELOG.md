@@ -8,12 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
-- Added `conda workspace platform add/remove --feature NAME` to edit named
-  feature platform lists. Lock updates preserve solutions for retained targets
-  and solve newly required targets without changing installed environments.
-  (#200)
+- Added `conda workspace platform add/remove` to edit workspace platforms,
+  with `--feature NAME` for named feature lists. Existing rich platform
+  definitions are preserved, and definitions still needed by features cannot
+  be removed. Lock updates retain existing solutions and solve newly required
+  targets without changing installed environments. (#200)
 
 ### Fixed
+
+- Workspace commands preserve interleaved tool tables when editing
+  `pyproject.toml` manifests. (#200)
+
+- Workspace mutation commands honor conda’s configured JSON output, including
+  `CONDA_JSON=true` and `--console json`. (#200)
 
 - Fixed `conda workspace run` changing the caller's working directory, so
   relative scripts and files now resolve where the command was invoked. (#197)

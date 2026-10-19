@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 import pytest
+from conda.base.constants import DEFAULT_JSON_REPORTER_BACKEND
 from conda.base.context import reset_context
 from conda.exceptions import CondaError, CondaSystemExit, DryRunExit
 from rich.console import Console
@@ -457,6 +458,7 @@ def test_workspace_sbom_owns_json_output(
     ("subcmd", "module_attr", "func_name"),
     [
         ("add", "conda_workspaces.cli.workspace.add", "execute_add"),
+        ("platform", "conda_workspaces.cli.workspace.platform", "execute_platform"),
         ("update", "conda_workspaces.cli.workspace.update", "execute_update"),
         ("remove", "conda_workspaces.cli.workspace.remove", "execute_remove"),
         ("install", "conda_workspaces.cli.workspace.install", "execute_install"),
@@ -476,6 +478,7 @@ def test_workspace_sbom_owns_json_output(
     ],
     ids=[
         "add",
+        "platform",
         "update",
         "remove",
         "install",
@@ -486,12 +489,22 @@ def test_workspace_sbom_owns_json_output(
         "unarchive",
     ],
 )
+@pytest.mark.parametrize(
+    ("json_args", "json_env"),
+    [
+        pytest.param({"json": True}, None, id="flag"),
+        pytest.param({}, "true", id="environment"),
+        pytest.param({"console": DEFAULT_JSON_REPORTER_BACKEND}, None, id="console"),
+    ],
+)
 def test_workspace_json_mutations_emit_single_result(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     subcmd: str,
     module_attr: str,
     func_name: str,
+    json_args: dict[str, str | bool],
+    json_env: str | None,
 ) -> None:
     calls: list[str] = []
 
@@ -506,7 +519,11 @@ def test_workspace_json_mutations_emit_single_result(
 
     module = importlib.import_module(module_attr)
     monkeypatch.setattr(module, func_name, fake_handler)
-    args = argparse.Namespace(subcmd=subcmd, json=True)
+    if json_env is None:
+        monkeypatch.delenv("CONDA_JSON", raising=False)
+    else:
+        monkeypatch.setenv("CONDA_JSON", json_env)
+    args = argparse.Namespace(subcmd=subcmd, **json_args)
     reset_context(argparse_args=args)
 
     result = execute_workspace(args)

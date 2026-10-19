@@ -55,35 +55,52 @@ fetches packages into a temporary cache to complete validation without changing
 the environment, with or without `--download-only`.
 
 (feature-platforms)=
-### Feature platforms
+### Platform management
 
-Use `platform add` and `platform remove` to edit an existing named feature's
-explicit platform list:
+Use `platform add` and `platform remove` to edit the workspace platform list.
+Add `--feature NAME` to edit an existing named feature instead:
 
 ```bash
+conda workspace platform add linux-64 win-64
+conda workspace platform remove win-64
 conda workspace platform add --feature tools linux-64
 conda workspace platform remove --feature tools linux-64
-conda workspace --file pyproject.toml platform add --feature tools win-64
+conda workspace --file pyproject.toml platform add win-64
 ```
 
-Both commands require `--feature` and accept one or more platform names. They
-edit `[feature.NAME].platforms`, or the corresponding selected `[tool.conda]`
-or `[tool.pixi]` table in `pyproject.toml`. Names must be recognized conda
-platforms or custom platform names already declared in the workspace. Typo
-suggestions are advisory. The commands do not create features or edit the
-workspace's platform list, and `--feature default` is not supported.
+Both commands accept one or more platform names. Without `--feature`, they edit
+`[workspace].platforms`, including legacy `[project].platforms` in `pixi.toml`.
+With `--feature`, they edit `[feature.NAME].platforms`. For `pyproject.toml`,
+they edit the corresponding selected `[tool.conda]` or `[tool.pixi]` tables.
+They do not create features. Omit `--feature` to change workspace platforms
+instead of using the unsupported `--feature default`.
+
+Added names must be concrete platforms recognized by conda, or custom names
+already declared in the workspace. `noarch` is a package category, not a solve
+target, so it cannot be added, including through a custom name. Typo suggestions
+are advisory. Adding an already listed platform has no effect. Removing a
+platform that is not explicitly listed in the selected table is an error.
+
+Workspace changes affect environments that derive their platforms from the
+workspace. Explicit feature platform lists are unchanged.
+Removing the last workspace platform retains `platforms = []`, so environments
+that inherit it use the native platform. Existing rich platform entries keep
+their subdir mappings, system requirements, and comments. A workspace definition
+with a custom subdir mapping or system requirements cannot be removed while a
+feature still references it. Remove those feature references first. An ordinary
+platform such as `linux-64` can remain in a feature after removal from the
+workspace list.
 
 Changing a shared feature affects every environment that includes it. Adding
 the first explicit platform starts a new list with the requested names. It
 does not copy the inherited workspace platforms. Removing the last explicit
 platform removes the setting, so environments derive their supported platforms
-from their other features or the workspace. Removing a platform that
-is only inherited is an error. Adding an already listed platform has no effect.
+from their other features or the workspace.
 
 By default, these commands update `conda.lock` without installing or changing
 any environment prefix. Existing solutions for retained targets stay unchanged,
 new targets are solved, and removed targets are dropped. If the lockfile is
-stale, refresh it with `conda workspace lock` before editing feature platforms.
+stale, refresh it with `conda workspace lock` before editing platforms.
 A missing lockfile is generated for the complete resulting workspace.
 
 Use `--no-lockfile-update` to edit only the manifest. `--dry-run` validates

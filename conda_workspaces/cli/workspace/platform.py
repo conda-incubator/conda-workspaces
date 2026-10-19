@@ -1,4 +1,4 @@
-"""Edit explicit platform lists on existing named features."""
+"""Edit workspace and named-feature platform lists."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from conda.base.constants import KNOWN_SUBDIRS
 from conda.utils import quote_for_shell
 from rich.console import Console
 from tomlkit.container import OutOfOrderTableProxy
-from tomlkit.items import Array, InlineTable, Table
+from tomlkit.items import AoT, Array, InlineTable, Table
 
 from ...context import WorkspaceContext
 from ...exceptions import CondaWorkspacesError, PlatformError
@@ -40,15 +40,15 @@ if TYPE_CHECKING:
 def execute_platform(
     args: argparse.Namespace, *, console: Console | None = None
 ) -> int:
-    """Update feature platforms and lock targets without touching installed prefixes."""
+    """Update platform declarations and locks without touching installed prefixes."""
     if console is None:
         console = Console(highlight=False)
     dry_run = bool(args.dry_run)
     feature_name = args.feature
     if feature_name == Feature.DEFAULT_NAME:
         raise CondaWorkspacesError(
-            "Platform commands require an existing named feature.",
-            hints=["The default feature and workspace platforms are not edited here."],
+            "The default feature cannot have a separate platform list.",
+            hints=["Omit --feature to edit the workspace platforms."],
         )
     if args.manifest_file is not None:
         WorkspacePublication.validate_manifest_path(Path(args.manifest_file))
@@ -59,60 +59,99 @@ def execute_platform(
     original_text = parser.read_manifest_text(manifest_path)
     document = parser.parse_toml_text_with_redacted_errors(original_text, manifest_path)
     source, _ = workspace_toml_source(document, manifest_path, create=False)
-    features = source.get("feature") if source is not None else None
-    if (
-        not isinstance(features, Table | InlineTable | OutOfOrderTableProxy)
-        or feature_name not in features
-    ):
-        raise CondaWorkspacesError(
-            f"Feature '{feature_name}' is not defined in the workspace."
+    target = "the workspace" if feature_name is None else f"feature '{feature_name}'"
+    if feature_name is None:
+        selected = (
+            source.get("workspace") or source.get("project")
+            if source is not None
+            else None
         )
-    selected = features[feature_name]
-    if not isinstance(selected, Table | InlineTable | OutOfOrderTableProxy):
-        raise CondaWorkspacesError(f"Feature '{feature_name}' must be a TOML table.")
-    declared = selected.get("platforms")
-    if declared is not None and (
-        not isinstance(declared, Array)
-        or any(not isinstance(platform, str) for platform in declared)
-    ):
-        raise CondaWorkspacesError(
-            f"Platforms for feature '{feature_name}' must be a list of platform names."
-        )
-    current = parser.parse_data_with_redacted_errors(document.unwrap(), manifest_path)
-    known = set(KNOWN_SUBDIRS).union(current.platforms, current.platform_subdirs)
-    requested = list(dict.fromkeys(args.platforms))
-    for platform in requested:
-        if platform not in known:
-            raise PlatformError(platform, sorted(known))
-        if args.platform_action == "remove" and (
-            declared is None or platform not in declared
+    else:
+        features = source.get("feature") if source is not None else None
+        if (
+            not isinstance(features, Table | InlineTable | OutOfOrderTableProxy)
+            or feature_name not in features
         ):
             raise CondaWorkspacesError(
-                f"Platform '{platform}' is not explicitly declared for"
-                f" feature '{feature_name}'."
+                f"Feature '{feature_name}' is not defined in the workspace."
             )
+        selected = features[feature_name]
+    if not isinstance(selected, Table | InlineTable | OutOfOrderTableProxy):
+        raise CondaWorkspacesError(f"Platforms for {target} require a TOML table.")
+    declared = selected.get("platforms")
+    if declared is not None and (
+        not isinstance(declared, Array if feature_name is not None else Array | AoT)
+        or (
+            feature_name is not None
+            and any(not isinstance(platform, str) for platform in declared)
+        )
+    ):
+        raise CondaWorkspacesError(
+            f"Platforms for {target} must be a list of platform names"
+            + (" or target tables." if feature_name is None else ".")
+        )
+    current = parser.parse_data_with_redacted_errors(document.unwrap(), manifest_path)
+    declared_names = (
+        current.platforms
+        if feature_name is None
+        else current.features[feature_name].platforms
+    )
+    known = set(KNOWN_SUBDIRS).union(current.platforms) - {"noarch"}
+    requested = list(dict.fromkeys(args.platforms))
+    for platform in requested:
+        if args.platform_action == "add":
+            if current.platform_subdir(platform) == "noarch":
+                raise CondaWorkspacesError(
+                    "'noarch' is a package subdirectory, not a target platform."
+                )
+            if platform not in known:
+                raise PlatformError(platform, sorted(known))
+        elif platform not in declared_names:
+            raise CondaWorkspacesError(
+                f"Platform '{platform}' is not explicitly declared for {target}."
+            )
+        elif feature_name is None and (
+            current.platform_subdir(platform) != platform
+            or current.platform_system_requirements.get(platform)
+        ):
+            references = [
+                name
+                for name, feature in current.features.items()
+                if platform in feature.platforms
+            ]
+            if references:
+                raise CondaWorkspacesError(
+                    f"Platform '{platform}' is still used by features: "
+                    + ", ".join(references),
+                    hints=[
+                        "Remove those feature references before removing the workspace"
+                        " target and its platform settings."
+                    ],
+                )
 
     changed = requested
     if args.platform_action == "add":
-        changed = [
-            platform
-            for platform in requested
-            if declared is None or platform not in declared
-        ]
+        changed = [platform for platform in requested if platform not in declared_names]
         if not changed:
             console.print("The requested platforms are already declared.")
             return 0
         if declared is None:
             selected["platforms"] = changed
+        elif isinstance(declared, AoT):
+            for platform in changed:
+                declared.append({"platform": platform})
         else:
             declared.extend(changed)
     else:
         assert declared is not None
-        for platform in requested:
-            while platform in declared:
-                declared.remove(platform)
+        for index in reversed(range(len(declared_names))):
+            if declared_names[index] in requested:
+                del declared[index]
         if not declared:
-            del selected["platforms"]
+            if feature_name is not None:
+                del selected["platforms"]
+            elif isinstance(declared, AoT):
+                selected["platforms"] = []
 
     updated_text = tomlkit.dumps(document)
     parser.validate_no_url_credentials(
@@ -185,7 +224,7 @@ def execute_platform(
                         hints=[
                             stale_reason,
                             f"Run '{quote_for_shell(*command)}' before editing"
-                            " feature platforms.",
+                            " platforms.",
                         ],
                     )
             rendered = render_lockfile(
@@ -205,17 +244,31 @@ def execute_platform(
     preposition = "to" if args.platform_action == "add" else "from"
     console.print(
         status.escape_for_console(
-            f"{action} {', '.join(changed)} {preposition} feature '{feature_name}'"
+            f"{action} {', '.join(changed)} {preposition} {target}"
             f" in {manifest_path.name}."
         ),
         highlight=False,
     )
-    if args.platform_action == "remove" and not config.features[feature_name].platforms:
-        console.print(
-            "With no explicit platform list, environments inherit platform support"
-            " from their other features or the workspace."
-        )
-    names = affected_environments(config, feature_name)
+    if args.platform_action == "remove":
+        if feature_name is None and not config.platforms:
+            console.print(
+                "With no workspace platform list, environments without explicit feature"
+                " platforms use the native platform."
+            )
+        elif feature_name is not None and not config.features[feature_name].platforms:
+            console.print(
+                "With no explicit platform list, environments inherit platform support"
+                " from their other features or the workspace."
+            )
+    if feature_name is None:
+        before = resolve_all_environments(current)
+        names = [
+            name
+            for name, environment in resolve_all_environments(config).items()
+            if environment.platforms != before[name].platforms
+        ]
+    else:
+        names = affected_environments(config, feature_name)
     if names:
         console.print(
             "Affected environments: " + status.escape_for_console(", ".join(names))

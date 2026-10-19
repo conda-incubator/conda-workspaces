@@ -11,6 +11,7 @@ from conda.exceptions import InvalidMatchSpec
 from conda.models.match_spec import MatchSpec
 from conda.utils import quote_for_shell
 from rich.console import Console
+from tomlkit.container import OutOfOrderTableProxy
 from tomlkit.items import InlineTable, Table
 
 from ...context import WorkspaceContext
@@ -228,7 +229,7 @@ def execute_add(args: argparse.Namespace, *, console: Console | None = None) -> 
 
 
 def _add_to_toml(
-    doc: tomlkit.TOMLDocument | Table | InlineTable,
+    doc: tomlkit.TOMLDocument | Table | InlineTable | OutOfOrderTableProxy,
     specs: list[str],
     dep_key: str,
     location: DependencyLocation,
@@ -260,7 +261,7 @@ def _add_to_toml(
     elif created_environment:
         assert location.environment is not None
         environment = ensure_child_table(doc, "environments")[location.environment]
-        assert isinstance(environment, (Table, InlineTable))
+        assert isinstance(environment, (Table, InlineTable, OutOfOrderTableProxy))
         if with_features:
             environment["features"] = with_features
         if no_default_feature:

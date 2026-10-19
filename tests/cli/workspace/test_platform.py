@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 import tomlkit
-from conda.base.context import reset_context
+from conda.base.context import context, reset_context
 
 from conda_workspaces.cli.main import execute_workspace, generate_workspace_parser
 from conda_workspaces.cli.workspace.platform import execute_platform
@@ -66,31 +66,50 @@ def platform_solves(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
     return calls
 
 
+@pytest.mark.parametrize("feature", [None, "tools"], ids=["workspace", "feature"])
 @pytest.mark.parametrize("action", ["add", "remove"])
 @pytest.mark.parametrize(
-    ("filename", "namespace", "workspace"),
+    ("filename", "namespace", "workspace", "split_namespace"),
     [
-        ("conda.toml", "", "workspace"),
-        ("pixi.toml", "", "workspace"),
-        ("pixi.toml", "", "project"),
-        ("pyproject.toml", "tool.conda.", "workspace"),
-        ("pyproject.toml", "tool.pixi.", "workspace"),
+        ("conda.toml", "", "workspace", False),
+        ("pixi.toml", "", "workspace", False),
+        ("pixi.toml", "", "project", False),
+        ("pyproject.toml", "tool.conda.", "workspace", False),
+        ("pyproject.toml", "tool.pixi.", "workspace", False),
+        ("pyproject.toml", "tool.conda.", "workspace", True),
+        ("pyproject.toml", "tool.pixi.", "workspace", True),
     ],
-    ids=["conda", "pixi", "pixi-legacy", "pyproject-conda", "pyproject-pixi"],
+    ids=[
+        "conda",
+        "pixi",
+        "pixi-legacy",
+        "pyproject-conda",
+        "pyproject-pixi",
+        "pyproject-conda-split",
+        "pyproject-pixi-split",
+    ],
 )
 def test_platform_edit_preserves_selected_manifest_content(
     tmp_path: Path,
     platform_manifest: Path,
     action: str,
+    feature: str | None,
     filename: str,
     namespace: str,
     workspace: str,
+    split_namespace: bool,
     platform_solves: list[tuple[str, str]],
 ) -> None:
     original = platform_manifest.read_text(encoding="utf-8")
     content = original.replace("[workspace]", f"[{namespace}{workspace}]")
     for table in ("feature.tools", "feature.other", "environments"):
         content = content.replace(f"[{table}]", f"[{namespace}{table}]")
+    if split_namespace:
+        content = content.replace(
+            f"[{namespace}feature.tools]",
+            "[tool.ruff]\nline-length = 88 # Ruff comment\n\n"
+            f"[{namespace}feature.tools]",
+        )
     if namespace:
         content += '\n[project]\nname = "packaging" # Packaging comment\n'
     selected = tmp_path / "selected" / filename
@@ -100,22 +119,33 @@ def test_platform_edit_preserves_selected_manifest_content(
         _DEFAULTS,
         manifest_file=selected,
         platform_action=action,
-        platforms=["win-64"] if action == "add" else ["linux-64"],
+        feature=feature,
+        platforms=(["win-64"] if feature else ["osx-arm64"])
+        if action == "add"
+        else ["linux-64"],
     )
 
     assert execute_platform(args) == 0
 
     updated = selected.read_text(encoding="utf-8")
     config = find_parser(selected).parse(selected)
-    assert config.features["tools"].platforms == (
-        ["linux-64", "osx-arm64", "win-64"] if action == "add" else ["osx-arm64"]
-    )
-    assert config.platforms == ["linux-64", "win-64"]
+    if feature:
+        assert config.features["tools"].platforms == (
+            ["linux-64", "osx-arm64", "win-64"] if action == "add" else ["osx-arm64"]
+        )
+        assert config.platforms == ["linux-64", "win-64"]
+    else:
+        assert config.platforms == (
+            ["linux-64", "win-64", "osx-arm64"] if action == "add" else ["win-64"]
+        )
+        assert config.features["tools"].platforms == ["linux-64", "osx-arm64"]
     assert config.features["other"].platforms == ["win-64"]
     assert "# Project comment" in updated
     assert "# Platform comment" in updated
     if namespace:
         assert 'name = "packaging" # Packaging comment' in updated
+    if split_namespace:
+        assert "line-length = 88 # Ruff comment" in updated
     assert platform_manifest.read_text(encoding="utf-8") == original
     assert platform_solves == []
 
@@ -124,9 +154,12 @@ def test_platform_edit_preserves_selected_manifest_content(
     ("options", "message", "suggestion"),
     [
         ({"feature": "missing"}, "not defined", None),
-        ({"feature": "default"}, "named feature", None),
+        ({"feature": "default"}, "Omit --feature", None),
         ({"platforms": ["linxu-64"]}, "Unknown platform", "linux-64"),
         ({"platforms": ["unrelated"]}, "Unknown platform", None),
+        ({"platforms": ["noarch"]}, "noarch", None),
+        ({"feature": None, "platforms": ["noarch"]}, "noarch", None),
+        ({"feature": None, "platforms": ["linxu-64"]}, "Unknown platform", "linux-64"),
         (
             {"platform_action": "remove", "platforms": ["win-64"]},
             "not explicitly declared",
@@ -138,7 +171,17 @@ def test_platform_edit_preserves_selected_manifest_content(
             "linux-64",
         ),
     ],
-    ids=["missing-feature", "default", "typo", "unknown", "absent", "mixed-validity"],
+    ids=[
+        "missing-feature",
+        "default",
+        "typo",
+        "unknown",
+        "feature-noarch",
+        "workspace-noarch",
+        "workspace-typo",
+        "absent",
+        "mixed-validity",
+    ],
 )
 def test_platform_invalid_selection_writes_nothing(
     platform_manifest: Path,
@@ -178,19 +221,28 @@ def test_platform_rejects_malformed_explicit_list(
     assert not (platform_manifest.parent / ".conda").exists()
 
 
+@pytest.mark.parametrize("feature", [None, "tools"], ids=["workspace", "feature"])
 @pytest.mark.parametrize("declaration", [None, []], ids=["missing", "empty"])
 def test_platform_add_starts_an_explicit_list(
-    platform_manifest: Path, declaration: list[str] | None
+    platform_manifest: Path, declaration: list[str] | None, feature: str | None
 ) -> None:
     document = tomlkit.parse(platform_manifest.read_text(encoding="utf-8"))
+    selected = document["feature"][feature] if feature else document["workspace"]
     if declaration is None:
-        del document["feature"]["tools"]["platforms"]
+        del selected["platforms"]
     else:
-        document["feature"]["tools"]["platforms"] = declaration
+        selected["platforms"] = declaration
     platform_manifest.write_text(tomlkit.dumps(document), encoding="utf-8")
-    assert execute_platform(make_args(_DEFAULTS, manifest_file=platform_manifest)) == 0
+    assert (
+        execute_platform(
+            make_args(_DEFAULTS, manifest_file=platform_manifest, feature=feature)
+        )
+        == 0
+    )
     config = find_parser(platform_manifest).parse(platform_manifest)
-    assert config.features["tools"].platforms == ["win-64"]
+    assert (config.features[feature].platforms if feature else config.platforms) == [
+        "win-64"
+    ]
 
 
 @pytest.mark.parametrize("duplicate", [False, True], ids=["unique", "duplicate"])
@@ -415,18 +467,22 @@ def test_platform_malformed_lockfile_writes_nothing(
 
 @pytest.mark.parametrize(
     "arguments",
-    [["add", "linux-64"], ["remove", "--feature", "tools"]],
-    ids=["missing-feature", "missing-platform"],
+    [["add"], ["remove", "--feature", "tools"]],
+    ids=["workspace-missing-platform", "feature-missing-platform"],
 )
-def test_platform_parser_requires_feature_and_platform(arguments: list[str]) -> None:
+def test_platform_parser_requires_platform(arguments: list[str]) -> None:
     with pytest.raises(SystemExit):
         generate_workspace_parser().parse_args(["platform", *arguments])
 
 
 @pytest.mark.usefixtures("reset_conda_context")
 @pytest.mark.parametrize("action", ["add", "remove"])
+@pytest.mark.parametrize("feature", [None, "tools"], ids=["workspace", "feature"])
 def test_platform_parser_dispatch_emits_one_json_result(
-    platform_manifest: Path, action: str, capsys: pytest.CaptureFixture[str]
+    platform_manifest: Path,
+    action: str,
+    capsys: pytest.CaptureFixture[str],
+    feature: str | None,
 ) -> None:
     args = generate_workspace_parser().parse_args(
         [
@@ -434,8 +490,7 @@ def test_platform_parser_dispatch_emits_one_json_result(
             str(platform_manifest),
             "platform",
             action,
-            "--feature",
-            "tools",
+            *(["--feature", feature] if feature else []),
             "--no-lockfile-update",
             "--json",
             "win-64" if action == "add" else "linux-64",
@@ -483,3 +538,229 @@ def test_platform_existing_lock_is_preserved_and_stale_lock_rejected(
     assert platform_manifest.read_bytes() == before
     assert lock_path.read_bytes() == lock_before
     assert platform_solves == []
+
+
+@pytest.mark.parametrize("feature", [None, "tools"], ids=["workspace", "feature"])
+def test_platform_remove_allows_existing_noarch(
+    platform_manifest: Path, feature: str | None
+) -> None:
+    document = tomlkit.parse(platform_manifest.read_text(encoding="utf-8"))
+    selected = document["feature"][feature] if feature else document["workspace"]
+    selected["platforms"].append("noarch")
+    platform_manifest.write_text(tomlkit.dumps(document), encoding="utf-8")
+    assert (
+        execute_platform(
+            make_args(
+                _DEFAULTS,
+                manifest_file=platform_manifest,
+                feature=feature,
+                platform_action="remove",
+                platforms=["noarch"],
+            )
+        )
+        == 0
+    )
+    config = find_parser(platform_manifest).parse(platform_manifest)
+    assert "noarch" not in (
+        config.features[feature].platforms if feature else config.platforms
+    )
+
+
+@pytest.mark.parametrize("action", ["add", "remove"])
+def test_workspace_platform_edits_preserve_rich_entries(
+    platform_manifest: Path, action: str
+) -> None:
+    document = tomlkit.parse(platform_manifest.read_text(encoding="utf-8"))
+    document["workspace"]["platforms"] = [
+        "win-64",
+        {"name": "linux-cuda", "platform": "linux-64", "cuda": "12"},
+    ]
+    document["workspace"]["platforms"].multiline(True)
+    original = tomlkit.dumps(document).replace(
+        'cuda = "12"},', 'cuda = "12"}, # GPU target'
+    )
+    platform_manifest.write_text(original, encoding="utf-8")
+    assert (
+        execute_platform(
+            make_args(
+                _DEFAULTS,
+                manifest_file=platform_manifest,
+                feature=None,
+                platform_action=action,
+                platforms=["osx-arm64"] if action == "add" else ["win-64"],
+            )
+        )
+        == 0
+    )
+    updated = platform_manifest.read_text(encoding="utf-8")
+    config = find_parser(platform_manifest).parse(platform_manifest)
+    assert config.platforms == (
+        ["win-64", "linux-cuda", "osx-arm64"] if action == "add" else ["linux-cuda"]
+    )
+    assert config.platform_subdir("linux-cuda") == "linux-64"
+    assert config.platform_system_requirements["linux-cuda"]["cuda"] == "12"
+    assert 'name = "linux-cuda", platform = "linux-64", cuda = "12"' in updated
+    assert "# GPU target" in updated
+
+
+@pytest.mark.parametrize(
+    ("entry", "platform", "rejected"),
+    [
+        (
+            {"name": "linux-cuda", "platform": "linux-64", "cuda": "12"},
+            "linux-cuda",
+            True,
+        ),
+        ({"name": "linux-custom", "platform": "linux-64"}, "linux-custom", True),
+        ({"name": "linux-64", "platform": "linux-64", "cuda": "12"}, "linux-64", True),
+        ("linux-64", "linux-64", False),
+    ],
+    ids=["custom-requirements", "custom-name", "native-requirements", "plain"],
+)
+def test_workspace_platform_removal_preserves_feature_target_metadata(
+    platform_manifest: Path, entry: str | dict[str, str], platform: str, rejected: bool
+) -> None:
+    document = tomlkit.parse(platform_manifest.read_text(encoding="utf-8"))
+    document["workspace"]["platforms"] = [entry, "win-64"]
+    document["feature"]["tools"]["platforms"] = [platform]
+    platform_manifest.write_text(tomlkit.dumps(document), encoding="utf-8")
+    original = platform_manifest.read_bytes()
+    args = make_args(
+        _DEFAULTS,
+        manifest_file=platform_manifest,
+        feature=None,
+        platform_action="remove",
+        platforms=[platform],
+    )
+    if rejected:
+        with pytest.raises(CondaWorkspacesError, match="tools"):
+            execute_platform(args)
+        assert platform_manifest.read_bytes() == original
+    else:
+        assert execute_platform(args) == 0
+        config = find_parser(platform_manifest).parse(platform_manifest)
+        assert config.platforms == ["win-64"]
+        assert resolve_environment(config, "tools").platforms == ["linux-64"]
+
+
+@pytest.mark.parametrize("feature", [None, "tools"], ids=["workspace", "feature"])
+def test_platform_add_rejects_alias_for_noarch(
+    platform_manifest: Path, feature: str | None
+) -> None:
+    document = tomlkit.parse(platform_manifest.read_text(encoding="utf-8"))
+    document["workspace"]["platforms"] = [{"name": "portable", "platform": "noarch"}]
+    platform_manifest.write_text(tomlkit.dumps(document), encoding="utf-8")
+    original = platform_manifest.read_bytes()
+    with pytest.raises(CondaWorkspacesError, match="noarch"):
+        execute_platform(
+            make_args(
+                _DEFAULTS,
+                manifest_file=platform_manifest,
+                feature=feature,
+                platforms=["portable"],
+            )
+        )
+    assert platform_manifest.read_bytes() == original
+
+
+@pytest.mark.parametrize("action", ["add", "remove"])
+def test_workspace_platform_lock_preserves_feature_solutions(
+    platform_manifest: Path,
+    platform_solves: list[tuple[str, str]],
+    capsys: pytest.CaptureFixture[str],
+    action: str,
+) -> None:
+    document = tomlkit.parse(platform_manifest.read_text(encoding="utf-8"))
+    document["environments"]["inherited"] = {"features": [], "no-default-feature": True}
+    platform_manifest.write_text(tomlkit.dumps(document), encoding="utf-8")
+    args = make_args(
+        _DEFAULTS,
+        manifest_file=platform_manifest,
+        feature=None,
+        platforms=["osx-64"],
+        no_lockfile_update=False,
+    )
+    assert execute_platform(args) == 0
+    lock_path = platform_manifest.parent / "conda.lock"
+    baseline = load_lockfile_data(lock_path.read_bytes())
+    platform_solves.clear()
+    capsys.readouterr()
+    args.platform_action = action
+    args.platforms = ["osx-arm64"] if action == "add" else ["win-64"]
+    assert execute_platform(args) == 0
+    updated = load_lockfile_data(lock_path.read_bytes())
+    expected = (
+        {"linux-64", "win-64", "osx-64", "osx-arm64"}
+        if action == "add"
+        else {"linux-64", "osx-64"}
+    )
+    for name in ("default", "inherited"):
+        assert set(updated["environments"][name]["packages"]) == expected
+    for name in ("tools", "shared", "other"):
+        assert updated["environments"][name] == baseline["environments"][name]
+    assert sorted(platform_solves) == (
+        [("default", "osx-arm64"), ("inherited", "osx-arm64")]
+        if action == "add"
+        else []
+    )
+    output = capsys.readouterr().out
+    assert "default" in output and "inherited" in output
+    assert "tools" not in output and "shared" not in output and "other" not in output
+
+
+def test_workspace_platform_remove_last_uses_native_target(
+    platform_manifest: Path,
+    platform_solves: list[tuple[str, str]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert (
+        execute_platform(
+            make_args(
+                _DEFAULTS,
+                manifest_file=platform_manifest,
+                feature=None,
+                platform_action="remove",
+                platforms=["linux-64", "win-64"],
+                no_lockfile_update=False,
+            )
+        )
+        == 0
+    )
+    document = tomlkit.parse(platform_manifest.read_text(encoding="utf-8"))
+    assert document["workspace"]["platforms"] == []
+    lock = load_lockfile_data((platform_manifest.parent / "conda.lock").read_bytes())
+    assert list(lock["environments"]["default"]["packages"]) == [context.subdir]
+    assert list(lock["environments"]["other"]["packages"]) == ["win-64"]
+    assert "native" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("action", ["add", "remove"])
+def test_workspace_platform_array_of_tables(
+    platform_manifest: Path,
+    action: str,
+) -> None:
+    document = tomlkit.parse(platform_manifest.read_text(encoding="utf-8"))
+    document["workspace"]["platforms"] = [{"platform": "linux-64", "cuda": "12"}]
+    platform_manifest.write_text(tomlkit.dumps(document), encoding="utf-8")
+    config = find_parser(platform_manifest).parse(platform_manifest)
+    target = config.platforms[0]
+    assert (
+        execute_platform(
+            make_args(
+                _DEFAULTS,
+                manifest_file=platform_manifest,
+                feature=None,
+                platform_action=action,
+                platforms=["osx-arm64"] if action == "add" else [target],
+            )
+        )
+        == 0
+    )
+    updated = tomlkit.parse(platform_manifest.read_text(encoding="utf-8"))
+    config = find_parser(platform_manifest).parse(platform_manifest)
+    if action == "add":
+        assert config.platforms == [target, "osx-arm64"]
+        assert config.platform_system_requirements[target]["cuda"] == "12"
+    else:
+        assert updated["workspace"]["platforms"] == []
+        assert config.platforms == []

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from conda.exceptions import ArgumentError
 from rich.console import Console
 from rich.table import Table
+from tomlkit.container import OutOfOrderTableProxy
 from tomlkit.items import InlineTable
 from tomlkit.items import Table as TomlTable
 
@@ -334,7 +335,7 @@ def _environment_details(
 
 
 def _dependency_detail(
-    source: tomlkit.TOMLDocument | TomlTable | InlineTable,
+    source: tomlkit.TOMLDocument | TomlTable | InlineTable | OutOfOrderTableProxy,
     namespace: tuple[str, ...],
     config: WorkspaceConfig,
     dependency_key: str,
@@ -362,7 +363,7 @@ def _dependency_detail(
     declaration = dependency_table.get(name)
     if (
         dependency_key == "dependencies"
-        and isinstance(declaration, (TomlTable, InlineTable))
+        and isinstance(declaration, (TomlTable, InlineTable, OutOfOrderTableProxy))
         and declaration.get("workspace") is True
     ):
         provenance["inherited_from"] = DependencyLocation().table_name(
