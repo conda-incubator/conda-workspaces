@@ -905,8 +905,10 @@ def test_conda_lock_loader_compose_redacts_relative_channel_token() -> None:
 
 
 @pytest.mark.parametrize("duplicate_count", [1, 32], ids=["single", "repeated"])
+@pytest.mark.parametrize("metadata_shape", ["container", "scalar"])
 def test_package_records_by_url_reuses_shared_metadata_comparisons(
     duplicate_count: int,
+    metadata_shape: str,
 ) -> None:
     comparisons = 0
 
@@ -919,8 +921,14 @@ def test_package_records_by_url_reuses_shared_metadata_comparisons(
 
     left_value = ComparableValue()
     right_value = ComparableValue()
-    left = {"values": [left_value] * 4096}
-    right = {"values": [right_value] * 4096}
+    left = (
+        {"values": [left_value] * 4096} if metadata_shape == "container" else left_value
+    )
+    right = (
+        {"values": [right_value] * 4096}
+        if metadata_shape == "container"
+        else right_value
+    )
     url = "https://repo.example.test/linux-64/demo-1.0-0.conda"
     first = {"conda": url, "metadata": left}
     duplicates = [{"conda": url, "metadata": right} for _ in range(duplicate_count)]
@@ -1299,8 +1307,23 @@ def test_conda_lock_loader_redacts_cyclic_in_memory_data_once(
         assert container[0] == url
 
 
-@pytest.mark.parametrize("alias_type", ["environment", "channels"])
-@pytest.mark.parametrize("entry_type", ["string", "mapping"])
+@pytest.mark.parametrize(
+    ("alias_type", "entry_type"),
+    [
+        ("environment", "string"),
+        ("environment", "mapping"),
+        ("channels", "string"),
+        ("channels", "mapping"),
+        ("entry", "mapping"),
+    ],
+    ids=[
+        "environment-string",
+        "environment-mapping",
+        "channels-string",
+        "channels-mapping",
+        "entry-mapping",
+    ],
+)
 def test_conda_lock_loader_normalizes_shared_channels_once(
     monkeypatch: pytest.MonkeyPatch,
     lockfile_data_source: Callable[[dict[str, Any]], dict[str, Any]],
@@ -1317,7 +1340,11 @@ def test_conda_lock_loader_normalizes_shared_channels_once(
                 f"env-{index}": (
                     environment
                     if alias_type == "environment"
-                    else {"channels": channels}
+                    else {
+                        "channels": list(channels)
+                        if alias_type == "entry"
+                        else channels
+                    }
                 )
                 for index in range(32)
             },
@@ -1343,7 +1370,9 @@ def test_conda_lock_loader_normalizes_shared_channels_once(
         {"url": f"https://repo.example/channel-{index}"} for index in range(4)
     ]
     for current in result["environments"].values():
-        assert current["channels"] is first_environment["channels"]
+        if alias_type != "entry":
+            assert current["channels"] is first_environment["channels"]
+        assert current["channels"] == first_environment["channels"]
         if alias_type == "environment":
             assert current is first_environment
 
@@ -1356,6 +1385,113 @@ def test_conda_lock_loader_rejects_credentials_in_structured_metadata() -> None:
 
     with pytest.raises(ValueError, match="structured metadata"):
         CondaLockLoader.redact_data_urls(data)
+
+
+@pytest.mark.parametrize(
+    "placement",
+    [
+        "mapping-value",
+        "sequence-value",
+        "mapping-key",
+        "channel-string",
+        "channel-mapping",
+    ],
+)
+def test_conda_lock_loader_processes_scalar_aliases_once(
+    monkeypatch: pytest.MonkeyPatch,
+    placement: str,
+) -> None:
+    value = (
+        "metadata-" * 512
+        if placement == "mapping-key"
+        else ("https://user:password@repo.example/t/token/" + "channel-" * 512)
+    )
+    entry = {
+        "mapping-value": "{value: *scalar}",
+        "sequence-value": "[*scalar]",
+        "mapping-key": "{*scalar : safe}",
+        "channel-string": "{channels: [*scalar]}",
+        "channel-mapping": "{channels: [{url: *scalar}]}",
+    }[placement]
+    content = f"version: 1\nscalar: &scalar {value}\n"
+    if placement.startswith("channel"):
+        content += "environments:\n" + "".join(
+            f"  env-{index}: {entry}\n" for index in range(32)
+        )
+    else:
+        content += "metadata:\n" + f"  - {entry}\n" * 32
+    data = load_lockfile_data(content)
+    scalar = data["scalar"]
+    calls = dict.fromkeys(
+        ("redact_url", "redact_channel_name", "has_url_credentials"), 0
+    )
+    for name in calls:
+        original = getattr(lockfile_module, name)
+
+        def record(value: str, *, original=original, name=name):
+            if value == scalar:
+                calls[name] += 1
+            return original(value)
+
+        monkeypatch.setattr(lockfile_module, name, record)
+
+    result = CondaLockLoader.redact_data_urls(data)
+
+    assert calls["redact_url"] == 1
+    assert calls["redact_channel_name"] == int(placement.startswith("channel"))
+    assert calls["has_url_credentials"] == int(placement == "mapping-key")
+    assert data["scalar"] == value
+    assert not lockfile_module.has_url_credentials_in_data(result)
+    expected = (
+        value
+        if placement == "mapping-key"
+        else ("https://repo.example/" + "channel-" * 512)
+    )
+    assert result["scalar"] == expected
+    if placement.startswith("channel"):
+        assert all(
+            env["channels"] == [{"url": expected}]
+            for env in result["environments"].values()
+        )
+    else:
+        expected_entry = {
+            "mapping-value": {"value": expected},
+            "sequence-value": [expected],
+            "mapping-key": {expected: "safe"},
+        }[placement]
+        assert result["metadata"] == [expected_entry] * 32
+
+
+@pytest.mark.parametrize("operation", ["parse", "redact"])
+@pytest.mark.parametrize("placement", ["mapping-key", "package-url", "metadata"])
+@pytest.mark.parametrize("references", [1, 8], ids=["within-limit", "over-limit"])
+def test_lockfile_limits_expanded_scalar_text(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    placement: str,
+    references: int,
+) -> None:
+    value = "https://repo.example/" + "a" * 256
+    entry = {
+        "mapping-key": "{*scalar : safe}",
+        "package-url": "{conda: *scalar}",
+        "metadata": "{metadata: *scalar}",
+    }[placement]
+    content = f"scalar: &scalar {value}\npackages:\n" + f"  - {entry}\n" * references
+    data = load_lockfile_data(content)
+    monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_BYTES", 1024)
+    assert len(content.encode()) < 1024
+
+    if references == 8:
+        with pytest.raises(ValueError, match="string content"):
+            if operation == "parse":
+                load_lockfile_data(content)
+            else:
+                CondaLockLoader.redact_data_urls(data)
+    elif operation == "parse":
+        assert load_lockfile_data(content) == data
+    else:
+        assert CondaLockLoader.redact_data_urls(data) == data
 
 
 @pytest.fixture
@@ -4023,6 +4159,7 @@ def test_merge_lockfiles_rejects_oversized_fragment(
     [
         pytest.param("bytes", "aggregate maximum size", id="bytes"),
         pytest.param("items", "aggregate collection items", id="items"),
+        pytest.param("strings", "string content", id="strings"),
     ],
 )
 def test_merge_lockfiles_enforces_aggregate_fragment_budgets(
@@ -4034,6 +4171,8 @@ def test_merge_lockfiles_enforces_aggregate_fragment_budgets(
 ) -> None:
     ctx = workspace_ctx_factory()
     content = "version: 1\nenvironments: {}\npackages: []\n"
+    if budget == "strings":
+        content += "scalar: &scalar " + "a" * 256 + "\nmetadata: [*scalar]\n"
     fragments = [tmp_path / "conda.lock.a", tmp_path / "conda.lock.b"]
     for fragment in fragments:
         fragment.write_bytes(content.encode("utf-8"))
@@ -4043,6 +4182,10 @@ def test_merge_lockfiles_enforces_aggregate_fragment_budgets(
             "MAX_LOCKFILE_BYTES",
             len(content.encode("utf-8")) + 1,
         )
+    elif budget == "strings":
+        monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_BYTES", 1024)
+        assert sum(fragment.stat().st_size for fragment in fragments) < 1024
+        load_lockfile_data(content)
     else:
         monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_ITEMS", 4)
 
@@ -4053,7 +4196,7 @@ def test_merge_lockfiles_enforces_aggregate_fragment_budgets(
 @pytest.mark.parametrize(
     ("budget", "match"),
     [
-        pytest.param("bytes", "Merged lockfile.*maximum size", id="bytes"),
+        pytest.param("bytes", "maximum (?:size|expanded string content)", id="bytes"),
         pytest.param("items", "Merged lockfile.*collection items", id="items"),
     ],
 )

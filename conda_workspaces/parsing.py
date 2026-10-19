@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat
 from collections.abc import Collection, Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
@@ -16,21 +17,38 @@ MAX_DOCUMENT_COLLECTION_ITEMS = 100_000
 MAX_DOCUMENT_ITEMS = 1_000_000
 
 
+@dataclass
+class DocumentStringBudget:
+    """Bound scalar processing across one document or a batch of fragments.
+
+    Count every string reference in visited containers, including mapping keys,
+    because dictionary lookups can compare aliased strings outside our memo.
+    """
+
+    remaining: int
+
+    def consume(self, value: str, *, label: str) -> None:
+        """Charge one string reference without scanning or encoding its text."""
+        self.remaining -= len(value)
+        if self.remaining < 0:
+            raise ValueError(f"{label} exceeds the maximum expanded string content")
+
+
 def document_values_equal(
     left: object,
     right: object,
     *,
-    equal_container_pairs: dict[tuple[int, int], tuple[object, object]] | None = None,
+    equal_value_pairs: dict[tuple[int, int], tuple[object, object]] | None = None,
 ) -> bool:
-    """Compare parsed document values without revisiting aliased containers.
+    """Compare parsed document values without revisiting aliases.
 
-    Successful comparisons extend *equal_container_pairs*. The memo retains the
-    containers so their identity keys remain valid across later comparisons.
+    Successful comparisons extend *equal_value_pairs*. The memo retains the
+    values so their identity keys remain valid across later comparisons.
     """
     stack = [(left, right)]
     root_identities = (id(left), id(right))
     compared: set[tuple[int, int]] = set()
-    new_equal_container_pairs: dict[tuple[int, int], tuple[object, object]] = {}
+    new_equal_value_pairs: dict[tuple[int, int], tuple[object, object]] = {}
 
     while stack:
         current_left, current_right = stack.pop()
@@ -38,10 +56,12 @@ def document_values_equal(
             continue
         identities = (id(current_left), id(current_right))
         if identities in compared or (
-            equal_container_pairs is not None and identities in equal_container_pairs
+            equal_value_pairs is not None and identities in equal_value_pairs
         ):
             continue
         compared.add(identities)
+        if identities != root_identities:
+            new_equal_value_pairs[identities] = (current_left, current_right)
 
         if isinstance(current_left, Mapping):
             if not isinstance(current_right, Mapping):
@@ -50,11 +70,6 @@ def document_values_equal(
             right_mapping = cast("Mapping[object, object]", current_right)
             if len(left_mapping) != len(right_mapping):
                 return False
-            if identities != root_identities:
-                new_equal_container_pairs[identities] = (
-                    current_left,
-                    current_right,
-                )
             for key, value in left_mapping.items():
                 if key not in right_mapping:
                     return False
@@ -68,11 +83,6 @@ def document_values_equal(
                 return False
             if len(current_left) != len(current_right):
                 return False
-            if identities != root_identities:
-                new_equal_container_pairs[identities] = (
-                    current_left,
-                    current_right,
-                )
             stack.extend(zip(current_left, current_right))
             continue
         if isinstance(current_right, list):
@@ -81,8 +91,8 @@ def document_values_equal(
         if current_left != current_right:
             return False
 
-    if equal_container_pairs is not None:
-        equal_container_pairs.update(new_equal_container_pairs)
+    if equal_value_pairs is not None:
+        equal_value_pairs.update(new_equal_value_pairs)
     return True
 
 
@@ -156,6 +166,7 @@ def validate_document_limits(
     maximum_depth: int = MAX_DOCUMENT_DEPTH,
     maximum_collection_items: int = MAX_DOCUMENT_COLLECTION_ITEMS,
     maximum_items: int = MAX_DOCUMENT_ITEMS,
+    string_budget: DocumentStringBudget | None = None,
 ) -> int:
     """Reject excessive documents and return their collection-item count.
 
@@ -173,6 +184,11 @@ def validate_document_limits(
         if exiting:
             active.remove(id(current))
             visited.add(id(current))
+            continue
+
+        if isinstance(current, str):
+            if string_budget is not None:
+                string_budget.consume(current, label=label)
             continue
 
         if isinstance(current, Mapping):

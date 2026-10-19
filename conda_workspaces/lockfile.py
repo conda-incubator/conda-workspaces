@@ -82,6 +82,7 @@ from .models import (
     redact_url,
 )
 from .parsing import (
+    DocumentStringBudget,
     decode_limited_text,
     document_values_equal,
     read_limited_text,
@@ -153,7 +154,11 @@ class _SolvedEnvironment:
     external_packages: dict[str, list[str]] = field(default_factory=dict)
 
 
-def load_lockfile_data(content: str | bytes) -> dict[str, Any]:
+def load_lockfile_data(
+    content: str | bytes,
+    *,
+    string_budget: DocumentStringBudget | None = None,
+) -> dict[str, Any]:
     """Parse in-memory lockfile YAML with the same safe loader as disk reads."""
     text = decode_limited_text(
         content,
@@ -172,6 +177,7 @@ def load_lockfile_data(content: str | bytes) -> dict[str, Any]:
         maximum_depth=MAX_LOCKFILE_DEPTH,
         maximum_collection_items=MAX_LOCKFILE_COLLECTION_ITEMS,
         maximum_items=MAX_LOCKFILE_ITEMS,
+        string_budget=string_budget or DocumentStringBudget(MAX_LOCKFILE_BYTES),
     )
     return dict(data)
 
@@ -899,7 +905,7 @@ class CondaLockLoader(EnvironmentSpecBase):
     ) -> dict[str, dict[str, Any]]:
         """Return top-level conda package records from *data* keyed by URL."""
         records_by_url: dict[str, dict[str, Any]] = {}
-        equal_container_pairs: dict[tuple[int, int], tuple[object, object]] = {}
+        equal_value_pairs: dict[tuple[int, int], tuple[object, object]] = {}
         packages = data.get("packages", [])
         if not isinstance(packages, list):
             raise ValueError("Lockfile package records must be a list")
@@ -912,7 +918,7 @@ class CondaLockLoader(EnvironmentSpecBase):
                 if existing is not None and not document_values_equal(
                     existing,
                     record,
-                    equal_container_pairs=equal_container_pairs,
+                    equal_value_pairs=equal_value_pairs,
                 ):
                     raise ValueError(
                         f"Conflicting package metadata for URL {redact_url(url)!r}"
@@ -1079,6 +1085,7 @@ class CondaLockLoader(EnvironmentSpecBase):
 
         environments = result.get("environments")
         normalized_channels: set[int] = set()
+        normalized_urls: dict[int, tuple[str, str]] = {}
         if isinstance(environments, dict):
             for environment in environments.values():
                 if not isinstance(environment, dict):
@@ -1091,13 +1098,31 @@ class CondaLockLoader(EnvironmentSpecBase):
                     normalized_channels.add(id(channels))
                     for index, entry in enumerate(channels):
                         if isinstance(entry, str):
-                            channels[index] = {"url": redact_channel_name(entry)}
+                            url = entry
                         elif isinstance(entry, dict):
+                            if id(entry) in normalized_channels:
+                                continue
+                            normalized_channels.add(id(entry))
                             channel_entry = cast("dict[str, Any]", entry)
                             url = channel_entry.get("url")
-                            if isinstance(url, str):
-                                channel_entry["url"] = redact_channel_name(url)
+                        else:
+                            continue
+                        if isinstance(url, str):
+                            if id(url) not in normalized_urls:
+                                normalized_urls[id(url)] = (
+                                    url,
+                                    redact_channel_name(url),
+                                )
+                            normalized = normalized_urls[id(url)][1]
+                            if isinstance(entry, str):
+                                channels[index] = {"url": normalized}
+                            else:
+                                cast("dict[str, Any]", entry)["url"] = normalized
         visited: set[int] = set()
+        checked_keys: set[int] = set()
+        string_budget = DocumentStringBudget(MAX_LOCKFILE_BYTES)
+        # Retain source strings while replacing values so IDs cannot be reused.
+        redacted_urls: dict[int, tuple[str, str]] = {}
         values: list[dict[str, Any] | list[Any]] = [result]
         while values:
             container = values.pop()
@@ -1106,18 +1131,27 @@ class CondaLockLoader(EnvironmentSpecBase):
             visited.add(id(container))
             if isinstance(container, dict):
                 for key, value in list(container.items()):
-                    if has_url_credentials(key):
-                        raise ValueError(
-                            "Lockfile contains credentials in a mapping key"
-                        )
+                    string_budget.consume(key, label="Lockfile data")
+                    if id(key) not in checked_keys:
+                        if has_url_credentials(key):
+                            raise ValueError(
+                                "Lockfile contains credentials in a mapping key"
+                            )
+                        checked_keys.add(id(key))
                     if isinstance(value, str):
-                        container[key] = redact_url(value)
+                        string_budget.consume(value, label="Lockfile data")
+                        if id(value) not in redacted_urls:
+                            redacted_urls[id(value)] = (value, redact_url(value))
+                        container[key] = redacted_urls[id(value)][1]
                     elif isinstance(value, (dict, list)):
                         values.append(value)
             else:
                 for index, value in enumerate(container):
                     if isinstance(value, str):
-                        container[index] = redact_url(value)
+                        string_budget.consume(value, label="Lockfile data")
+                        if id(value) not in redacted_urls:
+                            redacted_urls[id(value)] = (value, redact_url(value))
+                        container[index] = redacted_urls[id(value)][1]
                     elif isinstance(value, (dict, list)):
                         values.append(value)
         if has_url_credentials_in_data(result):
@@ -1851,6 +1885,7 @@ def merge_lockfiles(
     equal_channel_pairs: dict[tuple[int, int], tuple[object, object]] = {}
     fragment_bytes = 0
     fragment_items = 0
+    fragment_strings = DocumentStringBudget(MAX_LOCKFILE_BYTES)
 
     for env_name, env_obj in ctx.config.environments.items():
         entries = _manifest_channel_entries(ctx.config, env_obj)
@@ -1879,7 +1914,7 @@ def merge_lockfiles(
                 f"{MAX_LOCKFILE_BYTES:,} bytes"
             )
         try:
-            data = load_lockfile_data(content)
+            data = load_lockfile_data(content, string_budget=fragment_strings)
             fragment_items += validate_document_limits(
                 data,
                 label="Lockfile fragments",
@@ -1912,7 +1947,7 @@ def merge_lockfiles(
             elif not document_values_equal(
                 existing,
                 record,
-                equal_container_pairs=equal_package_record_pairs,
+                equal_value_pairs=equal_package_record_pairs,
             ):
                 raise LockfileMergeError(
                     f"fragment '{path}' has a conflicting package record for "
@@ -1959,7 +1994,7 @@ def merge_lockfiles(
             elif not document_values_equal(
                 existing,
                 channels,
-                equal_container_pairs=equal_channel_pairs,
+                equal_value_pairs=equal_channel_pairs,
             ):
                 raise LockfileMergeError(
                     f"environment '{env_name}' channels differ between "

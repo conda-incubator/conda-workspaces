@@ -20,7 +20,7 @@ from conda_workspaces.exceptions import (
     TaskExecutionError,
     WorkspaceParseError,
 )
-from conda_workspaces.models import Task, TaskArg
+from conda_workspaces.models import Task, TaskArg, TaskDependency
 
 
 def _run_args(
@@ -150,6 +150,52 @@ def test_execute_run_dry_run_with_deps(tmp_path, capsys):
     assert "Would run" in output
     assert "build" in output
     assert "setup" in output
+
+
+@pytest.mark.parametrize("shape", ["shared-descendants", "deep-chain"])
+def test_dry_run_tree_bounds_dependency_expansion(shape: str) -> None:
+    count = 16 if shape == "shared-descendants" else 1200
+    tasks = {
+        str(index): Task(
+            name=str(index),
+            cmd="echo safe",
+            depends_on=[
+                TaskDependency(task=str(dependency))
+                for dependency in range(
+                    max(0, index - (2 if shape == "shared-descendants" else 1)), index
+                )
+            ],
+        )
+        for index in range(count)
+    }
+
+    tree = run_mod._build_dry_run_tree(str(count - 1), tasks, {})
+
+    nodes = [tree]
+    expanded = []
+    for node in nodes:
+        nodes.extend(node.children)
+        if node.children:
+            expanded.append(node.label)
+    assert len(nodes) <= 2 * count
+    assert len(expanded) == count - 1
+    assert len(set(expanded)) == len(expanded)
+    if shape == "shared-descendants":
+        assert any("already shown" in node.label for node in nodes)
+
+
+def test_dry_run_tree_shows_shared_command_detail_once() -> None:
+    command = "echo " + "large-command-" * 4096
+    tasks = {
+        "root": Task(name="root", depends_on=[TaskDependency(task="leaf")] * 32),
+        "leaf": Task(name="leaf", cmd=command),
+    }
+
+    tree = run_mod._build_dry_run_tree("root", tasks, {"leaf": command})
+
+    assert len(tree.children) == 32
+    assert all("leaf" in child.label for child in tree.children)
+    assert sum(command in child.label for child in tree.children) == 1
 
 
 def test_execute_run_dry_run_alias(tmp_path, capsys):

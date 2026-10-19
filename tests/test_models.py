@@ -7,6 +7,7 @@ from dataclasses import asdict, fields
 
 import pytest
 
+import conda_workspaces.models as models_module
 from conda_workspaces.exceptions import (
     EnvironmentNameInvalidError,
     EnvironmentNotFoundError,
@@ -27,6 +28,7 @@ from conda_workspaces.models import (
     TaskOverride,
     WorkspaceConfig,
     has_url_credentials,
+    has_url_credentials_in_data,
     redact_channel_name,
     redact_channel_url,
     redact_url,
@@ -315,6 +317,38 @@ def test_redact_channel_name_and_url(
 )
 def test_has_url_credentials(value: str, expected: bool) -> None:
     assert has_url_credentials(value) is expected
+
+
+@pytest.mark.parametrize("placement", ["mapping-key", "mapping-value", "sequence"])
+@pytest.mark.parametrize(
+    "with_secret", [False, True], ids=["safe", "secret-after-aliases"]
+)
+def test_has_url_credentials_in_data_checks_shared_strings_once(
+    monkeypatch: pytest.MonkeyPatch,
+    placement: str,
+    with_secret: bool,
+) -> None:
+    scalar = "metadata-" * 512
+    entries = [
+        {scalar: index}
+        if placement == "mapping-key"
+        else ({"value": scalar} if placement == "mapping-value" else [scalar])
+        for index in range(32)
+    ]
+    data = ["https://user:password@repo.example" if with_secret else "safe", *entries]
+    calls = 0
+    original = models_module.has_url_credentials
+
+    def record(value: str) -> bool:
+        nonlocal calls
+        if value is scalar:
+            calls += 1
+        return original(value)
+
+    monkeypatch.setattr(models_module, "has_url_credentials", record)
+
+    assert has_url_credentials_in_data(data) is with_secret
+    assert calls == 1
 
 
 @pytest.mark.parametrize(

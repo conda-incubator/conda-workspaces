@@ -82,19 +82,19 @@ def test_document_values_equal(left: object, right: object, expected: bool) -> N
 
 
 def test_document_values_equal_does_not_reuse_failed_comparison() -> None:
-    equal_container_pairs: dict[tuple[int, int], tuple[object, object]] = {}
+    equal_value_pairs: dict[tuple[int, int], tuple[object, object]] = {}
     left = {"nested": ["left"]}
     right = {"nested": ["right"]}
 
     assert not document_values_equal(
         left,
         right,
-        equal_container_pairs=equal_container_pairs,
+        equal_value_pairs=equal_value_pairs,
     )
     assert not document_values_equal(
         left,
         right,
-        equal_container_pairs=equal_container_pairs,
+        equal_value_pairs=equal_value_pairs,
     )
 
 
@@ -103,18 +103,18 @@ def test_document_values_equal_does_not_iterate_shared_comparisons() -> None:
         def __iter__(self) -> Iterator[tuple[int, int]]:
             raise AssertionError("Iterated the shared comparison memo")
 
-    equal_container_pairs = NonIterableMemo()
+    equal_value_pairs = NonIterableMemo()
     shared_left = {"nested": ["value"]}
     shared_right = {"nested": ["value"]}
 
     assert document_values_equal(
         shared_left,
         shared_right,
-        equal_container_pairs=equal_container_pairs,
+        equal_value_pairs=equal_value_pairs,
     )
-    assert (id(shared_left), id(shared_right)) not in equal_container_pairs
+    assert (id(shared_left), id(shared_right)) not in equal_value_pairs
     assert document_values_equal(
         {"wrapper": shared_left},
         {"wrapper": shared_right},
-        equal_container_pairs=equal_container_pairs,
+        equal_value_pairs=equal_value_pairs,
     )

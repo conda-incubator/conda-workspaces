@@ -217,25 +217,21 @@ def has_url_credentials_in_data(value: object) -> bool:
     seen: set[int] = set()
     while values:
         current = values.pop()
+        identity = id(current)
+        if identity in seen:
+            continue
+        seen.add(identity)
         if isinstance(current, str):
             if has_url_credentials(current):
                 return True
             continue
         if isinstance(current, Mapping):
-            identity = id(current)
-            if identity in seen:
-                continue
-            seen.add(identity)
             values.extend(current.keys())
             values.extend(current.values())
         elif isinstance(current, Collection) and not isinstance(
             current,
             (bytes, bytearray),
         ):
-            identity = id(current)
-            if identity in seen:
-                continue
-            seen.add(identity)
             values.extend(current)
     return False
 
