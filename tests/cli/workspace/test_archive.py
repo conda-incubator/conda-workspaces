@@ -713,16 +713,15 @@ def test_execute_unarchive_rejects_existing_target(
 
 
 @pytest.mark.parametrize(
-    ("already_cached", "expected_count"),
-    [(False, 1), (True, 1)],
-    ids=["uncached", "archive-only"],
+    "already_cached",
+    [False, True],
+    ids=["uncached", "preexisting-package"],
 )
-def test_execute_unarchive_dry_run_reports_prospective_cache_count(
+def test_execute_unarchive_dry_run_does_not_stage_packages(
     bundled_cli_archive: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     already_cached: bool,
-    expected_count: int,
 ) -> None:
     from conda.base.context import context as conda_context
 
@@ -749,8 +748,12 @@ def test_execute_unarchive_dry_run_reports_prospective_cache_count(
     )
 
     assert result == 0
-    assert f"Would prime {expected_count} packages" in stream.getvalue()
+    assert "Would stage" not in stream.getvalue()
+    assert "Archive includes 1 bundled packages" in stream.getvalue()
     assert not (tmp_path / "target").exists()
+    assert {path.name for path in cache.iterdir()} == (
+        {"example-1.0-h123.conda"} if already_cached else set()
+    )
 
 
 def test_execute_unarchive_require_sha256_requires_receipt(

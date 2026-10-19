@@ -940,7 +940,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         "--no-install",
         action="store_true",
         default=False,
-        help="Skip cache priming for bundled packages.",
+        help="With --install, do not use bundled packages for offline installation.",
     )
     unarchive_parser.add_argument(
         "--receipt",

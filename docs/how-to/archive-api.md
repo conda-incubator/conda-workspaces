@@ -97,15 +97,13 @@ print(result.target)
 print(result.verified)
 ```
 
-When a bundled archive has a verified receipt, extraction can prime the
-local conda package cache from packages stored inside the archive. Without
-a receipt, bundled packages are left in the extracted workspace and cache
-priming is skipped.
-
-Pass `prime_cache=False` to disable cache priming:
+Extraction leaves bundled packages in the extracted workspace's `packages/`
+directory. It does not write records to a conda package cache. To install
+offline from a bundled archive, call `WorkspaceArchive.install()` with a
+receipt. It stages packages in a temporary cache for that installation:
 
 ```python
-archive.extract(target="/tmp/restored", prime_cache=False)
+archive.install(target="/tmp/restored")
 ```
 
 ## Install from an archive

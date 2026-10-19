@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import stat
 from collections.abc import Collection, Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -14,6 +14,76 @@ if TYPE_CHECKING:
 MAX_DOCUMENT_DEPTH = 128
 MAX_DOCUMENT_COLLECTION_ITEMS = 100_000
 MAX_DOCUMENT_ITEMS = 1_000_000
+
+
+def document_values_equal(
+    left: object,
+    right: object,
+    *,
+    equal_container_pairs: dict[tuple[int, int], tuple[object, object]] | None = None,
+) -> bool:
+    """Compare parsed document values without revisiting aliased containers.
+
+    Successful comparisons extend *equal_container_pairs*. The memo retains the
+    containers so their identity keys remain valid across later comparisons.
+    """
+    stack = [(left, right)]
+    root_identities = (id(left), id(right))
+    compared: set[tuple[int, int]] = set()
+    new_equal_container_pairs: dict[tuple[int, int], tuple[object, object]] = {}
+
+    while stack:
+        current_left, current_right = stack.pop()
+        if current_left is current_right:
+            continue
+        identities = (id(current_left), id(current_right))
+        if identities in compared or (
+            equal_container_pairs is not None and identities in equal_container_pairs
+        ):
+            continue
+        compared.add(identities)
+
+        if isinstance(current_left, Mapping):
+            if not isinstance(current_right, Mapping):
+                return False
+            left_mapping = cast("Mapping[object, object]", current_left)
+            right_mapping = cast("Mapping[object, object]", current_right)
+            if len(left_mapping) != len(right_mapping):
+                return False
+            if identities != root_identities:
+                new_equal_container_pairs[identities] = (
+                    current_left,
+                    current_right,
+                )
+            for key, value in left_mapping.items():
+                if key not in right_mapping:
+                    return False
+                stack.append((value, right_mapping[key]))
+            continue
+        if isinstance(current_right, Mapping):
+            return False
+
+        if isinstance(current_left, list):
+            if not isinstance(current_right, list):
+                return False
+            if len(current_left) != len(current_right):
+                return False
+            if identities != root_identities:
+                new_equal_container_pairs[identities] = (
+                    current_left,
+                    current_right,
+                )
+            stack.extend(zip(current_left, current_right))
+            continue
+        if isinstance(current_right, list):
+            return False
+
+        if current_left != current_right:
+            return False
+
+    if equal_container_pairs is not None:
+        equal_container_pairs.update(new_equal_container_pairs)
+    return True
 
 
 def decode_limited_text(

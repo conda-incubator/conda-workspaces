@@ -21,6 +21,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   Task environment values continue to support named arguments. (#200)
 - Bounded lockfile URL redaction work for shared YAML aliases, including
   shared channel lists, while preserving aliases and removing credentials. (#200)
+- Compare aliased lockfile package records and channel lists without repeated
+  traversal of shared YAML nodes. (#200)
+- Keep bundled archive packages in a temporary cache during explicit archive
+  installation, so extraction cannot add unsigned package records to a shared
+  conda cache. (#200)
 
 - Workspace commands preserve interleaved tool tables when editing
   `pyproject.toml` manifests. (#200)

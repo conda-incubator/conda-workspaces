@@ -1205,16 +1205,21 @@ class WorkspaceArchive:
         *,
         target: str | Path | None = None,
         require_sha256: bool = False,
-        prime_cache: bool = True,
+        prime_cache: bool = False,
         package_cache: str | Path | None = None,
         dry_run: bool = False,
     ) -> WorkspaceArchiveExtractResult:
-        """Extract the archive and optionally prime bundled package cache files."""
+        """Extract without cache publication. *package_cache* is ignored."""
+        if prime_cache:
+            raise ArchiveError(
+                "Persistent package cache priming is not supported.",
+                hints=["Use archive installation to consume bundled packages."],
+            )
         return self._extract(
             target=target,
             require_sha256=require_sha256,
-            prime_cache=prime_cache,
-            package_cache=package_cache,
+            prime_cache=False,
+            package_cache=None,
             dry_run=dry_run,
         )
 
@@ -1292,7 +1297,7 @@ class WorkspaceArchive:
             if receipt is not None:
                 receipt.verify_extracted(staged, require_sha256=require_sha256)
             cache_priming_skipped = bool(
-                info["has_packages"] and prime_cache and receipt is None
+                info["has_packages"] and not (prime_cache and receipt is not None)
             )
             cache_plan: list[tuple[str, Path, str]] = []
             cache_packages: list[tuple[Path, dict[str, object]]] = []
@@ -1631,6 +1636,7 @@ class WorkspaceArchive:
 
         When *dry_run* is true, archive and install inputs are validated
         without extracting files or changing an environment prefix.
+        *package_cache* is ignored because bundled packages use a private cache.
         """
         final_prefix = str(prefix) if prefix is not None else None
         if final_prefix is not None and not environment:
@@ -1758,39 +1764,55 @@ class WorkspaceArchive:
                     dry_run=True,
                 )
 
-        extract_result = self._extract(
-            target=target,
-            require_sha256=require_sha256,
-            prime_cache=prime_cache,
-            package_cache=package_cache,
-            dry_run=dry_run,
-            validate_workspace=validate_workspace,
-            validate_install=validate_install,
-        )
-
-        if dry_run:
-            return_code = 0
-        else:
-            handler = install_handler or self.install_from_lockfile
-            cache_override = (
-                conda_context._override(
-                    "_pkgs_dirs",
-                    (str(Path(package_cache)),),
-                )
-                if package_cache is not None
-                else nullcontext()
+        with (
+            tempfile.TemporaryDirectory(prefix="conda-workspaces-pkgs-")
+            if prime_cache
+            else nullcontext(None)
+        ) as temporary_cache:
+            private_cache = (
+                Path(temporary_cache) if temporary_cache is not None else None
             )
-            PackageCacheData.clear()
-            try:
-                with cache_override:
-                    return_code = handler(
-                        extract_result.target,
-                        environment,
-                        install_prefix,
-                        runtime_prefix,
+            extract_result = self._extract(
+                target=target,
+                require_sha256=require_sha256,
+                prime_cache=prime_cache,
+                package_cache=private_cache,
+                dry_run=dry_run,
+                validate_workspace=validate_workspace,
+                validate_install=validate_install,
+            )
+
+            if dry_run:
+                return_code = 0
+            else:
+                handler = install_handler or self.install_from_lockfile
+                use_private_cache = bool(
+                    private_cache is not None and extract_result.primed_packages
+                )
+                cache_override = (
+                    conda_context._override(
+                        "_pkgs_dirs",
+                        (str(private_cache),),
                     )
-            finally:
+                    if use_private_cache
+                    else nullcontext()
+                )
+                copy_override = (
+                    conda_context._override("always_copy", True)
+                    if use_private_cache
+                    else nullcontext()
+                )
                 PackageCacheData.clear()
+                try:
+                    with cache_override, copy_override:
+                        return_code = handler(
+                            extract_result.target,
+                            environment,
+                            install_prefix,
+                            runtime_prefix,
+                        )
+                finally:
+                    PackageCacheData.clear()
 
         prefix_matches: tuple[Path, ...] = ()
         prefix_matches_truncated = False

@@ -904,6 +904,35 @@ def test_conda_lock_loader_compose_redacts_relative_channel_token() -> None:
     ]
 
 
+@pytest.mark.parametrize("duplicate_count", [1, 32], ids=["single", "repeated"])
+def test_package_records_by_url_reuses_shared_metadata_comparisons(
+    duplicate_count: int,
+) -> None:
+    comparisons = 0
+
+    class ComparableValue:
+        def __eq__(self, other: object) -> bool:
+            nonlocal comparisons
+            comparisons += 1
+            assert comparisons == 1, "Revisited shared package metadata"
+            return isinstance(other, ComparableValue)
+
+    left_value = ComparableValue()
+    right_value = ComparableValue()
+    left = {"values": [left_value] * 4096}
+    right = {"values": [right_value] * 4096}
+    url = "https://repo.example.test/linux-64/demo-1.0-0.conda"
+    first = {"conda": url, "metadata": left}
+    duplicates = [{"conda": url, "metadata": right} for _ in range(duplicate_count)]
+
+    records = CondaLockLoader.package_records_by_url_from_data(
+        {"packages": [first, *duplicates]}
+    )
+
+    assert records == {url: first}
+    assert comparisons == 1
+
+
 def test_conda_lock_loader_reconstructs_package_records_from_metadata(
     selective_lock_data: dict,
 ) -> None:
@@ -4493,6 +4522,49 @@ packages:
             "depends": ["python >=3.11"],
         }
     ]
+
+
+def test_merge_lockfiles_accepts_aliased_package_metadata(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+) -> None:
+    ctx = workspace_ctx_factory(env_names=["default"])
+    channel = str(Channel("conda-forge"))
+    package_url = f"{channel}/noarch/demo-1.0-0.tar.bz2"
+    fragments = []
+
+    for platform in ("linux-64", "osx-64"):
+        shared_metadata: object = {"value": "shared"}
+        for _ in range(8):
+            shared_metadata = [shared_metadata, shared_metadata]
+        data = {
+            "version": 1,
+            "environments": {
+                "default": {
+                    "channels": [{"url": channel}],
+                    "packages": {platform: [{"conda": package_url}]},
+                }
+            },
+            "packages": [
+                {
+                    "conda": package_url,
+                    "sha256": "a" * 64,
+                    "metadata": shared_metadata,
+                }
+            ],
+        }
+        content = io.StringIO()
+        yaml_dump(data, content)
+        fragment = tmp_path / f"conda.lock.{platform}"
+        fragment.write_text(content.getvalue(), encoding="utf-8")
+        fragments.append(fragment)
+    load_yaml.cache_clear()
+
+    merged_path = merge_lockfiles(fragments, ctx)
+    merged = load_yaml(merged_path)
+
+    metadata = merged["packages"][0]["metadata"]
+    assert metadata[0] is metadata[1]
 
 
 @pytest.mark.parametrize(

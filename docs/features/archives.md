@@ -71,7 +71,7 @@ conda workspace archive --lock
 For offline deployment, `--bundle` includes resolved conda package
 archives (`.conda` or `.tar.bz2`) inside the archive. Package hashes
 are verified against the lockfile on bundling and before receipt-verified
-cache priming:
+temporary staging for installation:
 
 ```bash
 conda workspace archive --lock --bundle --receipt -o offline.tar.zst

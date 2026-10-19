@@ -83,6 +83,7 @@ from .models import (
 )
 from .parsing import (
     decode_limited_text,
+    document_values_equal,
     read_limited_text,
     validate_document_limits,
 )
@@ -898,6 +899,7 @@ class CondaLockLoader(EnvironmentSpecBase):
     ) -> dict[str, dict[str, Any]]:
         """Return top-level conda package records from *data* keyed by URL."""
         records_by_url: dict[str, dict[str, Any]] = {}
+        equal_container_pairs: dict[tuple[int, int], tuple[object, object]] = {}
         packages = data.get("packages", [])
         if not isinstance(packages, list):
             raise ValueError("Lockfile package records must be a list")
@@ -907,7 +909,11 @@ class CondaLockLoader(EnvironmentSpecBase):
             url = record.get("conda") or record.get("url") or record.get("pypi")
             if isinstance(url, str) and url:
                 existing = records_by_url.get(url)
-                if existing is not None and existing != record:
+                if existing is not None and not document_values_equal(
+                    existing,
+                    record,
+                    equal_container_pairs=equal_container_pairs,
+                ):
                     raise ValueError(
                         f"Conflicting package metadata for URL {redact_url(url)!r}"
                     )
@@ -1841,6 +1847,8 @@ def merge_lockfiles(
     package_sources_by_url: dict[str, Path] = {}
     manifest_env_channels: dict[str, list[dict[str, str]]] = {}
     manifest_env_channel_urls: dict[str, list[str]] = {}
+    equal_package_record_pairs: dict[tuple[int, int], tuple[object, object]] = {}
+    equal_channel_pairs: dict[tuple[int, int], tuple[object, object]] = {}
     fragment_bytes = 0
     fragment_items = 0
 
@@ -1901,7 +1909,11 @@ def merge_lockfiles(
             if existing is None:
                 packages_by_url[url] = record
                 package_sources_by_url[url] = path
-            elif existing != record:
+            elif not document_values_equal(
+                existing,
+                record,
+                equal_container_pairs=equal_package_record_pairs,
+            ):
                 raise LockfileMergeError(
                     f"fragment '{path}' has a conflicting package record for "
                     f"URL '{redact_url(url)}'",
@@ -1944,7 +1956,11 @@ def merge_lockfiles(
                 env_order.append(env_name)
                 env_channels[env_name] = channels
                 env_platforms[env_name] = {}
-            elif existing != channels:
+            elif not document_values_equal(
+                existing,
+                channels,
+                equal_container_pairs=equal_channel_pairs,
+            ):
                 raise LockfileMergeError(
                     f"environment '{env_name}' channels differ between "
                     f"fragments; '{path}' disagrees with an earlier fragment",
