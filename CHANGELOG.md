@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added
+
+- Added `conda workspace platform add/remove --feature NAME` to edit named
+  feature platform lists. Lock updates preserve solutions for retained targets
+  and solve newly required targets without changing installed environments.
+  (#200)
+
 ### Fixed
 
 - Fixed `conda workspace run` changing the caller's working directory, so
