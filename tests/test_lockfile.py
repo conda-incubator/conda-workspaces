@@ -41,6 +41,7 @@ from conda_workspaces.exceptions import (
     LockfileIntegrityError,
     LockfileMergeError,
     LockfileNotFoundError,
+    LockfileStaleError,
     SolveError,
 )
 from conda_workspaces.export import multiplatform_export
@@ -2071,6 +2072,54 @@ def resolved_envs_factory():
         }
 
     return _factory
+
+
+@pytest.mark.parametrize("omitted", ["environment", "platform"])
+@pytest.mark.parametrize("stale", [False, True], ids=["valid", "stale"])
+def test_render_lockfile_checks_retained_targets_once(
+    workspace_ctx_factory,
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    omitted: str,
+    stale: bool,
+) -> None:
+    dependencies = {"python": MatchSpec("python >=4" if stale else "python >=3")}
+    config = WorkspaceConfig(
+        channels=[Channel("conda-forge")],
+        platforms=["linux-64", "osx-arm64"],
+        environments={"default": Environment(name="default")},
+    )
+    data = lockfile_data_factory()
+    if omitted == "environment":
+        config.environments["retained"] = Environment(
+            name="retained", conda_dependencies=dependencies
+        )
+        data["environments"]["retained"] = data["environments"]["default"]
+    else:
+        config.environments["default"].target_conda_dependencies = {
+            "osx-arm64": dependencies
+        }
+    resolved = {"default": resolve_environment(config, "default")}
+    resolved["default"].platforms = ["linux-64"]
+    original_resolve = resolver_module.resolve_environment
+    resolved_names: list[str] = []
+
+    def record_resolve(config, name, platform=None, **kwargs):
+        resolved_names.append(name)
+        return original_resolve(config, name, platform, **kwargs)
+
+    monkeypatch.setattr(resolver_module, "resolve_environment", record_resolve)
+    ctx = workspace_ctx_factory(platform="linux-64")
+    if stale:
+        with pytest.raises(LockfileStaleError, match="python"):
+            render_lockfile(
+                ctx, resolved, config=config, baseline_data=data, update_targets={}
+            )
+    else:
+        render_lockfile(
+            ctx, resolved, config=config, baseline_data=data, update_targets={}
+        )
+    assert resolved_names == list(config.environments)
 
 
 def test_render_lockfile_selective_update_only_replaces_target(
@@ -6135,6 +6184,81 @@ def test_satisfiability_bounds_wildcard_package_comparisons(
     assert result.status == expected_status
     if expected_status == LockfileStatus.OUT_OF_DATE:
         assert "dependency matching exceeds" in result.reason
+
+
+@pytest.mark.parametrize("operation", ["status", "standalone", "target", "platform"])
+@pytest.mark.parametrize("target_only", [False, True], ids=["base", "rich-target"])
+@pytest.mark.parametrize("limited", [False, True], ids=["within-limit", "over-limit"])
+def test_satisfiability_bounds_overlapping_feature_inputs(
+    lockfile_data_factory,
+    workspace_ctx_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+    target_only: bool,
+    limited: bool,
+) -> None:
+    platforms = ["linux-64-a", "linux-64-b"] if target_only else ["linux-64"]
+    names = ["default"] if target_only else ["default", "dev"]
+    feature_names = ["one", "two", "three"]
+    dependencies = {"python": MatchSpec("python >=3.10")}
+    config = WorkspaceConfig(
+        channels=[Channel("conda-forge")],
+        platforms=platforms,
+        platform_subdirs=(
+            {name: "linux-64" for name in platforms} if target_only else {}
+        ),
+        features={
+            name: Feature(
+                name=name,
+                conda_dependencies={} if target_only else dependencies,
+                target_conda_dependencies=(
+                    {"linux-64": dependencies} if target_only else {}
+                ),
+            )
+            for name in feature_names
+        },
+        environments={
+            name: Environment(name=name, features=feature_names) for name in names
+        },
+    )
+    data = lockfile_data_factory()
+    locked_env = data["environments"]["default"]
+    refs = locked_env["packages"]["linux-64"]
+    locked_env["packages"] = {platform: refs for platform in platforms}
+    data["environments"] = {name: locked_env for name in names}
+    limit = (12 if target_only else 15) if limited else 128
+    monkeypatch.setattr(resolver_module, "MAX_RESOLUTION_WORK_ITEMS", limit)
+    merges: list[tuple[str, str | None]] = []
+    original_merge = config.merged_conda_dependencies
+
+    def record_merge(environment, platform=None):
+        merges.append((environment.name, platform))
+        return original_merge(environment, platform)
+
+    monkeypatch.setattr(config, "merged_conda_dependencies", record_merge)
+    if operation == "status":
+        ctx = workspace_ctx_factory(platform="linux-64", env_names=names)
+        lock = lockfile_path(ctx)
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        yaml_dump(data, lock)
+        status = lockfile_module.lockfile_status(ctx, config, platform=platforms[0])
+    elif operation == "standalone":
+        status = check_lockfile_satisfiability(config, data, platforms[0])
+    else:
+        status = CondaLockLoader(tmp_path / LOCKFILE_NAME, data=data).check_targets(
+            config,
+            ((name, platform) for name in names for platform in platforms),
+            match_budget_scope=operation,
+        )
+
+    if limited:
+        assert status.status == LockfileStatus.OUT_OF_DATE
+        assert "resolution work exceeds" in status.reason
+        assert merges == [("default", None)]
+    else:
+        assert status.status == LockfileStatus.UP_TO_DATE
+        assert any(platform is not None for _, platform in merges)
 
 
 def test_satisfiability_batch_resolves_named_platforms_once(

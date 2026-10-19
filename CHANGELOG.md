@@ -21,8 +21,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   with aggregate wildcard, package reference, and metadata limits. Apply the
   same limits to standalone status checks and reuse channel locations for
   platforms that share a conda subdir. (#200)
-- Cap aggregate feature-merge work before resolving all environments, including
-  workspace info without a lockfile. (#200)
+- Cap aggregate feature-merge work before resolving all environments or checking
+  lockfile status, including target-specific dependencies and workspace info
+  without a lockfile. Reuse resolved environments during platform edits and
+  lockfile validation. (#200)
 - Cap filesystem entries created by archive extraction, reserve disk space for
   file and directory metadata, and check available inodes before writing. (#200)
 - Limit archive extraction to 4 GiB of raw and expanded bytes by default, check free

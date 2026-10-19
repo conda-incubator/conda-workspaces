@@ -1314,7 +1314,6 @@ class WorkspaceArchive:
         return self._extract(
             target=target,
             require_sha256=require_sha256,
-            prime_cache=False,
             package_cache=None,
             dry_run=dry_run,
             allow_large_archive=allow_large_archive,
@@ -1325,8 +1324,7 @@ class WorkspaceArchive:
         *,
         target: str | Path | None,
         require_sha256: bool,
-        prime_cache: bool,
-        package_cache: str | Path | None,
+        package_cache: Path | None,
         dry_run: bool,
         allow_large_archive: bool,
         validate_workspace: Callable[[Path, ArchiveReceipt | None], None] | None = None,
@@ -1410,17 +1408,19 @@ class WorkspaceArchive:
             if receipt is not None:
                 receipt.verify_extracted(staged, require_sha256=require_sha256)
             cache_priming_skipped = bool(
-                info["has_packages"] and not (prime_cache and receipt is not None)
+                info["has_packages"]
+                and not (package_cache is not None and receipt is not None)
             )
             cache_plan: list[tuple[str, Path, str, int]] = []
             cache_packages: list[tuple[Path, dict[str, object]]] = []
             cache_records: list[tuple[Path, Path, dict[str, object]]] = []
             cache_path = None
-            if info["has_packages"] and prime_cache and receipt is not None:
-                if package_cache is None:
-                    cache_path = Path(conda_context.pkgs_dirs[0])
-                else:
-                    cache_path = Path(package_cache)
+            if (
+                info["has_packages"]
+                and package_cache is not None
+                and receipt is not None
+            ):
+                cache_path = package_cache
                 if cache_path.resolve().is_relative_to(target_path):
                     raise ArchiveError(
                         "Package cache must be outside the archive extraction target.",
@@ -1979,7 +1979,6 @@ class WorkspaceArchive:
             extract_result = self._extract(
                 target=target,
                 require_sha256=require_sha256,
-                prime_cache=prime_cache,
                 package_cache=private_cache,
                 dry_run=dry_run,
                 allow_large_archive=allow_large_archive,

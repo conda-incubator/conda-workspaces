@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import tomlkit
@@ -49,11 +48,10 @@ def execute_platform(
             "The default feature cannot have a separate platform list.",
             hints=["Omit --feature to edit the workspace platforms."],
         )
-    if args.manifest_file is not None:
-        WorkspacePublication.validate_manifest_path(Path(args.manifest_file))
-    selected_path = workspace_manifest_path_from_args(args, for_mutation=True)
-    manifest_path = selected_path or detect_workspace_file()
+    manifest_path = args.manifest_file or detect_workspace_file()
     WorkspacePublication.validate_manifest_path(manifest_path)
+    selected_path = workspace_manifest_path_from_args(args, for_mutation=True)
+    manifest_path = selected_path or manifest_path
     parser = find_parser(manifest_path)
     original_text = parser.read_manifest_text(manifest_path)
     document = parser.parse_toml_text_with_redacted_errors(original_text, manifest_path)
@@ -158,6 +156,12 @@ def execute_platform(
     )
     config = parser.parse_data_with_redacted_errors(document.unwrap(), manifest_path)
     ctx = WorkspaceContext(config)
+    current_envs = resolve_all_environments(current) if feature_name is None else {}
+    updated_envs = (
+        resolve_all_environments(config)
+        if feature_name is None or not args.no_lockfile_update
+        else {}
+    )
     publication = WorkspacePublication(
         ctx, manifest_path, original_text, updated_text, "platform update"
     )
@@ -191,8 +195,9 @@ def execute_platform(
                     }
                     if set(locked_platforms) != set(current.environments):
                         stale_reason = "Locked environments do not match the manifest."
-                    resolved_envs = resolve_all_environments(current)
-                    for name, resolved in resolved_envs.items():
+                    if feature_name is not None:
+                        current_envs = resolve_all_environments(current)
+                    for name, resolved in current_envs.items():
                         if stale_reason:
                             break
                         declared_platforms = set(resolved.platforms or [ctx.platform])
@@ -205,7 +210,7 @@ def execute_platform(
                     if stale_reason is None:
                         targets = (
                             (name, platform)
-                            for name, resolved in resolved_envs.items()
+                            for name, resolved in current_envs.items()
                             for platform in (resolved.platforms or [ctx.platform])
                         )
                         lock_status = loader.check_targets(
@@ -232,7 +237,7 @@ def execute_platform(
                     )
             rendered = render_lockfile(
                 ctx,
-                resolve_all_environments(config),
+                updated_envs,
                 config=config,
                 baseline_data=baseline,
                 preserve_existing=baseline is not None,
@@ -264,11 +269,10 @@ def execute_platform(
                 " from their other features or the workspace."
             )
     if feature_name is None:
-        before = resolve_all_environments(current)
         names = [
             name
-            for name, environment in resolve_all_environments(config).items()
-            if environment.platforms != before[name].platforms
+            for name, environment in updated_envs.items()
+            if environment.platforms != current_envs[name].platforms
         ]
     else:
         names = affected_environments(config, feature_name)

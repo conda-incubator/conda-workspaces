@@ -17,7 +17,11 @@ from conda_workspaces.lockfile import (
     load_lockfile_data,
 )
 from conda_workspaces.manifests import find_parser
-from conda_workspaces.resolver import ResolvedEnvironment, resolve_environment
+from conda_workspaces.resolver import (
+    ResolvedEnvironment,
+    resolve_all_environments,
+    resolve_environment,
+)
 
 from ..conftest import make_args
 
@@ -415,6 +419,67 @@ def test_platform_solve_failure_preserves_manifest(
 
 
 @pytest.mark.parametrize("dry_run", [False, True], ids=["write", "preview"])
+@pytest.mark.parametrize(
+    ("link_kind", "error", "message"),
+    [
+        ("manifest", CondaWorkspacesError, "manifest cannot be a symlink"),
+        ("broken-manifest", CondaWorkspacesError, "manifest cannot be a symlink"),
+        ("parent", NotADirectoryError, "parent is a symbolic link"),
+    ],
+    ids=["manifest", "broken-manifest", "parent"],
+)
+def test_platform_rejects_symlinked_manifest_paths(
+    platform_manifest: Path,
+    dry_run: bool,
+    link_kind: str,
+    error: type[Exception],
+    message: str,
+) -> None:
+    original = platform_manifest.read_bytes()
+    link = platform_manifest.parent / "linked"
+    if link_kind == "parent":
+        link.symlink_to(platform_manifest.parent, target_is_directory=True)
+        selected = link / platform_manifest.name
+    else:
+        link.symlink_to(
+            platform_manifest if link_kind == "manifest" else "missing-manifest"
+        )
+        selected = link
+
+    with pytest.raises(error, match=message):
+        execute_platform(make_args(_DEFAULTS, manifest_file=selected, dry_run=dry_run))
+
+    assert platform_manifest.read_bytes() == original
+    assert link.is_symlink()
+    assert not (platform_manifest.parent / ".conda").exists()
+
+
+@pytest.mark.parametrize("no_lockfile_update", [False, True], ids=["solve", "manifest"])
+def test_workspace_platform_resolution_limit_preserves_manifest(
+    platform_manifest: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    no_lockfile_update: bool,
+) -> None:
+    original = platform_manifest.read_bytes()
+    monkeypatch.setattr("conda_workspaces.resolver.MAX_RESOLUTION_WORK_ITEMS", 1)
+
+    with pytest.raises(CondaWorkspacesError, match="resolution work exceeds"):
+        execute_platform(
+            make_args(
+                _DEFAULTS,
+                manifest_file=platform_manifest,
+                feature=None,
+                platforms=["osx-arm64"],
+                no_lockfile_update=no_lockfile_update,
+            )
+        )
+
+    assert platform_manifest.read_bytes() == original
+    assert not (platform_manifest.parent / "conda.lock").exists()
+    assert not (platform_manifest.parent / ".conda").exists()
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "preview"])
 def test_platform_rejects_broken_lockfile_symlink(
     platform_manifest: Path, platform_solves: list[tuple[str, str]], dry_run: bool
 ) -> None:
@@ -689,20 +754,30 @@ def test_workspace_platform_lock_preserves_feature_solutions(
     assert execute_platform(args) == 0
     lock_path = platform_manifest.parent / "conda.lock"
     baseline = load_lockfile_data(lock_path.read_bytes())
-    checked: list[tuple[int, tuple[tuple[str, str], ...], str]] = []
+    checked: list[tuple[int, tuple[tuple[str, str], ...] | None, str]] = []
+    resolved_configs: list[WorkspaceConfig] = []
     original_check_targets = CondaLockLoader.check_targets
+
+    def record_resolution(config: WorkspaceConfig) -> dict[str, ResolvedEnvironment]:
+        resolved_configs.append(config)
+        return resolve_all_environments(config)
 
     def record_targets(
         loader: CondaLockLoader,
         config: WorkspaceConfig,
-        targets: tuple[tuple[str, str], ...],
+        targets: tuple[tuple[str, str], ...] | None = None,
         *,
         match_budget_scope: str,
+        default_platform: str | None = None,
     ) -> LockfileStatus:
-        pairs = tuple(targets)
+        pairs = tuple(targets) if targets is not None else None
         checked.append((id(loader), pairs, match_budget_scope))
         return original_check_targets(
-            loader, config, pairs, match_budget_scope=match_budget_scope
+            loader,
+            config,
+            pairs,
+            match_budget_scope=match_budget_scope,
+            default_platform=default_platform,
         )
 
     monkeypatch.setattr(
@@ -710,11 +785,17 @@ def test_workspace_platform_lock_preserves_feature_solutions(
         "check_targets",
         record_targets,
     )
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.platform.resolve_all_environments",
+        record_resolution,
+    )
     platform_solves.clear()
     capsys.readouterr()
     args.platform_action = action
     args.platforms = ["osx-arm64"] if action == "add" else ["win-64"]
     assert execute_platform(args) == 0
+    assert len(resolved_configs) == 2
+    assert resolved_configs[0] is not resolved_configs[1]
     expected_checks = {
         (name, platform)
         for name, env_data in baseline["environments"].items()
@@ -724,6 +805,7 @@ def test_workspace_platform_lock_preserves_feature_solutions(
     assert set(checked[0][1]) == expected_checks
     assert len(checked[0][1]) == len(expected_checks)
     assert checked[0][2] == "target"
+    assert checked[1][1] is None
     assert checked[1][2] == "platform"
     updated = load_lockfile_data(lock_path.read_bytes())
     expected = (

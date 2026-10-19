@@ -706,6 +706,44 @@ class WorkspaceConfig:
 
         return result
 
+    def resolution_work_items(
+        self, environment: Environment, platform: str | None = None
+    ) -> int:
+        """Count feature inputs before merges can discard overlapping entries.
+
+        Resolution and lockfile status share this accounting so that checking
+        an existing lockfile cannot bypass the feature-merge work limit.
+        """
+        target_keys = self.target_platform_keys(platform)
+        items = (
+            1
+            + len(self.channels)
+            + len(self.platforms)
+            + len(self.platform_subdirs)
+            + len(environment.conda_dependencies)
+            + len(environment.pypi_dependencies)
+        )
+        for key in target_keys:
+            items += len(environment.target_conda_dependencies.get(key, {}))
+            items += len(environment.target_pypi_dependencies.get(key, {}))
+        if platform is not None:
+            items += len(self.platform_system_requirements.get(platform, {}))
+        for feature in self.resolve_features(environment):
+            items += (
+                1
+                + len(feature.conda_dependencies)
+                + len(feature.pypi_dependencies)
+                + len(feature.channels)
+                + len(feature.platforms)
+                + len(feature.system_requirements)
+                + len(feature.activation_scripts)
+                + len(feature.activation_env)
+            )
+            for key in target_keys:
+                items += len(feature.target_conda_dependencies.get(key, {}))
+                items += len(feature.target_pypi_dependencies.get(key, {}))
+        return items
+
     def merged_conda_dependencies(
         self,
         environment: Environment,

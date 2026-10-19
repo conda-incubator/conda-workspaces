@@ -260,6 +260,7 @@ def check_lockfile_satisfiability(
     _total_match_budget: list[int] | None = None,
     _batch_expansion_budget: DocumentExpansionBudget | None = None,
     _channel_locations_cache: dict[tuple[int, str], ChannelLocations] | None = None,
+    _resolution_budget: list[int] | None = None,
     _exact_target: bool = False,
 ) -> LockfileStatus:
     """Check whether *lockfile_data* satisfies the manifest's requirements.
@@ -275,7 +276,14 @@ def check_lockfile_satisfiability(
     :meth:`CondaLockLoader.check_targets` to check several exact targets after
     validating those declarations once.
     """
+    from .resolver import MAX_RESOLUTION_WORK_ITEMS
+
     _stale = LockfileStatus.OUT_OF_DATE
+    resolution_budget = (
+        _resolution_budget
+        if _resolution_budget is not None
+        else [MAX_RESOLUTION_WORK_ITEMS]
+    )
     match_budget = (
         _match_budget if _match_budget is not None else [MAX_LOCKFILE_MATCH_ATTEMPTS]
     )
@@ -306,7 +314,9 @@ def check_lockfile_satisfiability(
         return LockfileStatus(status=_stale, reason=str(exc))
 
     if _validated_envs is None:
-        declaration_status, validated_envs = loader._validate_manifest(config)
+        declaration_status, validated_envs = loader._validate_manifest(
+            config, resolution_budget
+        )
         if declaration_status is not None:
             return declaration_status
     else:
@@ -420,8 +430,18 @@ def check_lockfile_satisfiability(
 
         from .envs import _build_pypi_specs
 
+        env_obj = config.get_environment(env_name)
+        resolution_budget[0] -= config.resolution_work_items(
+            env_obj, current_lock_platform
+        )
+        if resolution_budget[0] < 0:
+            return LockfileStatus(
+                status=_stale,
+                reason=(
+                    "Workspace environment resolution work exceeds the allowed limit"
+                ),
+            )
         if _exact_target:
-            env_obj = config.get_environment(env_name)
             target_resolved = replace(
                 base_resolved,
                 conda_dependencies=config.merged_conda_dependencies(
@@ -599,7 +619,7 @@ class CondaLockLoader(EnvironmentSpecBase):
         return self._data_cache
 
     def _validate_manifest(
-        self, config: WorkspaceConfig
+        self, config: WorkspaceConfig, resolution_budget: list[int]
     ) -> tuple[LockfileStatus | None, dict[str, ResolvedEnvironment]]:
         """Check lock metadata once and retain each environment's platform list."""
         stale = LockfileStatus.OUT_OF_DATE
@@ -654,6 +674,19 @@ class CondaLockLoader(EnvironmentSpecBase):
                         reason=(
                             f"Environment '{env_name}' is declared in the manifest "
                             "but missing from the lockfile"
+                        ),
+                    ),
+                    {},
+                )
+
+            resolution_budget[0] -= config.resolution_work_items(env_obj)
+            if resolution_budget[0] < 0:
+                return (
+                    LockfileStatus(
+                        status=stale,
+                        reason=(
+                            "Workspace environment resolution work "
+                            "exceeds the allowed limit"
                         ),
                     ),
                     {},
@@ -765,21 +798,39 @@ class CondaLockLoader(EnvironmentSpecBase):
     def check_targets(
         self,
         config: WorkspaceConfig,
-        targets: Iterable[tuple[str, str]],
+        targets: Iterable[tuple[str, str]] | None = None,
         *,
         match_budget_scope: Literal["target", "platform"],
+        default_platform: str | None = None,
     ) -> LockfileStatus:
         """Check exact environment/platform targets after one manifest validation.
 
         Platform management retains its prior per-target wildcard budget.
         Lockfile rendering retains a shared budget for each platform. Both
         modes also enforce one operation-wide wildcard comparison limit.
+        Omit *targets* to check every declared target, using *default_platform*
+        (or conda's current subdir) for environments without platform lists.
         """
+        from conda.base.context import context as conda_context
+
+        from .resolver import MAX_RESOLUTION_WORK_ITEMS
+
         if match_budget_scope not in ("target", "platform"):
             raise ValueError("Invalid lockfile match budget scope")
-        declaration_status, resolved_envs = self._validate_manifest(config)
+        resolution_budget = [MAX_RESOLUTION_WORK_ITEMS]
+        declaration_status, resolved_envs = self._validate_manifest(
+            config, resolution_budget
+        )
         if declaration_status is not None:
             return declaration_status
+        if targets is None:
+            targets = (
+                (name, platform)
+                for name, resolved in resolved_envs.items()
+                for platform in (
+                    resolved.platforms or [default_platform or conda_context.subdir]
+                )
+            )
 
         declared = {
             name: set(resolved.platforms or config.platforms)
@@ -842,6 +893,7 @@ class CondaLockLoader(EnvironmentSpecBase):
                 _total_match_budget=total_budget,
                 _batch_expansion_budget=expansion_budget,
                 _channel_locations_cache=channel_locations_cache,
+                _resolution_budget=resolution_budget,
                 _exact_target=True,
             )
             if status.status != LockfileStatus.UP_TO_DATE:
@@ -2221,15 +2273,10 @@ def render_lockfile(
         )
         if config is not None:
             updated_loader = CondaLockLoader(lockfile_path(ctx), data=updated)
-            from .resolver import resolve_all_environments
-
-            targets = (
-                (name, platform)
-                for name, resolved in resolve_all_environments(config).items()
-                for platform in (resolved.platforms or [host_platform])
-            )
             status = updated_loader.check_targets(
-                config, targets, match_budget_scope="platform"
+                config,
+                match_budget_scope="platform",
+                default_platform=host_platform,
             )
             if status.status != LockfileStatus.UP_TO_DATE:
                 raise LockfileStaleError(

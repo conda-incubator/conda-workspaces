@@ -465,46 +465,11 @@ def resolve_environment(
         selected_platform = config.resolve_platform_name(platform, resolved_platforms)
 
     if _work_budget is not None:
-        target_keys = config.target_platform_keys(selected_platform)
-        input_items = (
-            1
-            + len(config.channels)
-            + len(config.platforms)
-            + len(config.platform_subdirs)
-            + len(env.conda_dependencies)
-            + len(env.pypi_dependencies)
-        )
-        for key in target_keys:
-            input_items += len(env.target_conda_dependencies.get(key, {}))
-            input_items += len(env.target_pypi_dependencies.get(key, {}))
-        if selected_platform is not None:
-            input_items += len(
-                config.platform_system_requirements.get(selected_platform, {})
-            )
-        if input_items > _work_budget[0]:
+        _work_budget[0] -= config.resolution_work_items(env, selected_platform)
+        if _work_budget[0] < 0:
             raise CondaWorkspacesError(
                 "Workspace environment resolution work exceeds the allowed limit"
             )
-        _work_budget[0] -= input_items
-        for feature in features:
-            feature_items = (
-                1
-                + len(feature.conda_dependencies)
-                + len(feature.pypi_dependencies)
-                + len(feature.channels)
-                + len(feature.platforms)
-                + len(feature.system_requirements)
-                + len(feature.activation_scripts)
-                + len(feature.activation_env)
-            )
-            for key in target_keys:
-                feature_items += len(feature.target_conda_dependencies.get(key, {}))
-                feature_items += len(feature.target_pypi_dependencies.get(key, {}))
-            if feature_items > _work_budget[0]:
-                raise CondaWorkspacesError(
-                    "Workspace environment resolution work exceeds the allowed limit"
-                )
-            _work_budget[0] -= feature_items
 
     resolved = ResolvedEnvironment(
         name=env_name,

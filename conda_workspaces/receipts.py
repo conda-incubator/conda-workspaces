@@ -573,7 +573,6 @@ class ReceiptInventory:
             int,
             tuple[dict[str, object], list[dict[str, object]], int, int],
         ] = {}
-        source_sizes: dict[int, tuple[int, int]] = {}
         remaining_references = MAX_RECEIPT_ITEMS
         remaining_normalization_items = MAX_RECEIPT_ITEMS
         remaining_normalization_strings = MAX_RECEIPT_BYTES
@@ -613,24 +612,20 @@ class ReceiptInventory:
                         record_key = (id(source), url, platform)
                         normalized = normalized_records.get(record_key)
                         if normalized is None:
-                            if id(source) not in source_sizes:
-                                fields = [
-                                    field
-                                    for field in PACKAGE_RECORD_FIELDS
-                                    if field in source and source[field] is not None
-                                ]
-                                source_sizes[id(source)] = (
-                                    len(fields) + 4,
-                                    sum(
-                                        len(field) + len(value)
-                                        for field in fields
-                                        if isinstance(value := source[field], str)
-                                    ),
-                                )
-                            source_items, source_strings = source_sizes[id(source)]
-                            remaining_normalization_items -= source_items
+                            fields = [
+                                field
+                                for field in PACKAGE_RECORD_FIELDS
+                                if field in source and source[field] is not None
+                            ]
+                            remaining_normalization_items -= len(fields) + 4
                             remaining_normalization_strings -= (
-                                source_strings + len(url) + len(platform)
+                                sum(
+                                    len(field) + len(value)
+                                    for field in fields
+                                    if isinstance(value := source[field], str)
+                                )
+                                + len(url)
+                                + len(platform)
                             )
                             if (
                                 remaining_normalization_items < 0
