@@ -69,7 +69,7 @@ from .paths import (
 from .publication import WorkspacePublication
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Mapping
     from typing import Any, BinaryIO, Final
 
     from .context import WorkspaceContext
@@ -105,7 +105,7 @@ MAX_ARCHIVE_COMPONENTS: Final = 1_000_000
 """Maximum cumulative path components accepted across archive members."""
 
 MAX_ARCHIVE_METADATA_BYTES: Final = 64 * 1024**2
-"""Maximum combined expanded size of GNU and PAX metadata, in bytes."""
+"""Maximum metadata payload bytes and effective PAX text characters."""
 
 MAX_ARCHIVE_METADATA_HEADERS: Final = 128
 """Maximum consecutive GNU and PAX extension headers."""
@@ -114,7 +114,7 @@ MAX_ARCHIVE_METADATA_HEADERS_TOTAL: Final = 100_000
 """Maximum combined GNU and PAX extension headers in one archive."""
 
 MAX_ARCHIVE_PAX_RECORDS: Final = 100_000
-"""Maximum combined PAX key/value records."""
+"""Maximum encoded or cumulatively copied PAX key/value records."""
 
 MAX_ARCHIVE_EXPANDED_BYTES: Final = 100 * 1024**3
 """Maximum combined expanded size of regular archive members, in bytes."""
@@ -159,6 +159,39 @@ class _ArchiveWriteLimits:
         self.path_components = path_components
 
 
+@dataclass
+class _ArchivePaxLimits:
+    """Bound inherited metadata work as well as encoded header payloads."""
+
+    global_headers: Mapping[str, str]
+    records: int = 0
+    text_size: int = 0
+    global_text_size: int | None = None
+
+    def reserve(self, headers: Mapping[str, str]) -> None:
+        """Charge effective metadata before tarfile iterates or copies it."""
+        records = self.records + len(headers)
+        if records > MAX_ARCHIVE_PAX_RECORDS:
+            raise ArchiveError(
+                "Archive exceeds the maximum count of"
+                f" {MAX_ARCHIVE_PAX_RECORDS:,} expanded PAX metadata records."
+            )
+        if headers is self.global_headers and self.global_text_size is not None:
+            text_size = self.global_text_size
+        else:
+            text_size = sum(len(key) + len(value) for key, value in headers.items())
+            if headers is self.global_headers:
+                self.global_text_size = text_size
+        text_size += self.text_size
+        if text_size > MAX_ARCHIVE_METADATA_BYTES:
+            raise ArchiveError(
+                "Archive exceeds the maximum expanded PAX metadata text"
+                f" of {MAX_ARCHIVE_METADATA_BYTES:,} characters."
+            )
+        self.records = records
+        self.text_size = text_size
+
+
 ALLOWED_TAR_TYPES: frozenset[bytes] = frozenset(
     {
         tarfile.REGTYPE,
@@ -185,6 +218,11 @@ class _BoundedTarInfo(tarfile.TarInfo):
     """Reject oversized GNU and PAX metadata before tarfile reads its payload."""
 
     def _proc_member(self, archive: tarfile.TarFile) -> tarfile.TarInfo:
+        limits = getattr(archive, "_workspace_pax_limits", None)
+        if limits is None:
+            limits = _ArchivePaxLimits(archive.pax_headers)
+            setattr(archive, "_workspace_pax_limits", limits)
+        self._workspace_pax_limits: _ArchivePaxLimits = limits
         if self.type == tarfile.GNUTYPE_SPARSE:
             raise ArchiveError("Sparse archive members are not supported.")
         if self.type in EXTENDED_TAR_TYPES:
@@ -277,7 +315,17 @@ class _BoundedTarInfo(tarfile.TarInfo):
         )
         archive.fileobj.seek(position)
         del data
+        if self.type == tarfile.XGLTYPE:
+            self._workspace_pax_limits.global_text_size = None
+        else:
+            self._workspace_pax_limits.reserve(archive.pax_headers)
         return super()._proc_pax(archive)  # ty: ignore[unresolved-attribute]
+
+    def _apply_pax_info(
+        self, pax_headers: dict[str, str], encoding: str, errors: str
+    ) -> None:
+        self._workspace_pax_limits.reserve(pax_headers)
+        super()._apply_pax_info(pax_headers, encoding, errors)  # ty: ignore[unresolved-attribute]
 
     def _reject_sparse(self, *_args: object) -> None:
         """Reject PAX sparse maps before tarfile parses their data payload."""

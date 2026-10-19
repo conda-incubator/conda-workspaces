@@ -1227,6 +1227,115 @@ def test_open_tar_bounds_total_interleaved_metadata_headers(
             read_tar_members(tf)
 
 
+@pytest.mark.parametrize("local_headers", [False, True], ids=["global", "local"])
+@pytest.mark.parametrize(
+    ("limit", "maximum", "message"),
+    [
+        ("MAX_ARCHIVE_PAX_RECORDS", 5, "expanded PAX metadata records"),
+        ("MAX_ARCHIVE_METADATA_BYTES", 150, "expanded PAX metadata text"),
+    ],
+    ids=["records", "text"],
+)
+def test_open_tar_bounds_repeated_global_pax_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    local_headers: bool,
+    limit: str,
+    maximum: int,
+    message: str,
+) -> None:
+    archive = tmp_path / "global-pax.tar.gz"
+    with tarfile.open(
+        archive,
+        "w:gz",
+        format=tarfile.PAX_FORMAT,
+        pax_headers={"comment": "x" * 32, "vendor": "y" * 32},
+    ) as tf:
+        for index in range(3):
+            member = tarfile.TarInfo(f"file-{index}")
+            if local_headers:
+                member.pax_headers = {"local": "value"}
+            tf.addfile(member)
+    monkeypatch.setattr(archive_module, limit, maximum)
+
+    with pytest.raises(ArchiveError, match=message):
+        with open_tar(archive) as tf:
+            read_tar_members(tf)
+
+
+def test_open_tar_rechecks_changed_global_pax_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "changed-global-pax.tar.gz"
+    contents = bytearray()
+    for index, value in enumerate(("x", "y" * 64)):
+        payload = f"{len(value) + 12} comment={value}\n".encode()
+        metadata = tarfile.TarInfo(f"pax-{index}")
+        metadata.type = tarfile.XGLTYPE
+        metadata.size = len(payload)
+        contents.extend(metadata.tobuf())
+        contents.extend(payload)
+        contents.extend(b"\0" * (-len(payload) % tarfile.BLOCKSIZE))
+        for member_index in range(3):
+            contents.extend(tarfile.TarInfo(f"file-{index}-{member_index}").tobuf())
+    contents.extend(b"\0" * (tarfile.BLOCKSIZE * 2))
+    archive.write_bytes(gzip.compress(contents))
+    monkeypatch.setattr(archive_module, "MAX_ARCHIVE_METADATA_BYTES", 150)
+
+    with pytest.raises(ArchiveError, match="expanded PAX metadata text"):
+        with open_tar(archive) as tf:
+            read_tar_members(tf)
+
+
+def test_open_tar_bounds_global_copy_before_local_pax_processing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "local-pax-copy.tar.gz"
+    with tarfile.open(
+        archive,
+        "w:gz",
+        format=tarfile.PAX_FORMAT,
+        pax_headers={"comment": "global", "vendor": "value"},
+    ) as tf:
+        tf.addfile(tarfile.TarInfo("first"))
+        member = tarfile.TarInfo("second")
+        member.pax_headers = {"comment": "local"}
+        tf.addfile(member)
+    monkeypatch.setattr(archive_module, "MAX_ARCHIVE_PAX_RECORDS", 3)
+
+    def fail_processing(*args: object, **kwargs: object) -> None:
+        raise AssertionError("local PAX metadata copied global headers")
+
+    with open_tar(archive) as tf:
+        monkeypatch.setattr(tarfile.TarInfo, "_proc_pax", fail_processing)
+        with pytest.raises(ArchiveError, match="expanded PAX metadata records"):
+            read_tar_members(tf)
+
+
+def test_open_tar_preserves_global_and_local_pax_metadata(tmp_path: Path) -> None:
+    archive = tmp_path / "supported-pax.tar.gz"
+    long_name = "nested/" + "x" * 150
+    with tarfile.open(
+        archive,
+        "w:gz",
+        format=tarfile.PAX_FORMAT,
+        pax_headers={"comment": "global", "mtime": "123.25"},
+    ) as tf:
+        member = tarfile.TarInfo(long_name)
+        member.pax_headers = {"comment": "local", "mtime": "456.5"}
+        tf.addfile(member)
+        tf.addfile(tarfile.TarInfo("plain"))
+
+    with open_tar(archive) as tf:
+        members = read_tar_members(tf)
+
+    assert [member.name for member in members] == [long_name, "plain"]
+    assert [member.mtime for member in members] == [456.5, 123.25]
+    assert [member.pax_headers["comment"] for member in members] == ["local", "global"]
+
+
 def test_open_tar_rejects_unsupported_member_before_processing_payload(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

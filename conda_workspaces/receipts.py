@@ -562,7 +562,23 @@ class ReceiptInventory:
             raise ArchiveError("Invalid lockfile: environments must be a mapping.")
         lockfile_envs = cast("dict[str, object]", lockfile_envs)
         packages_by_url = cls.packages_by_url(data.get("packages", []) or [])
-        env_names = list(environment_prefixes or lockfile_envs)
+        env_names = environment_prefixes or lockfile_envs
+        if len(env_names) > MAX_RECEIPT_COLLECTION_ITEMS:
+            raise ArchiveError("Receipt inventory exceeds the maximum expanded items.")
+
+        normalized_records: dict[
+            tuple[int, str, str], tuple[ReceiptPackageRecord, str]
+        ] = {}
+        normalized_inventories: dict[
+            int,
+            tuple[dict[str, object], list[dict[str, object]], int, int],
+        ] = {}
+        source_sizes: dict[int, tuple[int, int]] = {}
+        remaining_references = MAX_RECEIPT_ITEMS
+        remaining_normalization_items = MAX_RECEIPT_ITEMS
+        remaining_normalization_strings = MAX_RECEIPT_BYTES
+        remaining_items = MAX_RECEIPT_ITEMS
+        remaining_strings = MAX_RECEIPT_BYTES
 
         result: list[dict[str, object]] = []
         for env_name in env_names:
@@ -576,41 +592,113 @@ class ReceiptInventory:
                     "Invalid lockfile: environment packages must be a mapping."
                 )
             platform_packages = cast("dict[str, object]", platform_packages)
-            packages_by_identity: dict[str, dict[str, object]] = {}
-            for platform in sorted(platform_packages):
-                refs = platform_packages[platform] or []
-                if not isinstance(refs, list):
-                    raise ArchiveError("Invalid lockfile package references.")
-                for ref in refs:
-                    if not isinstance(ref, dict):
-                        raise ArchiveError("Invalid lockfile package reference.")
-                    ref = cast("dict[str, object]", ref)
-                    url = ReceiptPackageRecord.package_url(ref)
-                    source = packages_by_url.get(url, ref)
-                    package = ReceiptPackageRecord.from_record(
-                        source,
-                        fallback_url=url,
-                        platform=platform,
-                    )
-                    existing = packages_by_identity.setdefault(
-                        package.identity,
-                        package.data,
-                    )
-                    if existing != package.data:
+            cached = normalized_inventories.get(id(platform_packages))
+            if cached is None:
+                packages_by_identity: dict[str, dict[str, object]] = {}
+                for platform in sorted(platform_packages):
+                    refs = platform_packages[platform] or []
+                    if not isinstance(refs, list):
+                        raise ArchiveError("Invalid lockfile package references.")
+                    remaining_references -= len(refs)
+                    if remaining_references < 0:
                         raise ArchiveError(
-                            "Duplicate package record for environment"
-                            f" '{env_name}': {redact_url_text(package.identity)}"
+                            "Receipt inventory exceeds the maximum expanded references."
                         )
+                    for ref in refs:
+                        if not isinstance(ref, dict):
+                            raise ArchiveError("Invalid lockfile package reference.")
+                        ref = cast("dict[str, object]", ref)
+                        url = ReceiptPackageRecord.package_url(ref)
+                        source = packages_by_url.get(url, ref)
+                        record_key = (id(source), url, platform)
+                        normalized = normalized_records.get(record_key)
+                        if normalized is None:
+                            if id(source) not in source_sizes:
+                                fields = [
+                                    field
+                                    for field in PACKAGE_RECORD_FIELDS
+                                    if field in source and source[field] is not None
+                                ]
+                                source_sizes[id(source)] = (
+                                    len(fields) + 4,
+                                    sum(
+                                        len(field) + len(value)
+                                        for field in fields
+                                        if isinstance(value := source[field], str)
+                                    ),
+                                )
+                            source_items, source_strings = source_sizes[id(source)]
+                            remaining_normalization_items -= source_items
+                            remaining_normalization_strings -= (
+                                source_strings + len(url) + len(platform)
+                            )
+                            if (
+                                remaining_normalization_items < 0
+                                or remaining_normalization_strings < 0
+                            ):
+                                raise ArchiveError(
+                                    "Receipt inventory exceeds the maximum expanded"
+                                    " normalization work."
+                                )
+                            package = ReceiptPackageRecord.from_record(
+                                source,
+                                fallback_url=url,
+                                platform=platform,
+                            )
+                            identity = package.identity
+                            normalized_records[record_key] = package, identity
+                        else:
+                            package, identity = normalized
+                        existing = packages_by_identity.setdefault(
+                            identity,
+                            package.data,
+                        )
+                        if existing != package.data:
+                            raise ArchiveError(
+                                "Duplicate package record for environment"
+                                f" '{env_name}': {redact_url_text(identity)}"
+                            )
+
+                packages = sorted(
+                    packages_by_identity.values(),
+                    key=lambda record: ReceiptPackageRecord(record).identity,
+                )
+                if len(packages) > MAX_RECEIPT_COLLECTION_ITEMS:
+                    raise ArchiveError(
+                        "Receipt inventory exceeds the maximum expanded items."
+                    )
+                package_items = len(packages) + sum(len(record) for record in packages)
+                package_strings = sum(
+                    len(key) + (len(value) if isinstance(value, str) else 0)
+                    for record in packages
+                    for key, value in record.items()
+                )
+                normalized_inventories[id(platform_packages)] = (
+                    platform_packages,
+                    packages,
+                    package_items,
+                    package_strings,
+                )
+            else:
+                _, packages, package_items, package_strings = cached
 
             env: dict[str, object] = {
                 "name": str(env_name),
-                "packages": sorted(
-                    packages_by_identity.values(),
-                    key=lambda record: ReceiptPackageRecord(record).identity,
-                ),
             }
             if environment_prefixes and env_name in environment_prefixes:
                 env["prefix"] = str(environment_prefixes[env_name])
+            remaining_items -= package_items + len(env) + 2
+            remaining_strings -= (
+                package_strings
+                + len("packages")
+                + sum(len(key) + len(str(value)) for key, value in env.items())
+            )
+            if remaining_items < 0 or remaining_strings < 0:
+                raise ArchiveError(
+                    "Receipt inventory exceeds the maximum expanded output."
+                )
+            # JSON expands aliases, so charge each environment before copying it.
+            env["packages"] = [dict(record) for record in packages]
             result.append(env)
 
         inventory = cls(result)

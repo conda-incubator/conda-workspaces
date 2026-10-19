@@ -16,6 +16,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Bound YAML merge construction and expanded manifest imports, including
+  referenced environment files. Preserve supported aliases and merge precedence.
+  (#200)
+- Discard YAML comments, tags and hidden merge metadata before redacting and
+  publishing lockfiles, so serializer metadata cannot retain credentials. (#200)
+- Bound inherited PAX metadata across archive members and expanded receipt
+  inventories across environments. Reuse normalized shared package records.
+  (#200)
+
 - Prevented named task arguments from being inserted into shell command source.
   Commands that reference named arguments must use the list form of `cmd`.
   Task environment values continue to support named arguments. (#200)

@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 from conda.base.constants import UpdateModifier
 from conda.base.context import context as conda_context
 from conda.common.serialize.yaml import dump as yaml_dump
+from conda.common.serialize.yaml import load as yaml_load
 from conda.core.prefix_data import PrefixData
 from conda.history import History
 from conda.models.environment import EnvironmentConfig
@@ -27,6 +28,7 @@ from conda.models.records import PackageRecord, PrefixRecord
 from conda_lockfiles.load_yaml import load_yaml
 
 import conda_workspaces.lockfile as lockfile_module
+import conda_workspaces.parsing as parsing_module
 import conda_workspaces.paths as paths_module
 from conda_workspaces.context import WorkspaceContext
 from conda_workspaces.exceptions import (
@@ -155,9 +157,9 @@ def test_load_lockfile_data_rejects_size_before_yaml_parsing(
     calls: list[object] = []
     monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_BYTES", 8)
     monkeypatch.setattr(
-        lockfile_module.yaml,
-        "load",
-        lambda content: calls.append(content),
+        parsing_module.YAML,
+        "compose",
+        lambda self, content: calls.append(content),
     )
 
     with pytest.raises(ValueError, match="maximum size"):
@@ -204,10 +206,92 @@ def test_load_lockfile_data_wraps_parser_recursion_error(
     def fail_parse(stream):
         raise RecursionError("nested input")
 
-    monkeypatch.setattr(lockfile_module.yaml, "load", fail_parse)
+    monkeypatch.setattr(
+        parsing_module.YAML, "compose", lambda self, stream: fail_parse(stream)
+    )
 
     with pytest.raises(ValueError, match="Invalid lockfile YAML"):
         load_lockfile_data("version: 1\n")
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["repeated", "nested"])
+def test_load_lockfile_data_bounds_merge_construction(
+    monkeypatch: pytest.MonkeyPatch, nested: bool
+) -> None:
+    monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_ITEMS", 50)
+    source = "&base {" + ", ".join(f"key{i}: {i}" for i in range(8)) + "}"
+    merges = ", ".join([source, *(["*base"] * 8)])
+    record = "{<<: [" + merges + "]}"
+    if nested:
+        record = "{<<: [&nested " + record + ", *nested]}"
+
+    with pytest.raises(ValueError, match="collection items"):
+        load_lockfile_data("record: " + record)
+
+
+def test_load_lockfile_data_preserves_merge_precedence_and_aliases() -> None:
+    data = load_lockfile_data(
+        "base: &base {winner: base, inherited: yes}\n"
+        "other: &other {winner: other, extra: value}\n"
+        "record: &record {<<: [*base, *other], extra: explicit}\n"
+        "alias: *record\n"
+        "single: {<<: *base, winner: explicit}\n"
+    )
+
+    assert data["record"] == {"winner": "base", "inherited": "yes", "extra": "explicit"}
+    assert data["alias"] is data["record"]
+    assert data["single"] == {"winner": "explicit", "inherited": "yes"}
+
+
+def test_load_lockfile_data_bounds_merge_scalar_comparisons(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_BYTES", 1024)
+    source = '&base {"' + "k" * 200 + '": value}'
+    content = "record: {<<: [" + ", ".join([source, *(["*base"] * 32)]) + "]}"
+
+    with pytest.raises(ValueError, match="expanded string"):
+        load_lockfile_data(content)
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["record: !TEST_ONLY_SECRET value", "1: value", "record: &cycle [*cycle]"],
+    ids=["custom-tag", "non-string-key", "cyclic-alias"],
+)
+def test_load_lockfile_data_rejects_unsupported_yaml_values(content: str) -> None:
+    with pytest.raises(ValueError):
+        load_lockfile_data(content)
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        '<<: {url: "https://user:TEST_ONLY_SECRET@example.invalid/file"}\n'
+        "url: https://example.invalid/file\n",
+        "url: https://example.invalid/file # TEST_ONLY_SECRET\n",
+    ],
+    ids=["hidden-merge", "comment"],
+)
+@pytest.mark.parametrize("source", ["parsed", "in-memory"])
+def test_redact_lockfile_discards_yaml_serializer_metadata(
+    metadata: str, source: str
+) -> None:
+    content = "record:\n" + "".join(
+        "  " + line + "\n" for line in metadata.splitlines()
+    )
+    data = (
+        load_lockfile_data(content)
+        if source == "parsed"
+        else yaml_load(io.StringIO(content))
+    )
+
+    redacted = CondaLockLoader.redact_data_urls(data)
+    output = io.StringIO()
+    yaml_dump(redacted, output)
+
+    assert "TEST_ONLY_SECRET" not in output.getvalue()
+    assert redacted["record"] == {"url": "https://example.invalid/file"}
 
 
 @pytest.fixture
@@ -4235,9 +4319,11 @@ def test_merge_lockfiles_enforces_merged_structure_budgets(
         merge_lockfiles([fragment], ctx)
 
 
+@pytest.mark.parametrize("metadata", ["ordinary", "merge", "comment"])
 def test_merge_lockfiles_redacts_credentialed_fragment_urls(
     tmp_path: Path,
     workspace_ctx_factory: Callable[..., WorkspaceContext],
+    metadata: str,
 ) -> None:
     ctx = workspace_ctx_factory(env_names=["default"])
     channel = (
@@ -4260,8 +4346,13 @@ def test_merge_lockfiles_redacts_credentialed_fragment_urls(
         "      linux-64:\n"
         f'      - conda: "{package_url}"\n'
         "packages:\n"
-        f'- conda: "{package_url}"\n'
-        f"  sha256: {'a' * 64}\n",
+        + (
+            f'- <<: {{conda: "{package_url}"}}\n'
+            if metadata == "merge"
+            else f'- conda: "{package_url}"\n'
+        )
+        + (f"  # {package_url}\n" if metadata == "comment" else "")
+        + f"  sha256: {'a' * 64}\n",
         encoding="utf-8",
     )
     load_yaml.cache_clear()

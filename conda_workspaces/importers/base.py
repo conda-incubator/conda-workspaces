@@ -4,11 +4,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from io import StringIO
 from typing import TYPE_CHECKING, cast
 
 import tomlkit
-from conda.common.serialize.yaml import load as yaml_load
 from conda.models.match_spec import MatchSpec
 from packaging.requirements import Requirement
 
@@ -26,7 +24,7 @@ from ..models import (
     redact_channel_name,
     redact_url_text,
 )
-from ..parsing import validate_document_limits
+from ..parsing import BoundedYamlLoader, DocumentExpansionBudget
 from ..paths import read_regular_file_bytes
 
 if TYPE_CHECKING:
@@ -34,6 +32,8 @@ if TYPE_CHECKING:
     from typing import Any, ClassVar
 
     from tomlkit.items import Table
+
+    from ..parsing import DocumentStringBudget
 
 
 class ManifestImporter(ABC):
@@ -55,24 +55,52 @@ class ManifestImporter(ABC):
     def convert(self, path: Path) -> tomlkit.TOMLDocument:
         """Read *path* and return a ``conda.toml``-shaped TOML document."""
 
-    def load_yaml(self, path: Path) -> dict[str, Any]:
-        """Load one bounded regular YAML manifest using conda's serialiser."""
+    @staticmethod
+    def expansion_budget() -> DocumentExpansionBudget:
+        """Bound conversion work across all YAML files in one import."""
+        return DocumentExpansionBudget(
+            items=MAX_MANIFEST_ITEMS,
+            strings=MAX_MANIFEST_BYTES,
+        )
+
+    def load_yaml(
+        self,
+        path: Path,
+        *,
+        expansion_budget: DocumentExpansionBudget | None = None,
+        source_budget: DocumentStringBudget | None = None,
+    ) -> dict[str, Any]:
+        """Load YAML with bounded construction and TOML conversion costs."""
         try:
             content = read_regular_file_bytes(
                 path,
                 maximum_bytes=MAX_MANIFEST_BYTES,
                 label="Manifest YAML",
-            ).decode("utf-8")
-            data = yaml_load(StringIO(content))
-            if not isinstance(data, Mapping):
-                raise ValueError("Manifest YAML must contain a mapping")
-            validate_document_limits(
-                data,
-                label="Manifest YAML",
+            )
+            if source_budget is not None:
+                source_budget.remaining -= len(content)
+                if source_budget.remaining < 0:
+                    raise ValueError("Manifest YAML exceeds the maximum combined size")
+            data = BoundedYamlLoader(
+                maximum_bytes=MAX_MANIFEST_BYTES,
                 maximum_depth=MAX_MANIFEST_DEPTH,
                 maximum_collection_items=MAX_MANIFEST_COLLECTION_ITEMS,
                 maximum_items=MAX_MANIFEST_ITEMS,
-            )
+                label="Manifest YAML",
+            ).load(content)
+            if not isinstance(data, Mapping):
+                raise ValueError("Manifest YAML must contain a mapping")
+            budget = expansion_budget or self.expansion_budget()
+            budget.consume(data, label="Manifest YAML")
+            if "name" in data and not isinstance(data["name"], str):
+                raise ValueError("Manifest name must be a string.")
+            for field in ("channels", "platforms"):
+                if field in data:
+                    values = data[field]
+                    if not isinstance(values, list) or not all(
+                        isinstance(value, str) for value in values
+                    ):
+                        raise ValueError(f"Manifest {field} must be a list of strings.")
         except (OSError, UnicodeError, ValueError) as exc:
             raise ManifestImportError(path, redact_url_text(str(exc))) from exc
         except Exception as exc:

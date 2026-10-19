@@ -56,7 +56,6 @@ from typing import TYPE_CHECKING, cast
 from urllib.parse import unquote, urlsplit
 
 from conda.common.io import dashlist
-from conda.common.serialize import yaml
 from conda.core.prefix_data import delete_prefix_from_linked_data
 from conda.models.dist import Dist
 from conda.plugins.types import EnvironmentSpecBase
@@ -82,9 +81,11 @@ from .models import (
     redact_url,
 )
 from .parsing import (
+    BoundedYamlLoader,
     DocumentStringBudget,
     decode_limited_text,
     document_values_equal,
+    plain_document,
     read_limited_text,
     validate_document_limits,
 )
@@ -165,20 +166,15 @@ def load_lockfile_data(
         maximum_bytes=MAX_LOCKFILE_BYTES,
         label="Lockfile YAML",
     )
-    try:
-        data = yaml.load(io.StringIO(text))
-    except Exception as exc:
-        raise ValueError("Invalid lockfile YAML") from exc
-    if not isinstance(data, Mapping):
-        raise ValueError("Lockfile YAML must contain a mapping")
-    validate_document_limits(
-        data,
+    data = BoundedYamlLoader(
         label="Lockfile YAML",
+        maximum_bytes=MAX_LOCKFILE_BYTES,
         maximum_depth=MAX_LOCKFILE_DEPTH,
         maximum_collection_items=MAX_LOCKFILE_COLLECTION_ITEMS,
         maximum_items=MAX_LOCKFILE_ITEMS,
-        string_budget=string_budget or DocumentStringBudget(MAX_LOCKFILE_BYTES),
-    )
+    ).load(text, string_budget=string_budget)
+    if not isinstance(data, Mapping):
+        raise ValueError("Lockfile YAML must contain a mapping")
     return dict(data)
 
 
@@ -1081,7 +1077,12 @@ class CondaLockLoader(EnvironmentSpecBase):
     @staticmethod
     def redact_data_urls(data: dict[str, Any]) -> dict[str, Any]:
         """Return lockfile data with every serialized URL credential-free."""
-        result = deepcopy(data)
+        result = plain_document(
+            data,
+            maximum_items=MAX_LOCKFILE_ITEMS,
+            maximum_collection_items=MAX_LOCKFILE_COLLECTION_ITEMS,
+            string_budget=DocumentStringBudget(MAX_LOCKFILE_BYTES),
+        )
 
         environments = result.get("environments")
         normalized_channels: set[int] = set()

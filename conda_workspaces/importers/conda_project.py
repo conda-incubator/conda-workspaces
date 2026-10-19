@@ -8,6 +8,7 @@ import tomlkit
 from conda.base.context import context as conda_context
 
 from ..exceptions import ManifestImportError
+from ..parsing import DocumentStringBudget
 from ..paths import parse_relative_posix_path, resolve_relative_path
 from .base import ManifestImporter
 
@@ -26,7 +27,13 @@ class CondaProjectImporter(ManifestImporter):
     label: ClassVar[str] = "conda-project"
 
     def convert(self, path: Path) -> tomlkit.TOMLDocument:
-        cp = self.load_yaml(path)
+        expansion_budget = self.expansion_budget()
+        source_budget = DocumentStringBudget(expansion_budget.strings)
+        cp = self.load_yaml(
+            path,
+            expansion_budget=expansion_budget,
+            source_budget=source_budget,
+        )
         project_dir = path.parent
 
         doc = tomlkit.document()
@@ -42,7 +49,11 @@ class CondaProjectImporter(ManifestImporter):
         for env_file in env_specs.get("default", []):
             env_path = self.environment_file_path(path, env_file)
             if env_path.exists():
-                env_data = self.load_yaml(env_path)
+                env_data = self.load_yaml(
+                    env_path,
+                    expansion_budget=expansion_budget,
+                    source_budget=source_budget,
+                )
                 raw_deps = env_data.get("dependencies", [])
                 base_deps.update(self.parse_conda_deps(raw_deps))
                 base_pypi.update(self.parse_pip_deps(raw_deps))
@@ -70,7 +81,11 @@ class CondaProjectImporter(ManifestImporter):
             for env_file in env_files:
                 env_path = self.environment_file_path(path, env_file)
                 if env_path.exists():
-                    env_data = self.load_yaml(env_path)
+                    env_data = self.load_yaml(
+                        env_path,
+                        expansion_budget=expansion_budget,
+                        source_budget=source_budget,
+                    )
                     env_deps.update(
                         self.parse_conda_deps(env_data.get("dependencies", []))
                     )

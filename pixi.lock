@@ -20789,6 +20789,7 @@ packages:
   - packaging>=21.0
   - platformdirs>=3.0
   - rich>=13.0
+  - ruamel-yaml>=0.18
   - tomlkit>=0.13,!=0.15.0
   requires_python: '>=3.10'
 - pypi: https://files.pythonhosted.org/packages/07/6c/aa3f2f849e01cb6a001cd8554a88d4c77c5c1a31c95bdf1cf9301e6d9ef4/defusedxml-0.7.1-py2.py3-none-any.whl
