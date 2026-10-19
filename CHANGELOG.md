@@ -4,6 +4,13 @@ All notable changes to conda-workspaces will be documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Changed
+
+- Updated CI and release workflows to `prefix-dev/setup-pixi` 0.11.0,
+  `actions/upload-artifact` 7.0.2, and `actions/download-artifact` 8.0.2. (#202)
+
 ## 0.11.1 — 2026-10-02
 
 ### Changed
