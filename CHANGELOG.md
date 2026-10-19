@@ -16,6 +16,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Bound wildcard lockfile dependency checks and reuse validated lockfile data
+  across export targets to avoid excessive work with large lockfiles. (#200)
+- Deduplicate workspace features by name so large manifests do not trigger
+  repeated feature comparisons. (#200)
 - Bound aliased package dependencies before converting lockfile packages and
   environments. (#200)
 - Validate repeated lockfile Python site-packages paths and channel URLs once.

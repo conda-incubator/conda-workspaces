@@ -142,6 +142,7 @@ MAX_LOCKFILE_BYTES: Final = 128 * 1024**2
 MAX_LOCKFILE_DEPTH: Final = 128
 MAX_LOCKFILE_COLLECTION_ITEMS: Final = 100_000
 MAX_LOCKFILE_ITEMS: Final = 1_000_000
+MAX_LOCKFILE_MATCH_ATTEMPTS: Final = 100_000
 _CURRENT_LOCKFILE_OUTPUT_GENERATION = object()
 
 
@@ -257,6 +258,7 @@ def check_lockfile_satisfiability(
     are still checked across the complete workspace.
     """
     _stale = LockfileStatus.OUT_OF_DATE
+    remaining_match_attempts = MAX_LOCKFILE_MATCH_ATTEMPTS
     if environment is not None:
         config.get_environment(environment)
 
@@ -482,7 +484,19 @@ def check_lockfile_satisfiability(
         for record, spec in dependencies:
             dep_name = spec.get_exact_value("name")
             if dep_name is None:
-                satisfied = any(spec.match(candidate) for candidate in candidates)
+                satisfied = False
+                for candidate in candidates:
+                    if remaining_match_attempts == 0:
+                        return LockfileStatus(
+                            status=_stale,
+                            reason=(
+                                "Lockfile dependency matching exceeds the allowed limit"
+                            ),
+                        )
+                    remaining_match_attempts -= 1
+                    if spec.match(candidate):
+                        satisfied = True
+                        break
             else:
                 candidate = candidates_by_name.get(dep_name)
                 satisfied = candidate is not None and spec.match(candidate)
@@ -671,79 +685,130 @@ class CondaLockLoader(EnvironmentSpecBase):
         *metadata_only* reconstructs exact records from the lockfile without
         accessing the package cache.
         """
+        return self.envs_for(
+            {platform: package_platform},
+            name,
+            metadata_only=metadata_only,
+        )[0]
+
+    def envs_for(
+        self,
+        platforms: Mapping[str, str | None],
+        name: str = "default",
+        *,
+        metadata_only: bool = False,
+    ) -> list[Environment]:
+        """Convert selected targets after copying and indexing the lockfile once."""
         self._env_data(name)
         payload = self.redact_data_urls(self._data)
         env_data = payload["environments"][name]
-        platforms = tuple(sorted(env_data.get("packages", {})))
-        if platform not in platforms:
-            from conda.exceptions import PlatformMismatchError
+        available = tuple(sorted(env_data["packages"]))
+        for platform in platforms:
+            if platform not in env_data["packages"]:
+                from conda.exceptions import PlatformMismatchError
 
-            raise PlatformMismatchError(
-                incompatible=[(str(self.path), platforms)],
-                subdir=platform,
-            )
-
-        self.validate_env_for_conversion(
-            payload,
-            name,
-            platform,
-            package_platform=package_platform,
-        )
-
-        conversion_platform = package_platform or platform
-        if conversion_platform != platform:
-            packages = payload["environments"][name]["packages"]
-            packages[conversion_platform] = packages[platform]
+                raise PlatformMismatchError(
+                    incompatible=[(str(self.path), available)],
+                    subdir=platform,
+                )
         if not metadata_only:
             DocumentExpansionBudget(
                 items=MAX_LOCKFILE_ITEMS,
                 strings=MAX_LOCKFILE_BYTES,
             ).consume(payload, label="Lockfile")
-        records = None
-        if metadata_only:
-            records = self.package_records_for_env_data(
-                payload,
+        try:
+            records_by_url = self.package_records_by_url_from_data(payload)
+        except ValueError as exc:
+            raise LockfileIntegrityError(self.path, str(exc)) from exc
+
+        envs: list[Environment] = []
+        for platform, package_platform in platforms.items():
+            conversion_platform = package_platform or platform
+            refs = env_data["packages"][platform]
+            selected_urls = dict.fromkeys(
+                ref["conda"]
+                for ref in refs
+                if isinstance(ref, dict) and isinstance(ref.get("conda"), str)
+            )
+            selected_records = [
+                records_by_url[url] for url in selected_urls if url in records_by_url
+            ]
+            selected_env_data = {
+                "channels": env_data["channels"],
+                "packages": {platform: refs},
+            }
+            selected_payload = {
+                "version": LOCKFILE_VERSION,
+                "environments": {name: selected_env_data},
+                "packages": selected_records,
+            }
+            self.validate_env_for_conversion(
+                selected_payload,
                 name,
                 platform,
                 package_platform=conversion_platform,
-            )
-        if records is None:
-            from conda_lockfiles.rattler_lock.v6 import (
-                rattler_lock_v6_to_conda_env,
+                records_by_url=records_by_url,
             )
 
-            from ._lockfile_compat import WorkspaceLock
+            if metadata_only:
+                from conda.models.channel import Channel
+                from conda.models.environment import Environment, EnvironmentConfig
+                from conda_lockfiles.rattler_lock.v6 import RattlerLockV6Environment
 
-            # The shared rattler model requires a default environment, while
-            # conda.lock may contain only a named environment. Adapt the copy.
-            payload.update(version=6, environments={"default": env_data})
-            lockfile_model = WorkspaceLock.model_validate(payload)
-            env = rattler_lock_v6_to_conda_env(
-                lockfile_model,
-                name="default",
-                platform=conversion_platform,
-            )
-        else:
-            from conda.models.channel import Channel
-            from conda.models.environment import Environment, EnvironmentConfig
-            from conda_lockfiles.rattler_lock.v6 import RattlerLockV6Environment
+                records = self.package_records_for_env_data(
+                    selected_payload,
+                    name,
+                    platform,
+                    package_platform=conversion_platform,
+                )
+                lock_environment = RattlerLockV6Environment.model_validate(
+                    selected_env_data
+                )
+                env = Environment(
+                    name=name,
+                    platform=conversion_platform,
+                    config=EnvironmentConfig(
+                        channels=tuple(
+                            Channel(channel.url).canonical_name
+                            for channel in lock_environment.channels
+                        )
+                    ),
+                    explicit_packages=records,
+                )
+            else:
+                from conda_lockfiles.rattler_lock.v6 import (
+                    rattler_lock_v6_to_conda_env,
+                )
 
-            lock_environment = RattlerLockV6Environment.model_validate(env_data)
-            env = Environment(
-                name=name,
-                platform=conversion_platform,
-                config=EnvironmentConfig(
-                    channels=tuple(
-                        Channel(channel.url).canonical_name
-                        for channel in lock_environment.channels
-                    )
-                ),
-                explicit_packages=records,
-            )
-        env.name = name
-        if conversion_platform != platform:
-            setattr(env, "lock_platform", platform)
-        return env
+                from ._lockfile_compat import WorkspaceLock
+
+                # The shared rattler model requires a default environment,
+                # while conda.lock may contain only a named environment.
+                conversion_payload = {
+                    "version": 6,
+                    "environments": {
+                        "default": {
+                            "channels": selected_env_data["channels"],
+                            "packages": {conversion_platform: refs},
+                        }
+                    },
+                    "packages": selected_records,
+                }
+                DocumentExpansionBudget(
+                    items=MAX_LOCKFILE_ITEMS,
+                    strings=MAX_LOCKFILE_BYTES,
+                ).consume(conversion_payload, label="Lockfile")
+                lockfile_model = WorkspaceLock.model_validate(conversion_payload)
+                env = rattler_lock_v6_to_conda_env(
+                    lockfile_model,
+                    name="default",
+                    platform=conversion_platform,
+                )
+            env.name = name
+            if conversion_platform != platform:
+                setattr(env, "lock_platform", platform)
+            envs.append(env)
+        return envs
 
     def validate_env_for_conversion(
         self,
@@ -752,8 +817,9 @@ class CondaLockLoader(EnvironmentSpecBase):
         platform: str,
         *,
         package_platform: str | None = None,
+        records_by_url: Mapping[str, dict[str, Any]] | None = None,
     ) -> None:
-        """Validate one redacted slice before generic rattler conversion."""
+        """Validate one environment target before rattler conversion."""
         env_data = data["environments"][name]
         refs = env_data.get("packages", {}).get(platform, ())
         channel_urls = self.channel_urls_for_env_data(
@@ -761,10 +827,11 @@ class CondaLockLoader(EnvironmentSpecBase):
             package_platform or platform,
             path=self.path,
         )
-        try:
-            records_by_url = self.package_records_by_url_from_data(data)
-        except ValueError as exc:
-            raise LockfileIntegrityError(self.path, str(exc)) from exc
+        if records_by_url is None:
+            try:
+                records_by_url = self.package_records_by_url_from_data(data)
+            except ValueError as exc:
+                raise LockfileIntegrityError(self.path, str(exc)) from exc
 
         for ref in refs:
             if not isinstance(ref, dict):

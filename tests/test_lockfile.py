@@ -565,6 +565,95 @@ def test_conda_lock_loader_env_for_rich_platform(
 @pytest.mark.parametrize(
     "metadata_only", [False, True], ids=["generic", "metadata-only"]
 )
+def test_conda_lock_loader_converts_rich_targets_without_recopying_full_document(
+    lockfile_with_platforms: Path,
+    fake_records_factory: list[dict[str, object]],
+    monkeypatch: pytest.MonkeyPatch,
+    metadata_only: bool,
+) -> None:
+    data = load_lockfile_data(lockfile_with_platforms.read_bytes())
+    packages = data["environments"]["default"]["packages"]
+    packages["linux-64-cuda11"] = packages.pop("linux-64")
+    numpy_url = "https://conda.anaconda.org/conda-forge/linux-64/numpy-1.0.0-py_0.conda"
+    packages["linux-64-cuda12"] = [{"conda": numpy_url}]
+    data["packages"].append({"conda": numpy_url, "sha256": "c" * 64})
+    loader = CondaLockLoader(lockfile_with_platforms, data=data)
+    full_document_copies = 0
+    full_index_builds = 0
+    original_plain_document = lockfile_module.plain_document
+    original_index = CondaLockLoader.package_records_by_url_from_data
+
+    def count_full_document_copy(document: dict, **kwargs: object) -> dict:
+        nonlocal full_document_copies
+        if (
+            len(document.get("environments", {}).get("default", {}).get("packages", {}))
+            == 3
+        ):
+            full_document_copies += 1
+        return original_plain_document(document, **kwargs)
+
+    def count_full_index(document: dict) -> dict:
+        nonlocal full_index_builds
+        if len(document.get("packages", [])) == 3:
+            full_index_builds += 1
+        return original_index(document)
+
+    monkeypatch.setattr(lockfile_module, "plain_document", count_full_document_copy)
+    monkeypatch.setattr(
+        CondaLockLoader,
+        "package_records_by_url_from_data",
+        staticmethod(count_full_index),
+    )
+
+    envs = loader.envs_for(
+        {"linux-64-cuda11": "linux-64", "linux-64-cuda12": "linux-64"},
+        metadata_only=metadata_only,
+    )
+
+    assert full_document_copies == 1
+    assert full_index_builds == 1
+    assert [env.platform for env in envs] == ["linux-64", "linux-64"]
+    assert [getattr(env, "lock_platform") for env in envs] == [
+        "linux-64-cuda11",
+        "linux-64-cuda12",
+    ]
+    assert [record.url for env in envs for record in env.explicit_packages] == [
+        packages["linux-64-cuda11"][0]["conda"],
+        numpy_url,
+    ]
+    assert len(fake_records_factory) == (0 if metadata_only else 2)
+
+
+def test_conda_lock_loader_bounds_aliased_targets_before_batch_conversion(
+    lockfile_with_platforms: Path,
+    lockfile_data_source: Callable[[dict[str, Any]], dict[str, Any]],
+    fake_records_factory: list[dict[str, object]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = load_lockfile_data(lockfile_with_platforms.read_bytes())
+    refs = data["environments"]["default"]["packages"]["linux-64"] * 12
+    data["environments"]["default"]["packages"] = {
+        f"linux-64-cuda{index}": refs for index in range(12)
+    }
+    loader = CondaLockLoader(
+        lockfile_with_platforms,
+        data=lockfile_data_source(data),
+    )
+    targets = loader._data["environments"]["default"]["packages"]
+    assert targets["linux-64-cuda0"] is targets["linux-64-cuda11"]
+    monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_ITEMS", 100)
+
+    with pytest.raises(ValueError, match="maximum expanded collection items"):
+        loader.envs_for(
+            {"linux-64-cuda0": "linux-64", "linux-64-cuda1": "linux-64"},
+        )
+
+    assert fake_records_factory == []
+
+
+@pytest.mark.parametrize(
+    "metadata_only", [False, True], ids=["generic", "metadata-only"]
+)
 def test_conda_lock_loader_bounds_selected_aliased_dependencies_before_conversion(
     monkeypatch: pytest.MonkeyPatch,
     lockfile_with_platforms: Path,
@@ -5598,6 +5687,47 @@ def test_satisfiability_accepts_wildcard_dependency_name(
     result = check_lockfile_satisfiability(config, data, "linux-64")
 
     assert result.status == LockfileStatus.UP_TO_DATE
+
+
+@pytest.mark.parametrize(
+    ("environment_count", "dependency_count", "comparison_limit", "expected_status"),
+    [
+        (1, 1, 3, LockfileStatus.UP_TO_DATE),
+        (1, 2, 3, LockfileStatus.OUT_OF_DATE),
+        (2, 1, 3, LockfileStatus.OUT_OF_DATE),
+    ],
+    ids=["normal-wildcard", "repeated-wildcards", "multiple-environments"],
+)
+def test_satisfiability_bounds_wildcard_package_comparisons(
+    satisfiability_config_factory,
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    environment_count: int,
+    dependency_count: int,
+    comparison_limit: int,
+    expected_status: str,
+) -> None:
+    names = ("default", "test")[:environment_count]
+    config = satisfiability_config_factory(
+        platforms=["linux-64"],
+        environments={name: [] for name in names},
+    )
+    data = lockfile_data_factory()
+    numpy_url = "https://conda.anaconda.org/conda-forge/linux-64/numpy-1.0.0-py_0.conda"
+    data["environments"]["default"]["packages"]["linux-64"].append({"conda": numpy_url})
+    data["packages"][0]["depends"] = ["num* >=1"] * dependency_count
+    data["packages"].append({"conda": numpy_url, "sha256": "c" * 64})
+    if environment_count == 2:
+        data["environments"]["test"] = deepcopy(data["environments"]["default"])
+    monkeypatch.setattr(
+        lockfile_module, "MAX_LOCKFILE_MATCH_ATTEMPTS", comparison_limit
+    )
+
+    result = check_lockfile_satisfiability(config, data, "linux-64")
+
+    assert result.status == expected_status
+    if expected_status == LockfileStatus.OUT_OF_DATE:
+        assert "dependency matching exceeds" in result.reason
 
 
 def test_satisfiability_validates_translated_pypi_roots(

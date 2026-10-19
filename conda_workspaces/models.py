@@ -692,15 +692,17 @@ class WorkspaceConfig:
         environment sets ``no_default_feature``.
         """
         result: list[Feature] = []
+        seen: set[str] = set()
         if not environment.no_default_feature:
             result.append(self.features[Feature.DEFAULT_NAME])
+            seen.add(Feature.DEFAULT_NAME)
 
         for fname in environment.features:
             if fname not in self.features:
                 raise FeatureNotFoundError(fname, environment.name)
-            feat = self.features[fname]
-            if feat not in result:
-                result.append(feat)
+            if fname not in seen:
+                result.append(self.features[fname])
+                seen.add(fname)
 
         return result
 
