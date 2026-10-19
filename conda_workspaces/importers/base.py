@@ -36,6 +36,14 @@ if TYPE_CHECKING:
     from ..parsing import DocumentStringBudget
 
 
+def manifest_expansion_budget() -> DocumentExpansionBudget:
+    """Create a conversion budget using the current manifest limits."""
+    return DocumentExpansionBudget(
+        items=MAX_MANIFEST_ITEMS,
+        strings=MAX_MANIFEST_BYTES,
+    )
+
+
 class ManifestImporter(ABC):
     """Base class for converting foreign manifests to ``conda.toml``.
 
@@ -54,14 +62,6 @@ class ManifestImporter(ABC):
     @abstractmethod
     def convert(self, path: Path) -> tomlkit.TOMLDocument:
         """Read *path* and return a ``conda.toml``-shaped TOML document."""
-
-    @staticmethod
-    def expansion_budget() -> DocumentExpansionBudget:
-        """Bound conversion work across all YAML files in one import."""
-        return DocumentExpansionBudget(
-            items=MAX_MANIFEST_ITEMS,
-            strings=MAX_MANIFEST_BYTES,
-        )
 
     def load_yaml(
         self,
@@ -90,7 +90,7 @@ class ManifestImporter(ABC):
             ).load(content)
             if not isinstance(data, Mapping):
                 raise ValueError("Manifest YAML must contain a mapping")
-            budget = expansion_budget or self.expansion_budget()
+            budget = expansion_budget or manifest_expansion_budget()
             budget.consume(data, label="Manifest YAML")
             if "name" in data and not isinstance(data["name"], str):
                 raise ValueError("Manifest name must be a string.")

@@ -10,7 +10,7 @@ from conda.base.context import context as conda_context
 from ..exceptions import ManifestImportError
 from ..parsing import DocumentStringBudget
 from ..paths import parse_relative_posix_path, resolve_relative_path
-from .base import ManifestImporter
+from .base import ManifestImporter, manifest_expansion_budget
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -27,7 +27,7 @@ class CondaProjectImporter(ManifestImporter):
     label: ClassVar[str] = "conda-project"
 
     def convert(self, path: Path) -> tomlkit.TOMLDocument:
-        expansion_budget = self.expansion_budget()
+        expansion_budget = manifest_expansion_budget()
         source_budget = DocumentStringBudget(expansion_budget.strings)
         cp = self.load_yaml(
             path,

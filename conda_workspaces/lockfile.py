@@ -261,7 +261,9 @@ def check_lockfile_satisfiability(
 
     try:
         lockfile_data = CondaLockLoader.redact_data_urls(lockfile_data)
-        version = CondaLockLoader.version_from_data(lockfile_data)
+        version = lockfile_data.get("version")
+        if type(version) is not int:
+            raise ValueError("Lockfile version must be an integer")
     except ValueError as exc:
         return LockfileStatus(status=_stale, reason=str(exc))
 
@@ -529,21 +531,14 @@ class CondaLockLoader(EnvironmentSpecBase):
         self.path = Path(path).resolve()
         self._data_cache = self.redact_data_urls(data) if data is not None else None
 
-    @staticmethod
-    def version_from_data(data: dict[str, Any]) -> int:
-        """Read a scalar schema version without expanding malformed YAML aliases."""
-        version = data.get("version")
-        if type(version) is not int:
-            raise ValueError("Lockfile version must be an integer")
-        return version
-
     def can_handle(self) -> bool:
         if self.path.name not in DEFAULT_FILENAMES:
             return False
         if not self.path.exists():
             return False
         try:
-            return self.version_from_data(self._data) == LOCKFILE_VERSION
+            version = self._data.get("version")
+            return type(version) is int and version == LOCKFILE_VERSION
         except Exception:
             return False
 
@@ -562,7 +557,9 @@ class CondaLockLoader(EnvironmentSpecBase):
     def available_environments(self) -> tuple[str, ...]:
         """Return the environment names declared in this lockfile."""
         data = self._data
-        version = self.version_from_data(data)
+        version = data.get("version")
+        if type(version) is not int:
+            raise ValueError("Lockfile version must be an integer")
         if version != LOCKFILE_VERSION:
             raise ValueError(
                 f"Unsupported {LOCKFILE_NAME} version: {version!r} "
@@ -830,12 +827,7 @@ class CondaLockLoader(EnvironmentSpecBase):
             raise ValueError(
                 f"Lockfile environment {name!r} has invalid target packages"
             )
-        self.validate_channel_entries(env_data.get("channels"), name)
-        return env_data
-
-    @staticmethod
-    def validate_channel_entries(channels: Any, name: str) -> list[dict[str, Any]]:
-        """Reject non-string channel URLs before normalization or conversion."""
+        channels = env_data.get("channels")
         if not isinstance(channels, list) or not all(
             isinstance(channel, dict)
             and isinstance(channel.get("url"), str)
@@ -843,7 +835,7 @@ class CondaLockLoader(EnvironmentSpecBase):
             for channel in channels
         ):
             raise ValueError(f"Lockfile environment {name!r} has invalid channels")
-        return channels
+        return env_data
 
     def explicit_package_specs_for(
         self,
@@ -1956,7 +1948,9 @@ def merge_lockfiles(
                     f"{MAX_LOCKFILE_ITEMS:,} aggregate collection items"
                 )
             data = CondaLockLoader.redact_data_urls(data)
-            version = CondaLockLoader.version_from_data(data)
+            version = data.get("version")
+            if type(version) is not int:
+                raise ValueError("Lockfile version must be an integer")
         except ValueError as exc:
             raise LockfileMergeError(str(exc)) from exc
         if version != LOCKFILE_VERSION:
@@ -1991,12 +1985,17 @@ def merge_lockfiles(
 
         for env_name, env_data in (data.get("environments") or {}).items():
             channels = env_data.get("channels")
-            try:
-                channels = CondaLockLoader.validate_channel_entries(
-                    [] if channels is None else channels, env_name
+            if channels is None:
+                channels = []
+            if not isinstance(channels, list) or not all(
+                isinstance(channel, dict)
+                and isinstance(channel.get("url"), str)
+                and channel["url"]
+                for channel in channels
+            ):
+                raise LockfileMergeError(
+                    f"Lockfile environment {env_name!r} has invalid channels"
                 )
-            except ValueError as exc:
-                raise LockfileMergeError(str(exc)) from exc
             manifest_channels = manifest_env_channels.get(env_name)
             if manifest_channels is not None:
                 manifest_urls = manifest_env_channel_urls[env_name]
