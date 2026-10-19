@@ -4,6 +4,16 @@ All notable changes to conda-workspaces will be documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Fixed
+
+- Fixed `conda workspace run` changing the caller's working directory, so
+  relative scripts and files now resolve where the command was invoked. (#197)
+- Platform errors now distinguish unknown names from valid platforms unsupported
+  by the selected environment, suggest close matches, and identify the manifest
+  settings to update. (#199)
+
 ## 0.11.1 — 2026-10-02
 
 ### Changed
