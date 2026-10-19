@@ -191,3 +191,38 @@ def test_archive_hash_mismatch_error():
     assert "numpy-1.26.conda" in str(exc)
     assert "abc" in str(exc)
     assert "def" in str(exc)
+
+
+@pytest.mark.parametrize(
+    ("platform", "known_platforms", "unknown", "suggestion"),
+    [
+        ("linux-64", (), False, None),
+        ("linxu-64", (), True, "linux-64"),
+        ("osx-arm6", (), True, "osx-arm64"),
+        ("unrelated", (), True, None),
+        ("gpu-linux", ("gpu-linux",), False, None),
+        ("gpu-linx", ("gpu-linux",), True, "gpu-linux"),
+    ],
+    ids=[
+        "known",
+        "transpose",
+        "missing-character",
+        "unrelated",
+        "custom",
+        "custom-typo",
+    ],
+)
+def test_platform_error_suggestions(
+    platform: str,
+    known_platforms: tuple[str, ...],
+    unknown: bool,
+    suggestion: str | None,
+) -> None:
+    exc = PlatformError(platform, ["osx-arm64"], known_platforms=known_platforms)
+
+    assert ("Unknown platform" in exc.error_message) is unknown
+    assert "Supported platforms: osx-arm64" in exc.hints
+    suggestions = [hint for hint in exc.hints if hint.startswith("Did you mean")]
+    assert suggestions == ([f"Did you mean '{suggestion}'?"] if suggestion else [])
+    assert all(hint in str(exc) for hint in exc.hints)
+    assert not any("Add " in hint for hint in exc.hints)

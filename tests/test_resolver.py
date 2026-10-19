@@ -453,3 +453,26 @@ def test_resolve_channel_priority(priority, expected):
     config = WorkspaceConfig(**kwargs)
     resolved = resolve_environment(config, "default")
     assert resolved.channel_priority == expected
+
+
+@pytest.mark.parametrize(
+    ("requested", "suggestion"),
+    [("gpu-linux", None), ("gpu-linx", "gpu-linux")],
+    ids=["known-custom", "custom-typo"],
+)
+def test_resolve_platform_error_recognizes_excluded_custom_name(
+    requested: str, suggestion: str | None
+) -> None:
+    config = ResolvedEnvironment(
+        name="gpu",
+        platforms=["gpu-linux", "osx-arm64"],
+        platform_subdirs={"gpu-linux": "linux-64"},
+    )
+
+    with pytest.raises(PlatformError) as caught:
+        config.resolve_platform_name(requested, ["osx-arm64"])
+
+    error = caught.value
+    assert ("Unknown platform" in error.error_message) is (suggestion is not None)
+    suggestions = [hint for hint in error.hints if hint.startswith("Did you mean")]
+    assert suggestions == ([f"Did you mean '{suggestion}'?"] if suggestion else [])

@@ -677,7 +677,11 @@ class WorkspaceConfig:
         matches = self.platform_names_for_subdir(requested, candidates)
         if matches:
             return matches[0]
-        raise PlatformError(requested, sorted(candidates))
+        raise PlatformError(
+            requested,
+            sorted(candidates),
+            known_platforms=(*self.platforms, *self.platform_subdirs),
+        )
 
     def get_environment(self, name: str) -> Environment:
         """Return the environment with *name*, raising if not found."""

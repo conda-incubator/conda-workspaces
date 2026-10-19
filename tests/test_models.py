@@ -837,3 +837,25 @@ def test_archive_config_custom():
     assert cfg.exclude == ("data/**", "*.bin")
     assert cfg.compression == "gz"
     assert cfg.compression_level == 6
+
+
+@pytest.mark.parametrize(
+    ("requested", "suggestion"),
+    [("gpu-linux", None), ("gpu-linx", "gpu-linux")],
+    ids=["known-custom", "custom-typo"],
+)
+def test_resolve_platform_error_recognizes_excluded_custom_name(
+    requested: str, suggestion: str | None
+) -> None:
+    config = WorkspaceConfig(
+        platforms=["gpu-linux", "osx-arm64"],
+        platform_subdirs={"gpu-linux": "linux-64"},
+    )
+
+    with pytest.raises(PlatformError) as caught:
+        config.resolve_platform_name(requested, ["osx-arm64"])
+
+    error = caught.value
+    assert ("Unknown platform" in error.error_message) is (suggestion is not None)
+    suggestions = [hint for hint in error.hints if hint.startswith("Did you mean")]
+    assert suggestions == ([f"Did you mean '{suggestion}'?"] if suggestion else [])
