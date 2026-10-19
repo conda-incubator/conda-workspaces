@@ -12,6 +12,7 @@ import pytest
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import PurePosixPath
     from typing import Any
 
     from tests.conftest import SnapshotTree
@@ -22,6 +23,7 @@ from conda.common.serialize.yaml import dump as yaml_dump
 from conda.common.serialize.yaml import load as yaml_load
 from conda.core.prefix_data import PrefixData
 from conda.history import History
+from conda.models.channel import Channel as CondaChannel
 from conda.models.environment import EnvironmentConfig
 from conda.models.match_spec import MatchSpec
 from conda.models.records import PackageRecord, PrefixRecord
@@ -30,6 +32,7 @@ from conda_lockfiles.load_yaml import load_yaml
 import conda_workspaces.lockfile as lockfile_module
 import conda_workspaces.parsing as parsing_module
 import conda_workspaces.paths as paths_module
+from conda_workspaces._lockfile_compat import WorkspaceLock
 from conda_workspaces.context import WorkspaceContext
 from conda_workspaces.exceptions import (
     CondaWorkspacesError,
@@ -559,6 +562,82 @@ def test_conda_lock_loader_env_for_rich_platform(
     assert "/linux-64/" in env.explicit_packages[0].url
 
 
+@pytest.mark.parametrize(
+    "metadata_only", [False, True], ids=["generic", "metadata-only"]
+)
+def test_conda_lock_loader_bounds_selected_aliased_dependencies_before_conversion(
+    monkeypatch: pytest.MonkeyPatch,
+    lockfile_with_platforms: Path,
+    lockfile_data_source: Callable[[dict[str, Any]], dict[str, Any]],
+    metadata_only: bool,
+) -> None:
+    data = load_lockfile_data(lockfile_with_platforms.read_bytes())
+    channel = data["environments"]["default"]["channels"][0]["url"]
+    depends = [f"dependency-{index} >=1" for index in range(64)]
+    urls = [f"{channel}/linux-64/demo-{index}-1.0-0.conda" for index in range(32)]
+    data["environments"]["default"]["packages"]["linux-64"] = [
+        {"conda": url} for url in urls
+    ]
+    data["packages"] = [
+        {"conda": url, "sha256": "a" * 64, "depends": depends} for url in urls
+    ]
+    data = lockfile_data_source(data)
+    loader = CondaLockLoader(lockfile_with_platforms, data=data)
+    assert (
+        loader._data["packages"][0]["depends"]
+        is loader._data["packages"][-1]["depends"]
+    )
+
+    monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_ITEMS", 1_000)
+
+    def reject_conversion(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Conversion received expanded lockfile dependencies")
+
+    if metadata_only:
+        monkeypatch.setattr(PackageRecord, "from_objects", reject_conversion)
+    else:
+        monkeypatch.setattr(WorkspaceLock, "model_validate", reject_conversion)
+
+    with pytest.raises(ValueError, match="maximum expanded collection items"):
+        loader.env_for("linux-64", metadata_only=metadata_only)
+
+
+def test_conda_lock_loader_metadata_only_ignores_unselected_aliased_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    lockfile_with_platforms: Path,
+    lockfile_data_source: Callable[[dict[str, Any]], dict[str, Any]],
+) -> None:
+    data = load_lockfile_data(lockfile_with_platforms.read_bytes())
+    channel = data["environments"]["default"]["channels"][0]["url"]
+    selected_url = data["environments"]["default"]["packages"]["linux-64"][0]["conda"]
+    depends = [f"dependency-{index} >=1" for index in range(64)]
+    urls = [f"{channel}/linux-64/unused-{index}-1.0-0.conda" for index in range(32)]
+    data["environments"]["unused"] = {
+        "channels": [{"url": channel}],
+        "packages": {"linux-64": [{"conda": url} for url in urls]},
+    }
+    data["packages"].extend(
+        {"conda": url, "sha256": "a" * 64, "depends": depends} for url in urls
+    )
+    data = lockfile_data_source(data)
+    loader = CondaLockLoader(lockfile_with_platforms, data=data)
+    assert (
+        loader._data["packages"][-1]["depends"]
+        is loader._data["packages"][-32]["depends"]
+    )
+
+    monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_ITEMS", 1_000)
+    with pytest.raises(ValueError, match="maximum expanded collection items"):
+        parsing_module.DocumentExpansionBudget(
+            items=1_000,
+            strings=lockfile_module.MAX_LOCKFILE_BYTES,
+        ).consume(loader._data, label="Lockfile")
+
+    env = loader.env_for("linux-64", metadata_only=True)
+
+    assert [record.url for record in env.explicit_packages] == [selected_url]
+
+
 def test_conda_lock_loader_env_redacts_urls_before_conversion(
     lockfile_with_platforms: Path,
     fake_records_factory: list[dict],
@@ -1027,6 +1106,98 @@ def test_package_records_by_url_reuses_shared_metadata_comparisons(
 
     assert records == {url: first}
     assert comparisons == 1
+
+
+@pytest.mark.parametrize("count", [1, 8, 32], ids=["single", "eight", "thirty-two"])
+@pytest.mark.parametrize(
+    "record_shape", ["alias", "distinct-urls"], ids=["record-alias", "shared-path"]
+)
+def test_package_records_by_url_validates_shared_site_packages_path_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    lockfile_data_source: Callable[[dict[str, Any]], dict[str, Any]],
+    count: int,
+    record_shape: str,
+) -> None:
+    site_packages_path = "lib/" + "nested/" * 292 + "site-packages"
+    record = {
+        "conda": "https://repo.example/linux-64/demo-0.conda",
+        "python_site_packages_path": site_packages_path,
+    }
+    records = (
+        [record] * count
+        if record_shape == "alias"
+        else [
+            {**record, "conda": f"https://repo.example/linux-64/demo-{index}.conda"}
+            for index in range(count)
+        ]
+    )
+    data = lockfile_data_source({"version": 1, "environments": {}, "packages": records})
+    loader = CondaLockLoader(tmp_path / LOCKFILE_NAME, data=data)
+    calls: list[str] = []
+    original_parse = lockfile_module.parse_relative_posix_path
+
+    def record_parse(path: str) -> PurePosixPath:
+        calls.append(path)
+        return original_parse(path)
+
+    monkeypatch.setattr(lockfile_module, "parse_relative_posix_path", record_parse)
+
+    assert len(loader.package_records_by_url()) == (
+        1 if record_shape == "alias" else count
+    )
+    assert calls == [site_packages_path]
+
+
+@pytest.mark.parametrize("count", [1, 8, 32], ids=["single", "eight", "thirty-two"])
+@pytest.mark.parametrize(
+    "entry_shape", ["alias", "distinct-entries"], ids=["entry-alias", "shared-url"]
+)
+def test_conda_lock_loader_expands_repeated_channel_url_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    lockfile_data_source: Callable[[dict[str, Any]], dict[str, Any]],
+    count: int,
+    entry_shape: str,
+) -> None:
+    url = "https://repo.example/channel"
+    entry = {"url": url}
+    channels = (
+        [entry] * count
+        if entry_shape == "alias"
+        else [{"url": url} for _ in range(count)]
+    )
+    data = lockfile_data_source(
+        {
+            "version": 1,
+            "environments": {
+                "default": {"channels": channels, "packages": {"linux-64": []}}
+            },
+            "packages": [],
+        }
+    )
+    loader = CondaLockLoader(tmp_path / LOCKFILE_NAME, data=data)
+    calls: list[bool] = []
+
+    def record_urls(
+        channel: CondaChannel,
+        *,
+        with_credentials: bool,
+        subdirs: tuple[str, ...],
+    ) -> list[str]:
+        assert str(channel) == url
+        assert subdirs == ("linux-64", "noarch")
+        calls.append(with_credentials)
+        return [f"{url}/{subdir}" for subdir in subdirs]
+
+    monkeypatch.setattr(CondaChannel, "urls", record_urls)
+
+    env_data = loader._env_data()
+    assert loader.channel_urls_for(env_data, "linux-64") == (
+        f"{url}/linux-64",
+        f"{url}/noarch",
+    )
+    assert calls == [False, True]
 
 
 @pytest.mark.parametrize(

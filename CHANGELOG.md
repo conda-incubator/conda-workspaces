@@ -16,6 +16,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Bound aliased package dependencies before converting lockfile packages and
+  environments. (#200)
+- Validate repeated lockfile Python site-packages paths and channel URLs once.
+  (#200)
 - Reject malformed lockfile versions and channel URLs before converting values
   to strings, preventing repeated expansion of YAML aliases. (#200)
 - Validate lockfile Python site-packages paths before package conversion so

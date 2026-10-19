@@ -82,6 +82,7 @@ from .models import (
 )
 from .parsing import (
     BoundedYamlLoader,
+    DocumentExpansionBudget,
     DocumentStringBudget,
     decode_limited_text,
     document_values_equal,
@@ -690,6 +691,14 @@ class CondaLockLoader(EnvironmentSpecBase):
         )
 
         conversion_platform = package_platform or platform
+        if conversion_platform != platform:
+            packages = payload["environments"][name]["packages"]
+            packages[conversion_platform] = packages[platform]
+        if not metadata_only:
+            DocumentExpansionBudget(
+                items=MAX_LOCKFILE_ITEMS,
+                strings=MAX_LOCKFILE_BYTES,
+            ).consume(payload, label="Lockfile")
         records = None
         if metadata_only:
             records = self.package_records_for_env_data(
@@ -698,9 +707,6 @@ class CondaLockLoader(EnvironmentSpecBase):
                 platform,
                 package_platform=conversion_platform,
             )
-        if conversion_platform != platform:
-            packages = payload["environments"][name]["packages"]
-            packages[conversion_platform] = packages[platform]
         if records is None:
             from conda_lockfiles.rattler_lock.v6 import (
                 rattler_lock_v6_to_conda_env,
@@ -910,6 +916,7 @@ class CondaLockLoader(EnvironmentSpecBase):
         """Return top-level conda package records from *data* keyed by URL."""
         records_by_url: dict[str, dict[str, Any]] = {}
         equal_value_pairs: dict[tuple[int, int], tuple[object, object]] = {}
+        validated_paths: set[str] = set()
         packages = data.get("packages", [])
         if not isinstance(packages, list):
             raise ValueError("Lockfile package records must be a list")
@@ -923,7 +930,9 @@ class CondaLockLoader(EnvironmentSpecBase):
                     try:
                         if not isinstance(site_packages_path, str):
                             raise ValueError
-                        parse_relative_posix_path(site_packages_path)
+                        if site_packages_path not in validated_paths:
+                            parse_relative_posix_path(site_packages_path)
+                            validated_paths.add(site_packages_path)
                     except ValueError:
                         raise ValueError(
                             "Lockfile python_site_packages_path must be a relative "
@@ -1002,6 +1011,19 @@ class CondaLockLoader(EnvironmentSpecBase):
             )
 
         records_by_url = cls.package_records_by_url_from_data(data)
+        selected_metadata: list[dict[str, Any]] = []
+        for ref in refs:
+            if isinstance(ref, dict):
+                url = ref.get("conda")
+                if isinstance(url, str) and url in records_by_url:
+                    selected_metadata.append(records_by_url[url])
+        DocumentExpansionBudget(
+            items=MAX_LOCKFILE_ITEMS,
+            strings=MAX_LOCKFILE_BYTES,
+        ).consume(
+            {"environment": env_data, "packages": selected_metadata},
+            label="Lockfile",
+        )
         records: list[PackageRecord] = []
         for ref in refs:
             if not isinstance(ref, dict) or "conda" not in ref:
@@ -1285,11 +1307,14 @@ class CondaLockLoader(EnvironmentSpecBase):
         from conda.models.channel import Channel
 
         urls: set[str] = set()
+        seen_raw_urls: set[str] = set()
         for entry in env_data.get("channels", []) or []:
             if not isinstance(entry, dict):
                 continue
             raw_url = entry.get("url")
             if not isinstance(raw_url, str) or not raw_url:
+                continue
+            if raw_url in seen_raw_urls:
                 continue
             try:
                 channel = Channel(raw_url)
@@ -1300,6 +1325,7 @@ class CondaLockLoader(EnvironmentSpecBase):
                             subdirs=(platform, "noarch"),
                         )
                     )
+                seen_raw_urls.add(raw_url)
             except Exception:
                 reason = (
                     "environment channel"
