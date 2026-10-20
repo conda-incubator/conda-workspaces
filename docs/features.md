@@ -51,6 +51,14 @@ Portable workspace archives with source files, manifests, optional lockfiles,
 optional package bundles, receipts, and verified extraction.
 :::
 
+:::{grid-item-card} {octicon}`rocket` Native launchers
+:link: features/shipping
+:link-type: doc
+
+Locked environments distributed through conda-ship as native launchers,
+with online, external, and embedded package layouts.
+:::
+
 :::{grid-item-card} {octicon}`server` Local environments and CI
 :link: features/ci
 :link-type: doc
@@ -79,5 +87,6 @@ features/environments
 features/locking
 features/export
 features/archives
+features/shipping
 features/ci
 ```

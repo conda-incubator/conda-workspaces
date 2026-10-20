@@ -54,7 +54,7 @@ Animated terminal demos recorded with [VHS](https://github.com/charmbracelet/vhs
 
 The `image` demo also requires a running Linux Docker daemon with Buildx and network access to fetch its base images and locked packages. It uses the Docker host's native architecture (`linux-64` or `linux-aarch64`) and the committed lockfile from `examples/container`. The recording omits the build wait and leaves the resulting `workspace-image-demo` image available locally.
 
-The `ship` demos require a conda-ship build with the input-selection options from [conda-ship#147](https://github.com/conda-incubator/conda-ship/pull/147), installed in the dev environment. They use the committed lockfile from `examples/ship` on Linux x86-64 or Apple Silicon. `ship-bundle` also needs `tar` with Zstandard support. The recordings omit build and installation waits. Each uses a new temporary directory and fresh runtime prefixes, and leaves its artifacts and logs there for inspection. VHS also writes screen transcripts under `docs/_build`.
+The `ship` demos require conda-ship 0.11.1 or later, installed in the dev environment. They use the committed lockfile from `examples/ship` on Linux x86-64 or Apple Silicon. `ship-bundle` also needs `tar` with Zstandard support. The recordings omit build and installation waits. Each uses a new temporary directory and fresh runtime prefixes, and leaves its artifacts and logs there for inspection. VHS also writes screen transcripts under `docs/_build`.
 
 To record with a local conda-ship checkout, build its `cs` and `cs-template` release binaries, then set these variables before running VHS:
 
