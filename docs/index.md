@@ -29,9 +29,9 @@ pixi global install conda-workspaces
 
 ::::
 
-Both methods provide the `cw` and `ct` shortcut commands. Installing into
-conda's base environment also registers the `conda workspace` and
-`conda task` plugin subcommands.
+Both methods provide the `cw` and `ct` shortcuts. Installing into conda's
+base environment also registers the `conda workspace` and `conda task`
+plugin subcommands.
 
 ## Define a workspace
 
@@ -51,6 +51,7 @@ numpy = ">=1.24"
 
 [feature.test.dependencies]
 pytest = ">=8.0"
+python-build = ">=1.0"
 ruff = ">=0.9"
 
 [environments]
@@ -78,7 +79,8 @@ Add tasks to the same manifest:
 
 ```toml
 [tasks]
-test = "pytest tests/ -v"
+test = { cmd = "pytest tests/ -v", depends-on = ["build"] }
+build = "python -m build"
 lint = "ruff check ."
 
 [tasks.check]
@@ -88,15 +90,14 @@ depends-on = ["test", "lint"]
 Then run them:
 
 ```bash
-conda task run -e test check  # resolves dependencies, runs test and lint
-conda task list             # shows all available tasks
-conda task run -e test test   # runs one task in the test environment
+conda task run check -e test  # run check and its prerequisites
+conda task list              # show all available tasks
+conda task run test -e test   # build first, then test
 ```
 
-Tasks beside a workspace use its `default` environment when that prefix is
-installed, otherwise they use the current conda environment. Use `-e myenv`
-to require another installed workspace environment. Tasks-only manifests use
-the current conda environment.
+Without an explicit selection, tasks use the installed workspace `default`
+environment, or the current shell environment if that prefix is absent.
+Use `-e myenv` or a task's `default-environment` to select another environment.
 
 ## Why conda-workspaces?
 
@@ -105,13 +106,16 @@ with its own solver and installation machinery. conda-workspaces reads
 pixi-compatible workspace manifests and uses conda to solve and install
 the environments.
 
+This means:
+
 - Workspaces and tasks read from `conda.toml`, `pixi.toml`, or
-  `pyproject.toml`, so multiple tools can use one manifest
+  `pyproject.toml` — one manifest, multiple tools
 - Environments are solved by conda's configured solver backend and
   installed as regular conda prefixes
 - Lock files (`conda.lock`) capture exact package URLs for reproducible
   installs without re-solving
-- Supports task dependencies, caching, Jinja2 templates, and platform overrides
+- Task dependencies, caching, Jinja2 templates, and platform overrides
+  all work out of the box
 - Ships as a conda plugin (`conda workspace` / `conda ws`, `conda task`) and
   standalone `cw` / `ct` CLIs
 
@@ -218,7 +222,6 @@ tutorials/archives
 :caption: How-to guides
 
 how-to/index
-how-to/sbom
 how-to/archive-api
 ```
 

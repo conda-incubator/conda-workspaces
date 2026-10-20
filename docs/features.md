@@ -1,7 +1,9 @@
 # Features
 
-conda-workspaces adds workspaces and task execution to conda,
-using conda's solver, package cache, and environment prefixes.
+conda-workspaces adds workspaces and task execution to conda
+without replacing conda's solver, package cache, or environment prefixes.
+This overview explains the main feature areas and points to the detailed
+explanation pages for each one.
 
 ## Choose a feature area
 
@@ -84,8 +86,16 @@ Workspace exports through conda's exporter plugin system, including
 
 <span id="archives"></span>
 
-Portable workspace archives with source files, manifests, optional
-lockfiles and package bundles, receipts, and verified extraction.
+Portable workspace archives with source files, manifests, optional lockfiles,
+optional package bundles, receipts, and verified extraction.
+:::
+
+:::{grid-item-card} {octicon}`rocket` Native launchers
+:link: features/shipping
+:link-type: doc
+
+Locked environments distributed through conda-ship as native launchers,
+with online, external, and embedded package layouts.
 :::
 
 :::{grid-item-card} {octicon}`server` Local environments and CI
@@ -120,5 +130,6 @@ features/environments
 features/locking
 features/export
 features/archives
+features/shipping
 features/ci
 ```

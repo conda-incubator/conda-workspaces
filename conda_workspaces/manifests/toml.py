@@ -58,8 +58,8 @@ class CondaTomlParser(ManifestParser):
     def can_handle(self, path: Path) -> bool:
         return path.name in self.filenames
 
-    def has_workspace(self, path: Path) -> bool:
-        data = self.load_toml(path)
+    def has_workspace(self, path: Path, *, reject_symlinks: bool = False) -> bool:
+        data = self.load_toml(path, reject_symlinks=reject_symlinks)
         return "workspace" in data
 
     def parse_data(self, data: dict[str, Any], path: Path) -> WorkspaceConfig:
@@ -73,8 +73,8 @@ class CondaTomlParser(ManifestParser):
         config.manifest_path = str(path)
         return config
 
-    def has_tasks(self, path: Path) -> bool:
-        data = self.load_toml(path)
+    def has_tasks(self, path: Path, *, reject_symlinks: bool = False) -> bool:
+        data = self.load_toml(path, reject_symlinks=reject_symlinks)
         return bool(data.get("tasks"))
 
     def parse_tasks_data(self, data: dict[str, Any]) -> dict[str, Task]:

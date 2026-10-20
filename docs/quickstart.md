@@ -87,6 +87,13 @@ emits a single structured `{workspace, environment, manifest,
 specs_added, shell_spawned}` payload on stdout that you can pipe into
 `jq`.
 
+`--copy` and `--clone` accept a manifest file or a workspace directory.
+Symbolic links in the source path, including the selected manifest, are
+rejected. These checks also apply to `--dry-run`. Use the real source path
+or a regular copy of the manifest. The destination manifest must not
+already exist. Copied manifests follow the
+{ref}`generated file permissions <generated-file-permissions>`.
+
 Positional specs are added as private dependencies of the selected
 environment, including the default environment. Quickstart creates the
 environment when necessary, writes the specs below
