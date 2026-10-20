@@ -17,6 +17,7 @@ import conda_workspaces.publication as publication_mod
 from conda_workspaces.cli.workspace.add import execute_add
 from conda_workspaces.cli.workspace.dependencies import DependencyLocation
 from conda_workspaces.cli.workspace.remove import execute_remove
+from conda_workspaces.cli.workspace.update import execute_update
 from conda_workspaces.exceptions import CondaWorkspacesError, FeatureNotFoundError
 from conda_workspaces.manifests import find_parser
 from conda_workspaces.resolver import ResolvedEnvironment
@@ -24,6 +25,8 @@ from conda_workspaces.resolver import ResolvedEnvironment
 from ..conftest import make_args
 
 if TYPE_CHECKING:
+    import argparse
+    from collections.abc import Callable
     from pathlib import Path
 
     from rich.console import Console
@@ -1051,19 +1054,149 @@ click = ">=8"
     assert all(f"--file {path}" in hint for hint in hints)
 
 
-def test_add_unknown_platform_fails_without_write(declaration_toml: Path) -> None:
-    before = declaration_toml.read_bytes()
+@pytest.fixture(
+    params=[
+        ("conda.toml", "workspace", ""),
+        ("pixi.toml", "workspace", ""),
+        ("pixi.toml", "project", ""),
+        ("pyproject.toml", "tool.conda.workspace", "tool.conda."),
+        ("pyproject.toml", "tool.pixi.workspace", "tool.pixi."),
+    ],
+    ids=["conda", "pixi", "pixi-legacy", "pyproject-conda", "pyproject-pixi"],
+)
+def platform_diagnostic_manifest(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> tuple[Path, str, str]:
+    filename, table, namespace = request.param
+    path = tmp_path / filename
+    path.write_text(
+        f'[{table}]\nname = "platform-errors"\nchannels = []\n'
+        'platforms = ["osx-arm64"]\n\n'
+        f'[{namespace}dependencies]\npython = "*"\n',
+        encoding="utf-8",
+    )
+    return path, table, namespace
+
+
+@pytest.mark.parametrize(
+    "execute_fn",
+    [execute_add, execute_remove, execute_update],
+    ids=["add", "remove", "update"],
+)
+@pytest.mark.parametrize(
+    ("platform", "unknown", "suggestion", "declaration"),
+    [
+        ("linux-64", False, None, "linux-64"),
+        ("linxu-64", True, "linux-64", "linux-64"),
+        ("osx-arm6", True, "osx-arm64", None),
+        ("unrelated", True, None, None),
+    ],
+    ids=["undeclared", "undeclared-typo", "declared-typo", "unrelated"],
+)
+def test_platform_errors_explain_recovery_without_write(
+    platform_diagnostic_manifest: tuple[Path, str, str],
+    execute_fn: Callable[[argparse.Namespace], int],
+    platform: str,
+    unknown: bool,
+    suggestion: str | None,
+    declaration: str | None,
+) -> None:
+    path, table, _ = platform_diagnostic_manifest
+    before = path.read_bytes()
+    args = make_args(_DEFAULTS, manifest_file=path, specs=["python"], platform=platform)
+
+    with pytest.raises(CondaWorkspacesError) as caught:
+        execute_fn(args)
+
+    error = caught.value
+    assert ("Unknown platform" in error.error_message) is unknown
+    assert "Supported platforms: osx-arm64" in error.hints
+    suggestions = [hint for hint in error.hints if hint.startswith("Did you mean")]
+    assert suggestions == ([f"Did you mean '{suggestion}'?"] if suggestion else [])
+    declaration_hints = [hint for hint in error.hints if hint.startswith("Add ")]
+    assert declaration_hints == (
+        [f"Add '{declaration}' to [{table}].platforms in {path.name}."]
+        if declaration
+        else []
+    )
+    assert all(hint in str(error) for hint in error.hints)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "selector",
+    ["feature", "environment", None],
+    ids=["feature", "environment", "workspace"],
+)
+def test_platform_error_names_applicable_feature_restrictions(
+    platform_diagnostic_manifest: tuple[Path, str, str], selector: str | None
+) -> None:
+    path, table, namespace = platform_diagnostic_manifest
+    with path.open("a", encoding="utf-8") as manifest:
+        manifest.write(
+            f'\n[{namespace}feature."qa.tools"]\nplatforms = ["osx-arm64"]\n'
+            f'\n[{namespace}feature.other]\nplatforms = ["win-64"]\n'
+            f'\n[{namespace}environments]\nqa = ["qa.tools"]\nother = ["other"]\n'
+        )
+    before = path.read_bytes()
     args = make_args(
         _DEFAULTS,
-        manifest_file=declaration_toml,
-        specs=["click"],
-        platform="win-64",
+        manifest_file=path,
+        specs=["python"],
+        platform="linxu-64",
+        **(
+            {selector: "qa.tools" if selector == "feature" else "qa"}
+            if selector
+            else {}
+        ),
     )
 
-    with pytest.raises(CondaWorkspacesError, match="win-64"):
+    with pytest.raises(CondaWorkspacesError) as caught:
         execute_add(args)
 
-    assert declaration_toml.read_bytes() == before
+    hints = caught.value.hints
+    assert "Did you mean 'linux-64'?" in hints
+    if selector:
+        assert any(
+            f'[{namespace}feature."qa.tools"].platforms' in hint for hint in hints
+        )
+        assert any(path.name in hint for hint in hints)
+        assert not any(
+            "feature.other" in hint or hint.startswith("Add ") for hint in hints
+        )
+    else:
+        assert f"Add 'linux-64' to [{table}].platforms in {path.name}." in hints
+        assert not any("feature." in hint for hint in hints)
+    assert path.read_bytes() == before
+
+
+def test_platform_error_names_default_feature_restrictions(
+    platform_diagnostic_manifest: tuple[Path, str, str],
+) -> None:
+    path, _, namespace = platform_diagnostic_manifest
+    original = path.read_text(encoding="utf-8")
+    table = f"[{namespace.rstrip('.')}]" if namespace else ""
+    path.write_text(
+        f'{table}\nplatforms = ["osx-arm64"]\n\n{original}', encoding="utf-8"
+    )
+    before = path.read_bytes()
+    args = make_args(
+        _DEFAULTS,
+        manifest_file=path,
+        specs=["python"],
+        platform="linux-64",
+        environment="default",
+    )
+
+    with pytest.raises(CondaWorkspacesError) as caught:
+        execute_add(args)
+
+    setting = f"{table}.platforms" if namespace else "top-level platforms"
+    assert (
+        f"To support 'linux-64', review {setting} in {path.name}." in caught.value.hints
+    )
+    assert not any("feature.default" in hint for hint in caught.value.hints)
+    assert path.read_bytes() == before
 
 
 def test_dependency_location_diagnostics_use_shell_quoting(tmp_path: Path) -> None:
@@ -2248,3 +2381,56 @@ lint = {features = ["lint"], no-default-feature = true}
 
     env_names, _ = stub_sync[0]
     assert env_names == ["default"]
+
+
+@pytest.mark.parametrize(
+    ("platform", "suggestion", "restricted"),
+    [
+        ("linxu-64", "linux-64", False),
+        ("linux-64-cud11", "linux-64-cuda11", False),
+        ("linux-64-cuda12", None, True),
+        ("linux-64-cud12", "linux-64-cuda12", True),
+    ],
+    ids=["subdir-typo", "custom-typo", "restricted-custom", "restricted-custom-typo"],
+)
+def test_add_rich_platform_errors_preserve_names_and_subdir_aliases(
+    tmp_path: Path, platform: str, suggestion: str | None, restricted: bool
+) -> None:
+    path = tmp_path / "pixi.toml"
+    path.write_text(
+        """\
+[workspace]
+name = "rich-platform-errors"
+channels = []
+platforms = [
+  { name = "linux-64-cuda11", platform = "linux-64", cuda = "11.0" },
+  { name = "linux-64-cuda12", platform = "linux-64", cuda = "12.0" },
+]
+
+[feature.gpu]
+platforms = ["linux-64-cuda11"]
+
+[environments]
+gpu = ["gpu"]
+""",
+        encoding="utf-8",
+    )
+    before = path.read_bytes()
+    args = make_args(
+        _DEFAULTS,
+        manifest_file=path,
+        specs=["python"],
+        platform=platform,
+        environment="gpu",
+    )
+
+    with pytest.raises(CondaWorkspacesError) as caught:
+        execute_add(args)
+
+    error = caught.value
+    assert ("Unknown platform" in error.error_message) is (suggestion is not None)
+    suggestions = [hint for hint in error.hints if hint.startswith("Did you mean")]
+    assert suggestions == ([f"Did you mean '{suggestion}'?"] if suggestion else [])
+    assert any("[feature.gpu].platforms" in hint for hint in error.hints) is restricted
+    assert not any(hint.startswith("Add ") for hint in error.hints)
+    assert path.read_bytes() == before

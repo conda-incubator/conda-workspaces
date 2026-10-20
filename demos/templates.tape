@@ -24,7 +24,7 @@ Type ""
 Enter
 Type "[tasks.greet]"
 Enter
-Type `cmd = "echo 'Hello, {{ name }}!'"`
+Type `cmd = ["echo", "Hello, {{ name }}!"]`
 Enter
 Type ""
 Enter

@@ -96,25 +96,33 @@ def _build_dry_run_tree(
     tasks: dict[str, Task],
     rendered_cmds: dict[str, str],
 ) -> Tree:
-    """Build a Rich Tree for dry-run display."""
+    """Build a Rich Tree, expanding each task's dependencies once."""
 
-    def _label(name: str) -> str:
+    def _label(name: str, *, include_command: bool = True) -> str:
         return status.message_label(
             "Would run",
             "task",
             name,
-            detail=rendered_cmds.get(name),
+            detail=rendered_cmds.get(name) if include_command else None,
         )
 
-    def _add_children(parent: Tree, task_name: str, seen: set[str]) -> None:
-        for dep in tasks[task_name].depends_on:
-            if dep.task in seen:
-                continue
-            child = parent.add(_label(dep.task))
-            _add_children(child, dep.task, seen | {dep.task})
-
     tree = Tree(_label(target_name))
-    _add_children(tree, target_name, {target_name})
+    expanded = {target_name}
+    pending = [(tree, iter(tasks[target_name].depends_on))]
+    while pending:
+        parent, dependencies = pending[-1]
+        dependency = next(dependencies, None)
+        if dependency is None:
+            pending.pop()
+            continue
+        name = dependency.task
+        if name in expanded:
+            label = _label(name, include_command=False)
+            parent.add(f"{label} [dim](already shown)[/dim]")
+            continue
+        child = parent.add(_label(name))
+        expanded.add(name)
+        pending.append((child, iter(tasks[name].depends_on)))
     return tree
 
 

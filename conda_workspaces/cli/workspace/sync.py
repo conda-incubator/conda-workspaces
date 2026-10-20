@@ -18,6 +18,7 @@ from ...context import isolated_package_cache
 from ...envs import activate_d_scripts, install_environment
 from ...exceptions import CondaWorkspacesError
 from ...lockfile import (
+    CondaLockLoader,
     LockfileInstallPlan,
     load_lockfile_data,
     lockfile_path,
@@ -157,6 +158,7 @@ def sync_environments(
         rendered_lockfile_data = load_lockfile_data(rendered_lockfile.encode("utf-8"))
         install_plans = {}
         if not no_install:
+            lockfile_loader: CondaLockLoader | None = None
             for name in names:
                 update_names = None
                 if update_targets is not None:
@@ -165,10 +167,14 @@ def sync_environments(
                     update_names = update_targets.get((name, declared))
                     if not update_names:
                         continue
+                if lockfile_loader is None:
+                    lockfile_loader = CondaLockLoader(
+                        lockfile_path(ctx), data=rendered_lockfile_data
+                    )
                 install_plans[name] = LockfileInstallPlan.prepare(
                     ctx,
                     name,
-                    lockfile_data=rendered_lockfile_data,
+                    lockfile_loader=lockfile_loader,
                     update_names=update_names,
                     prune=prune,
                     replace_existing=force_reinstall,

@@ -591,6 +591,144 @@ def test_yaml_import_rejects_oversized_input(
         find_importer(path).convert(path)
 
 
+@pytest.mark.parametrize(
+    "filename",
+    ["environment.yml", "anaconda-project.yml", "conda-project.yml"],
+    ids=["environment", "anaconda-project", "conda-project"],
+)
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+def test_yaml_import_rejects_expanded_scalar_aliases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    yaml_import_source: Callable[[str, str], Path],
+    filename: str,
+    dry_run: bool,
+) -> None:
+    monkeypatch.setattr(importer_base, "MAX_MANIFEST_BYTES", 1024)
+    channel = "https://packages.example.test/" + "x" * 128
+    source = yaml_import_source(
+        filename,
+        f"name: bounded\nchannels:\n  - &channel {channel}\n" + "  - *channel\n" * 16,
+    )
+    output = tmp_path / "conda.toml"
+
+    with pytest.raises(ManifestImportError, match="maximum expanded string"):
+        execute_import(
+            make_args(_DEFAULTS, file=source, output=output, dry_run=dry_run),
+            console=Console(file=StringIO(), width=200),
+        )
+
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["environment.yml", "anaconda-project.yml", "conda-project.yml"],
+    ids=["environment", "anaconda-project", "conda-project"],
+)
+def test_yaml_import_rejects_expanded_collection_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+    yaml_import_source: Callable[[str, str], Path],
+    filename: str,
+) -> None:
+    monkeypatch.setattr(importer_base, "MAX_MANIFEST_ITEMS", 80)
+    source = yaml_import_source(
+        filename,
+        "platforms:\n"
+        "  - &leaf [linux-64, linux-64, linux-64, linux-64]\n"
+        "  - &branch [*leaf, *leaf, *leaf, *leaf]\n"
+        "  - [*branch, *branch, *branch, *branch]\n",
+    )
+
+    with pytest.raises(ManifestImportError, match="maximum expanded"):
+        find_importer(source).convert(source)
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["environment.yml", "anaconda-project.yml", "conda-project.yml"],
+    ids=["environment", "anaconda-project", "conda-project"],
+)
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        ("name: [invalid]\n", "name must be a string"),
+        ("channels: {invalid: conda-forge}\n", "channels must be a list of strings"),
+        ("channels: [conda-forge, 1]\n", "channels must be a list of strings"),
+        ("platforms: [[linux-64]]\n", "platforms must be a list of strings"),
+    ],
+    ids=["name", "channels-mapping", "channels-nonstring", "platforms-nested"],
+)
+def test_yaml_import_rejects_malformed_workspace_metadata(
+    yaml_import_source: Callable[[str, str], Path],
+    filename: str,
+    content: str,
+    message: str,
+) -> None:
+    source = yaml_import_source(filename, content)
+
+    with pytest.raises(ManifestImportError, match=message):
+        find_importer(source).convert(source)
+
+
+@pytest.mark.parametrize("limit", ["strings", "items", "source"])
+@pytest.mark.parametrize(
+    "repeated_reference", [False, True], ids=["distinct", "repeated"]
+)
+def test_conda_project_import_bounds_combined_yaml_documents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    limit: str,
+    repeated_reference: bool,
+) -> None:
+    source = tmp_path / "conda-project.yml"
+    filenames = (
+        ["first.yml"] * 3
+        if repeated_reference
+        else ["first.yml", "second.yml", "third.yml"]
+    )
+    source.write_text(
+        "name: bounded\nenvironments:\n  default: [" + ", ".join(filenames) + "]\n",
+        encoding="utf-8",
+    )
+    if limit == "strings":
+        monkeypatch.setattr(importer_base, "MAX_MANIFEST_BYTES", 512)
+        content = "name: " + "x" * 200 + "\n"
+    elif limit == "source":
+        monkeypatch.setattr(importer_base, "MAX_MANIFEST_BYTES", 512)
+        content = "# " + "x" * 250 + "\nname: bounded\n"
+    else:
+        monkeypatch.setattr(importer_base, "MAX_MANIFEST_ITEMS", 20)
+        content = "channels: [conda-forge, conda-forge, conda-forge, conda-forge]\n"
+    for filename in filenames:
+        (tmp_path / filename).write_text(content, encoding="utf-8")
+
+    with pytest.raises(ManifestImportError, match="maximum (combined size|expanded)"):
+        find_importer(source).convert(source)
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["environment.yml", "anaconda-project.yml", "conda-project.yml"],
+    ids=["environment", "anaconda-project", "conda-project"],
+)
+def test_yaml_import_preserves_bounded_aliases_and_merges(
+    yaml_import_source: Callable[[str, str], Path],
+    filename: str,
+) -> None:
+    source = yaml_import_source(
+        filename,
+        "<<: {name: bounded, channels: [&channel conda-forge, *channel]}\n"
+        "platforms: [linux-64]\n",
+    )
+
+    doc = find_importer(source).convert(source)
+
+    assert doc["workspace"]["name"] == "bounded"
+    assert doc["workspace"]["channels"] == ["conda-forge", "conda-forge"]
+    assert doc["workspace"]["platforms"] == ["linux-64"]
+
+
 @pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
 @pytest.mark.parametrize(
     "content",

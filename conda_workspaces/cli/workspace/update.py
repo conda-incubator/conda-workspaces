@@ -20,7 +20,6 @@ from ...exceptions import (
 )
 from ...lockfile import (
     CondaLockLoader,
-    check_lockfile_satisfiability,
     load_lockfile_data,
     lockfile_path,
     render_lockfile,
@@ -90,7 +89,9 @@ def execute_update(args: argparse.Namespace, *, console: Console | None = None) 
     current = parser.parse_data_with_redacted_errors(document.unwrap(), manifest_path)
     if location.environment is not None:
         current.get_environment(location.environment)
-    location.validate_platform(current, source, allow_existing=True)
+    location.validate_platform(
+        current, source, namespace=namespace, allow_existing=True
+    )
 
     selected = location.find_table(source)
     selected_dependencies = (
@@ -247,34 +248,31 @@ def execute_update(args: argparse.Namespace, *, console: Console | None = None) 
             if baseline_path.is_file():
                 candidate = load_lockfile_data(publication.read_lockfile_bytes())
                 lock_environments = candidate.get("environments", {})
-                platforms = {
-                    platform
-                    for resolved in resolved_current.values()
-                    for platform in (resolved.platforms or [ctx.platform])
-                }
-                statuses = [
-                    check_lockfile_satisfiability(current, candidate, platform)
-                    for platform in platforms
-                ]
                 complete = set(lock_environments) == set(current.environments) and all(
                     set(lock_environments[name].get("packages", {}))
                     == set(resolved_current[name].platforms or [ctx.platform])
                     for name in current.environments
                 )
-                complete = complete and all(
-                    status.status == LockfileStatus.UP_TO_DATE for status in statuses
-                )
                 if complete:
                     try:
-                        for (env_name, platform), names in update_targets.items():
-                            records = CondaLockLoader.package_records_for_env_data(
-                                candidate,
-                                env_name,
-                                platform,
-                            )
-                            if names - {record.name for record in records}:
-                                complete = False
-                                break
+                        loader = CondaLockLoader(baseline_path, data=candidate)
+                        targets = (
+                            (name, platform)
+                            for name, resolved in resolved_current.items()
+                            for platform in (resolved.platforms or [ctx.platform])
+                        )
+                        complete = (
+                            loader.check_targets(
+                                current, targets, match_budget_scope="platform"
+                            ).status
+                            == LockfileStatus.UP_TO_DATE
+                        )
+                        if complete:
+                            for (env_name, platform), names in update_targets.items():
+                                records = loader.package_records_for(env_name, platform)
+                                if names - {record.name for record in records}:
+                                    complete = False
+                                    break
                     except ValueError:
                         complete = False
                 if complete:

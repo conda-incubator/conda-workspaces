@@ -89,6 +89,25 @@ def record_ship_builder(
 
 
 @pytest.fixture
+def yaml_import_source(tmp_path: Path) -> Callable[[str, str], Path]:
+    """Write YAML metadata in the source consumed by each import format."""
+
+    def create(filename: str, content: str) -> Path:
+        source = tmp_path / filename
+        if filename == "conda-project.yml":
+            source.write_text(
+                "name: bounded\nenvironments:\n  default: [environment.yml]\n",
+                encoding="utf-8",
+            )
+            (tmp_path / "environment.yml").write_text(content, encoding="utf-8")
+        else:
+            source.write_text(content, encoding="utf-8")
+        return source
+
+    return create
+
+
+@pytest.fixture
 def exact_lockfile_export(
     pixi_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,

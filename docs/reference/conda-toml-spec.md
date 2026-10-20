@@ -348,6 +348,11 @@ either a command string or a *task table*.
 A *task arg* is an inline table such as
 `{ arg = "path", default = "tests/" }`.
 
+Named arguments can be rendered in list-form `cmd` entries and data fields
+such as `env`, `inputs`, and `outputs`. Shell command strings reject named
+argument references. Use `cmd = ["pytest", "{{ path }}"]` to pass a path as
+one literal argument.
+
 A *task dep* is one of:
 
 - a string naming another task: `"build"`, or

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 from ...exceptions import (
@@ -55,7 +56,7 @@ def execute_run(args: argparse.Namespace) -> int:
         executable_call=cmd,
         dev=False,
         debug_wrapper_scripts=False,
-        cwd=None,
+        cwd=os.getcwd(),
         no_capture_output=True,
     )
     parser = _argparse.ArgumentParser(prog="conda workspace run")

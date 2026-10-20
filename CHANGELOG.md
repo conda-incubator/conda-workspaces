@@ -12,6 +12,65 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   workspace environment through conda-ship, with online, external, and embedded
   package layouts. (#194)
 
+## 0.12.0 — 2026-10-20
+
+### Added
+
+- Added `conda workspace platform add/remove` to manage workspace platforms,
+  with `--feature NAME` for existing named features. The commands preserve rich
+  platform definitions and inheritance, retain locked solutions, and solve only
+  newly required targets. Installed environments keep their current platform.
+  (#200)
+
+### Changed
+
+- Task commands that reference named arguments must use list-form `cmd` values.
+  For example, replace `cmd = "pytest {{ test_path }} -v"` with
+  `cmd = ["pytest", "{{ test_path }}", "-v"]`. Task environment values continue
+  to support named arguments. See the [task argument migration guide](https://conda-incubator.github.io/conda-workspaces/features/tasks/#task-arguments).
+  (#200)
+- Bundled archive packages now use a temporary cache during installation.
+  Extraction alone leaves them under `packages/` without priming a shared conda
+  cache. Use `unarchive --install --receipt` for an offline installation. A later
+  `install --locked` does not automatically read the extracted bundle. (#200)
+- Python callers should remove `prime_cache=True` from
+  `WorkspaceArchive.extract()` or use `WorkspaceArchive.install()` with a
+  receipt for bundled installation. The `package_cache` argument is now ignored
+  by both methods. (#200)
+- Archive extraction is limited to 4 GiB of raw and expanded data by default.
+  Use `--allow-large-archive` for trusted inputs above that limit. The 100 GiB
+  hard limit still applies. (#200)
+- Updated CI and release workflows to `prefix-dev/setup-pixi` 0.11.0,
+  `actions/upload-artifact` 7.0.2, and `actions/download-artifact` 8.0.2. (#202)
+
+### Fixed
+
+- Preserve the caller's working directory in `conda workspace run`, so relative
+  scripts and files resolve where the command was invoked. (#197)
+- Distinguish unknown platform names from valid platforms unsupported by an
+  environment, suggest close matches, and identify the manifest settings to edit.
+  (#199)
+- Preserve interleaved tool tables when editing `pyproject.toml` manifests.
+  Workspace mutations also honor conda's configured JSON output, including
+  `CONDA_JSON=true` and `--console json`. (#200)
+- Validate large environment/platform lockfile matrices consistently during
+  status checks and selective updates. Reuse package indexes, parsed channels,
+  and validated data across targets, exports, and bulk installs. (#200)
+- Bound aggregate feature merging, dependency matching, and metadata expansion
+  before expensive work. Shared YAML aliases, merges, and referenced manifest
+  imports remain supported within those limits. (#200)
+- Validate lockfile versions, channel URLs, package metadata, and Python
+  site-packages paths before package conversion. Preserve credential redaction
+  for shared YAML values and discard hidden YAML metadata before publication.
+  (#200)
+- Bound task dry-run previews while supporting deep dependency chains and
+  showing shared dependencies without repeatedly expanding them. (#200)
+- Bound archive file selection, PAX metadata, decompression, and expanded receipt
+  inventories. Check free disk space and available inodes before writing, and
+  prune excluded environment directories during non-Git archive traversal.
+  (#200)
+- Escape environment names in platform warnings. (#200)
+
 ## 0.11.1 — 2026-10-02
 
 ### Changed

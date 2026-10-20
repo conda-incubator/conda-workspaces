@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 import tomlkit
@@ -20,6 +21,9 @@ from conda_workspaces.exceptions import (
 from conda_workspaces.models import LockfileStatus
 
 from ..conftest import make_args
+
+if TYPE_CHECKING:
+    from conda_workspaces.lockfile import CondaLockLoader
 
 _DEFAULTS = {
     "manifest_file": None,
@@ -982,9 +986,18 @@ def test_update_dry_run_uses_replacement_without_writing_manifest(
         ("complete", "existing", 0),
         ("stale", "rendered", 1),
         ("missing-root", "rendered", 1),
-        ("missing-slice", "rendered", 1),
+        ("missing-target", "rendered", 1),
+        ("incomplete-targets", "rendered", 1),
+        ("feature-platforms", "existing", 0),
     ],
-    ids=["complete", "stale", "missing-root", "missing-environment-slice"],
+    ids=[
+        "complete",
+        "stale",
+        "missing-root",
+        "missing-target",
+        "incomplete-targets",
+        "feature-platforms",
+    ],
 )
 def test_update_selects_only_a_complete_current_lock_as_baseline(
     layered_manifest: Path,
@@ -994,19 +1007,39 @@ def test_update_selects_only_a_complete_current_lock_as_baseline(
     expected_source: str,
     render_count: int,
 ) -> None:
+    if mode == "feature-platforms":
+        text = layered_manifest.read_text(encoding="utf-8")
+        layered_manifest.write_text(
+            text.replace(
+                "[feature.dev.dependencies]",
+                '[feature.dev]\nplatforms = ["linux-64"]\n\n[feature.dev.dependencies]',
+            ),
+            encoding="utf-8",
+        )
     layered_manifest.with_name("conda.lock").write_bytes(b"existing-lock")
-    checked_platforms: list[str] = []
+    checked_batches: list[list[tuple[str, str]]] = []
+    checked_loaders: list[CondaLockLoader] = []
 
-    def fake_status(config, data, platform: str) -> LockfileStatus:
-        checked_platforms.append(platform)
+    def fake_status(
+        loader: CondaLockLoader,
+        config,
+        targets,
+        *,
+        match_budget_scope: str,
+    ) -> LockfileStatus:
+        assert match_budget_scope == "platform"
+        assert set(config.environments) == {"default", "dev", "private", "isolated"}
+        checked_loaders.append(loader)
+        checked_batches.append(list(targets))
         status = (
             LockfileStatus.OUT_OF_DATE if mode == "stale" else LockfileStatus.UP_TO_DATE
         )
         return LockfileStatus(status=status)
 
-    def fake_records(data, name: str, platform: str):
-        if mode == "missing-slice" and name == "private" and platform == "osx-arm64":
-            raise ValueError("slice missing")
+    def fake_records(loader: CondaLockLoader, name: str, platform: str):
+        checked_loaders.append(loader)
+        if mode == "missing-target" and name == "private" and platform == "osx-arm64":
+            raise ValueError("target missing")
         if mode == "missing-root" and name == "dev" and platform == "linux-64":
             return []
         return [SimpleNamespace(name="featurepkg")]
@@ -1018,6 +1051,11 @@ def test_update_selects_only_a_complete_current_lock_as_baseline(
             for name in ("default", "dev", "private", "isolated")
         },
     }
+    if mode == "incomplete-targets":
+        del existing["environments"]["dev"]["packages"]["osx-arm64"]
+    elif mode == "feature-platforms":
+        for name in ("dev", "private"):
+            del existing["environments"][name]["packages"]["osx-arm64"]
 
     def fake_load(content: bytes):
         if content == b"existing-lock":
@@ -1025,12 +1063,12 @@ def test_update_selects_only_a_complete_current_lock_as_baseline(
         return {"source": "rendered"}
 
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.update.check_lockfile_satisfiability",
+        "conda_workspaces.cli.workspace.update.CondaLockLoader.check_targets",
         fake_status,
     )
     monkeypatch.setattr(
-        "conda_workspaces.cli.workspace.update.CondaLockLoader.package_records_for_env_data",
-        staticmethod(fake_records),
+        "conda_workspaces.cli.workspace.update.CondaLockLoader.package_records_for",
+        fake_records,
     )
     monkeypatch.setattr(
         "conda_workspaces.cli.workspace.update.load_lockfile_data",
@@ -1049,7 +1087,20 @@ def test_update_selects_only_a_complete_current_lock_as_baseline(
         == 0
     )
 
-    assert set(checked_platforms) == {"linux-64", "osx-arm64"}
+    if mode == "incomplete-targets":
+        assert checked_batches == []
+        assert checked_loaders == []
+    else:
+        assert len(checked_batches) == 1
+        assert set(checked_batches[0]) == {
+            (name, platform)
+            for name in ("default", "dev", "private", "isolated")
+            for platform in ("linux-64", "osx-arm64")
+            if mode != "feature-platforms"
+            or name not in {"dev", "private"}
+            or platform == "linux-64"
+        }
+    assert len({id(loader) for loader in checked_loaders}) <= 1
     assert len(update_runtime.render_calls) == render_count
     baseline = update_runtime.sync_calls[0]["baseline_lockfile"]
     assert baseline["source"] == expected_source

@@ -15,6 +15,7 @@ import pytest
 from conda.base.context import context
 from rich.console import Console
 
+import conda_workspaces.archive as archive_module
 from conda_workspaces.archive import (
     create_archive,
     file_contains_bytes,
@@ -30,6 +31,7 @@ from conda_workspaces.cli.workspace.archive import (
     warn_staging_prefix_references,
 )
 from conda_workspaces.exceptions import ArchiveError
+from conda_workspaces.lockfile import CondaLockLoader
 from conda_workspaces.models import ArchiveConfig
 from conda_workspaces.receipts import ArchiveReceipt
 
@@ -713,16 +715,15 @@ def test_execute_unarchive_rejects_existing_target(
 
 
 @pytest.mark.parametrize(
-    ("already_cached", "expected_count"),
-    [(False, 1), (True, 1)],
-    ids=["uncached", "archive-only"],
+    "already_cached",
+    [False, True],
+    ids=["uncached", "preexisting-package"],
 )
-def test_execute_unarchive_dry_run_reports_prospective_cache_count(
+def test_execute_unarchive_dry_run_does_not_stage_packages(
     bundled_cli_archive: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     already_cached: bool,
-    expected_count: int,
 ) -> None:
     from conda.base.context import context as conda_context
 
@@ -749,8 +750,12 @@ def test_execute_unarchive_dry_run_reports_prospective_cache_count(
     )
 
     assert result == 0
-    assert f"Would prime {expected_count} packages" in stream.getvalue()
+    assert "Would stage" not in stream.getvalue()
+    assert "Archive includes 1 bundled packages" in stream.getvalue()
     assert not (tmp_path / "target").exists()
+    assert {path.name for path in cache.iterdir()} == (
+        {"example-1.0-h123.conda"} if already_cached else set()
+    )
 
 
 def test_execute_unarchive_require_sha256_requires_receipt(
@@ -777,12 +782,16 @@ def test_execute_unarchive_require_sha256_requires_receipt(
 
 
 @pytest.mark.parametrize("install", [False, True], ids=["extract", "install"])
-def test_execute_unarchive_dry_run_preserves_tree(
+@pytest.mark.parametrize(
+    "allow_large_archive", [False, True], ids=["default-limit", "trusted-opt-in"]
+)
+def test_execute_unarchive_dry_run_enforces_expanded_limit_and_preserves_tree(
     archive_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     snapshot_tree: SnapshotTree,
     install: bool,
+    allow_large_archive: bool,
 ) -> None:
     monkeypatch.chdir(archive_workspace)
     archive = tmp_path / "dry-run.tar.gz"
@@ -798,29 +807,34 @@ def test_execute_unarchive_dry_run_preserves_tree(
     dest = tmp_path / "staging"
     before = snapshot_tree(tmp_path)
     stream = StringIO()
+    monkeypatch.setattr(archive_module, "DEFAULT_ARCHIVE_EXTRACT_BYTES", 1)
 
-    result = execute_unarchive(
-        make_args(
-            _UNARCHIVE_DEFAULTS,
-            archive_path=archive,
-            target=target,
-            receipt=True,
-            install=install,
-            environment="default" if install else None,
-            prefix="/opt/runtime" if install else None,
-            dest=dest if install else None,
-            dry_run=True,
-        ),
-        console=Console(file=stream, width=200, highlight=False),
+    args = make_args(
+        _UNARCHIVE_DEFAULTS,
+        archive_path=archive,
+        target=target,
+        receipt=True,
+        install=install,
+        environment="default" if install else None,
+        prefix="/opt/runtime" if install else None,
+        dest=dest if install else None,
+        dry_run=True,
+        allow_large_archive=allow_large_archive,
     )
+    console = Console(file=stream, width=200, highlight=False)
+    if allow_large_archive:
+        result = execute_unarchive(args, console=console)
+        assert result == 0
+        assert "Would extract" in stream.getvalue()
+        if install:
+            assert "Would install" in stream.getvalue()
+    else:
+        with pytest.raises(ArchiveError, match="default extraction limit"):
+            execute_unarchive(args, console=console)
 
-    assert result == 0
     assert snapshot_tree(tmp_path) == before
     assert not target.exists()
     assert not dest.exists()
-    assert "Would extract" in stream.getvalue()
-    if install:
-        assert "Would install" in stream.getvalue()
 
 
 def test_execute_unarchive_dry_run_resolves_relative_target(
@@ -954,11 +968,13 @@ platforms = ["{platform}"]
     assert preview_environment == environment == "default"
     assert preview_phase == "prepare"
     assert install_phase == "execute"
-    assert preview_kwargs["lockfile_data"] is install_kwargs["lockfile_data"]
+    assert preview_kwargs["lockfile_loader"] is install_kwargs["lockfile_loader"]
     assert install_ctx.root == target
     assert Path(install_ctx.config.manifest_path) == target / "conda.toml"
     expected_override = None if str(Path(prefix)) == prefix else prefix
-    lockfile_data = install_kwargs.pop("lockfile_data")
+    lockfile_loader = install_kwargs.pop("lockfile_loader")
+    assert isinstance(lockfile_loader, CondaLockLoader)
+    lockfile_data = lockfile_loader._data
     assert lockfile_data["version"] == 1
     assert lockfile_data["environments"]["default"]["packages"][platform] == []
     validate_workspace = install_kwargs.pop("validate_workspace")

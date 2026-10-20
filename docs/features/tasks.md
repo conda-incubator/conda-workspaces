@@ -8,8 +8,8 @@ environment definitions or in a tasks-only manifest. Run them with
 
 ![task quickstart demo](../../demos/task-quickstart.gif)
 
-A task's `cmd` can be a simple string or a list of strings joined with
-spaces:
+A task's string `cmd` runs through the shell. A list of strings supplies the
+executable and its arguments separately:
 
 ```toml
 [tasks]
@@ -69,7 +69,7 @@ Tasks can accept named arguments with optional defaults:
 
 ```toml
 [tasks.test]
-cmd = "pytest {{ test_path }} -v"
+cmd = ["pytest", "{{ test_path }}", "-v"]
 args = [
   { arg = "test_path", default = "tests/" },
 ]
@@ -81,6 +81,16 @@ Run with:
 ```bash
 conda task run test src/tests/
 ```
+
+Use list-form commands when referencing named arguments. Each rendered list
+item stays one argument, including spaces and shell metacharacters. String
+commands reject named-argument references, including filters and conditionals,
+because quoting a value before inserting it into shell source is unsafe.
+
+To migrate `cmd = "pytest {{ test_path }} -v"`, use the list form above.
+A shell task can put a named argument in its `env` table and have the program
+read that environment variable directly. Do not interpolate untrusted values
+into an interpreter's code argument, such as `sh -c` or `python -c`.
 
 ## Template variables
 

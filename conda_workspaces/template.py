@@ -5,9 +5,8 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
-from conda.utils import quote_for_shell
-
 from .context import build_template_context
+from .exceptions import CondaWorkspacesError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -57,21 +56,34 @@ def render_command(
     task_args: dict[str, str] | None = None,
     target_prefix: Path | None = None,
 ) -> str:
-    """Render a shell command template with task arguments shell-quoted.
+    """Render shell source without inserting named task argument data.
 
-    Command strings are executed through the native shell, so named task
-    arguments are data values that must occupy one shell word when they
-    are interpolated.
+    Named arguments belong in argv-list commands or task environment values.
+    Quoting before template rendering cannot protect every shell syntax context.
     """
-    quoted_args = (
-        {key: quote_for_shell(str(value)) for key, value in task_args.items()}
-        if task_args
-        else None
-    )
+    if task_args and ("{{" in template_str or "{%" in template_str):
+        from jinja2 import meta
+
+        argument_names = task_args.keys() - {"conda", "pixi"}
+        env = _get_jinja_env().overlay()
+        # Jinja excludes globals from undeclared names, but arguments can shadow them.
+        env.globals = {
+            key: value
+            for key, value in env.globals.items()
+            if key not in argument_names
+        }
+        referenced_names = meta.find_undeclared_variables(env.parse(template_str))
+        if argument_names.intersection(referenced_names):
+            raise CondaWorkspacesError(
+                "Named task arguments cannot be referenced in shell command templates.",
+                hints=[
+                    'Use an array of strings for cmd: ["pytest", "{{ path }}"].',
+                    "For shell tasks, pass data through env for the program to read.",
+                ],
+            )
     return render(
         template_str,
         manifest_path=manifest_path,
-        task_args=quoted_args,
         target_prefix=target_prefix,
     )
 

@@ -6,27 +6,34 @@ import io
 import os
 from copy import deepcopy
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
+from ruamel.yaml.composer import Composer
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import PurePosixPath
 
     from tests.conftest import SnapshotTree
 
 from conda.base.constants import UpdateModifier
 from conda.base.context import context as conda_context
 from conda.common.serialize.yaml import dump as yaml_dump
+from conda.common.serialize.yaml import load as yaml_load
 from conda.core.prefix_data import PrefixData
 from conda.history import History
+from conda.models.channel import Channel as CondaChannel
 from conda.models.environment import EnvironmentConfig
 from conda.models.match_spec import MatchSpec
 from conda.models.records import PackageRecord, PrefixRecord
 from conda_lockfiles.load_yaml import load_yaml
 
 import conda_workspaces.lockfile as lockfile_module
+import conda_workspaces.parsing as parsing_module
 import conda_workspaces.paths as paths_module
+import conda_workspaces.resolver as resolver_module
+from conda_workspaces._lockfile_compat import WorkspaceLock
 from conda_workspaces.context import WorkspaceContext
 from conda_workspaces.exceptions import (
     CondaWorkspacesError,
@@ -34,6 +41,7 @@ from conda_workspaces.exceptions import (
     LockfileIntegrityError,
     LockfileMergeError,
     LockfileNotFoundError,
+    LockfileStaleError,
     SolveError,
 )
 from conda_workspaces.export import multiplatform_export
@@ -154,9 +162,9 @@ def test_load_lockfile_data_rejects_size_before_yaml_parsing(
     calls: list[object] = []
     monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_BYTES", 8)
     monkeypatch.setattr(
-        lockfile_module.yaml,
-        "load",
-        lambda content: calls.append(content),
+        parsing_module.YAML,
+        "compose",
+        lambda self, content: calls.append(content),
     )
 
     with pytest.raises(ValueError, match="maximum size"):
@@ -197,16 +205,149 @@ def test_load_lockfile_data_enforces_shape_limits(
         load_lockfile_data(content)
 
 
+@pytest.mark.parametrize(
+    ("content", "collection_limit", "item_limit", "maximum_scalar_nodes"),
+    [
+        (
+            "root:\n" + "".join(f"  - value{i}\n" for i in range(256)),
+            4,
+            1000,
+            5,
+        ),
+        (
+            "root:\n" + "".join(f"  key{i}: value{i}\n" for i in range(256)),
+            4,
+            1000,
+            9,
+        ),
+        (
+            "root:\n" + "".join(f"  - value{i}\n" for i in range(256)),
+            1000,
+            4,
+            4,
+        ),
+    ],
+    ids=["sequence", "mapping", "total-items"],
+)
+def test_load_lockfile_data_limits_collection_during_composition(
+    monkeypatch: pytest.MonkeyPatch,
+    content: str,
+    collection_limit: int,
+    item_limit: int,
+    maximum_scalar_nodes: int,
+) -> None:
+    monkeypatch.setattr(
+        lockfile_module, "MAX_LOCKFILE_COLLECTION_ITEMS", collection_limit
+    )
+    monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_ITEMS", item_limit)
+    original_compose = Composer.compose_scalar_node
+    composed_scalars = 0
+
+    def count_scalar(self: Composer, anchor: str | None) -> object:
+        nonlocal composed_scalars
+        composed_scalars += 1
+        return original_compose(self, anchor)
+
+    monkeypatch.setattr(Composer, "compose_scalar_node", count_scalar)
+
+    with pytest.raises(ValueError, match="maximum collection items"):
+        load_lockfile_data(content)
+
+    assert composed_scalars <= maximum_scalar_nodes
+
+
 def test_load_lockfile_data_wraps_parser_recursion_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fail_parse(stream):
         raise RecursionError("nested input")
 
-    monkeypatch.setattr(lockfile_module.yaml, "load", fail_parse)
+    monkeypatch.setattr(
+        parsing_module.YAML, "compose", lambda self, stream: fail_parse(stream)
+    )
 
     with pytest.raises(ValueError, match="Invalid lockfile YAML"):
         load_lockfile_data("version: 1\n")
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["repeated", "nested"])
+def test_load_lockfile_data_bounds_merge_construction(
+    monkeypatch: pytest.MonkeyPatch, nested: bool
+) -> None:
+    monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_ITEMS", 50)
+    source = "&base {" + ", ".join(f"key{i}: {i}" for i in range(8)) + "}"
+    merges = ", ".join([source, *(["*base"] * 8)])
+    record = "{<<: [" + merges + "]}"
+    if nested:
+        record = "{<<: [&nested " + record + ", *nested]}"
+
+    with pytest.raises(ValueError, match="collection items"):
+        load_lockfile_data("record: " + record)
+
+
+def test_load_lockfile_data_preserves_merge_precedence_and_aliases() -> None:
+    data = load_lockfile_data(
+        "base: &base {winner: base, inherited: yes}\n"
+        "other: &other {winner: other, extra: value}\n"
+        "record: &record {<<: [*base, *other], extra: explicit}\n"
+        "alias: *record\n"
+        "single: {<<: *base, winner: explicit}\n"
+    )
+
+    assert data["record"] == {"winner": "base", "inherited": "yes", "extra": "explicit"}
+    assert data["alias"] is data["record"]
+    assert data["single"] == {"winner": "explicit", "inherited": "yes"}
+
+
+def test_load_lockfile_data_bounds_merge_scalar_comparisons(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_BYTES", 1024)
+    source = '&base {"' + "k" * 200 + '": value}'
+    content = "record: {<<: [" + ", ".join([source, *(["*base"] * 32)]) + "]}"
+
+    with pytest.raises(ValueError, match="expanded string"):
+        load_lockfile_data(content)
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["record: !TEST_ONLY_SECRET value", "1: value", "record: &cycle [*cycle]"],
+    ids=["custom-tag", "non-string-key", "cyclic-alias"],
+)
+def test_load_lockfile_data_rejects_unsupported_yaml_values(content: str) -> None:
+    with pytest.raises(ValueError):
+        load_lockfile_data(content)
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        '<<: {url: "https://user:TEST_ONLY_SECRET@example.invalid/file"}\n'
+        "url: https://example.invalid/file\n",
+        "url: https://example.invalid/file # TEST_ONLY_SECRET\n",
+    ],
+    ids=["hidden-merge", "comment"],
+)
+@pytest.mark.parametrize("source", ["parsed", "in-memory"])
+def test_redact_lockfile_discards_yaml_serializer_metadata(
+    metadata: str, source: str
+) -> None:
+    content = "record:\n" + "".join(
+        "  " + line + "\n" for line in metadata.splitlines()
+    )
+    data = (
+        load_lockfile_data(content)
+        if source == "parsed"
+        else yaml_load(io.StringIO(content))
+    )
+
+    redacted = CondaLockLoader.redact_data_urls(data)
+    output = io.StringIO()
+    yaml_dump(redacted, output)
+
+    assert "TEST_ONLY_SECRET" not in output.getvalue()
+    assert redacted["record"] == {"url": "https://example.invalid/file"}
 
 
 @pytest.fixture
@@ -398,13 +539,17 @@ def fake_records_factory(monkeypatch: pytest.MonkeyPatch):
     calls: list[dict] = []
 
     class FakeRecord:
-        def __init__(self, url: str):
+        def __init__(self, url: str, metadata: dict):
             self.url = url
             self.name = "python"
+            self.python_site_packages_path = metadata.get("python_site_packages_path")
+            self.sha256 = metadata.get("sha256")
 
     def fake_records_from_conda_urls(metadata_by_url, **kwargs):
         calls.append(dict(metadata_by_url))
-        return tuple(FakeRecord(url) for url in metadata_by_url)
+        return tuple(
+            FakeRecord(url, metadata) for url, metadata in metadata_by_url.items()
+        )
 
     monkeypatch.setattr(
         "conda_lockfiles.rattler_lock.v6.records_from_conda_urls",
@@ -468,6 +613,171 @@ def test_conda_lock_loader_env_for_rich_platform(
     assert getattr(env, "lock_platform") == "linux-64-cuda"
     assert len(env.explicit_packages) == 1
     assert "/linux-64/" in env.explicit_packages[0].url
+
+
+@pytest.mark.parametrize(
+    "metadata_only", [False, True], ids=["generic", "metadata-only"]
+)
+def test_conda_lock_loader_converts_rich_targets_without_recopying_full_document(
+    lockfile_with_platforms: Path,
+    fake_records_factory: list[dict[str, object]],
+    monkeypatch: pytest.MonkeyPatch,
+    metadata_only: bool,
+) -> None:
+    data = load_lockfile_data(lockfile_with_platforms.read_bytes())
+    packages = data["environments"]["default"]["packages"]
+    packages["linux-64-cuda11"] = packages.pop("linux-64")
+    numpy_url = "https://conda.anaconda.org/conda-forge/linux-64/numpy-1.0.0-py_0.conda"
+    packages["linux-64-cuda12"] = [{"conda": numpy_url}]
+    data["packages"].append({"conda": numpy_url, "sha256": "c" * 64})
+    loader = CondaLockLoader(lockfile_with_platforms, data=data)
+    full_document_copies = 0
+    full_index_builds = 0
+    original_plain_document = lockfile_module.plain_document
+    original_index = CondaLockLoader.package_records_by_url_from_data
+
+    def count_full_document_copy(document: dict, **kwargs: object) -> dict:
+        nonlocal full_document_copies
+        if (
+            len(document.get("environments", {}).get("default", {}).get("packages", {}))
+            == 3
+        ):
+            full_document_copies += 1
+        return original_plain_document(document, **kwargs)
+
+    def count_full_index(document: dict) -> dict:
+        nonlocal full_index_builds
+        if len(document.get("packages", [])) == 3:
+            full_index_builds += 1
+        return original_index(document)
+
+    monkeypatch.setattr(lockfile_module, "plain_document", count_full_document_copy)
+    monkeypatch.setattr(
+        CondaLockLoader,
+        "package_records_by_url_from_data",
+        staticmethod(count_full_index),
+    )
+
+    envs = loader.envs_for(
+        {"linux-64-cuda11": "linux-64", "linux-64-cuda12": "linux-64"},
+        metadata_only=metadata_only,
+    )
+
+    assert full_document_copies == 1
+    assert full_index_builds == 1
+    assert [env.platform for env in envs] == ["linux-64", "linux-64"]
+    assert [getattr(env, "lock_platform") for env in envs] == [
+        "linux-64-cuda11",
+        "linux-64-cuda12",
+    ]
+    assert [record.url for env in envs for record in env.explicit_packages] == [
+        packages["linux-64-cuda11"][0]["conda"],
+        numpy_url,
+    ]
+    assert len(fake_records_factory) == (0 if metadata_only else 2)
+
+
+def test_conda_lock_loader_bounds_aliased_targets_before_batch_conversion(
+    lockfile_with_platforms: Path,
+    lockfile_data_source: Callable[[dict[str, Any]], dict[str, Any]],
+    fake_records_factory: list[dict[str, object]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = load_lockfile_data(lockfile_with_platforms.read_bytes())
+    refs = data["environments"]["default"]["packages"]["linux-64"] * 12
+    data["environments"]["default"]["packages"] = {
+        f"linux-64-cuda{index}": refs for index in range(12)
+    }
+    loader = CondaLockLoader(
+        lockfile_with_platforms,
+        data=lockfile_data_source(data),
+    )
+    targets = loader._data["environments"]["default"]["packages"]
+    assert targets["linux-64-cuda0"] is targets["linux-64-cuda11"]
+    monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_ITEMS", 100)
+
+    with pytest.raises(ValueError, match="maximum expanded collection items"):
+        loader.envs_for(
+            {"linux-64-cuda0": "linux-64", "linux-64-cuda1": "linux-64"},
+        )
+
+    assert fake_records_factory == []
+
+
+@pytest.mark.parametrize(
+    "metadata_only", [False, True], ids=["generic", "metadata-only"]
+)
+def test_conda_lock_loader_bounds_selected_aliased_dependencies_before_conversion(
+    monkeypatch: pytest.MonkeyPatch,
+    lockfile_with_platforms: Path,
+    lockfile_data_source: Callable[[dict[str, Any]], dict[str, Any]],
+    metadata_only: bool,
+) -> None:
+    data = load_lockfile_data(lockfile_with_platforms.read_bytes())
+    channel = data["environments"]["default"]["channels"][0]["url"]
+    depends = [f"dependency-{index} >=1" for index in range(64)]
+    urls = [f"{channel}/linux-64/demo-{index}-1.0-0.conda" for index in range(32)]
+    data["environments"]["default"]["packages"]["linux-64"] = [
+        {"conda": url} for url in urls
+    ]
+    data["packages"] = [
+        {"conda": url, "sha256": "a" * 64, "depends": depends} for url in urls
+    ]
+    data = lockfile_data_source(data)
+    loader = CondaLockLoader(lockfile_with_platforms, data=data)
+    assert (
+        loader._data["packages"][0]["depends"]
+        is loader._data["packages"][-1]["depends"]
+    )
+
+    monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_ITEMS", 1_000)
+
+    def reject_conversion(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Conversion received expanded lockfile dependencies")
+
+    if metadata_only:
+        monkeypatch.setattr(PackageRecord, "from_objects", reject_conversion)
+    else:
+        monkeypatch.setattr(WorkspaceLock, "model_validate", reject_conversion)
+
+    with pytest.raises(ValueError, match="maximum expanded collection items"):
+        loader.env_for("linux-64", metadata_only=metadata_only)
+
+
+def test_conda_lock_loader_metadata_only_ignores_unselected_aliased_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    lockfile_with_platforms: Path,
+    lockfile_data_source: Callable[[dict[str, Any]], dict[str, Any]],
+) -> None:
+    data = load_lockfile_data(lockfile_with_platforms.read_bytes())
+    channel = data["environments"]["default"]["channels"][0]["url"]
+    selected_url = data["environments"]["default"]["packages"]["linux-64"][0]["conda"]
+    depends = [f"dependency-{index} >=1" for index in range(64)]
+    urls = [f"{channel}/linux-64/unused-{index}-1.0-0.conda" for index in range(32)]
+    data["environments"]["unused"] = {
+        "channels": [{"url": channel}],
+        "packages": {"linux-64": [{"conda": url} for url in urls]},
+    }
+    data["packages"].extend(
+        {"conda": url, "sha256": "a" * 64, "depends": depends} for url in urls
+    )
+    data = lockfile_data_source(data)
+    loader = CondaLockLoader(lockfile_with_platforms, data=data)
+    assert (
+        loader._data["packages"][-1]["depends"]
+        is loader._data["packages"][-32]["depends"]
+    )
+
+    monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_ITEMS", 1_000)
+    with pytest.raises(ValueError, match="maximum expanded collection items"):
+        parsing_module.DocumentExpansionBudget(
+            items=1_000,
+            strings=lockfile_module.MAX_LOCKFILE_BYTES,
+        ).consume(loader._data, label="Lockfile")
+
+    env = loader.env_for("linux-64", metadata_only=True)
+
+    assert [record.url for record in env.explicit_packages] == [selected_url]
 
 
 def test_conda_lock_loader_env_redacts_urls_before_conversion(
@@ -903,6 +1213,258 @@ def test_conda_lock_loader_compose_redacts_relative_channel_token() -> None:
     ]
 
 
+@pytest.mark.parametrize("duplicate_count", [1, 32], ids=["single", "repeated"])
+@pytest.mark.parametrize("metadata_shape", ["container", "scalar"])
+def test_package_records_by_url_reuses_shared_metadata_comparisons(
+    duplicate_count: int,
+    metadata_shape: str,
+) -> None:
+    comparisons = 0
+
+    class ComparableValue:
+        def __eq__(self, other: object) -> bool:
+            nonlocal comparisons
+            comparisons += 1
+            assert comparisons == 1, "Revisited shared package metadata"
+            return isinstance(other, ComparableValue)
+
+    left_value = ComparableValue()
+    right_value = ComparableValue()
+    left = (
+        {"values": [left_value] * 4096} if metadata_shape == "container" else left_value
+    )
+    right = (
+        {"values": [right_value] * 4096}
+        if metadata_shape == "container"
+        else right_value
+    )
+    url = "https://repo.example.test/linux-64/demo-1.0-0.conda"
+    first = {"conda": url, "metadata": left}
+    duplicates = [{"conda": url, "metadata": right} for _ in range(duplicate_count)]
+
+    records = CondaLockLoader.package_records_by_url_from_data(
+        {"packages": [first, *duplicates]}
+    )
+
+    assert records == {url: first}
+    assert comparisons == 1
+
+
+@pytest.mark.parametrize("count", [1, 8, 32], ids=["single", "eight", "thirty-two"])
+@pytest.mark.parametrize(
+    "record_shape", ["alias", "distinct-urls"], ids=["record-alias", "shared-path"]
+)
+def test_package_records_by_url_validates_shared_site_packages_path_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    lockfile_data_source: Callable[[dict[str, Any]], dict[str, Any]],
+    count: int,
+    record_shape: str,
+) -> None:
+    site_packages_path = "lib/" + "nested/" * 292 + "site-packages"
+    record = {
+        "conda": "https://repo.example/linux-64/demo-0.conda",
+        "python_site_packages_path": site_packages_path,
+    }
+    records = (
+        [record] * count
+        if record_shape == "alias"
+        else [
+            {**record, "conda": f"https://repo.example/linux-64/demo-{index}.conda"}
+            for index in range(count)
+        ]
+    )
+    data = lockfile_data_source({"version": 1, "environments": {}, "packages": records})
+    loader = CondaLockLoader(tmp_path / LOCKFILE_NAME, data=data)
+    calls: list[str] = []
+    original_parse = lockfile_module.parse_relative_posix_path
+
+    def record_parse(path: str) -> PurePosixPath:
+        calls.append(path)
+        return original_parse(path)
+
+    monkeypatch.setattr(lockfile_module, "parse_relative_posix_path", record_parse)
+
+    assert len(loader.package_records_by_url()) == (
+        1 if record_shape == "alias" else count
+    )
+    assert calls == [site_packages_path]
+
+
+def test_package_record_index_is_not_mutated_by_returned_mapping(
+    tmp_path: Path,
+    lockfile_data_factory,
+) -> None:
+    loader = CondaLockLoader(tmp_path / LOCKFILE_NAME, data=lockfile_data_factory())
+    records = loader.package_records_by_url()
+    records.clear()
+
+    assert len(loader.package_records_by_url()) == 2
+    assert len(loader.explicit_package_specs_for("linux-64")) == 1
+
+
+@pytest.mark.parametrize("count", [1, 8, 32], ids=["single", "eight", "thirty-two"])
+@pytest.mark.parametrize(
+    "entry_shape", ["alias", "distinct-entries"], ids=["entry-alias", "shared-url"]
+)
+def test_conda_lock_loader_expands_repeated_channel_url_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    lockfile_data_source: Callable[[dict[str, Any]], dict[str, Any]],
+    count: int,
+    entry_shape: str,
+) -> None:
+    url = "https://repo.example/channel"
+    entry = {"url": url}
+    channels = (
+        [entry] * count
+        if entry_shape == "alias"
+        else [{"url": url} for _ in range(count)]
+    )
+    data = lockfile_data_source(
+        {
+            "version": 1,
+            "environments": {
+                "default": {"channels": channels, "packages": {"linux-64": []}}
+            },
+            "packages": [],
+        }
+    )
+    loader = CondaLockLoader(tmp_path / LOCKFILE_NAME, data=data)
+    calls: list[bool] = []
+
+    def record_urls(
+        channel: CondaChannel,
+        *,
+        with_credentials: bool,
+        subdirs: tuple[str, ...],
+    ) -> list[str]:
+        assert str(channel) == url
+        assert subdirs == ("linux-64", "noarch")
+        calls.append(with_credentials)
+        return [f"{url}/{subdir}" for subdir in subdirs]
+
+    monkeypatch.setattr(CondaChannel, "urls", record_urls)
+
+    env_data = loader._env_data()
+    assert loader.channel_urls_for(env_data, "linux-64") == (
+        f"{url}/linux-64",
+        f"{url}/noarch",
+    )
+    assert calls == [False, True]
+
+
+@pytest.mark.parametrize(
+    "site_packages_path",
+    [
+        "../outside",
+        "lib/../../outside",
+        "/outside",
+        "C:/outside",
+        "C:outside",
+        "\\\\server\\share\\outside",
+        "\\outside",
+        "lib\\site-packages",
+        "",
+        ".",
+        "lib/\0outside",
+        42,
+        False,
+        ["TEST_ONLY_SECRET"],
+        {"TEST_ONLY_SECRET": []},
+    ],
+    ids=[
+        "parent",
+        "nested-parent",
+        "absolute",
+        "windows-absolute",
+        "windows-drive",
+        "windows-unc",
+        "windows-root",
+        "backslash",
+        "empty",
+        "current-directory",
+        "nul",
+        "integer",
+        "boolean",
+        "list",
+        "mapping",
+    ],
+)
+@pytest.mark.parametrize("source", ["conda", "url"], ids=["conda", "legacy-url"])
+@pytest.mark.parametrize("route", ["generic", "metadata-only", "records"])
+def test_conda_lock_loader_rejects_unsafe_python_site_packages_path(
+    lockfile_with_platforms: Path,
+    fake_records_factory: list[dict[str, object]],
+    site_packages_path: object,
+    source: str,
+    route: str,
+) -> None:
+    data = load_lockfile_data(lockfile_with_platforms.read_bytes())
+    metadata = data["packages"][0]
+    metadata[source] = metadata.pop("conda")
+    metadata["python_site_packages_path"] = site_packages_path
+    loader = CondaLockLoader(lockfile_with_platforms, data=data)
+
+    with pytest.raises(
+        (ValueError, LockfileIntegrityError),
+        match="python_site_packages_path must be a relative POSIX path",
+    ) as exc_info:
+        if route == "records":
+            loader.package_records_for_env_data(data, "default", "linux-64")
+        else:
+            loader.env_for("linux-64", metadata_only=route == "metadata-only")
+
+    assert "TEST_ONLY_SECRET" not in str(exc_info.value)
+    assert fake_records_factory == []
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {},
+        {"python_site_packages_path": None},
+        {"python_site_packages_path": "Lib/site-packages"},
+        {"python_site_packages_path": "lib/python3.13t/site-packages"},
+    ],
+    ids=["omitted", "null", "windows", "free-threaded"],
+)
+@pytest.mark.parametrize(
+    ("route", "source"),
+    [
+        ("generic", "conda"),
+        ("metadata-only", "conda"),
+        ("records", "conda"),
+        ("records", "url"),
+    ],
+    ids=["generic", "metadata-only", "records", "legacy-records"],
+)
+def test_conda_lock_loader_preserves_python_site_packages_path(
+    lockfile_with_platforms: Path,
+    fake_records_factory: list[dict[str, object]],
+    metadata: dict[str, str | None],
+    route: str,
+    source: str,
+) -> None:
+    data = load_lockfile_data(lockfile_with_platforms.read_bytes())
+    record_data = data["packages"][0]
+    record_data[source] = record_data.pop("conda")
+    record_data.update(metadata)
+    loader = CondaLockLoader(lockfile_with_platforms, data=data)
+
+    if route == "records":
+        records = loader.package_records_for_env_data(data, "default", "linux-64")
+    else:
+        records = loader.env_for(
+            "linux-64", metadata_only=route == "metadata-only"
+        ).explicit_packages
+
+    assert records[0].python_site_packages_path == metadata.get(
+        "python_site_packages_path"
+    )
+    assert records[0].sha256 == "a" * 64
+
+
 def test_conda_lock_loader_reconstructs_package_records_from_metadata(
     selective_lock_data: dict,
 ) -> None:
@@ -1163,6 +1725,182 @@ def test_conda_lock_loader_redacts_unknown_url_fields() -> None:
     assert data["metadata"]["mirror"].startswith("https://user:password@")
 
 
+@pytest.fixture(params=["in-memory", "yaml"])
+def lockfile_data_source(
+    request: pytest.FixtureRequest,
+) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    def prepare(data: dict[str, Any]) -> dict[str, Any]:
+        if request.param == "yaml":
+            content = io.StringIO()
+            yaml_dump(data, content)
+            return load_lockfile_data(content.getvalue())
+        return data
+
+    return prepare
+
+
+@pytest.mark.parametrize("container_type", ["mapping", "sequence"])
+def test_conda_lock_loader_redacts_shared_containers_once(
+    monkeypatch: pytest.MonkeyPatch,
+    lockfile_data_source: Callable[[dict[str, Any]], dict[str, Any]],
+    container_type: str,
+) -> None:
+    url = "https://user:password@repo.example/t/token/channel?secret=yes"
+    leaf: dict[str, Any] | list[Any] = (
+        {"url": url} if container_type == "mapping" else [url]
+    )
+    graph = leaf
+    for _ in range(10):
+        graph = (
+            {"left": graph, "right": graph}
+            if container_type == "mapping"
+            else [graph, graph]
+        )
+    data = lockfile_data_source({"version": 1, "metadata": graph, "leaf": leaf})
+    baseline = deepcopy(data)
+    calls: list[str] = []
+    original_redact_url = lockfile_module.redact_url
+
+    def record_redaction(value: str) -> str:
+        calls.append(value)
+        return original_redact_url(value)
+
+    monkeypatch.setattr(lockfile_module, "redact_url", record_redaction)
+
+    result = CondaLockLoader.redact_data_urls(data)
+
+    assert calls == [url]
+    assert data == baseline
+    assert not lockfile_module.has_url_credentials_in_data(result)
+    current = result["metadata"]
+    for _ in range(10):
+        left, right = (
+            (current["left"], current["right"])
+            if container_type == "mapping"
+            else current
+        )
+        assert left is right
+        current = left
+    assert current is result["leaf"]
+    assert current == (
+        {"url": "https://repo.example/channel"}
+        if container_type == "mapping"
+        else ["https://repo.example/channel"]
+    )
+
+
+@pytest.mark.parametrize("container_type", ["mapping", "sequence"])
+def test_conda_lock_loader_redacts_cyclic_in_memory_data_once(
+    monkeypatch: pytest.MonkeyPatch,
+    container_type: str,
+) -> None:
+    url = "https://user:password@repo.example/channel"
+    container: dict[str, Any] | list[Any]
+    if container_type == "mapping":
+        container = {"url": url}
+        container["self"] = container
+    else:
+        container = [url]
+        container.append(container)
+    data = {"version": 1, "metadata": container}
+    calls: list[str] = []
+    original_redact_url = lockfile_module.redact_url
+
+    def record_redaction(value: str) -> str:
+        calls.append(value)
+        assert len(calls) == 1, "Revisited a cyclic container"
+        return original_redact_url(value)
+
+    monkeypatch.setattr(lockfile_module, "redact_url", record_redaction)
+
+    result = CondaLockLoader.redact_data_urls(data)
+
+    assert calls == [url]
+    assert not lockfile_module.has_url_credentials_in_data(result)
+    redacted = result["metadata"]
+    assert redacted is not container
+    if isinstance(container, dict):
+        assert redacted["self"] is redacted
+        assert redacted["url"] == "https://repo.example/channel"
+        assert container["self"] is container
+        assert container["url"] == url
+    else:
+        assert redacted[1] is redacted
+        assert redacted[0] == "https://repo.example/channel"
+        assert container[1] is container
+        assert container[0] == url
+
+
+@pytest.mark.parametrize(
+    ("alias_type", "entry_type"),
+    [
+        ("environment", "string"),
+        ("environment", "mapping"),
+        ("channels", "string"),
+        ("channels", "mapping"),
+        ("entry", "mapping"),
+    ],
+    ids=[
+        "environment-string",
+        "environment-mapping",
+        "channels-string",
+        "channels-mapping",
+        "entry-mapping",
+    ],
+)
+def test_conda_lock_loader_normalizes_shared_channels_once(
+    monkeypatch: pytest.MonkeyPatch,
+    lockfile_data_source: Callable[[dict[str, Any]], dict[str, Any]],
+    alias_type: str,
+    entry_type: str,
+) -> None:
+    urls = [f"https://user:password@repo.example/channel-{index}" for index in range(4)]
+    channels = urls if entry_type == "string" else [{"url": url} for url in urls]
+    environment = {"channels": channels}
+    data = lockfile_data_source(
+        {
+            "version": 1,
+            "environments": {
+                f"env-{index}": (
+                    environment
+                    if alias_type == "environment"
+                    else {
+                        "channels": list(channels)
+                        if alias_type == "entry"
+                        else channels
+                    }
+                )
+                for index in range(32)
+            },
+        }
+    )
+    baseline = deepcopy(data)
+    calls: list[str] = []
+    original_redact_channel_name = lockfile_module.redact_channel_name
+
+    def record_redaction(value: str) -> str:
+        calls.append(value)
+        return original_redact_channel_name(value)
+
+    monkeypatch.setattr(lockfile_module, "redact_channel_name", record_redaction)
+
+    result = CondaLockLoader.redact_data_urls(data)
+
+    assert calls == urls
+    assert data == baseline
+    assert not lockfile_module.has_url_credentials_in_data(result)
+    first_environment = result["environments"]["env-0"]
+    assert first_environment["channels"] == [
+        {"url": f"https://repo.example/channel-{index}"} for index in range(4)
+    ]
+    for current in result["environments"].values():
+        if alias_type != "entry":
+            assert current["channels"] is first_environment["channels"]
+        assert current["channels"] == first_environment["channels"]
+        if alias_type == "environment":
+            assert current is first_environment
+
+
 def test_conda_lock_loader_rejects_credentials_in_structured_metadata() -> None:
     data = {
         "version": 1,
@@ -1171,6 +1909,113 @@ def test_conda_lock_loader_rejects_credentials_in_structured_metadata() -> None:
 
     with pytest.raises(ValueError, match="structured metadata"):
         CondaLockLoader.redact_data_urls(data)
+
+
+@pytest.mark.parametrize(
+    "placement",
+    [
+        "mapping-value",
+        "sequence-value",
+        "mapping-key",
+        "channel-string",
+        "channel-mapping",
+    ],
+)
+def test_conda_lock_loader_processes_scalar_aliases_once(
+    monkeypatch: pytest.MonkeyPatch,
+    placement: str,
+) -> None:
+    value = (
+        "metadata-" * 512
+        if placement == "mapping-key"
+        else ("https://user:password@repo.example/t/token/" + "channel-" * 512)
+    )
+    entry = {
+        "mapping-value": "{value: *scalar}",
+        "sequence-value": "[*scalar]",
+        "mapping-key": "{*scalar : safe}",
+        "channel-string": "{channels: [*scalar]}",
+        "channel-mapping": "{channels: [{url: *scalar}]}",
+    }[placement]
+    content = f"version: 1\nscalar: &scalar {value}\n"
+    if placement.startswith("channel"):
+        content += "environments:\n" + "".join(
+            f"  env-{index}: {entry}\n" for index in range(32)
+        )
+    else:
+        content += "metadata:\n" + f"  - {entry}\n" * 32
+    data = load_lockfile_data(content)
+    scalar = data["scalar"]
+    calls = dict.fromkeys(
+        ("redact_url", "redact_channel_name", "has_url_credentials"), 0
+    )
+    for name in calls:
+        original = getattr(lockfile_module, name)
+
+        def record(value: str, *, original=original, name=name):
+            if value == scalar:
+                calls[name] += 1
+            return original(value)
+
+        monkeypatch.setattr(lockfile_module, name, record)
+
+    result = CondaLockLoader.redact_data_urls(data)
+
+    assert calls["redact_url"] == 1
+    assert calls["redact_channel_name"] == int(placement.startswith("channel"))
+    assert calls["has_url_credentials"] == int(placement == "mapping-key")
+    assert data["scalar"] == value
+    assert not lockfile_module.has_url_credentials_in_data(result)
+    expected = (
+        value
+        if placement == "mapping-key"
+        else ("https://repo.example/" + "channel-" * 512)
+    )
+    assert result["scalar"] == expected
+    if placement.startswith("channel"):
+        assert all(
+            env["channels"] == [{"url": expected}]
+            for env in result["environments"].values()
+        )
+    else:
+        expected_entry = {
+            "mapping-value": {"value": expected},
+            "sequence-value": [expected],
+            "mapping-key": {expected: "safe"},
+        }[placement]
+        assert result["metadata"] == [expected_entry] * 32
+
+
+@pytest.mark.parametrize("operation", ["parse", "redact"])
+@pytest.mark.parametrize("placement", ["mapping-key", "package-url", "metadata"])
+@pytest.mark.parametrize("references", [1, 8], ids=["within-limit", "over-limit"])
+def test_lockfile_limits_expanded_scalar_text(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    placement: str,
+    references: int,
+) -> None:
+    value = "https://repo.example/" + "a" * 256
+    entry = {
+        "mapping-key": "{*scalar : safe}",
+        "package-url": "{conda: *scalar}",
+        "metadata": "{metadata: *scalar}",
+    }[placement]
+    content = f"scalar: &scalar {value}\npackages:\n" + f"  - {entry}\n" * references
+    data = load_lockfile_data(content)
+    monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_BYTES", 1024)
+    assert len(content.encode()) < 1024
+
+    if references == 8:
+        with pytest.raises(ValueError, match="string content"):
+            if operation == "parse":
+                load_lockfile_data(content)
+            else:
+                CondaLockLoader.redact_data_urls(data)
+    elif operation == "parse":
+        assert load_lockfile_data(content) == data
+    else:
+        assert CondaLockLoader.redact_data_urls(data) == data
 
 
 @pytest.fixture
@@ -1227,6 +2072,54 @@ def resolved_envs_factory():
         }
 
     return _factory
+
+
+@pytest.mark.parametrize("omitted", ["environment", "platform"])
+@pytest.mark.parametrize("stale", [False, True], ids=["valid", "stale"])
+def test_render_lockfile_checks_retained_targets_once(
+    workspace_ctx_factory,
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    omitted: str,
+    stale: bool,
+) -> None:
+    dependencies = {"python": MatchSpec("python >=4" if stale else "python >=3")}
+    config = WorkspaceConfig(
+        channels=[Channel("conda-forge")],
+        platforms=["linux-64", "osx-arm64"],
+        environments={"default": Environment(name="default")},
+    )
+    data = lockfile_data_factory()
+    if omitted == "environment":
+        config.environments["retained"] = Environment(
+            name="retained", conda_dependencies=dependencies
+        )
+        data["environments"]["retained"] = data["environments"]["default"]
+    else:
+        config.environments["default"].target_conda_dependencies = {
+            "osx-arm64": dependencies
+        }
+    resolved = {"default": resolve_environment(config, "default")}
+    resolved["default"].platforms = ["linux-64"]
+    original_resolve = resolver_module.resolve_environment
+    resolved_names: list[str] = []
+
+    def record_resolve(config, name, platform=None, **kwargs):
+        resolved_names.append(name)
+        return original_resolve(config, name, platform, **kwargs)
+
+    monkeypatch.setattr(resolver_module, "resolve_environment", record_resolve)
+    ctx = workspace_ctx_factory(platform="linux-64")
+    if stale:
+        with pytest.raises(LockfileStaleError, match="python"):
+            render_lockfile(
+                ctx, resolved, config=config, baseline_data=data, update_targets={}
+            )
+    else:
+        render_lockfile(
+            ctx, resolved, config=config, baseline_data=data, update_targets={}
+        )
+    assert resolved_names == list(config.environments)
 
 
 def test_render_lockfile_selective_update_only_replaces_target(
@@ -1316,6 +2209,278 @@ def test_render_lockfile_selective_update_only_replaces_target(
         == baseline["environments"]["default"]["packages"]["osx-arm64"]
     )
     assert result["environments"]["test"] == baseline["environments"]["test"]
+
+
+def test_render_lockfile_reuses_prepared_baseline_for_multiple_update_targets(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    resolved_envs_factory,
+    selective_lock_data: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = workspace_ctx_factory(env_names=["default", "test"])
+    resolved = resolved_envs_factory(
+        default=["linux-64", "osx-arm64"], test=["linux-64"]
+    )
+    seeded_loaders: list[CondaLockLoader] = []
+    environment_expansions: list[int] = []
+    selected_records: list[int] = []
+    baseline_copies = 0
+    original_seed = CondaLockLoader.seed_prefix_from_data
+    original_redact = CondaLockLoader.redact_data_urls
+    original_consume = parsing_module.DocumentExpansionBudget.consume
+
+    def record_seed(data, *args, **kwargs):
+        assert isinstance(data, CondaLockLoader)
+        seeded_loaders.append(data)
+        return original_seed(data, *args, **kwargs)
+
+    def record_redaction(data: dict[str, Any]) -> dict[str, Any]:
+        nonlocal baseline_copies
+        if data is selective_lock_data:
+            baseline_copies += 1
+        return original_redact(data)
+
+    def record_expansion(
+        budget: parsing_module.DocumentExpansionBudget,
+        value: object,
+        *,
+        label: str,
+    ) -> None:
+        if isinstance(value, dict) and set(value) == {"environment"}:
+            environment_expansions.append(
+                sum(len(refs) for refs in value["environment"]["packages"].values())
+            )
+        elif isinstance(value, dict) and set(value) == {"packages"}:
+            selected_records.append(len(value["packages"]))
+        return original_consume(budget, value, label=label)
+
+    def solve(self, platform, *, prefix, update_names=None):
+        package = "python" if self.name == "default" else "pytest"
+        return [
+            _FakePkg(
+                package,
+                f"https://conda.anaconda.org/conda-forge/{platform}/"
+                f"{package}-9.0-0.conda",
+            )
+        ]
+
+    monkeypatch.setattr(CondaLockLoader, "seed_prefix_from_data", record_seed)
+    monkeypatch.setattr(
+        CondaLockLoader, "redact_data_urls", staticmethod(record_redaction)
+    )
+    monkeypatch.setattr(ResolvedEnvironment, "solve_for_platform", solve)
+    monkeypatch.setattr(
+        parsing_module.DocumentExpansionBudget, "consume", record_expansion
+    )
+
+    rendered = render_lockfile(
+        ctx,
+        resolved,
+        baseline_data=selective_lock_data,
+        update_targets={
+            ("default", "linux-64"): {"python"},
+            ("default", "osx-arm64"): {"python"},
+            ("test", "linux-64"): {"pytest"},
+        },
+    )
+
+    assert len(seeded_loaders) == 3
+    assert seeded_loaders[0] is seeded_loaders[1] is seeded_loaders[2]
+    assert baseline_copies == 1
+    assert environment_expansions == [5, 2]
+    assert selected_records == [2, 2, 2]
+    updated = load_lockfile_data(rendered)
+    for name, platform, package in (
+        ("default", "linux-64", "python"),
+        ("default", "osx-arm64", "python"),
+        ("test", "linux-64", "pytest"),
+    ):
+        refs = updated["environments"][name]["packages"][platform]
+        assert any(f"{package}-9.0-0.conda" in ref["conda"] for ref in refs)
+
+
+@pytest.mark.parametrize(
+    ("target_count", "rejected"),
+    [(2, False), (4, True)],
+    ids=["within-expanded-limit", "aliased-targets-exceed-limit"],
+)
+def test_prepared_lockfile_checks_expanded_environment_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_count: int,
+    rejected: bool,
+) -> None:
+    url = "https://repo.example.test/channel/linux-64/python-3.12.0-0.conda"
+    targets = f"      target-0: &refs\n      - conda: {url}\n"
+    targets += "".join(
+        f"      target-{index}: *refs\n" for index in range(1, target_count)
+    )
+    content = (
+        "version: 1\n"
+        "environments:\n"
+        "  default:\n"
+        "    channels:\n"
+        "    - url: https://repo.example.test/channel\n"
+        "    packages:\n"
+        f"{targets}"
+        "packages:\n"
+        f"- conda: {url}\n"
+        f"  sha256: {'a' * 64}\n"
+    )
+    monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_ITEMS", 20)
+    data = load_lockfile_data(content)
+    loader = CondaLockLoader(tmp_path / LOCKFILE_NAME, data=data)
+
+    if rejected:
+        with pytest.raises(ValueError, match="expanded collection items"):
+            loader.package_records_for(
+                "default", "target-0", package_platform="linux-64"
+            )
+    else:
+        records = loader.package_records_for(
+            "default", "target-0", package_platform="linux-64"
+        )
+        assert len(records) == 1
+        assert records[0].name == "python"
+
+
+@pytest.mark.parametrize("change", ["add", "remove", "rich-target"])
+def test_render_lockfile_preserves_existing_platform_solutions(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    selective_lock_data: dict,
+    resolved_envs_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    channel = "https://conda.anaconda.org/conda-forge"
+    certifi = f"{channel}/noarch/certifi-2026.1-pyhd_0.conda"
+    selective_lock_data["metadata"] = {"source": "existing lock"}
+    selective_lock_data["environments"]["default"]["metadata"] = {"retain": True}
+    shared_record = next(
+        record
+        for record in selective_lock_data["packages"]
+        if record.get("conda") == certifi
+    )
+    shared_record["license"] = "original metadata"
+    baseline = deepcopy(selective_lock_data)
+    added = "linux-64-cuda" if change == "rich-target" else "win-64"
+    platforms = ["linux-64"]
+    if change != "remove":
+        platforms.extend(["osx-arm64", added])
+    resolved = resolved_envs_factory(default=platforms, test=["linux-64"])
+    resolved["default"].platform_subdirs[added] = (
+        "linux-64" if change == "rich-target" else "win-64"
+    )
+    calls: list[tuple[str, str]] = []
+
+    def solve(self, platform, *, prefix):
+        calls.append((self.name, platform))
+        return [
+            _FakePkg("certifi", certifi, md5="d" * 32, license="new metadata"),
+            _FakePkg("python", f"{channel}/{platform}/python-3.12.0-new_0.conda"),
+        ]
+
+    monkeypatch.setattr(ResolvedEnvironment, "solve_for_platform", solve)
+    ctx = workspace_ctx_factory(env_names=["default", "test"])
+
+    result = load_lockfile_data(
+        render_lockfile(
+            ctx,
+            resolved,
+            baseline_data=selective_lock_data,
+            preserve_existing=True,
+        )
+    )
+
+    assert selective_lock_data == baseline
+    assert calls == (
+        []
+        if change == "remove"
+        else [("default", "linux-64" if change == "rich-target" else "win-64")]
+    )
+    assert result["metadata"] == baseline["metadata"]
+    assert result["environments"]["test"] == baseline["environments"]["test"]
+    result_env = result["environments"]["default"]
+    assert result_env["metadata"] == baseline["environments"]["default"]["metadata"]
+    assert set(result_env["packages"]) == set(platforms)
+    for target in set(platforms) & {"linux-64", "osx-arm64"}:
+        assert (
+            result_env["packages"][target]
+            == baseline["environments"]["default"]["packages"][target]
+        )
+    packages = {
+        record.get("conda") or record.get("pypi"): record
+        for record in result["packages"]
+    }
+    assert packages[certifi] == shared_record
+    assert f"{channel}/noarch/orphan-1.0-0.conda" not in packages
+    if change == "remove":
+        assert f"{channel}/osx-arm64/python-3.10.0-h2_0.conda" not in packages
+
+
+@pytest.mark.parametrize("failure", ["solve", "shared-hash-conflict"])
+def test_render_lockfile_preservation_failure_keeps_baseline(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    selective_lock_data: dict,
+    resolved_envs_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    baseline = deepcopy(selective_lock_data)
+    prefixes: list[Path] = []
+
+    def solve(self, platform, *, prefix):
+        prefixes.append(Path(prefix))
+        if failure == "solve":
+            raise SolveError(self.name, "unsatisfiable", platform=platform)
+        return [
+            _FakePkg(
+                "certifi",
+                "https://conda.anaconda.org/conda-forge/noarch/certifi-2026.1-pyhd_0.conda",
+                md5="f" * 32,
+            )
+        ]
+
+    monkeypatch.setattr(ResolvedEnvironment, "solve_for_platform", solve)
+    error = SolveError if failure == "solve" else ValueError
+    match = "unsatisfiable" if failure == "solve" else "Conflicting package metadata"
+    with pytest.raises(error, match=match):
+        render_lockfile(
+            workspace_ctx_factory(env_names=["default", "test"]),
+            resolved_envs_factory(
+                default=["linux-64", "osx-arm64", "win-64"], test=["linux-64"]
+            ),
+            baseline_data=selective_lock_data,
+            preserve_existing=True,
+        )
+
+    assert selective_lock_data == baseline
+    assert len(prefixes) == 1
+    assert not prefixes[0].exists()
+    assert not any(prefix == prefixes[0] for prefix, _ in PrefixData._cache_)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {},
+        {"baseline_data": {}, "update_targets": {}},
+        {"baseline_data": {}, "platforms": ("linux-64",)},
+        {"baseline_data": {}, "skip_unsolvable": True},
+    ],
+    ids=[
+        "missing-baseline",
+        "selective-updates",
+        "partial-platforms",
+        "partial-solves",
+    ],
+)
+def test_render_lockfile_rejects_incomplete_preservation_modes(
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    options: dict,
+) -> None:
+    with pytest.raises(ValueError, match="preserv"):
+        render_lockfile(workspace_ctx_factory(), {}, preserve_existing=True, **options)
 
 
 @pytest.mark.parametrize("failure", ["seed", "missing-root", "solve"])
@@ -2882,6 +4047,21 @@ def test_install_from_lockfile_rejects_invalid_prefix_before_writes(
             False,
             id="encoded-path-separators",
         ),
+        pytest.param(
+            "https://example.com/channel/linux-64",
+            False,
+            id="channel-is-not-its-own-child",
+        ),
+        pytest.param(
+            "https://example.com/channel/linux-64-other/package.conda",
+            False,
+            id="channel-segment-prefix-is-not-child",
+        ),
+        pytest.param(
+            "https://user@example.com/channel/linux-64/package.conda",
+            False,
+            id="different-url-credentials",
+        ),
     ],
 )
 def test_url_matches_channel_rejects_path_escapes(
@@ -2895,6 +4075,38 @@ def test_url_matches_channel_rejects_path_escapes(
         )
         is expected
     )
+
+
+@pytest.mark.parametrize("channel_count", [1, 500], ids=["few", "many"])
+def test_channel_lookup_work_depends_on_package_path_depth(
+    channel_count: int,
+) -> None:
+    channel_urls = tuple(
+        f"https://example.com/other-{index}/linux-64" for index in range(channel_count)
+    ) + ("https://example.com/selected/linux-64",)
+    package_url = "https://example.com/selected/linux-64/package.conda"
+    locations = CondaLockLoader._channel_locations(channel_urls)
+    probes: list[object] = []
+
+    class CountingTree(dict[str, Any]):
+        def __contains__(self, key: object) -> bool:
+            probes.append(key)
+            return super().__contains__(key)
+
+        def get(self, key: str, default: Any = None) -> Any:
+            probes.append(key)
+            return super().get(key, default)
+
+    def count_probes(node: dict[str, Any]) -> CountingTree:
+        return CountingTree({key: count_probes(child) for key, child in node.items()})
+
+    package_location = CondaLockLoader.url_location(package_url)
+    assert package_location is not None
+    origin, package_path = package_location
+    locations[origin] = count_probes(locations[origin])
+
+    assert CondaLockLoader._url_matches_locations(package_url, locations)
+    assert len(probes) <= 2 * len(package_path)
 
 
 @pytest.mark.parametrize(
@@ -3699,6 +4911,7 @@ def test_merge_lockfiles_rejects_oversized_fragment(
     [
         pytest.param("bytes", "aggregate maximum size", id="bytes"),
         pytest.param("items", "aggregate collection items", id="items"),
+        pytest.param("strings", "string content", id="strings"),
     ],
 )
 def test_merge_lockfiles_enforces_aggregate_fragment_budgets(
@@ -3710,6 +4923,8 @@ def test_merge_lockfiles_enforces_aggregate_fragment_budgets(
 ) -> None:
     ctx = workspace_ctx_factory()
     content = "version: 1\nenvironments: {}\npackages: []\n"
+    if budget == "strings":
+        content += "scalar: &scalar " + "a" * 256 + "\nmetadata: [*scalar]\n"
     fragments = [tmp_path / "conda.lock.a", tmp_path / "conda.lock.b"]
     for fragment in fragments:
         fragment.write_bytes(content.encode("utf-8"))
@@ -3719,6 +4934,10 @@ def test_merge_lockfiles_enforces_aggregate_fragment_budgets(
             "MAX_LOCKFILE_BYTES",
             len(content.encode("utf-8")) + 1,
         )
+    elif budget == "strings":
+        monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_BYTES", 1024)
+        assert sum(fragment.stat().st_size for fragment in fragments) < 1024
+        load_lockfile_data(content)
     else:
         monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_ITEMS", 4)
 
@@ -3729,7 +4948,7 @@ def test_merge_lockfiles_enforces_aggregate_fragment_budgets(
 @pytest.mark.parametrize(
     ("budget", "match"),
     [
-        pytest.param("bytes", "Merged lockfile.*maximum size", id="bytes"),
+        pytest.param("bytes", "maximum (?:size|expanded string content)", id="bytes"),
         pytest.param("items", "Merged lockfile.*collection items", id="items"),
     ],
 )
@@ -3768,9 +4987,11 @@ def test_merge_lockfiles_enforces_merged_structure_budgets(
         merge_lockfiles([fragment], ctx)
 
 
+@pytest.mark.parametrize("metadata", ["ordinary", "merge", "comment"])
 def test_merge_lockfiles_redacts_credentialed_fragment_urls(
     tmp_path: Path,
     workspace_ctx_factory: Callable[..., WorkspaceContext],
+    metadata: str,
 ) -> None:
     ctx = workspace_ctx_factory(env_names=["default"])
     channel = (
@@ -3793,8 +5014,13 @@ def test_merge_lockfiles_redacts_credentialed_fragment_urls(
         "      linux-64:\n"
         f'      - conda: "{package_url}"\n'
         "packages:\n"
-        f'- conda: "{package_url}"\n'
-        f"  sha256: {'a' * 64}\n",
+        + (
+            f'- <<: {{conda: "{package_url}"}}\n'
+            if metadata == "merge"
+            else f'- conda: "{package_url}"\n'
+        )
+        + (f"  # {package_url}\n" if metadata == "comment" else "")
+        + f"  sha256: {'a' * 64}\n",
         encoding="utf-8",
     )
     load_yaml.cache_clear()
@@ -3851,6 +5077,84 @@ def test_merge_lockfiles_missing_file(
     ctx = workspace_ctx_factory()
     with pytest.raises(LockfileMergeError, match="does not exist"):
         merge_lockfiles([tmp_path / "missing.lock"], ctx)
+
+
+@pytest.fixture(params=["list", "mapping"], ids=["aliased-list", "aliased-mapping"])
+def aliased_lockfile_scalar(request: pytest.FixtureRequest) -> str:
+    """A small YAML graph that expands when converted to a string."""
+    content = "a0: &a0 [value]\n"
+    for depth in range(1, 9):
+        alias = f"*a{depth - 1}"
+        value = (
+            f"[{alias}, {alias}]"
+            if request.param == "list"
+            else f"{{left: {alias}, right: {alias}}}"
+        )
+        content += f"a{depth}: &a{depth} {value}\n"
+    return content
+
+
+@pytest.mark.parametrize(
+    "consumer",
+    ["status", "environments", "merge"],
+    ids=["satisfiability", "discovery", "fragment-merge"],
+)
+@pytest.mark.parametrize(
+    "version",
+    ["*a8", "true", "1.0", '"1"', "null"],
+    ids=["alias", "boolean", "float", "string", "missing"],
+)
+def test_lockfile_rejects_noninteger_version_without_expanding_aliases(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    aliased_lockfile_scalar: str,
+    consumer: str,
+    version: str,
+) -> None:
+    ctx = workspace_ctx_factory()
+    content = aliased_lockfile_scalar + (
+        f"version: {version}\nenvironments: {{}}\npackages: []\n"
+    )
+    path = tmp_path / LOCKFILE_NAME
+    path.write_text(content, encoding="utf-8")
+    data = load_lockfile_data(content)
+    loader = CondaLockLoader(path, data=data)
+    assert loader.can_handle() is False
+
+    if consumer == "status":
+        result = check_lockfile_satisfiability(ctx.config, data, "linux-64")
+        assert result.status == LockfileStatus.OUT_OF_DATE
+        message = result.reason
+    else:
+        with pytest.raises((ValueError, LockfileMergeError)) as exc_info:
+            if consumer == "environments":
+                _ = loader.available_environments
+            else:
+                merge_lockfiles([path], ctx, dry_run=True)
+        message = str(exc_info.value)
+    assert "version" in message.lower()
+    assert len(message) < 512
+
+
+@pytest.mark.parametrize(
+    "environment", ["default", "unlisted"], ids=["known", "unknown"]
+)
+def test_merge_lockfiles_rejects_aliased_channel_urls(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+    aliased_lockfile_scalar: str,
+    environment: str,
+) -> None:
+    ctx = workspace_ctx_factory()
+    fragment = tmp_path / "fragment.lock"
+    fragment.write_text(
+        aliased_lockfile_scalar + f"version: 1\nenvironments:\n  {environment}:\n"
+        "    channels: [{url: *a8}]\n    packages: {}\npackages: []\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(LockfileMergeError, match="invalid channels"):
+        merge_lockfiles([fragment], ctx, dry_run=True)
+    assert not lockfile_path(ctx).exists()
 
 
 def test_merge_lockfiles_rejects_wrong_version(
@@ -4200,6 +5504,49 @@ packages:
     ]
 
 
+def test_merge_lockfiles_accepts_aliased_package_metadata(
+    tmp_path: Path,
+    workspace_ctx_factory: Callable[..., WorkspaceContext],
+) -> None:
+    ctx = workspace_ctx_factory(env_names=["default"])
+    channel = str(Channel("conda-forge"))
+    package_url = f"{channel}/noarch/demo-1.0-0.tar.bz2"
+    fragments = []
+
+    for platform in ("linux-64", "osx-64"):
+        shared_metadata: object = {"value": "shared"}
+        for _ in range(8):
+            shared_metadata = [shared_metadata, shared_metadata]
+        data = {
+            "version": 1,
+            "environments": {
+                "default": {
+                    "channels": [{"url": channel}],
+                    "packages": {platform: [{"conda": package_url}]},
+                }
+            },
+            "packages": [
+                {
+                    "conda": package_url,
+                    "sha256": "a" * 64,
+                    "metadata": shared_metadata,
+                }
+            ],
+        }
+        content = io.StringIO()
+        yaml_dump(data, content)
+        fragment = tmp_path / f"conda.lock.{platform}"
+        fragment.write_text(content.getvalue(), encoding="utf-8")
+        fragments.append(fragment)
+    load_yaml.cache_clear()
+
+    merged_path = merge_lockfiles(fragments, ctx)
+    merged = load_yaml(merged_path)
+
+    metadata = merged["packages"][0]["metadata"]
+    assert metadata[0] is metadata[1]
+
+
 @pytest.mark.parametrize(
     ("packages_block", "package_url", "match"),
     [
@@ -4474,23 +5821,154 @@ def satisfiability_config_factory(tmp_path: Path):
         ),
     ],
 )
+@pytest.mark.parametrize("prepared", [False, True], ids=["raw", "prepared"])
 def test_satisfiability(
     satisfiability_config_factory,
     lockfile_data_factory,
+    tmp_path: Path,
     config_kwargs: dict,
     data_kwargs: dict,
     expected_ok: bool,
     reason_fragment: str,
+    prepared: bool,
 ) -> None:
     config = satisfiability_config_factory(**config_kwargs)
     data = lockfile_data_factory(**data_kwargs)
-    result = check_lockfile_satisfiability(config, data, "linux-64")
+    input_data = (
+        CondaLockLoader(tmp_path / LOCKFILE_NAME, data=data) if prepared else data
+    )
+    result = check_lockfile_satisfiability(config, input_data, "linux-64")
     if expected_ok:
         assert result.status == LockfileStatus.UP_TO_DATE
         assert result.reason == ""
     else:
         assert result.status == LockfileStatus.OUT_OF_DATE
         assert reason_fragment in result.reason.lower()
+
+
+def test_satisfiability_processes_shared_lockfile_data_once(
+    satisfiability_config_factory,
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = satisfiability_config_factory(
+        environments={"default": [], "dev": []},
+    )
+    data = lockfile_data_factory()
+    data["environments"]["dev"] = deepcopy(data["environments"]["default"])
+    redactions: list[int] = []
+    indexes: list[int] = []
+    original_redact = CondaLockLoader.redact_data_urls
+    original_index = CondaLockLoader.package_records_by_url_from_data
+
+    def record_redaction(value: dict[str, Any]) -> dict[str, Any]:
+        redactions.append(len(value["packages"]))
+        return original_redact(value)
+
+    def record_index(value: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        indexes.append(len(value["packages"]))
+        return original_index(value)
+
+    monkeypatch.setattr(
+        CondaLockLoader, "redact_data_urls", staticmethod(record_redaction)
+    )
+    monkeypatch.setattr(
+        CondaLockLoader, "package_records_by_url_from_data", staticmethod(record_index)
+    )
+
+    status = check_lockfile_satisfiability(config, data, "linux-64")
+
+    assert status.status == LockfileStatus.UP_TO_DATE
+    assert redactions == [2]
+    assert indexes == [2]
+
+
+def test_satisfiability_reuses_prepared_lockfile_across_targets(
+    satisfiability_config_factory,
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = satisfiability_config_factory(
+        environments={"default": [], "dev": []},
+    )
+    data = lockfile_data_factory()
+    data["environments"]["dev"] = deepcopy(data["environments"]["default"])
+    original = deepcopy(data)
+    redactions: list[int] = []
+    indexes: list[int] = []
+    original_redact = CondaLockLoader.redact_data_urls
+    original_index = CondaLockLoader.package_records_by_url_from_data
+
+    def record_redaction(value: dict[str, Any]) -> dict[str, Any]:
+        redactions.append(len(value["packages"]))
+        return original_redact(value)
+
+    def record_index(value: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        indexes.append(len(value["packages"]))
+        return original_index(value)
+
+    monkeypatch.setattr(
+        CondaLockLoader, "redact_data_urls", staticmethod(record_redaction)
+    )
+    monkeypatch.setattr(
+        CondaLockLoader, "package_records_by_url_from_data", staticmethod(record_index)
+    )
+
+    loader = CondaLockLoader(tmp_path / LOCKFILE_NAME, data=data)
+    for platform in ("linux-64", "osx-arm64"):
+        status = check_lockfile_satisfiability(config, loader, platform)
+        assert status.status == LockfileStatus.UP_TO_DATE
+
+    assert redactions == [2]
+    assert indexes == [2]
+    assert data == original
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["status", "explicit", "conversion"],
+    ids=["status", "exact-install", "export-conversion"],
+)
+def test_lockfile_channel_urls_parsed_once_per_target(
+    satisfiability_config_factory,
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    config = satisfiability_config_factory()
+    data = lockfile_data_factory()
+    package_url = "https://conda.anaconda.org/conda-forge/linux-64/numpy-1.0-0.conda"
+    data["environments"]["default"]["packages"]["linux-64"].append(
+        {"conda": package_url}
+    )
+    data["packages"].append({"conda": package_url, "sha256": "c" * 64})
+    channel_urls = CondaLockLoader.channel_urls_for_env_data(
+        data["environments"]["default"], "linux-64"
+    )
+    channel_parses = dict.fromkeys(channel_urls, 0)
+    original_location = CondaLockLoader.url_location
+
+    def record_location(url: str) -> Any:
+        if url in channel_parses:
+            channel_parses[url] += 1
+        return original_location(url)
+
+    monkeypatch.setattr(CondaLockLoader, "url_location", staticmethod(record_location))
+
+    if operation == "status":
+        status = check_lockfile_satisfiability(config, data, "linux-64")
+        assert status.status == LockfileStatus.UP_TO_DATE
+    else:
+        loader = CondaLockLoader(tmp_path / LOCKFILE_NAME, data=data)
+        if operation == "explicit":
+            specs = loader.explicit_package_specs_for("linux-64")
+            assert len(specs) == 2
+        else:
+            loader.validate_env_for_conversion(loader._data, "default", "linux-64")
+    assert channel_parses
+    assert set(channel_parses.values()) == {1}
 
 
 @pytest.mark.parametrize(
@@ -4633,6 +6111,529 @@ def test_satisfiability_accepts_wildcard_dependency_name(
     result = check_lockfile_satisfiability(config, data, "linux-64")
 
     assert result.status == LockfileStatus.UP_TO_DATE
+
+
+@pytest.mark.parametrize(
+    (
+        "environment_count",
+        "dependency_count",
+        "comparison_limit",
+        "budget_scope",
+        "batch_limit",
+        "expected_status",
+    ),
+    [
+        (1, 1, 3, None, None, LockfileStatus.UP_TO_DATE),
+        (1, 2, 3, None, None, LockfileStatus.OUT_OF_DATE),
+        (2, 1, 3, None, None, LockfileStatus.OUT_OF_DATE),
+        (2, 1, 3, "target", None, LockfileStatus.UP_TO_DATE),
+        (2, 1, 3, "platform", None, LockfileStatus.OUT_OF_DATE),
+        (2, 1, 3, "target", 3, LockfileStatus.OUT_OF_DATE),
+    ],
+    ids=[
+        "normal-wildcard",
+        "repeated-wildcards",
+        "multiple-environments",
+        "batch-per-target",
+        "batch-per-platform",
+        "batch-total-limit",
+    ],
+)
+def test_satisfiability_bounds_wildcard_package_comparisons(
+    satisfiability_config_factory,
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    environment_count: int,
+    dependency_count: int,
+    comparison_limit: int,
+    budget_scope: str | None,
+    batch_limit: int | None,
+    expected_status: str,
+) -> None:
+    names = ("default", "test")[:environment_count]
+    config = satisfiability_config_factory(
+        platforms=["linux-64"],
+        environments={name: [] for name in names},
+    )
+    data = lockfile_data_factory()
+    numpy_url = "https://conda.anaconda.org/conda-forge/linux-64/numpy-1.0.0-py_0.conda"
+    data["environments"]["default"]["packages"]["linux-64"].append({"conda": numpy_url})
+    data["packages"][0]["depends"] = ["num* >=1"] * dependency_count
+    data["packages"].append({"conda": numpy_url, "sha256": "c" * 64})
+    if environment_count == 2:
+        data["environments"]["test"] = deepcopy(data["environments"]["default"])
+    monkeypatch.setattr(
+        lockfile_module, "MAX_LOCKFILE_MATCH_ATTEMPTS", comparison_limit
+    )
+    if batch_limit is not None:
+        monkeypatch.setattr(
+            lockfile_module, "MAX_LOCKFILE_BATCH_MATCH_ATTEMPTS", batch_limit
+        )
+
+    if budget_scope is None:
+        result = check_lockfile_satisfiability(config, data, "linux-64")
+    else:
+        loader = CondaLockLoader(tmp_path / "conda.lock", data=data)
+        result = loader.check_targets(
+            config,
+            [(name, "linux-64") for name in names],
+            match_budget_scope=budget_scope,
+        )
+
+    assert result.status == expected_status
+    if expected_status == LockfileStatus.OUT_OF_DATE:
+        assert "dependency matching exceeds" in result.reason
+
+
+@pytest.mark.parametrize("operation", ["status", "standalone", "target", "platform"])
+@pytest.mark.parametrize("target_only", [False, True], ids=["base", "rich-target"])
+@pytest.mark.parametrize("limited", [False, True], ids=["within-limit", "over-limit"])
+def test_satisfiability_bounds_overlapping_feature_inputs(
+    lockfile_data_factory,
+    workspace_ctx_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+    target_only: bool,
+    limited: bool,
+) -> None:
+    platforms = ["linux-64-a", "linux-64-b"] if target_only else ["linux-64"]
+    names = ["default"] if target_only else ["default", "dev"]
+    feature_names = ["one", "two", "three"]
+    dependencies = {"python": MatchSpec("python >=3.10")}
+    config = WorkspaceConfig(
+        channels=[Channel("conda-forge")],
+        platforms=platforms,
+        platform_subdirs=(
+            {name: "linux-64" for name in platforms} if target_only else {}
+        ),
+        features={
+            name: Feature(
+                name=name,
+                conda_dependencies={} if target_only else dependencies,
+                target_conda_dependencies=(
+                    {"linux-64": dependencies} if target_only else {}
+                ),
+            )
+            for name in feature_names
+        },
+        environments={
+            name: Environment(name=name, features=feature_names) for name in names
+        },
+    )
+    data = lockfile_data_factory()
+    locked_env = data["environments"]["default"]
+    refs = locked_env["packages"]["linux-64"]
+    locked_env["packages"] = {platform: refs for platform in platforms}
+    data["environments"] = {name: locked_env for name in names}
+    limit = (12 if target_only else 15) if limited else 128
+    monkeypatch.setattr(resolver_module, "MAX_RESOLUTION_WORK_ITEMS", limit)
+    merges: list[tuple[str, str | None]] = []
+    original_merge = config.merged_conda_dependencies
+
+    def record_merge(environment, platform=None):
+        merges.append((environment.name, platform))
+        return original_merge(environment, platform)
+
+    monkeypatch.setattr(config, "merged_conda_dependencies", record_merge)
+    if operation == "status":
+        ctx = workspace_ctx_factory(platform="linux-64", env_names=names)
+        lock = lockfile_path(ctx)
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        yaml_dump(data, lock)
+        status = lockfile_module.lockfile_status(ctx, config, platform=platforms[0])
+    elif operation == "standalone":
+        status = check_lockfile_satisfiability(config, data, platforms[0])
+    else:
+        status = CondaLockLoader(tmp_path / LOCKFILE_NAME, data=data).check_targets(
+            config,
+            ((name, platform) for name in names for platform in platforms),
+            match_budget_scope=operation,
+        )
+
+    if limited:
+        assert status.status == LockfileStatus.OUT_OF_DATE
+        assert "resolution work exceeds" in status.reason
+        assert merges == [("default", None)]
+    else:
+        assert status.status == LockfileStatus.UP_TO_DATE
+        assert any(platform is not None for _, platform in merges)
+
+
+def test_satisfiability_batch_resolves_named_platforms_once(
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    platforms = [f"linux-64-{index}" for index in range(24)]
+    config = WorkspaceConfig(
+        name="rich-batch",
+        channels=[Channel("conda-forge")],
+        platforms=platforms,
+        platform_subdirs={name: "linux-64" for name in platforms},
+        root=str(tmp_path),
+        manifest_path=str(tmp_path / "conda.toml"),
+    )
+    data = lockfile_data_factory()
+    linux_refs = data["environments"]["default"]["packages"]["linux-64"]
+    data["environments"]["default"]["packages"] = {
+        name: linux_refs for name in platforms
+    }
+    original_resolve = resolver_module.resolve_environment
+    resolved_platforms: list[str | None] = []
+
+    def record_resolve(config, name, platform=None):
+        resolved_platforms.append(platform)
+        return original_resolve(config, name, platform)
+
+    monkeypatch.setattr(resolver_module, "resolve_environment", record_resolve)
+    loader = CondaLockLoader(tmp_path / "conda.lock", data=data)
+
+    status = loader.check_targets(
+        config,
+        (("default", platform) for platform in platforms),
+        match_budget_scope="target",
+    )
+
+    assert status.status == LockfileStatus.UP_TO_DATE
+    assert resolved_platforms == [None]
+
+
+def test_satisfiability_batch_bounds_repeated_manifest_dependencies(
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    names = ("default", "dev", "test")
+    config = WorkspaceConfig(
+        channels=[Channel("conda-forge")],
+        platforms=["linux-64"],
+        features={
+            "default": Feature(
+                name="default",
+                conda_dependencies={
+                    name: MatchSpec(name)
+                    for name in ("python", "numpy", "scipy", "pandas")
+                },
+            )
+        },
+        environments={name: Environment(name=name) for name in names},
+        root=str(tmp_path),
+        manifest_path=str(tmp_path / "conda.toml"),
+    )
+    data = lockfile_data_factory()
+    data["environments"] = {name: data["environments"]["default"] for name in names}
+    monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_DECLARATION_ITEMS", 16)
+    resolved_names: list[str] = []
+    original_resolve = resolver_module.resolve_environment
+
+    def record_resolve(config, name, platform=None):
+        resolved_names.append(name)
+        return original_resolve(config, name, platform)
+
+    monkeypatch.setattr(resolver_module, "resolve_environment", record_resolve)
+    loader = CondaLockLoader(tmp_path / "conda.lock", data=data)
+
+    status = loader.check_targets(
+        config, [("default", "linux-64")], match_budget_scope="target"
+    )
+
+    assert status.status == LockfileStatus.OUT_OF_DATE
+    assert "declaration work" in status.reason
+    assert resolved_names == ["default", "dev"]
+
+
+def test_satisfiability_batch_reuses_channel_locations_for_rich_platforms(
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    platforms = [f"linux-64-{index}" for index in range(4)]
+    config = WorkspaceConfig(
+        channels=[Channel("conda-forge")],
+        platforms=platforms,
+        platform_subdirs={platform: "linux-64" for platform in platforms},
+        features={"default": Feature(name="default")},
+        environments={"default": Environment(name="default")},
+        root=str(tmp_path),
+        manifest_path=str(tmp_path / "conda.toml"),
+    )
+    data = lockfile_data_factory()
+    data["environments"]["default"]["packages"] = {
+        platform: [] for platform in platforms
+    }
+    data["packages"] = []
+    loader = CondaLockLoader(tmp_path / "conda.lock", data=data)
+    original = CondaLockLoader.channel_urls_for_env_data
+    expanded_platforms: list[str] = []
+
+    def record_channel_urls(env_data, platform, *, path=None):
+        expanded_platforms.append(platform)
+        return original(env_data, platform, path=path)
+
+    monkeypatch.setattr(
+        CondaLockLoader, "channel_urls_for_env_data", record_channel_urls
+    )
+
+    status = loader.check_targets(
+        config,
+        (("default", platform) for platform in platforms),
+        match_budget_scope="platform",
+    )
+
+    assert status.status == LockfileStatus.UP_TO_DATE
+    assert expanded_platforms == ["linux-64"]
+
+
+@pytest.fixture
+def multi_environment_lockfile(
+    tmp_path: Path,
+) -> tuple[WorkspaceConfig, dict[str, Any]]:
+    """A valid lockfile sharing ordinary noarch packages across fifty targets."""
+    platforms = ["linux-64", "linux-aarch64", "osx-64", "osx-arm64", "win-64"]
+    names = ["default", *(f"env-{index}" for index in range(1, 10))]
+    channel = "https://conda.anaconda.org/conda-forge"
+    packages = [
+        {
+            "conda": f"{channel}/noarch/package{index}-1.0-py_0.conda",
+            "sha256": "a" * 64,
+            "md5": "b" * 32,
+            "build_number": 0,
+            "depends": [],
+            "constrains": [],
+            "license": "BSD-3-Clause",
+            "size": 1024,
+        }
+        for index in range(250)
+    ]
+    config = WorkspaceConfig(
+        channels=[Channel(channel)],
+        platforms=platforms,
+        features={"default": Feature(name="default")},
+        environments={name: Environment(name=name) for name in names},
+        root=str(tmp_path),
+        manifest_path=str(tmp_path / "conda.toml"),
+    )
+    data = {
+        "version": LOCKFILE_VERSION,
+        "environments": {
+            name: {
+                "channels": [{"url": channel}],
+                "packages": {
+                    platform: [{"conda": package["conda"]} for package in packages]
+                    for platform in platforms
+                },
+            }
+            for name in names
+        },
+        "packages": packages,
+    }
+    return config, data
+
+
+@pytest.mark.parametrize("operation", ["status", "target", "platform", "render"])
+def test_satisfiability_accepts_multi_environment_package_metadata(
+    multi_environment_lockfile: tuple[WorkspaceConfig, dict[str, Any]],
+    operation: str,
+) -> None:
+    config, data = multi_environment_lockfile
+    ctx = WorkspaceContext(config)
+    ctx._cache["platform"] = "linux-64"
+    if operation == "render":
+        rendered = render_lockfile(
+            ctx,
+            {"default": resolve_environment(config, "default")},
+            config=config,
+            baseline_data=data,
+            update_targets={},
+        )
+        assert load_lockfile_data(rendered)["environments"] == data["environments"]
+    else:
+        if operation == "status":
+            yaml_dump(data, lockfile_path(ctx))
+            status = lockfile_module.lockfile_status(ctx, config, platform="linux-64")
+        else:
+            status = CondaLockLoader(lockfile_path(ctx), data=data).check_targets(
+                config,
+                match_budget_scope=operation,
+            )
+        assert status.status == LockfileStatus.UP_TO_DATE, status.reason
+
+
+@pytest.mark.parametrize(
+    ("limit", "limit_value", "reason"),
+    [
+        ("MAX_LOCKFILE_BATCH_PACKAGE_REFS", 1, "package references"),
+        (
+            "MAX_LOCKFILE_BATCH_EXPANDED_ITEMS",
+            4,
+            "expanded collection items",
+        ),
+    ],
+    ids=["shared-reference-limit", "shared-metadata-limit"],
+)
+def test_satisfiability_standalone_bounds_aliased_environment_refs(
+    satisfiability_config_factory,
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    limit: str,
+    limit_value: int,
+    reason: str,
+) -> None:
+    config = satisfiability_config_factory(
+        platforms=["linux-64"],
+        environments={"default": [], "test": []},
+    )
+    data = lockfile_data_factory()
+    data["environments"]["test"] = data["environments"]["default"]
+    monkeypatch.setattr(lockfile_module, limit, limit_value)
+
+    status = check_lockfile_satisfiability(config, data, "linux-64")
+
+    assert status.status == LockfileStatus.OUT_OF_DATE
+    assert reason in status.reason
+
+
+@pytest.mark.parametrize(
+    ("limit", "limit_value", "reason"),
+    [
+        ("MAX_LOCKFILE_BATCH_TARGETS", 2, "target count"),
+        ("MAX_LOCKFILE_BATCH_PACKAGE_REFS", 2, "package references"),
+        ("MAX_LOCKFILE_BATCH_EXPANDED_ITEMS", 8, "expanded collection items"),
+    ],
+    ids=["target-count", "reused-package-refs", "reused-package-metadata"],
+)
+def test_satisfiability_batch_bounds_reused_targets(
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    limit: str,
+    limit_value: int,
+    reason: str,
+) -> None:
+    platforms = ["linux-64-a", "linux-64-b", "linux-64-c"]
+    config = WorkspaceConfig(
+        name="bounded-batch",
+        channels=[Channel("conda-forge")],
+        platforms=platforms,
+        platform_subdirs={name: "linux-64" for name in platforms},
+        root=str(tmp_path),
+        manifest_path=str(tmp_path / "conda.toml"),
+    )
+    data = lockfile_data_factory()
+    shared_refs = data["environments"]["default"]["packages"]["linux-64"]
+    data["environments"]["default"]["packages"] = {
+        name: shared_refs for name in platforms
+    }
+    monkeypatch.setattr(lockfile_module, limit, limit_value, raising=False)
+    loader = CondaLockLoader(tmp_path / "conda.lock", data=data)
+
+    status = loader.check_targets(
+        config,
+        (("default", platform) for platform in platforms),
+        match_budget_scope="target",
+    )
+
+    assert status.status == LockfileStatus.OUT_OF_DATE
+    assert reason in status.reason
+
+
+@pytest.mark.parametrize(
+    ("platform", "expected_status"),
+    [
+        ("linux-64-a", LockfileStatus.UP_TO_DATE),
+        ("linux-64-b", LockfileStatus.OUT_OF_DATE),
+    ],
+    ids=["matching-rich-target", "mismatching-rich-target"],
+)
+def test_satisfiability_batch_uses_exact_rich_target_dependencies(
+    lockfile_data_factory,
+    tmp_path: Path,
+    platform: str,
+    expected_status: str,
+) -> None:
+    platforms = ["linux-64-a", "linux-64-b"]
+    config = WorkspaceConfig(
+        name="rich-dependencies",
+        channels=[Channel("conda-forge")],
+        platforms=platforms,
+        platform_subdirs={name: "linux-64" for name in platforms},
+        features={
+            "default": Feature(
+                name="default",
+                target_conda_dependencies={
+                    "linux-64-a": {"python": MatchSpec("python >=3.10")},
+                    "linux-64-b": {"python": MatchSpec("python >=4")},
+                },
+            )
+        },
+        root=str(tmp_path),
+        manifest_path=str(tmp_path / "conda.toml"),
+    )
+    data = lockfile_data_factory()
+    linux_refs = data["environments"]["default"]["packages"]["linux-64"]
+    data["environments"]["default"]["packages"] = {
+        name: linux_refs for name in platforms
+    }
+    loader = CondaLockLoader(tmp_path / "conda.lock", data=data)
+
+    status = loader.check_targets(
+        config, [("default", platform)], match_budget_scope="target"
+    )
+
+    assert status.status == expected_status
+    if expected_status == LockfileStatus.OUT_OF_DATE:
+        assert platform in status.reason
+
+
+@pytest.mark.parametrize(
+    ("target_limit", "expected_status", "cached_budgets"),
+    [
+        (3, LockfileStatus.OUT_OF_DATE, 0),
+        (4, LockfileStatus.UP_TO_DATE, 1),
+    ],
+    ids=["aliased-target-cap", "shared-environment-budget"],
+)
+def test_satisfiability_batch_bounds_aliased_environment_targets(
+    lockfile_data_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    target_limit: int,
+    expected_status: str,
+    cached_budgets: int,
+) -> None:
+    config = WorkspaceConfig(
+        name="aliased-environments",
+        channels=[Channel("conda-forge")],
+        platforms=["linux-64", "osx-arm64"],
+        environments={
+            "default": Environment(name="default"),
+            "extra": Environment(name="extra"),
+        },
+        root=str(tmp_path),
+        manifest_path=str(tmp_path / "conda.toml"),
+    )
+    data = lockfile_data_factory()
+    data["environments"]["extra"] = data["environments"]["default"]
+    monkeypatch.setattr(lockfile_module, "MAX_LOCKFILE_BATCH_TARGETS", target_limit)
+    loader = CondaLockLoader(tmp_path / "conda.lock", data=data)
+    assert (
+        loader._data["environments"]["default"] is loader._data["environments"]["extra"]
+    )
+
+    status = loader.check_targets(
+        config,
+        (
+            (name, platform)
+            for name in ("default", "extra")
+            for platform in ("linux-64", "osx-arm64")
+        ),
+        match_budget_scope="target",
+    )
+
+    assert status.status == expected_status
+    assert len(loader._environment_budgets) == cached_budgets
 
 
 def test_satisfiability_validates_translated_pypi_roots(
@@ -4808,10 +6809,18 @@ def test_satisfiability_selection_keeps_complete_workspace_declaration_checks(
     assert affected_environment in result.reason
 
 
+@pytest.mark.parametrize("prepared", [False, True], ids=["raw", "prepared"])
 def test_satisfiability_rejects_unknown_environment(
     satisfiability_environment_pair,
+    tmp_path: Path,
+    prepared: bool,
 ) -> None:
     config, data = satisfiability_environment_pair
+    input_data = (
+        CondaLockLoader(tmp_path / LOCKFILE_NAME, data=data) if prepared else data
+    )
 
     with pytest.raises(EnvironmentNotFoundError, match="unknown"):
-        check_lockfile_satisfiability(config, data, "linux-64", environment="unknown")
+        check_lockfile_satisfiability(
+            config, input_data, "linux-64", environment="unknown"
+        )

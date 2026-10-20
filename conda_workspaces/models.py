@@ -217,25 +217,21 @@ def has_url_credentials_in_data(value: object) -> bool:
     seen: set[int] = set()
     while values:
         current = values.pop()
+        identity = id(current)
+        if identity in seen:
+            continue
+        seen.add(identity)
         if isinstance(current, str):
             if has_url_credentials(current):
                 return True
             continue
         if isinstance(current, Mapping):
-            identity = id(current)
-            if identity in seen:
-                continue
-            seen.add(identity)
             values.extend(current.keys())
             values.extend(current.values())
         elif isinstance(current, Collection) and not isinstance(
             current,
             (bytes, bytearray),
         ):
-            identity = id(current)
-            if identity in seen:
-                continue
-            seen.add(identity)
             values.extend(current)
     return False
 
@@ -677,7 +673,11 @@ class WorkspaceConfig:
         matches = self.platform_names_for_subdir(requested, candidates)
         if matches:
             return matches[0]
-        raise PlatformError(requested, sorted(candidates))
+        raise PlatformError(
+            requested,
+            sorted(candidates),
+            known_platforms=(*self.platforms, *self.platform_subdirs),
+        )
 
     def get_environment(self, name: str) -> Environment:
         """Return the environment with *name*, raising if not found."""
@@ -692,17 +692,57 @@ class WorkspaceConfig:
         environment sets ``no_default_feature``.
         """
         result: list[Feature] = []
+        seen: set[str] = set()
         if not environment.no_default_feature:
             result.append(self.features[Feature.DEFAULT_NAME])
+            seen.add(Feature.DEFAULT_NAME)
 
         for fname in environment.features:
             if fname not in self.features:
                 raise FeatureNotFoundError(fname, environment.name)
-            feat = self.features[fname]
-            if feat not in result:
-                result.append(feat)
+            if fname not in seen:
+                result.append(self.features[fname])
+                seen.add(fname)
 
         return result
+
+    def resolution_work_items(
+        self, environment: Environment, platform: str | None = None
+    ) -> int:
+        """Count feature inputs before merges can discard overlapping entries.
+
+        Resolution and lockfile status share this accounting so that checking
+        an existing lockfile cannot bypass the feature-merge work limit.
+        """
+        target_keys = self.target_platform_keys(platform)
+        items = (
+            1
+            + len(self.channels)
+            + len(self.platforms)
+            + len(self.platform_subdirs)
+            + len(environment.conda_dependencies)
+            + len(environment.pypi_dependencies)
+        )
+        for key in target_keys:
+            items += len(environment.target_conda_dependencies.get(key, {}))
+            items += len(environment.target_pypi_dependencies.get(key, {}))
+        if platform is not None:
+            items += len(self.platform_system_requirements.get(platform, {}))
+        for feature in self.resolve_features(environment):
+            items += (
+                1
+                + len(feature.conda_dependencies)
+                + len(feature.pypi_dependencies)
+                + len(feature.channels)
+                + len(feature.platforms)
+                + len(feature.system_requirements)
+                + len(feature.activation_scripts)
+                + len(feature.activation_env)
+            )
+            for key in target_keys:
+                items += len(feature.target_conda_dependencies.get(key, {}))
+                items += len(feature.target_pypi_dependencies.get(key, {}))
+        return items
 
     def merged_conda_dependencies(
         self,

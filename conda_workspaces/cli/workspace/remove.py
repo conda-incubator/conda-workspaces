@@ -32,6 +32,7 @@ from .sync import affected_environments, sync_environments
 if TYPE_CHECKING:
     import argparse
 
+    from tomlkit.container import OutOfOrderTableProxy
     from tomlkit.items import InlineTable, Table
 
     from .dependencies import DependencyDeclaration
@@ -275,7 +276,9 @@ def execute_remove(args: argparse.Namespace, *, console: Console | None = None) 
         current = parser.parse_data_with_redacted_errors(doc.unwrap(), manifest_path)
         if location.environment is not None:
             current.get_environment(location.environment)
-        location.validate_platform(current, source, allow_existing=True)
+        location.validate_platform(
+            current, source, namespace=namespace, allow_existing=True
+        )
         selected = location.find_table(source)
         selected_dependencies = (
             selected.get(dep_key, {}) if selected is not None else {}
@@ -384,7 +387,7 @@ def execute_remove(args: argparse.Namespace, *, console: Console | None = None) 
 
 
 def _remove_from_toml(
-    doc: tomlkit.TOMLDocument | Table | InlineTable,
+    doc: tomlkit.TOMLDocument | Table | InlineTable | OutOfOrderTableProxy,
     specs: list[str],
     dep_key: str,
     location: DependencyLocation,
