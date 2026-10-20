@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from difflib import get_close_matches
 from typing import TYPE_CHECKING
 
+from conda.base.constants import KNOWN_SUBDIRS
 from conda.exceptions import CondaError
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from pathlib import Path
 
 
@@ -168,15 +171,38 @@ class FeatureNotFoundError(CondaWorkspacesError):
 class PlatformError(CondaWorkspacesError):
     """Platform configuration error."""
 
-    def __init__(self, platform: str, available: list[str]) -> None:
+    def __init__(
+        self,
+        platform: str,
+        available: list[str],
+        *,
+        known_platforms: Iterable[str] = (),
+        hints: list[str] | None = None,
+    ) -> None:
         self.platform = platform
         self.available = available
-        super().__init__(
-            f"Platform '{platform}' is not supported by this workspace.",
-            hints=[
-                f"Supported platforms: {', '.join(sorted(available))}",
-            ],
+        known = set(KNOWN_SUBDIRS).union(available, known_platforms)
+        message = (
+            f"Platform '{platform}' is not supported by this workspace."
+            if platform in known
+            else f"Unknown platform '{platform}'."
         )
+        platform_hints = [f"Supported platforms: {', '.join(sorted(available))}"]
+        if suggestion := self.suggest_platform(platform, known):
+            platform_hints.append(f"Did you mean '{suggestion}'?")
+        platform_hints.extend(hints or ())
+        super().__init__(message, hints=platform_hints)
+
+    @staticmethod
+    def suggest_platform(
+        platform: str, known_platforms: Iterable[str] = ()
+    ) -> str | None:
+        """Suggest a close conda subdir or declared custom platform name."""
+        known = set(KNOWN_SUBDIRS).union(known_platforms)
+        if platform in known:
+            return None
+        matches = get_close_matches(platform, sorted(known), n=1, cutoff=0.8)
+        return matches[0] if matches else None
 
 
 class SolveError(CondaWorkspacesError):

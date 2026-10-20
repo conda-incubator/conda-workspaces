@@ -33,6 +33,7 @@ dependencies = [
   "packaging >=21.0",
   "platformdirs >=3.0",
   "rich >=13.0",
+  "ruamel.yaml >=0.18",
   "tomlkit >=0.13,!=0.15.0",
   "backports.zstd; python_version < '3.14'",
 ]

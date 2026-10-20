@@ -22,6 +22,7 @@ from conda_workspaces.exceptions import (
     PlatformError,
 )
 from conda_workspaces.export import resolve_exporter, run_exporter
+from conda_workspaces.lockfile import CondaLockLoader
 from conda_workspaces.resolver import ResolvedEnvironment
 
 from ..conftest import make_args
@@ -695,12 +696,27 @@ def test_export_from_lockfile_resolves_rich_platform_subdir(
 def test_export_from_lockfile_preserves_rich_platform_variants(
     rich_platform_lockfile: Callable[[dict[str, str], tuple[str, ...]], Path],
     export_console: Console,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = rich_platform_lockfile(
         {"linux-64-cuda": "12.0"},
         ("linux-64", "linux-64-cuda"),
     )
     output = workspace / "roundtrip.lock"
+    batch_calls: list[tuple[str, ...]] = []
+    original_envs_for = CondaLockLoader.envs_for
+
+    def record_batch(
+        loader: CondaLockLoader,
+        platforms: dict[str, str | None],
+        name: str = "default",
+        *,
+        metadata_only: bool = False,
+    ) -> list[Environment]:
+        batch_calls.append(tuple(platforms))
+        return original_envs_for(loader, platforms, name, metadata_only=metadata_only)
+
+    monkeypatch.setattr(CondaLockLoader, "envs_for", record_batch)
 
     execute_export(
         make_args(
@@ -717,6 +733,8 @@ def test_export_from_lockfile_preserves_rich_platform_variants(
         "linux-64",
         "linux-64-cuda",
     }
+    assert len(batch_calls) == 1
+    assert set(batch_calls[0]) == {"linux-64", "linux-64-cuda"}
 
 
 def test_export_from_lockfile_rejects_ambiguous_rich_platform_subdir(

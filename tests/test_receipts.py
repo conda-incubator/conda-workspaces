@@ -19,7 +19,7 @@ from conda_workspaces.receipts import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from pathlib import Path
     from typing import Any
 
@@ -576,6 +576,195 @@ def test_receipt_inventory_compare_rejects_duplicate_package_identity() -> None:
 
     with pytest.raises(ArchiveError, match="Duplicate package record"):
         ReceiptInventory([env]).compare(ReceiptInventory([env]))
+
+
+@pytest.fixture
+def recorded_package_normalizations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[str]:
+    platforms: list[str] = []
+    original = ReceiptPackageRecord.from_record
+
+    def record_normalization(
+        cls: type[ReceiptPackageRecord],
+        record: Mapping[str, object],
+        *,
+        fallback_url: str = "",
+        platform: str = "",
+    ) -> ReceiptPackageRecord:
+        platforms.append(platform)
+        return original(record, fallback_url=fallback_url, platform=platform)
+
+    monkeypatch.setattr(
+        ReceiptPackageRecord, "from_record", classmethod(record_normalization)
+    )
+    return platforms
+
+
+@pytest.mark.parametrize("shared_mapping", [False, True], ids=["refs", "environment"])
+def test_receipt_inventory_normalizes_shared_packages_once(
+    recorded_package_normalizations: list[str], shared_mapping: bool
+) -> None:
+    package = {"name": "sample", "version": "1", "build": "0"}
+    refs = [package] * 8
+    shared = {"packages": {"linux-64": refs}}
+    data = {
+        "environments": {
+            name: shared if shared_mapping else {"packages": {"linux-64": refs}}
+            for name in ("first", "second", "third")
+        }
+    }
+    inventory = ReceiptInventory.from_lockfile_data(
+        data, environment_prefixes={"first": "envs/first", "second": "envs/second"}
+    )
+
+    assert recorded_package_normalizations == ["linux-64"]
+    first, second = inventory.data
+    assert first["name"] == "first"
+    assert second["prefix"] == "envs/second"
+    assert first["packages"] == second["packages"]
+    assert first["packages"] is not second["packages"]
+    first["packages"][0]["name"] = "changed"
+    assert second["packages"][0]["name"] == "sample"
+
+
+def test_receipt_inventory_shared_packages_keep_platform_defaults(
+    recorded_package_normalizations: list[str],
+) -> None:
+    refs = [{"name": "sample", "version": "1", "build": "0"}]
+    inventory = ReceiptInventory.from_lockfile_data(
+        {
+            "environments": {
+                platform: {"packages": {platform: refs}}
+                for platform in ("linux-64", "osx-arm64")
+            }
+        }
+    )
+
+    assert recorded_package_normalizations == ["linux-64", "osx-arm64"]
+    assert [env["packages"][0]["subdir"] for env in inventory.data] == [
+        "linux-64",
+        "osx-arm64",
+    ]
+
+
+@pytest.mark.parametrize("noarch", [False, True], ids=["conflict", "noarch"])
+def test_receipt_inventory_shared_packages_preserve_platform_deduplication(
+    noarch: bool,
+) -> None:
+    package = {"name": "sample", "version": "1", "build": "0"}
+    if noarch:
+        package["subdir"] = "noarch"
+    refs = [package]
+    data = {
+        "environments": {
+            "default": {"packages": dict.fromkeys(("linux-64", "osx-arm64"), refs)}
+        }
+    }
+
+    if noarch:
+        inventory = ReceiptInventory.from_lockfile_data(data)
+        assert len(inventory.data[0]["packages"]) == 1
+        assert inventory.data[0]["packages"][0]["subdir"] == "noarch"
+    else:
+        with pytest.raises(ArchiveError, match="Duplicate package record"):
+            ReceiptInventory.from_lockfile_data(data)
+
+
+@pytest.mark.parametrize(
+    ("limit_name", "limit"),
+    [("MAX_RECEIPT_ITEMS", 100), ("MAX_RECEIPT_BYTES", 1000)],
+    ids=["items", "strings"],
+)
+def test_receipt_inventory_rejects_expanded_aliased_output(
+    monkeypatch: pytest.MonkeyPatch,
+    recorded_package_normalizations: list[str],
+    limit_name: str,
+    limit: int,
+) -> None:
+    shared = {
+        "packages": {
+            "linux-64": [{"name": "sample", "version": "1" * 100, "build": "0"}]
+        }
+    }
+    monkeypatch.setattr(receipts_module, limit_name, limit)
+    ReceiptInventory.from_lockfile_data({"environments": {"one": shared}})
+    recorded_package_normalizations.clear()
+
+    with pytest.raises(ArchiveError, match="maximum expanded"):
+        ReceiptInventory.from_lockfile_data(
+            {"environments": {f"env{index}": shared for index in range(16)}}
+        )
+
+    assert recorded_package_normalizations == ["linux-64"]
+
+
+def test_receipt_inventory_limits_references_before_normalization(
+    monkeypatch: pytest.MonkeyPatch,
+    recorded_package_normalizations: list[str],
+) -> None:
+    refs = [{"name": "sample", "version": "1", "build": "0"}] * 5
+    monkeypatch.setattr(receipts_module, "MAX_RECEIPT_ITEMS", 4)
+
+    with pytest.raises(ArchiveError, match="maximum expanded"):
+        ReceiptInventory.from_lockfile_data(
+            {"environments": {"default": {"packages": {"linux-64": refs}}}}
+        )
+
+    assert recorded_package_normalizations == []
+
+
+def test_receipt_inventory_bounds_normalization_across_platform_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+    recorded_package_normalizations: list[str],
+) -> None:
+    url = "https://example.invalid/noarch/" + "a" * 200 + "-1-0.conda"
+    refs = [{"conda": url}]
+    data = {
+        "environments": {
+            "default": {
+                "packages": {f"platform{i}": refs for i in range(16)},
+            }
+        }
+    }
+    monkeypatch.setattr(receipts_module, "MAX_RECEIPT_BYTES", 1000)
+
+    with pytest.raises(ArchiveError, match="maximum expanded"):
+        ReceiptInventory.from_lockfile_data(data)
+
+    assert len(recorded_package_normalizations) < 4
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_archive_receipt_rejects_alias_expansion_before_inventory_comparison(
+    receipt_workspace: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    newline: str,
+) -> None:
+    archive_path = tmp_path / "workspace.tar.gz"
+    create_archive(receipt_workspace, archive_path, ArchiveConfig())
+    statement = copied_statement(build_receipt(receipt_workspace, archive_path))
+    target = tmp_path / "extracted"
+    extract_archive(archive_path, target)
+    lockfile = (
+        "version: 1\nenvironments:\n  default: &shared\n"
+        "    packages:\n      linux-64:\n"
+        "        - {name: sample, version: '1', build: '0'}\n"
+        + "".join(f"  env{index}: *shared\n" for index in range(16))
+    )
+    lockfile_bytes = lockfile.replace("\n", newline).encode()
+    target.joinpath("conda.lock").write_bytes(lockfile_bytes)
+    for subject in statement["subject"]:
+        if subject["name"] == "conda.lock":
+            subject["digest"]["sha256"] = hashlib.sha256(lockfile_bytes).hexdigest()
+    statement["predicate"]["environments"] = [
+        {"name": f"env{index}", "packages": []} for index in range(16)
+    ]
+    monkeypatch.setattr(receipts_module, "MAX_RECEIPT_ITEMS", 100)
+
+    with pytest.raises(ArchiveError, match="maximum expanded"):
+        ArchiveReceipt(statement).verify_extracted(target)
 
 
 @pytest.mark.parametrize(

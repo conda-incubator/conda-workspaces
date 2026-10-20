@@ -12,6 +12,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
+from conda.base.constants import DEFAULT_JSON_REPORTER_BACKEND
 from conda.base.context import context as conda_context
 from conda.cli.helpers import (
     LazyChoicesAction,
@@ -682,6 +683,36 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         help="Remove and recreate the affected environment(s) from scratch.",
     )
 
+    platform_parser = sub.add_parser(
+        "platform",
+        help="Edit workspace or named-feature platforms.",
+        add_help=False,
+    )
+    add_parser_help(platform_parser)
+    platform_commands = platform_parser.add_subparsers(
+        dest="platform_action", required=True
+    )
+    for action in ("add", "remove"):
+        command = platform_commands.add_parser(
+            action,
+            help=f"{action.capitalize()} workspace or named-feature platforms.",
+            add_help=False,
+        )
+        add_parser_help(command)
+        add_output_and_prompt_options(command)
+        command.add_argument(
+            "--feature", help="Existing named feature to modify (default: workspace)."
+        )
+        command.add_argument(
+            "platforms", nargs="+", metavar="PLATFORM", help="Platform names to edit."
+        )
+        command.add_argument(
+            "--no-lockfile-update",
+            action="store_true",
+            default=False,
+            help="Only update the manifest. Skip solving and lockfile updates.",
+        )
+
     clean_parser = sub.add_parser(
         "clean",
         help="Remove installed workspace environments.",
@@ -909,7 +940,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         "--no-install",
         action="store_true",
         default=False,
-        help="Skip cache priming for bundled packages.",
+        help="With --install, do not use bundled packages for offline installation.",
     )
     unarchive_parser.add_argument(
         "--receipt",
@@ -928,6 +959,12 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         default=False,
         help="Require package records verified by --receipt to include SHA-256.",
+    )
+    unarchive_parser.add_argument(
+        "--allow-large-archive",
+        action="store_true",
+        default=False,
+        help="Allow a trusted archive to exceed the default expanded-size limit.",
     )
 
     quickstart_parser = sub.add_parser(
@@ -1089,8 +1126,12 @@ def execute_workspace(args: argparse.Namespace) -> int:
         generate_workspace_parser().print_help()
         return 0
 
-    json_result = bool(getattr(args, "json", False)) and subcmd in {
+    json_result = (
+        bool(getattr(args, "json", False))
+        or conda_context.console == DEFAULT_JSON_REPORTER_BACKEND
+    ) and subcmd in {
         "add",
+        "platform",
         "update",
         "remove",
         "install",
@@ -1172,6 +1213,10 @@ def _dispatch_workspace(args: argparse.Namespace, subcmd: str) -> int:
         from .workspace.remove import execute_remove
 
         return execute_remove(args)
+    elif subcmd == "platform":
+        from .workspace.platform import execute_platform
+
+        return execute_platform(args)
     elif subcmd == "clean":
         from .workspace.clean import execute_clean
 

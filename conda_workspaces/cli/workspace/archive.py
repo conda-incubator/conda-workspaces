@@ -169,13 +169,14 @@ def execute_unarchive(
             prime_cache=not args.no_install,
             install_handler=install_from_archive_cli(console),
             dry_run=dry_run,
+            allow_large_archive=getattr(args, "allow_large_archive", False),
         )
     else:
         result = archive.extract(
             target=args.target,
             require_sha256=getattr(args, "require_sha256", False),
-            prime_cache=not args.no_install,
             dry_run=dry_run,
+            allow_large_archive=getattr(args, "allow_large_archive", False),
         )
 
     if result.verified:
@@ -189,24 +190,29 @@ def execute_unarchive(
         console.print(
             f"  Archive includes {result.info['package_count']} bundled packages"
         )
-        if result.cache_priming_skipped:
+        if args.install and result.cache_priming_skipped:
             action = "Would skip" if dry_run else "Skipping"
-            console.print(f"  {action} package cache priming without verified receipt")
-        elif dry_run and not args.no_install:
-            status.message(
-                console,
-                "Would prime",
-                "packages",
-                str(result.primed_packages),
-                detail="into conda cache",
+            reason = (
+                "without verified receipt"
+                if not result.verified
+                else "for this install"
             )
-        elif result.primed_packages > 0:
+            console.print(f"  {action} bundled packages {reason}")
+        elif args.install and dry_run and result.primed_packages > 0:
             status.message(
                 console,
-                "Primed",
+                "Would stage",
                 "packages",
                 str(result.primed_packages),
-                detail="into conda cache",
+                detail="for this install",
+            )
+        elif args.install and result.primed_packages > 0:
+            status.message(
+                console,
+                "Staged",
+                "packages",
+                str(result.primed_packages),
+                detail="for this install",
             )
 
     if args.install:

@@ -6,10 +6,97 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added
+
+- Added `conda workspace platform add/remove` to edit workspace platforms,
+  with `--feature NAME` for named feature lists. Existing rich platform
+  definitions are preserved, and definitions still needed by features cannot
+  be removed. Lock updates retain existing solutions and solve newly required
+  targets without changing installed environments. (#200)
+
 ### Changed
 
 - Updated CI and release workflows to `prefix-dev/setup-pixi` 0.11.0,
   `actions/upload-artifact` 7.0.2, and `actions/download-artifact` 8.0.2. (#202)
+
+### Fixed
+
+- Apply the total lockfile document limit to aggregate target metadata, so valid
+  environment/platform matrices remain usable during status checks and selective
+  updates. (#200)
+- Prune excluded environment directories before archive traversal limits, so
+  installed environments do not block archives in non-Git workspaces. (#200)
+- Check lockfile environment and platform declarations once per platform edit,
+  workspace update, or lockfile rendering operation, then check exact targets
+  with aggregate wildcard, package reference, and metadata limits. Apply the
+  same limits to standalone status checks and reuse channel locations for
+  platforms that share a conda subdir. (#200)
+- Cap aggregate feature-merge work before resolving all environments or checking
+  lockfile status, including target-specific dependencies and workspace info
+  without a lockfile. Reuse resolved environments during platform edits and
+  lockfile validation. (#200)
+- Cap filesystem entries created by archive extraction, reserve disk space for
+  file and directory metadata, and check available inodes before writing. (#200)
+- Limit archive extraction to 4 GiB of raw and expanded bytes by default, check free
+  space before snapshotting, extracting, and staging bundled packages, and
+  require `--allow-large-archive` for trusted archives above the default limit.
+  The 100 GiB hard limit still applies. (#200)
+- Stream archive candidates and bound file selection and pattern matching before
+  archive member validation. (#200)
+- Enforce YAML collection and depth limits while composing nodes, before large
+  documents can be built in memory. (#200)
+- Reuse lockfile package indexes and parsed channels across status checks and
+  bulk installs. (#200)
+- Bound wildcard lockfile dependency checks and reuse validated lockfile data
+  across export targets to avoid excessive work with large lockfiles. (#200)
+- Deduplicate workspace features by name so large manifests do not trigger
+  repeated feature comparisons. (#200)
+- Bound aliased package dependencies before converting lockfile packages and
+  environments. (#200)
+- Validate repeated lockfile Python site-packages paths and channel URLs once.
+  (#200)
+- Reject malformed lockfile versions and channel URLs before converting values
+  to strings, preventing repeated expansion of YAML aliases. (#200)
+- Validate lockfile Python site-packages paths before package conversion so
+  noarch files stay within the selected installation prefix. (#200)
+- Count raw and PAX-overridden tar member sizes together when enforcing archive
+  decompression limits. (#200)
+- Escape manifest environment names in platform intersection warnings. (#200)
+- Bound YAML merge construction and expanded manifest imports, including
+  referenced environment files. Preserve supported aliases and merge precedence.
+  (#200)
+- Discard YAML comments, tags and hidden merge metadata before redacting and
+  publishing lockfiles, so serializer metadata cannot retain credentials. (#200)
+- Bound inherited PAX metadata across archive members and expanded receipt
+  inventories across environments. Reuse normalized shared package records.
+  (#200)
+
+- Prevented named task arguments from being inserted into shell command source.
+  Commands that reference named arguments must use the list form of `cmd`.
+  Task environment values continue to support named arguments. (#200)
+- Bounded lockfile URL redaction work for shared YAML aliases, including
+  shared channel lists, while preserving aliases and removing credentials. (#200)
+- Compare aliased lockfile package records and channel lists without repeated
+  traversal of shared YAML nodes, including scalar values. Reuse URL redaction,
+  channel normalization and credential checks for shared strings, and limit
+  expanded string content across lockfiles and merged fragments. (#200)
+- Bound task dry-run previews by expanding each task's dependencies once,
+  while showing repeated references and supporting deep dependency chains. (#200)
+- Keep bundled archive packages in a temporary cache during explicit archive
+  installation, so extraction cannot add unsigned package records to a shared
+  conda cache. (#200)
+
+- Workspace commands preserve interleaved tool tables when editing
+  `pyproject.toml` manifests. (#200)
+
+- Workspace mutation commands honor conda’s configured JSON output, including
+  `CONDA_JSON=true` and `--console json`. (#200)
+
+- Fixed `conda workspace run` changing the caller's working directory, so
+  relative scripts and files now resolve where the command was invoked. (#197)
+- Platform errors now distinguish unknown names from valid platforms unsupported
+  by the selected environment, suggest close matches, and identify the manifest
+  settings to update. (#199)
 
 ## 0.11.1 — 2026-10-02
 

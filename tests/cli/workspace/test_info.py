@@ -92,6 +92,67 @@ def test_info_does_not_emit_manifest_terminal_controls(
 
 
 @pytest.mark.parametrize(
+    ("filename", "table_prefix"),
+    [
+        ("conda.toml", ""),
+        ("pixi.toml", ""),
+        ("pyproject.toml", "tool.conda."),
+        ("pyproject.toml", "tool.pixi."),
+    ],
+    ids=["conda", "pixi", "pyproject-conda", "pyproject-pixi"],
+)
+@pytest.mark.parametrize(
+    ("env_name", "display_name"),
+    [
+        ("ordinary", "ordinary"),
+        ("erase\x1b[2J", r"erase\x1b[2J"),
+        ("line\rnext\nlast\ttab", r"line\x0dnext\x0alast\x09tab"),
+        ("c1\x9b2J", r"c1\x9b2J"),
+    ],
+    ids=["ordinary", "escape", "line-controls", "c1"],
+)
+def test_info_escapes_environment_name_in_platform_warning(
+    tmp_path: Path,
+    rich_console: Console,
+    caplog: pytest.LogCaptureFixture,
+    filename: str,
+    table_prefix: str,
+    env_name: str,
+    display_name: str,
+) -> None:
+    manifest = tmp_path / filename
+    manifest.write_text(
+        f"[{table_prefix}workspace]\n"
+        'name = "warning-test"\n'
+        'channels = ["conda-forge"]\n'
+        'platforms = ["linux-64", "win-64"]\n'
+        f"[{table_prefix}feature.linux]\n"
+        'platforms = ["linux-64"]\n'
+        f"[{table_prefix}feature.windows]\n"
+        'platforms = ["win-64"]\n'
+        f"[{table_prefix}environments]\n"
+        f'{json.dumps(env_name)} = ["linux", "windows"]\n',
+        encoding="utf-8",
+    )
+
+    result = execute_info(
+        make_args(_DEFAULTS, manifest_file=manifest),
+        console=rich_console,
+    )
+
+    assert result == 0
+    message = "".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "conda_workspaces.resolver"
+    )
+    assert "Feature platform intersection" in message
+    assert "falling back to workspace platforms" in message
+    assert f"environment '{display_name}'" in message
+    assert not any(ord(char) < 32 or 0x7F <= ord(char) <= 0x9F for char in message)
+
+
+@pytest.mark.parametrize(
     "selector",
     ["directory", "missing"],
     ids=["directory", "missing"],

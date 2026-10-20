@@ -35,8 +35,9 @@ Each builder reuses an existing primitive where one exists:
   :func:`conda.cli.main_export.execute` uses.
 * :func:`envs_from_lockfile` — our own
   :class:`~conda_workspaces.lockfile.CondaLockLoader`
-  ``EnvironmentSpecBase`` plugin (``env_for``), identical to the path
-  conda takes when it reads ``--file conda.lock`` through
+  ``EnvironmentSpecBase`` plugin (``env_for`` for one target and ``envs_for``
+  for several), using the same loader conda calls for ``--file conda.lock``
+  through
   :meth:`Environment.from_cli_with_file_envs`, with optional manifest
   requested-package enrichment for consumers that need declared roots.
 * :func:`envs_from_manifest` — the only source without a conda
@@ -224,15 +225,11 @@ def envs_from_lockfile(
     if not targets:
         raise LockfileNotFoundError(env_name, path)
     try:
-        envs = [
-            loader.env_for(
-                platform=platform,
-                name=env_name,
-                package_platform=ctx.config.platform_subdir(platform),
-                metadata_only=include_requested_packages,
-            )
-            for platform in targets
-        ]
+        envs = loader.envs_for(
+            {platform: ctx.config.platform_subdir(platform) for platform in targets},
+            name=env_name,
+            metadata_only=include_requested_packages,
+        )
     except ValueError as exc:
         raise LockfileNotFoundError(env_name, path) from exc
     if include_requested_packages:

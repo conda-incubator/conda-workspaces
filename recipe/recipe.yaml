@@ -34,6 +34,7 @@ requirements:
     - conda-lockfiles >=0.2.0
     - conda-spawn >=0.1.0
     - rich >=13.0
+    - ruamel.yaml >=0.18
     - tomlkit >=0.13,!=0.15.0
     - platformdirs >=3.0
     - jinja2 >=3.0

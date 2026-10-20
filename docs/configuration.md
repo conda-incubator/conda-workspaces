@@ -419,7 +419,7 @@ colorama = ">=0.4"
 
 ```toml
 [tasks.test]
-cmd = "pytest {{ path }} {{ flags }}"
+cmd = ["pytest", "{{ path }}", "{{ flags }}"]
 args = [
   { arg = "path", default = "tests/" },
   { arg = "flags", default = "-v" },

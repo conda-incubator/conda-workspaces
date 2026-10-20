@@ -172,5 +172,6 @@ For provenance-sensitive workflows, distribute the receipt through an
 independent trusted channel or sign it with an external signing system.
 For air-gapped workflows, pair `--receipt` with `--bundle` so the
 archive carries the package artifacts and the receipt carries the
-lockfile inventory that should describe them. `unarchive` only primes a
-conda package cache from bundled packages after receipt verification.
+lockfile inventory that should describe them. `unarchive --install` stages
+bundled packages in a temporary cache after receipt verification. Extraction
+alone does not publish package cache records.

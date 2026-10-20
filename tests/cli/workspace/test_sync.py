@@ -19,6 +19,7 @@ from conda_workspaces.exceptions import (
     EnvironmentNotFoundError,
     PlatformError,
 )
+from conda_workspaces.lockfile import CondaLockLoader
 from conda_workspaces.models import Environment, Feature, WorkspaceConfig
 
 _RENDERED_LOCK = """\
@@ -284,6 +285,10 @@ def test_sync_threads_required_absence_to_install_preflight(
     assert prepare_calls["imported"]["require_absent"] is True
     assert prepare_calls["default"]["validate_workspace"] is validate_workspace
     assert prepare_calls["imported"]["validate_workspace"] is validate_workspace
+    assert (
+        prepare_calls["default"]["lockfile_loader"]
+        is prepare_calls["imported"]["lockfile_loader"]
+    )
 
 
 @pytest.mark.parametrize("prefix_exists", [False, True], ids=["absent", "present"])
@@ -543,13 +548,12 @@ def test_force_dry_run_validates_rendered_lock_without_removal(
         console=captured_console,
     )
 
+    loader = install_calls[0]["lockfile_loader"]
+    assert isinstance(loader, CondaLockLoader)
+    assert loader._data == {"version": 1, "environments": {}, "packages": []}
     assert install_calls == [
         {
-            "lockfile_data": {
-                "version": 1,
-                "environments": {},
-                "packages": [],
-            },
+            "lockfile_loader": loader,
             "update_names": None,
             "prune": False,
             "replace_existing": True,
@@ -653,14 +657,13 @@ def test_sync_selective_update_threads_host_and_lock_targets(
     )
 
     assert install_calls == [{"dry_run": True, "update_names": {"python"}}]
+    loader = exact_install_calls[0]["lockfile_loader"]
+    assert isinstance(loader, CondaLockLoader)
+    assert loader._data == {"version": 1, "environments": {}, "packages": []}
     assert exact_install_calls == [
         {
             "phase": "prepare",
-            "lockfile_data": {
-                "version": 1,
-                "environments": {},
-                "packages": [],
-            },
+            "lockfile_loader": loader,
             "update_names": {"python"},
             "prune": False,
             "replace_existing": False,
@@ -669,11 +672,7 @@ def test_sync_selective_update_threads_host_and_lock_targets(
         },
         {
             "phase": "execute",
-            "lockfile_data": {
-                "version": 1,
-                "environments": {},
-                "packages": [],
-            },
+            "lockfile_loader": loader,
             "update_names": {"python"},
             "prune": False,
             "replace_existing": False,
