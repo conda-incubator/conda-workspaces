@@ -9,8 +9,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 ### Added
 
 - Added `conda workspace ship` to build native launchers from a selected locked
-  workspace environment through conda-ship, with online, external, and embedded
-  package layouts. (#194)
+  workspace environment through conda-ship 0.11.1 or later, with online,
+  external, and embedded package layouts. (#194)
 
 ## 0.12.0 — 2026-10-20
 

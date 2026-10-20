@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from importlib import import_module
-from importlib.util import find_spec
+from importlib import import_module, metadata
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from conda.base.constants import DEFAULT_JSON_REPORTER_BACKEND
+from conda.base.context import context as conda_context
+from packaging.version import InvalidVersion, Version
 from rich.console import Console
 
 from ...exceptions import CondaWorkspacesError, LockfileNotFoundError
@@ -83,52 +85,52 @@ def execute_ship(args: argparse.Namespace, *, console: Console | None = None) ->
         raise CondaWorkspacesError(f"Cannot ship from conda.lock: {exc}") from exc
 
     output = args.output.expanduser().absolute()
+    minimum_version = Version("0.11.1")
     requirement = (
-        "Install conda-ship with explicit input selection support "
-        "(--manifest, --source-lock, --source-environment) in the environment "
-        "that runs conda. Released conda-ship 0.10.0 does not support these options."
+        f"Install conda-ship >={minimum_version} in the environment that runs "
+        "conda, for example: conda install -n base "
+        f"'conda-forge::conda-ship>={minimum_version}'"
     )
-    if find_spec("conda_ship") is None:
-        raise CondaWorkspacesError("conda-ship is not installed.", hints=[requirement])
-
-    command = [sys.executable, "-m", "conda_ship.cli", "build"]
     try:
-        help_result = subprocess.run(
-            [*command, "--help"], capture_output=True, text=True, check=False
+        installed_version = Version(metadata.version("conda-ship"))
+    except metadata.PackageNotFoundError as exc:
+        raise CondaWorkspacesError(
+            "conda-ship is not installed.", hints=[requirement]
+        ) from exc
+    except InvalidVersion as exc:
+        raise CondaWorkspacesError(
+            "Cannot determine the installed conda-ship version.", hints=[requirement]
+        ) from exc
+    if installed_version < minimum_version:
+        raise CondaWorkspacesError(
+            f"conda-ship >={minimum_version} is required "
+            f"(installed: {installed_version}).",
+            hints=[requirement],
         )
-        if help_result.returncode:
-            raise CondaWorkspacesError(
-                f"Cannot run conda-ship: {help_result.stderr.strip()}",
-                hints=[requirement],
-            )
-        if not all(
-            option in help_result.stdout.split()
-            for option in ("--manifest", "--source-lock", "--source-environment")
-        ):
-            raise CondaWorkspacesError(
-                "This conda-ship builder lacks explicit input selection support.",
-                hints=[requirement],
-            )
-        command.extend(
-            [
-                "--manifest",
-                str(manifest),
-                "--source-lock",
-                str(lock),
-                "--source-environment",
-                args.environment,
-                "--platform",
-                platform,
-                "--out-dir",
-                str(output),
-            ]
-        )
-        if args.delegate_executable is not None:
-            command.extend(["--delegate-executable", args.delegate_executable])
-        if args.artifact_layout is not None:
-            command.extend(["--artifact-layout", args.artifact_layout])
-        if args.dry_run:
-            command.append("--dry-run")
+
+    command = [
+        sys.executable,
+        "-m",
+        "conda_ship.cli",
+        "build",
+        "--manifest",
+        str(manifest),
+        "--source-lock",
+        str(lock),
+        "--source-environment",
+        args.environment,
+        "--platform",
+        platform,
+        "--out-dir",
+        str(output),
+    ]
+    if args.delegate_executable is not None:
+        command.extend(["--delegate-executable", args.delegate_executable])
+    if args.artifact_layout is not None:
+        command.extend(["--artifact-layout", args.artifact_layout])
+    if args.dry_run:
+        command.append("--dry-run")
+    try:
         result = subprocess.run(
             command, stdout=sys.stderr, stderr=sys.stderr, check=False
         )
@@ -139,7 +141,7 @@ def execute_ship(args: argparse.Namespace, *, console: Console | None = None) ->
 
     if console is None:
         console = Console(highlight=False)
-    if args.json:
+    if args.json or conda_context.console == DEFAULT_JSON_REPORTER_BACKEND:
         console.print_json(
             data={
                 "success": True,

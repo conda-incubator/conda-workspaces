@@ -157,8 +157,9 @@ copied into the launcher.
 
 The launcher installs its managed environment on first use. Online artifacts
 download packages then, while external and embedded bundles download them
-during the build. This integration requires unreleased conda-ship support for
-explicit source selection. conda-ship 0.10.0 is insufficient. See
+during the build. Install conda-ship 0.11.1 or later in the environment that
+runs conda with `conda install -n base "conda-forge::conda-ship>=0.11.1"`,
+replacing `base` if needed. See
 [Ship a workspace environment](../how-to/ship.md) for prerequisites and examples.
 
 ### Importing manifests

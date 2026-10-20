@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from conda.base.context import reset_context
 
 from conda_workspaces.cli.main import execute_workspace, generate_workspace_parser
 from conda_workspaces.cli.workspace.ship import execute_ship
@@ -100,8 +101,8 @@ def test_ship_delegates_without_solving_or_changing_workspace(
     )
 
     assert execute_workspace(args) == 0
-    assert len(calls) == 2
-    assert calls[1][4:] == [
+    assert len(calls) == 1
+    assert calls[0][4:] == [
         "--manifest",
         config.manifest_path,
         "--source-lock",
@@ -130,6 +131,43 @@ def test_ship_delegates_without_solving_or_changing_workspace(
         }
     else:
         assert "launcher" in captured.out
+
+
+@pytest.mark.usefixtures("reset_conda_context")
+@pytest.mark.parametrize(
+    ("options", "json_environment"),
+    [
+        pytest.param(["--json"], None, id="flag"),
+        pytest.param([], "true", id="environment"),
+        pytest.param(["--console", "json"], None, id="console"),
+    ],
+)
+def test_ship_honors_conda_json_configuration(
+    image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
+    record_ship_builder: Callable[..., list[list[str]]],
+    ship_args: Callable[..., argparse.Namespace],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    options: list[str],
+    json_environment: str | None,
+) -> None:
+    config, _ = image_workspace()
+    record_ship_builder()
+    if json_environment is None:
+        monkeypatch.delenv("CONDA_JSON", raising=False)
+    else:
+        monkeypatch.setenv("CONDA_JSON", json_environment)
+    args = ship_args(config, *options)
+    reset_context(argparse_args=args)
+
+    assert execute_workspace(args) == 0
+
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert result["success"] is True
+    assert result["environment"] == "default"
+    assert result["platform"] == "linux-64"
+    assert "conda-ship build output" in captured.err
 
 
 @pytest.mark.parametrize("filename", ["conda.toml", "pixi.toml", "pyproject.toml"])
@@ -171,7 +209,7 @@ def test_ship_selects_exact_manifest_and_environment(
         ]
     )
     assert execute_ship(args) == 0
-    build = calls[1]
+    build = calls[0]
     assert build[build.index("--manifest") + 1] == str(manifest)
     assert build[build.index("--source-lock") + 1] == str(lock)
     assert build[build.index("--source-environment") + 1] == "runtime"
@@ -179,9 +217,49 @@ def test_ship_selects_exact_manifest_and_environment(
     assert (manifest.read_bytes(), lock.read_bytes()) == before
 
 
+@pytest.mark.parametrize("environment", ["default", "outdated"])
+def test_ship_checks_only_selected_environment_requirements(
+    image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
+    record_ship_builder: Callable[..., list[list[str]]],
+    ship_args: Callable[..., argparse.Namespace],
+    environment: str,
+) -> None:
+    config, ctx = image_workspace(
+        manifest_extra=(
+            '\n[feature.outdated.dependencies]\npython = "3.13.*"\n'
+            '\n[environments]\ndefault = []\noutdated = ["outdated"]\n'
+        )
+    )
+    lock = ctx.root / "conda.lock"
+    data = json.loads(lock.read_text())
+    data["environments"]["outdated"] = data["environments"]["default"]
+    lock.write_text(json.dumps(data))
+    calls = record_ship_builder()
+    args = ship_args(config)
+    args.environment = environment
+
+    if environment == "default":
+        assert execute_ship(args) == 0
+        assert len(calls) == 1
+    else:
+        with pytest.raises(CondaWorkspacesError, match="outdated conda.lock"):
+            execute_ship(args)
+        assert calls == []
+
+
 @pytest.mark.parametrize(
     "problem",
-    ["missing", "stale", "malformed", "version", "platform", "environment", "package"],
+    [
+        "missing",
+        "stale",
+        "malformed",
+        "version",
+        "platform",
+        "environment",
+        "package",
+        "unknown-environment",
+        "unsupported-platform",
+    ],
 )
 def test_ship_rejects_invalid_locks_before_running_builder(
     image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
@@ -213,6 +291,10 @@ def test_ship_rejects_invalid_locks_before_running_builder(
     calls = record_ship_builder()
     before = snapshot_tree(ctx.root)
     args = ship_args(config)
+    if problem == "unknown-environment":
+        args.environment = "unknown"
+    elif problem == "unsupported-platform":
+        args.platform = "osx-64"
     with pytest.raises(CondaWorkspacesError):
         execute_ship(args)
     assert calls == []
@@ -223,10 +305,20 @@ def test_ship_rejects_invalid_locks_before_running_builder(
     "settings, message, expected_calls",
     [
         ({"available": False}, "Install", 0),
-        ({"help_text": "--root"}, "input selection", 1),
+        ({"installed_version": "0.10.0"}, ">=0.11.1", 0),
+        ({"installed_version": "0.11.0"}, ">=0.11.1", 0),
+        ({"installed_version": "0.11.1rc1"}, ">=0.11.1", 0),
+        ({"installed_version": "unknown"}, ">=0.11.1", 0),
         ({"execution_error": OSError("cannot execute")}, "cannot execute", 1),
     ],
-    ids=["missing-package", "incompatible-builder", "execution-error"],
+    ids=[
+        "missing-package",
+        "missing-input-selection",
+        "missing-installed-executable-fix",
+        "prerelease-builder",
+        "invalid-version",
+        "execution-error",
+    ],
 )
 def test_ship_reports_unavailable_builder(
     image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],

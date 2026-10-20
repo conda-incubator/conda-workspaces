@@ -2,7 +2,13 @@
 
 This example builds a native launcher for a locked Python environment. The launcher installs that environment into a managed prefix on first use and passes its arguments to Python. No project source files or manifest tasks are copied into the artifact.
 
-The integration requires an unreleased conda-ship development build with the `--manifest`, `--source-lock`, and `--source-environment` build options from [conda-ship#147](https://github.com/conda-incubator/conda-ship/pull/147). conda-ship 0.10.0 does not support these options. Install a compatible development build in the Python environment running conda-workspaces.
+Install conda-ship 0.11.1 or later in the Python environment that runs conda:
+
+```bash
+conda install -n base "conda-forge::conda-ship>=0.11.1"
+```
+
+Replace `base` if conda runs from another environment.
 
 ## Build and run
 

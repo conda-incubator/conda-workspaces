@@ -7,15 +7,15 @@ an executable from that environment. Later invocations reuse the prefix.
 
 ![Preview, build, and run a locked Python launcher](../../demos/ship.gif)
 
-```{important}
-This integration requires a development build of conda-ship with the
-`--manifest`, `--source-lock`, and `--source-environment` build options.
-These options have not been released. conda-ship 0.10.0 does not support them.
-The input-selection support is proposed in
-[conda-ship#147](https://github.com/conda-incubator/conda-ship/pull/147).
-Install a compatible development build in the Python environment that runs
-conda-workspaces.
+````{important}
+Install conda-ship 0.11.1 or later in the Python environment that runs conda:
+
+```bash
+conda install -n base "conda-forge::conda-ship>=0.11.1"
 ```
+
+Replace `base` if conda runs from another environment.
+````
 
 ## Prepare the manifest and lockfile
 

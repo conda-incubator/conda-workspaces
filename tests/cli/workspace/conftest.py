@@ -6,7 +6,7 @@ import argparse
 import json
 import subprocess
 import sys
-from importlib.machinery import ModuleSpec
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -56,16 +56,21 @@ def record_ship_builder(
     def record(
         *,
         available: bool = True,
-        help_text: str = "--manifest --source-lock --source-environment",
+        installed_version: str = "0.11.1",
         exit_code: int = 0,
         execution_error: OSError | None = None,
     ) -> list[list[str]]:
         calls: list[list[str]] = []
-        monkeypatch.setattr(
-            ship,
-            "find_spec",
-            lambda name: ModuleSpec(name, None) if available else None,
-        )
+        original_version = importlib_metadata.version
+
+        def version(distribution: str) -> str:
+            if distribution != "conda-ship":
+                return original_version(distribution)
+            if not available:
+                raise importlib_metadata.PackageNotFoundError(distribution)
+            return installed_version
+
+        monkeypatch.setattr(importlib_metadata, "version", version)
 
         def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
             calls.append(list(args))
@@ -73,8 +78,6 @@ def record_ship_builder(
             assert not kwargs.get("shell")
             if execution_error is not None:
                 raise execution_error
-            if args[-1] == "--help":
-                return subprocess.CompletedProcess(args, 0, stdout=help_text, stderr="")
             assert kwargs["stdout"] is sys.stderr
             assert kwargs["stderr"] is sys.stderr
             print("conda-ship build output", file=sys.stderr)
