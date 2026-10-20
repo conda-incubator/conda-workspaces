@@ -6386,6 +6386,81 @@ def test_satisfiability_batch_reuses_channel_locations_for_rich_platforms(
     assert expanded_platforms == ["linux-64"]
 
 
+@pytest.fixture
+def multi_environment_lockfile(
+    tmp_path: Path,
+) -> tuple[WorkspaceConfig, dict[str, Any]]:
+    """A valid lockfile sharing ordinary noarch packages across fifty targets."""
+    platforms = ["linux-64", "linux-aarch64", "osx-64", "osx-arm64", "win-64"]
+    names = ["default", *(f"env-{index}" for index in range(1, 10))]
+    channel = "https://conda.anaconda.org/conda-forge"
+    packages = [
+        {
+            "conda": f"{channel}/noarch/package{index}-1.0-py_0.conda",
+            "sha256": "a" * 64,
+            "md5": "b" * 32,
+            "build_number": 0,
+            "depends": [],
+            "constrains": [],
+            "license": "BSD-3-Clause",
+            "size": 1024,
+        }
+        for index in range(250)
+    ]
+    config = WorkspaceConfig(
+        channels=[Channel(channel)],
+        platforms=platforms,
+        features={"default": Feature(name="default")},
+        environments={name: Environment(name=name) for name in names},
+        root=str(tmp_path),
+        manifest_path=str(tmp_path / "conda.toml"),
+    )
+    data = {
+        "version": LOCKFILE_VERSION,
+        "environments": {
+            name: {
+                "channels": [{"url": channel}],
+                "packages": {
+                    platform: [{"conda": package["conda"]} for package in packages]
+                    for platform in platforms
+                },
+            }
+            for name in names
+        },
+        "packages": packages,
+    }
+    return config, data
+
+
+@pytest.mark.parametrize("operation", ["status", "target", "platform", "render"])
+def test_satisfiability_accepts_multi_environment_package_metadata(
+    multi_environment_lockfile: tuple[WorkspaceConfig, dict[str, Any]],
+    operation: str,
+) -> None:
+    config, data = multi_environment_lockfile
+    ctx = WorkspaceContext(config)
+    ctx._cache["platform"] = "linux-64"
+    if operation == "render":
+        rendered = render_lockfile(
+            ctx,
+            {"default": resolve_environment(config, "default")},
+            config=config,
+            baseline_data=data,
+            update_targets={},
+        )
+        assert load_lockfile_data(rendered)["environments"] == data["environments"]
+    else:
+        if operation == "status":
+            yaml_dump(data, lockfile_path(ctx))
+            status = lockfile_module.lockfile_status(ctx, config, platform="linux-64")
+        else:
+            status = CondaLockLoader(lockfile_path(ctx), data=data).check_targets(
+                config,
+                match_budget_scope=operation,
+            )
+        assert status.status == LockfileStatus.UP_TO_DATE, status.reason
+
+
 @pytest.mark.parametrize(
     ("limit", "limit_value", "reason"),
     [

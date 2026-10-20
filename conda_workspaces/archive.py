@@ -2374,6 +2374,25 @@ class _ArchiveSelectionBudget:
                 f" of {MAX_ARCHIVE_CANDIDATES:,}."
             )
 
+    def filesystem_candidates(self, root: Path) -> Iterator[Path]:
+        """Charge filesystem entries without entering builtin-excluded trees."""
+        for directory, directory_names, file_names in os.walk(root, followlinks=False):
+            parent = Path(directory)
+            retained_directories = []
+            for name in directory_names:
+                path = parent / name
+                relative = path.relative_to(root).as_posix()
+                normalized = "/".join(portable_path_key(PurePosixPath(relative)))
+                if normalized in BUILTIN_EXCLUDE_DIRS:
+                    continue
+                retained_directories.append(name)
+                self.reserve_candidate()
+                yield path
+            directory_names[:] = retained_directories
+            for name in file_names:
+                self.reserve_candidate()
+                yield parent / name
+
     def matches_patterns(
         self,
         rel_path: str,
@@ -2475,13 +2494,18 @@ def collect_archive_files(
     result: list[Path] = []
     seen: set[Path] = set()
     git_candidates = git_tracked_files(root) if is_git_repo(root) else None
-    candidates = git_candidates if git_candidates is not None else root.rglob("*")
+    candidates = (
+        git_candidates
+        if git_candidates is not None
+        else budget.filesystem_candidates(root)
+    )
     try:
         for path, is_extra in chain(
             ((path, False) for path in candidates),
             ((path, True) for path in extra_files),
         ):
-            budget.reserve_candidate()
+            if git_candidates is not None or is_extra:
+                budget.reserve_candidate()
             if not is_extra and not path.is_file():
                 continue
             if path in seen:

@@ -16,6 +16,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Apply the total lockfile document limit to aggregate target metadata, so valid
+  environment/platform matrices remain usable during status checks and selective
+  updates. (#200)
+- Prune excluded environment directories before archive traversal limits, so
+  installed environments do not block archives in non-Git workspaces. (#200)
 - Check lockfile environment and platform declarations once per platform edit,
   workspace update, or lockfile rendering operation, then check exact targets
   with aggregate wildcard, package reference, and metadata limits. Apply the

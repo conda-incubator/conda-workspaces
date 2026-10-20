@@ -377,6 +377,79 @@ def test_collect_files_bounds_excluded_candidates(
 
 
 @pytest.mark.parametrize(
+    "excluded_directory",
+    [".git", ".conda/envs", ".pixi", "__pycache__", ".CoNdA/ENVS", ".PiXi"],
+    ids=["git", "conda-envs", "pixi", "pycache", "conda-envs-case", "pixi-case"],
+)
+def test_collect_files_prunes_builtin_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    excluded_directory: str,
+) -> None:
+    manifest = tmp_path / "conda.toml"
+    manifest.write_text("[workspace]\n", encoding="utf-8")
+    excluded = tmp_path / excluded_directory
+    excluded.mkdir(parents=True)
+    for index in range(3):
+        (excluded / f"package-{index}.txt").write_text("data", encoding="utf-8")
+    scanned: list[Path] = []
+    original_scandir = os.scandir
+
+    def record_scandir(path: str | Path) -> os.ScandirIterator[str]:
+        scanned.append(Path(path))
+        return original_scandir(path)
+
+    monkeypatch.setattr(archive_module.os, "scandir", record_scandir)
+    monkeypatch.setattr(
+        archive_module,
+        "MAX_ARCHIVE_CANDIDATES",
+        len(Path(excluded_directory).parts) + 1,
+    )
+
+    files = collect_archive_files(
+        tmp_path,
+        ArchiveConfig(include=("*",)),
+        extra_files=(excluded / "package-0.txt",),
+    )
+
+    assert files == [manifest]
+    assert excluded not in scanned
+
+
+def test_collect_files_does_not_follow_directory_symlinks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    manifest = root / "conda.toml"
+    manifest.write_text("[workspace]\n", encoding="utf-8")
+    external = tmp_path / "external"
+    external.mkdir()
+    for index in range(3):
+        (external / f"package-{index}.txt").write_text("data", encoding="utf-8")
+    try:
+        (root / "linked-directory").symlink_to(external, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink setup unavailable: {exc}")
+    monkeypatch.setattr(archive_module, "MAX_ARCHIVE_CANDIDATES", 2)
+
+    assert collect_archive_files(root, ArchiveConfig()) == [manifest]
+
+
+def test_collect_files_bounds_eligible_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for index in range(3):
+        (tmp_path / f"directory-{index}").mkdir()
+    monkeypatch.setattr(archive_module, "MAX_ARCHIVE_CANDIDATES", 2)
+
+    with pytest.raises(ArchiveError, match="candidate"):
+        collect_archive_files(tmp_path, ArchiveConfig())
+
+
+@pytest.mark.parametrize(
     "exit_during_kill", [False, True], ids=["running", "exited-before-kill"]
 )
 def test_git_tracked_files_stops_subprocess_when_selection_aborts(
