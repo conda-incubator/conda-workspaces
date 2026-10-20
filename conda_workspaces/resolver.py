@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, ClassVar
 from conda.exceptions import CondaValueError
 
 from .exceptions import (
+    CondaWorkspacesError,
     PlatformError,
 )
 from .models import (
@@ -25,16 +26,18 @@ from .models import (
     has_url_credentials,
     redact_url_text,
 )
+from .terminal import escape_for_console
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
-    from typing import Any
+    from typing import Any, Final
 
     from conda.models.records import PackageRecord
 
     from .models import Channel, PyPIDependency, WorkspaceConfig
 
 log = logging.getLogger(__name__)
+MAX_RESOLUTION_WORK_ITEMS: Final = 100_000
 
 
 @dataclass
@@ -418,6 +421,8 @@ def resolve_environment(
     config: WorkspaceConfig,
     env_name: str,
     platform: str | None = None,
+    *,
+    _work_budget: list[int] | None = None,
 ) -> ResolvedEnvironment:
     """Resolve an environment by composing its features.
 
@@ -426,6 +431,9 @@ def resolve_environment(
 
     If *platform* is given, target-specific overrides are included
     and platform support is validated.
+
+    A shared *_work_budget* bounds repeated feature merging when callers
+    resolve every environment in one workspace.
     """
     env = config.get_environment(env_name)
     features = config.resolve_features(env)
@@ -448,13 +456,20 @@ def resolve_environment(
             log.warning(
                 "Feature platform intersection for environment '%s' is empty; "
                 "falling back to workspace platforms",
-                env_name,
+                escape_for_console(env_name),
             )
         resolved_platforms = list(config.platforms)
 
     selected_platform = platform
     if platform and resolved_platforms:
         selected_platform = config.resolve_platform_name(platform, resolved_platforms)
+
+    if _work_budget is not None:
+        _work_budget[0] -= config.resolution_work_items(env, selected_platform)
+        if _work_budget[0] < 0:
+            raise CondaWorkspacesError(
+                "Workspace environment resolution work exceeds the allowed limit"
+            )
 
     resolved = ResolvedEnvironment(
         name=env_name,
@@ -495,12 +510,15 @@ def resolve_all_environments(
 ) -> dict[str, ResolvedEnvironment]:
     """Resolve all environments in the workspace.
 
-    Returns a dict mapping environment name to its resolved deps.
+    Returns a dict mapping environment name to its resolved deps. Feature
+    inputs are counted before each merge to limit work and retained copies.
     """
-    return {
-        name: resolve_environment(config, name, platform)
-        for name in config.environments
-    }
+    resolved_environments: dict[str, ResolvedEnvironment] = {}
+    work_budget = [MAX_RESOLUTION_WORK_ITEMS]
+    for name in config.environments:
+        resolved = resolve_environment(config, name, platform, _work_budget=work_budget)
+        resolved_environments[name] = resolved
+    return resolved_environments
 
 
 def known_platforms(

@@ -5,9 +5,8 @@ from __future__ import annotations
 import pytest
 from conda.base.constants import on_win
 from conda.base.context import context
-from conda.utils import quote_for_shell
 
-import conda_workspaces.template as template_mod
+from conda_workspaces.exceptions import CondaWorkspacesError
 from conda_workspaces.template import render, render_command, render_list
 
 
@@ -21,61 +20,94 @@ def test_render_simple_variable():
 
 
 @pytest.mark.parametrize(
-    ("template", "task_args", "expected"),
+    "command",
     [
-        (
-            "python -m pytest {{ target }}",
-            {"target": "tests/unit; echo ARG_PWN"},
-            f"python -m pytest {quote_for_shell('tests/unit; echo ARG_PWN')}",
-        ),
-        (
-            "echo {{ name }}",
-            {"name": "simple"},
-            "echo simple",
-        ),
+        "echo {{ value }}",
+        'echo "{{ value }}"',
+        "echo '{{ value }}'",
+        "echo prefix{{ value }}suffix",
+        "cat <<EOF\n{{ value }}\nEOF",
+        "echo {{ value | upper }}",
+        "echo {{ value | replace(\"'\", '') }}",
+        "echo {{ value[1:] }}",
+        "{% set alias = value %}echo {{ alias }}",
+        "{% macro show(x) %}echo {{ x }}{% endmacro %}{{ show(value) }}",
+        "{% if value %}echo yes{% endif %}",
     ],
-    ids=["metacharacters", "simple"],
+    ids=[
+        "unquoted",
+        "double-quoted",
+        "single-quoted",
+        "concatenated",
+        "heredoc",
+        "filter",
+        "quote-removing-filter",
+        "substring",
+        "alias",
+        "macro",
+        "conditional",
+    ],
 )
-def test_render_command_quotes_task_args(template, task_args, expected):
-    result = render_command(template, task_args=task_args)
-    assert result == expected
+@pytest.mark.parametrize(
+    "value", ["ordinary value", "$(printf injected)"], ids=["ordinary", "substitution"]
+)
+def test_render_command_rejects_named_argument_references(command, value):
+    with pytest.raises(CondaWorkspacesError, match="array of strings"):
+        render_command(command, task_args={"value": value})
 
 
 @pytest.mark.parametrize(
-    "value",
-    [
-        "tests/unit; echo ARG_PWN",
-        '100%^"done',
-    ],
-    ids=["posix-metacharacters", "windows-sensitive"],
+    "name", ["range", "dict", "cycler", "joiner", "namespace", "lipsum"]
 )
-def test_render_command_delegates_task_arg_quoting_to_conda(monkeypatch, value):
-    calls: list[tuple[str, ...]] = []
-
-    def fake_quote_for_shell(*arguments):
-        calls.append(arguments)
-        return f"quoted:{arguments[0]}"
-
-    monkeypatch.setattr(template_mod, "quote_for_shell", fake_quote_for_shell)
-
-    assert (
-        template_mod.render_command(
-            "echo {{ value }}",
-            task_args={"value": value},
+def test_render_command_rejects_arguments_shadowing_jinja_globals(name):
+    with pytest.raises(CondaWorkspacesError, match="array of strings"):
+        render_command(
+            "echo {{ " + name + " }}", task_args={name: "$(printf injected)"}
         )
-        == f"echo quoted:{value}"
-    )
-    assert calls == [(value,)]
 
 
-def test_render_command_quotes_multiple_task_args():
-    result = render_command(
-        "cp {{ source }} {{ destination }}",
-        task_args={"source": "dist/app.whl", "destination": "tmp/out; echo ARG_PWN"},
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("echo hello", "echo hello"),
+        ("echo {{ conda.platform }}", f"echo {context.subdir}"),
+        ("echo {{ pixi.platform }}", f"echo {context.subdir}"),
+        (
+            "{% if conda.is_unix %}unix{% else %}win{% endif %}",
+            "win" if on_win else "unix",
+        ),
+    ],
+    ids=["static", "conda-context", "pixi-context", "platform-conditional"],
+)
+def test_render_command_allows_args_used_outside_shell_source(command, expected):
+    assert (
+        render_command(
+            command,
+            task_args={
+                "value": "$(printf injected)",
+                "conda": "ignored",
+                "pixi": "ignored",
+            },
+        )
+        == expected
     )
-    assert result == (
-        f"cp {quote_for_shell('dist/app.whl')} "
-        f"{quote_for_shell('tmp/out; echo ARG_PWN')}"
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("{% set value = 'fixed' %}echo {{ value }}", "echo fixed"),
+        ("{% for value in ['fixed'] %}echo {{ value }}{% endfor %}", "echo fixed"),
+        (
+            "{% macro show(value) %}echo {{ value }}{% endmacro %}{{ show('fixed') }}",
+            "echo fixed",
+        ),
+    ],
+    ids=["assignment", "loop", "macro"],
+)
+def test_render_command_preserves_template_local_names(command, expected):
+    assert (
+        render_command(command, task_args={"value": "$(printf injected)"}) == expected
     )
 
 
@@ -117,9 +149,14 @@ def test_render_extra_context():
             {"name": "main"},
             ["src/main.py", "tests/"],
         ),
+        (
+            ["{{ value | upper }}", "{% if value == 'hello' %}yes{% endif %}"],
+            {"value": "hello"},
+            ["HELLO", "yes"],
+        ),
         ([], {}, []),
     ],
-    ids=["with-vars", "empty"],
+    ids=["with-vars", "filters-and-conditionals", "empty"],
 )
 def test_render_list(items, task_args, expected):
     assert render_list(items, task_args=task_args) == expected

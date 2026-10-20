@@ -50,13 +50,12 @@ import tempfile
 from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from urllib.parse import unquote, urlsplit
 
 from conda.common.io import dashlist
-from conda.common.serialize import yaml
 from conda.core.prefix_data import delete_prefix_from_linked_data
 from conda.models.dist import Dist
 from conda.plugins.types import EnvironmentSpecBase
@@ -82,7 +81,12 @@ from .models import (
     redact_url,
 )
 from .parsing import (
+    BoundedYamlLoader,
+    DocumentExpansionBudget,
+    DocumentStringBudget,
     decode_limited_text,
+    document_values_equal,
+    plain_document,
     read_limited_text,
     validate_document_limits,
 )
@@ -91,6 +95,7 @@ from .paths import (
     atomic_write_text,
     canonicalize_system_path_alias,
     output_paths_collide,
+    parse_relative_posix_path,
     read_regular_file_bytes,
     regular_file_generation,
     validate_directory_output,
@@ -99,7 +104,7 @@ from .paths import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Sequence
-    from typing import Any, ClassVar, Final
+    from typing import Any, ClassVar, Final, Literal, TypeAlias
 
     from conda.common.path import PathType
     from conda.core.link import PrefixSetup
@@ -117,6 +122,11 @@ if TYPE_CHECKING:
 #: schema version so that tools can tell a conda-workspaces-owned lock
 #: from a pixi-owned one at a glance.
 LOCKFILE_VERSION: Final = 1
+
+UrlOrigin: TypeAlias = tuple[str, str, int | None, str | None, str | None]
+UrlLocation: TypeAlias = tuple[UrlOrigin, tuple[str, ...]]
+ChannelPathTree: TypeAlias = dict[str, "ChannelPathTree"]
+ChannelLocations: TypeAlias = dict[UrlOrigin, ChannelPathTree]
 
 #: The canonical lockfile filename.
 LOCKFILE_NAME: Final = "conda.lock"
@@ -137,6 +147,12 @@ MAX_LOCKFILE_BYTES: Final = 128 * 1024**2
 MAX_LOCKFILE_DEPTH: Final = 128
 MAX_LOCKFILE_COLLECTION_ITEMS: Final = 100_000
 MAX_LOCKFILE_ITEMS: Final = 1_000_000
+MAX_LOCKFILE_MATCH_ATTEMPTS: Final = 100_000
+MAX_LOCKFILE_BATCH_MATCH_ATTEMPTS: Final = MAX_LOCKFILE_ITEMS
+MAX_LOCKFILE_BATCH_TARGETS: Final = 10_000
+MAX_LOCKFILE_BATCH_PACKAGE_REFS: Final = MAX_LOCKFILE_COLLECTION_ITEMS
+MAX_LOCKFILE_BATCH_EXPANDED_ITEMS: Final = MAX_LOCKFILE_ITEMS
+MAX_LOCKFILE_DECLARATION_ITEMS: Final = MAX_LOCKFILE_COLLECTION_ITEMS
 _CURRENT_LOCKFILE_OUTPUT_GENERATION = object()
 
 
@@ -152,26 +168,26 @@ class _SolvedEnvironment:
     external_packages: dict[str, list[str]] = field(default_factory=dict)
 
 
-def load_lockfile_data(content: str | bytes) -> dict[str, Any]:
+def load_lockfile_data(
+    content: str | bytes,
+    *,
+    string_budget: DocumentStringBudget | None = None,
+) -> dict[str, Any]:
     """Parse in-memory lockfile YAML with the same safe loader as disk reads."""
     text = decode_limited_text(
         content,
         maximum_bytes=MAX_LOCKFILE_BYTES,
         label="Lockfile YAML",
     )
-    try:
-        data = yaml.load(io.StringIO(text))
-    except Exception as exc:
-        raise ValueError("Invalid lockfile YAML") from exc
-    if not isinstance(data, Mapping):
-        raise ValueError("Lockfile YAML must contain a mapping")
-    validate_document_limits(
-        data,
+    data = BoundedYamlLoader(
         label="Lockfile YAML",
+        maximum_bytes=MAX_LOCKFILE_BYTES,
         maximum_depth=MAX_LOCKFILE_DEPTH,
         maximum_collection_items=MAX_LOCKFILE_COLLECTION_ITEMS,
         maximum_items=MAX_LOCKFILE_ITEMS,
-    )
+    ).load(text, string_budget=string_budget)
+    if not isinstance(data, Mapping):
+        raise ValueError("Lockfile YAML must contain a mapping")
     return dict(data)
 
 
@@ -235,10 +251,17 @@ def lockfile_status(
 
 def check_lockfile_satisfiability(
     config: WorkspaceConfig,
-    lockfile_data: dict[str, Any],
+    lockfile_data: dict[str, Any] | CondaLockLoader,
     current_platform: str,
     *,
     environment: str | None = None,
+    _validated_envs: Mapping[str, ResolvedEnvironment] | None = None,
+    _match_budget: list[int] | None = None,
+    _total_match_budget: list[int] | None = None,
+    _batch_expansion_budget: DocumentExpansionBudget | None = None,
+    _channel_locations_cache: dict[tuple[int, str], ChannelLocations] | None = None,
+    _resolution_budget: list[int] | None = None,
+    _exact_target: bool = False,
 ) -> LockfileStatus:
     """Check whether *lockfile_data* satisfies the manifest's requirements.
 
@@ -249,100 +272,90 @@ def check_lockfile_satisfiability(
 
     Set *environment* to check package requirements only for that environment
     on *current_platform*. Environment names, channels and declared platforms
-    are still checked across the complete workspace.
+    are still checked across the complete workspace. Use
+    :meth:`CondaLockLoader.check_targets` to check several exact targets after
+    validating those declarations once.
     """
+    from .resolver import MAX_RESOLUTION_WORK_ITEMS
+
     _stale = LockfileStatus.OUT_OF_DATE
+    resolution_budget = (
+        _resolution_budget
+        if _resolution_budget is not None
+        else [MAX_RESOLUTION_WORK_ITEMS]
+    )
+    match_budget = (
+        _match_budget if _match_budget is not None else [MAX_LOCKFILE_MATCH_ATTEMPTS]
+    )
+    standalone = _validated_envs is None
+    package_refs = 0
+    batch_expansion_budget = (
+        _batch_expansion_budget
+        if _batch_expansion_budget is not None
+        else DocumentExpansionBudget(
+            items=MAX_LOCKFILE_BATCH_EXPANDED_ITEMS,
+            strings=MAX_LOCKFILE_BYTES,
+        )
+    )
+    channel_locations_cache = (
+        _channel_locations_cache if _channel_locations_cache is not None else {}
+    )
     if environment is not None:
         config.get_environment(environment)
 
     try:
-        lockfile_data = CondaLockLoader.redact_data_urls(lockfile_data)
+        if isinstance(lockfile_data, CondaLockLoader):
+            loader = lockfile_data
+            lockfile_data = loader._data
+        else:
+            loader = CondaLockLoader(LOCKFILE_NAME, data=lockfile_data)
+            lockfile_data = loader._data
     except ValueError as exc:
         return LockfileStatus(status=_stale, reason=str(exc))
 
-    if lockfile_data.get("version") != LOCKFILE_VERSION:
-        return LockfileStatus(
-            status=_stale,
-            reason=(
-                f"Lockfile version {lockfile_data.get('version')!r} "
-                f"does not match expected version {LOCKFILE_VERSION}"
-            ),
+    if _validated_envs is None:
+        declaration_status, validated_envs = loader._validate_manifest(
+            config, resolution_budget
         )
+        if declaration_status is not None:
+            return declaration_status
+    else:
+        validated_envs = _validated_envs
 
-    from .resolver import resolve_environment
-
-    lock_envs = lockfile_data.get("environments", {})
-    extra_envs = sorted(set(lock_envs) - set(config.environments))
-    if extra_envs:
-        names = ", ".join(f"'{name}'" for name in extra_envs)
-        return LockfileStatus(
-            status=_stale,
-            reason=(
-                f"Environment{'' if len(extra_envs) == 1 else 's'} {names} "
-                f"{'is' if len(extra_envs) == 1 else 'are'} present in the "
-                "lockfile but not declared in the manifest"
-            ),
-        )
-    for env_name, env_obj in config.environments.items():
-        if env_name not in lock_envs:
-            return LockfileStatus(
-                status=_stale,
-                reason=(
-                    f"Environment '{env_name}' is declared in the manifest "
-                    f"but missing from the lockfile"
-                ),
-            )
-
+    lock_envs = lockfile_data["environments"]
+    records_by_url: dict[str, dict[str, Any]] | None = None
+    env_names = (environment,) if environment is not None else config.environments
+    for env_name in env_names:
         lock_env = lock_envs[env_name]
-
-        manifest_channels = _manifest_channel_entries(config, env_obj)
-        manifest_urls = _normalize_channel_urls(
-            entry["url"] for entry in manifest_channels
-        )
-        lock_channel_entries = lock_env.get("channels", [])
-        lock_urls = _normalize_channel_urls(
-            entry.get("url", "") for entry in lock_channel_entries
-        )
-        if manifest_urls != lock_urls:
-            return LockfileStatus(
-                status=_stale,
-                reason=(
-                    f"Channel mismatch for environment '{env_name}': "
-                    "manifest declares "
-                    f"{[redact_channel_name(url) for url in manifest_urls]} "
-                    "but lockfile has "
-                    f"{[redact_channel_name(url) for url in lock_urls]}"
-                ),
-            )
-
-        lock_platforms = set(lock_env.get("packages", {}))
-        resolved_platforms = resolve_environment(config, env_name).platforms
-        manifest_platforms = resolved_platforms or config.platforms
-        for platform in manifest_platforms:
-            if platform not in lock_platforms:
-                return LockfileStatus(
-                    status=_stale,
-                    reason=(
-                        f"Platform '{platform}' is declared in the "
-                        f"manifest but missing from environment "
-                        f"'{env_name}' in the lockfile"
-                    ),
-                )
-
-        if environment is not None and env_name != environment:
-            continue
+        base_resolved = validated_envs[env_name]
+        manifest_platforms = base_resolved.platforms or config.platforms
 
         lock_packages = lock_env.get("packages", {})
-        try:
-            current_lock_platform = config.resolve_platform_name(
-                current_platform,
-                manifest_platforms,
-            )
-        except PlatformError:
+        if _exact_target:
             current_lock_platform = current_platform
+        else:
+            try:
+                current_lock_platform = config.resolve_platform_name(
+                    current_platform,
+                    manifest_platforms,
+                )
+            except PlatformError:
+                current_lock_platform = current_platform
         platform_refs = lock_packages.get(current_lock_platform)
         if platform_refs is None:
             continue
+        if standalone:
+            if not isinstance(platform_refs, list):
+                return LockfileStatus(
+                    status=_stale,
+                    reason="Lockfile package references must be a list",
+                )
+            package_refs += len(platform_refs)
+            if package_refs > MAX_LOCKFILE_BATCH_PACKAGE_REFS:
+                return LockfileStatus(
+                    status=_stale,
+                    reason="Lockfile package references exceed the allowed limit",
+                )
         for ref in platform_refs:
             if not isinstance(ref, dict) or set(ref) != {"conda"}:
                 return LockfileStatus(
@@ -355,15 +368,28 @@ def check_lockfile_satisfiability(
         package_platform = config.platform_subdir(current_lock_platform)
 
         try:
-            channel_urls = CondaLockLoader.channel_urls_for_env_data(
+            channel_key = (id(lock_env), package_platform)
+            channel_locations = channel_locations_cache.get(channel_key)
+            if channel_locations is None:
+                channel_urls = CondaLockLoader.channel_urls_for_env_data(
+                    lock_env,
+                    package_platform,
+                )
+                channel_locations = CondaLockLoader._channel_locations(channel_urls)
+                channel_locations_cache[channel_key] = channel_locations
+            if records_by_url is None:
+                records_by_url = loader._records_index()
+            remaining_items, remaining_strings = loader._environment_budget(lock_env)
+            records = CondaLockLoader._package_records_from_refs(
                 lock_env,
-                package_platform,
-            )
-            records = CondaLockLoader.package_records_for_env_data(
-                lockfile_data,
+                platform_refs,
                 env_name,
                 current_lock_platform,
+                records_by_url,
                 package_platform=package_platform,
+                remaining_items=remaining_items,
+                remaining_strings=remaining_strings,
+                batch_expansion_budget=batch_expansion_budget,
             )
         except ValueError as exc:
             return LockfileStatus(status=_stale, reason=str(exc))
@@ -379,7 +405,7 @@ def check_lockfile_satisfiability(
                         f"package ref on '{current_lock_platform}'"
                     ),
                 )
-            if not CondaLockLoader.url_matches_channel(url, channel_urls):
+            if not CondaLockLoader._url_matches_locations(url, channel_locations):
                 return LockfileStatus(
                     status=_stale,
                     reason=(
@@ -404,11 +430,38 @@ def check_lockfile_satisfiability(
 
         from .envs import _build_pypi_specs
 
-        target_resolved = resolve_environment(
-            config,
-            env_name,
-            current_lock_platform,
+        env_obj = config.get_environment(env_name)
+        resolution_budget[0] -= config.resolution_work_items(
+            env_obj, current_lock_platform
         )
+        if resolution_budget[0] < 0:
+            return LockfileStatus(
+                status=_stale,
+                reason=(
+                    "Workspace environment resolution work exceeds the allowed limit"
+                ),
+            )
+        if _exact_target:
+            target_resolved = replace(
+                base_resolved,
+                conda_dependencies=config.merged_conda_dependencies(
+                    env_obj, current_lock_platform
+                ),
+                pypi_dependencies=config.merged_pypi_dependencies(
+                    env_obj, current_lock_platform
+                ),
+                system_requirements=config.merged_system_requirements(
+                    env_obj, current_lock_platform
+                ),
+            )
+        else:
+            from .resolver import resolve_environment
+
+            target_resolved = resolve_environment(
+                config,
+                env_name,
+                current_lock_platform,
+            )
         requested_specs = [
             *target_resolved.conda_dependencies.values(),
             *_build_pypi_specs(target_resolved),
@@ -474,7 +527,28 @@ def check_lockfile_satisfiability(
         for record, spec in dependencies:
             dep_name = spec.get_exact_value("name")
             if dep_name is None:
-                satisfied = any(spec.match(candidate) for candidate in candidates)
+                satisfied = False
+                for candidate in candidates:
+                    if match_budget[0] == 0:
+                        return LockfileStatus(
+                            status=_stale,
+                            reason=(
+                                "Lockfile dependency matching exceeds the allowed limit"
+                            ),
+                        )
+                    if _total_match_budget is not None and _total_match_budget[0] == 0:
+                        return LockfileStatus(
+                            status=_stale,
+                            reason=(
+                                "Lockfile dependency matching exceeds the batch limit"
+                            ),
+                        )
+                    match_budget[0] -= 1
+                    if _total_match_budget is not None:
+                        _total_match_budget[0] -= 1
+                    if spec.match(candidate):
+                        satisfied = True
+                        break
             else:
                 candidate = candidates_by_name.get(dep_name)
                 satisfied = candidate is not None and spec.match(candidate)
@@ -523,6 +597,9 @@ class CondaLockLoader(EnvironmentSpecBase):
     def __init__(self, path: PathType, *, data: dict[str, Any] | None = None) -> None:
         self.path = Path(path).resolve()
         self._data_cache = self.redact_data_urls(data) if data is not None else None
+        self._environment_names_cache: tuple[str, ...] | None = None
+        self._records_by_url_cache: dict[str, dict[str, Any]] | None = None
+        self._environment_budgets: dict[int, tuple[int, int]] = {}
 
     def can_handle(self) -> bool:
         if self.path.name not in DEFAULT_FILENAMES:
@@ -530,7 +607,8 @@ class CondaLockLoader(EnvironmentSpecBase):
         if not self.path.exists():
             return False
         try:
-            return self._data.get("version") == LOCKFILE_VERSION
+            version = self._data.get("version")
+            return type(version) is int and version == LOCKFILE_VERSION
         except Exception:
             return False
 
@@ -540,6 +618,288 @@ class CondaLockLoader(EnvironmentSpecBase):
             self._data_cache = self.redact_data_urls(load_lockfile_path(self.path))
         return self._data_cache
 
+    def _validate_manifest(
+        self, config: WorkspaceConfig, resolution_budget: list[int]
+    ) -> tuple[LockfileStatus | None, dict[str, ResolvedEnvironment]]:
+        """Check lock metadata once and retain each environment's platform list."""
+        stale = LockfileStatus.OUT_OF_DATE
+        data = self._data
+        version = data.get("version")
+        if type(version) is not int:
+            return (
+                LockfileStatus(
+                    status=stale, reason="Lockfile version must be an integer"
+                ),
+                {},
+            )
+        if version != LOCKFILE_VERSION:
+            return (
+                LockfileStatus(
+                    status=stale,
+                    reason=(
+                        f"Lockfile version {version!r} "
+                        f"does not match expected version {LOCKFILE_VERSION}"
+                    ),
+                ),
+                {},
+            )
+
+        from .resolver import resolve_environment
+
+        lock_envs = data.get("environments", {})
+        extra_envs = sorted(set(lock_envs) - set(config.environments))
+        if extra_envs:
+            names = ", ".join(f"'{name}'" for name in extra_envs)
+            return (
+                LockfileStatus(
+                    status=stale,
+                    reason=(
+                        f"Environment{'' if len(extra_envs) == 1 else 's'} {names} "
+                        f"{'is' if len(extra_envs) == 1 else 'are'} present in the "
+                        "lockfile but not declared in the manifest"
+                    ),
+                ),
+                {},
+            )
+
+        resolved_envs: dict[str, ResolvedEnvironment] = {}
+        platform_sets: dict[int, set[str]] = {}
+        declaration_items = 0
+        target_count = 0
+        for env_name, env_obj in config.environments.items():
+            if env_name not in lock_envs:
+                return (
+                    LockfileStatus(
+                        status=stale,
+                        reason=(
+                            f"Environment '{env_name}' is declared in the manifest "
+                            "but missing from the lockfile"
+                        ),
+                    ),
+                    {},
+                )
+
+            resolution_budget[0] -= config.resolution_work_items(env_obj)
+            if resolution_budget[0] < 0:
+                return (
+                    LockfileStatus(
+                        status=stale,
+                        reason=(
+                            "Workspace environment resolution work "
+                            "exceeds the allowed limit"
+                        ),
+                    ),
+                    {},
+                )
+
+            lock_env = lock_envs[env_name]
+            manifest_channels = _manifest_channel_entries(config, env_obj)
+            manifest_urls = _normalize_channel_urls(
+                entry["url"] for entry in manifest_channels
+            )
+            lock_channel_entries = lock_env.get("channels", [])
+            declaration_items += len(manifest_channels) + len(lock_channel_entries)
+            if declaration_items > MAX_LOCKFILE_DECLARATION_ITEMS:
+                return (
+                    LockfileStatus(
+                        status=stale,
+                        reason="Lockfile declaration work exceeds the allowed limit",
+                    ),
+                    {},
+                )
+            lock_urls = _normalize_channel_urls(
+                entry.get("url", "") for entry in lock_channel_entries
+            )
+            if manifest_urls != lock_urls:
+                return (
+                    LockfileStatus(
+                        status=stale,
+                        reason=(
+                            f"Channel mismatch for environment '{env_name}': "
+                            "manifest declares "
+                            f"{[redact_channel_name(url) for url in manifest_urls]} "
+                            "but lockfile has "
+                            f"{[redact_channel_name(url) for url in lock_urls]}"
+                        ),
+                    ),
+                    {},
+                )
+
+            resolved = resolve_environment(config, env_name)
+            declaration_items += (
+                len(resolved.conda_dependencies)
+                + len(resolved.pypi_dependencies)
+                + len(resolved.system_requirements)
+                + len(resolved.channels)
+                + len(resolved.platform_subdirs)
+                + len(resolved.activation_scripts)
+                + len(resolved.activation_env)
+            )
+            if declaration_items > MAX_LOCKFILE_DECLARATION_ITEMS:
+                return (
+                    LockfileStatus(
+                        status=stale,
+                        reason="Lockfile declaration work exceeds the allowed limit",
+                    ),
+                    {},
+                )
+            manifest_platforms = resolved.platforms or config.platforms
+            target_count += len(manifest_platforms) or 1
+            declaration_items += len(manifest_platforms)
+            if target_count > MAX_LOCKFILE_BATCH_TARGETS:
+                return (
+                    LockfileStatus(
+                        status=stale,
+                        reason="Lockfile status target count exceeds the allowed limit",
+                    ),
+                    {},
+                )
+            if declaration_items > MAX_LOCKFILE_DECLARATION_ITEMS:
+                return (
+                    LockfileStatus(
+                        status=stale,
+                        reason="Lockfile declaration work exceeds the allowed limit",
+                    ),
+                    {},
+                )
+            lock_packages = lock_env.get("packages", {})
+            lock_platforms = platform_sets.get(id(lock_packages))
+            if lock_platforms is None:
+                declaration_items += len(lock_packages)
+                if declaration_items > MAX_LOCKFILE_DECLARATION_ITEMS:
+                    return (
+                        LockfileStatus(
+                            status=stale,
+                            reason=(
+                                "Lockfile declaration work exceeds the allowed limit"
+                            ),
+                        ),
+                        {},
+                    )
+                lock_platforms = set(lock_packages)
+                platform_sets[id(lock_packages)] = lock_platforms
+            for platform in manifest_platforms:
+                if platform not in lock_platforms:
+                    return (
+                        LockfileStatus(
+                            status=stale,
+                            reason=(
+                                f"Platform '{platform}' is declared in the "
+                                f"manifest but missing from environment "
+                                f"'{env_name}' in the lockfile"
+                            ),
+                        ),
+                        {},
+                    )
+            resolved_envs[env_name] = resolved
+
+        return None, resolved_envs
+
+    def check_targets(
+        self,
+        config: WorkspaceConfig,
+        targets: Iterable[tuple[str, str]] | None = None,
+        *,
+        match_budget_scope: Literal["target", "platform"],
+        default_platform: str | None = None,
+    ) -> LockfileStatus:
+        """Check exact environment/platform targets after one manifest validation.
+
+        Platform management retains its prior per-target wildcard budget.
+        Lockfile rendering retains a shared budget for each platform. Both
+        modes also enforce one operation-wide wildcard comparison limit.
+        Omit *targets* to check every declared target, using *default_platform*
+        (or conda's current subdir) for environments without platform lists.
+        """
+        from conda.base.context import context as conda_context
+
+        from .resolver import MAX_RESOLUTION_WORK_ITEMS
+
+        if match_budget_scope not in ("target", "platform"):
+            raise ValueError("Invalid lockfile match budget scope")
+        resolution_budget = [MAX_RESOLUTION_WORK_ITEMS]
+        declaration_status, resolved_envs = self._validate_manifest(
+            config, resolution_budget
+        )
+        if declaration_status is not None:
+            return declaration_status
+        if targets is None:
+            targets = (
+                (name, platform)
+                for name, resolved in resolved_envs.items()
+                for platform in (
+                    resolved.platforms or [default_platform or conda_context.subdir]
+                )
+            )
+
+        declared = {
+            name: set(resolved.platforms or config.platforms)
+            for name, resolved in resolved_envs.items()
+        }
+        platform_budgets: dict[str, list[int]] = {}
+        total_budget = [MAX_LOCKFILE_BATCH_MATCH_ATTEMPTS]
+        expansion_budget = DocumentExpansionBudget(
+            items=MAX_LOCKFILE_BATCH_EXPANDED_ITEMS,
+            strings=MAX_LOCKFILE_BYTES,
+        )
+        channel_locations_cache: dict[tuple[int, str], ChannelLocations] = {}
+        seen: set[tuple[str, str]] = set()
+        package_refs = 0
+        for inspected, (name, platform) in enumerate(targets, 1):
+            if inspected > MAX_LOCKFILE_BATCH_TARGETS:
+                return LockfileStatus(
+                    status=LockfileStatus.OUT_OF_DATE,
+                    reason="Lockfile status target count exceeds the allowed limit",
+                )
+            if (name, platform) in seen:
+                continue
+            seen.add((name, platform))
+            config.get_environment(name)
+            if declared[name] and platform not in declared[name]:
+                return LockfileStatus(
+                    status=LockfileStatus.OUT_OF_DATE,
+                    reason=(
+                        f"Platform '{platform}' is not declared for "
+                        f"environment '{name}'"
+                    ),
+                )
+            refs = self._data["environments"][name].get("packages", {}).get(platform)
+            if refs is not None:
+                if not isinstance(refs, list):
+                    return LockfileStatus(
+                        status=LockfileStatus.OUT_OF_DATE,
+                        reason="Lockfile package references must be a list",
+                    )
+                package_refs += len(refs)
+                if package_refs > MAX_LOCKFILE_BATCH_PACKAGE_REFS:
+                    return LockfileStatus(
+                        status=LockfileStatus.OUT_OF_DATE,
+                        reason="Lockfile package references exceed the allowed limit",
+                    )
+            match_budget = (
+                [MAX_LOCKFILE_MATCH_ATTEMPTS]
+                if match_budget_scope == "target"
+                else platform_budgets.setdefault(
+                    platform, [MAX_LOCKFILE_MATCH_ATTEMPTS]
+                )
+            )
+            status = check_lockfile_satisfiability(
+                config,
+                self,
+                platform,
+                environment=name,
+                _validated_envs=resolved_envs,
+                _match_budget=match_budget,
+                _total_match_budget=total_budget,
+                _batch_expansion_budget=expansion_budget,
+                _channel_locations_cache=channel_locations_cache,
+                _resolution_budget=resolution_budget,
+                _exact_target=True,
+            )
+            if status.status != LockfileStatus.UP_TO_DATE:
+                return status
+        return LockfileStatus(status=LockfileStatus.UP_TO_DATE)
+
     @property
     def available_platforms(self) -> tuple[str, ...]:
         """Platforms declared in this lockfile's default environment."""
@@ -548,10 +908,15 @@ class CondaLockLoader(EnvironmentSpecBase):
     @property
     def available_environments(self) -> tuple[str, ...]:
         """Return the environment names declared in this lockfile."""
+        if self._environment_names_cache is not None:
+            return self._environment_names_cache
         data = self._data
-        if data.get("version") != LOCKFILE_VERSION:
+        version = data.get("version")
+        if type(version) is not int:
+            raise ValueError("Lockfile version must be an integer")
+        if version != LOCKFILE_VERSION:
             raise ValueError(
-                f"Unsupported {LOCKFILE_NAME} version: {data.get('version')!r} "
+                f"Unsupported {LOCKFILE_NAME} version: {version!r} "
                 f"(expected {LOCKFILE_VERSION})"
             )
         environments = data.get("environments")
@@ -559,7 +924,8 @@ class CondaLockLoader(EnvironmentSpecBase):
             isinstance(name, str) and name for name in environments
         ):
             raise ValueError("Lockfile environments must be a mapping of names")
-        return tuple(sorted(environments))
+        self._environment_names_cache = tuple(sorted(environments))
+        return self._environment_names_cache
 
     def platforms_for(self, name: str = "default") -> tuple[str, ...]:
         """Return the platforms declared for lockfile environment *name*."""
@@ -659,74 +1025,130 @@ class CondaLockLoader(EnvironmentSpecBase):
         *metadata_only* reconstructs exact records from the lockfile without
         accessing the package cache.
         """
+        return self.envs_for(
+            {platform: package_platform},
+            name,
+            metadata_only=metadata_only,
+        )[0]
+
+    def envs_for(
+        self,
+        platforms: Mapping[str, str | None],
+        name: str = "default",
+        *,
+        metadata_only: bool = False,
+    ) -> list[Environment]:
+        """Convert selected targets after copying and indexing the lockfile once."""
         self._env_data(name)
         payload = self.redact_data_urls(self._data)
         env_data = payload["environments"][name]
-        platforms = tuple(sorted(env_data.get("packages", {})))
-        if platform not in platforms:
-            from conda.exceptions import PlatformMismatchError
+        available = tuple(sorted(env_data["packages"]))
+        for platform in platforms:
+            if platform not in env_data["packages"]:
+                from conda.exceptions import PlatformMismatchError
 
-            raise PlatformMismatchError(
-                incompatible=[(str(self.path), platforms)],
-                subdir=platform,
+                raise PlatformMismatchError(
+                    incompatible=[(str(self.path), available)],
+                    subdir=platform,
+                )
+        if not metadata_only:
+            DocumentExpansionBudget(
+                items=MAX_LOCKFILE_ITEMS,
+                strings=MAX_LOCKFILE_BYTES,
+            ).consume(payload, label="Lockfile")
+        try:
+            records_by_url = self.package_records_by_url_from_data(payload)
+        except ValueError as exc:
+            raise LockfileIntegrityError(self.path, str(exc)) from exc
+
+        envs: list[Environment] = []
+        for platform, package_platform in platforms.items():
+            conversion_platform = package_platform or platform
+            refs = env_data["packages"][platform]
+            selected_urls = dict.fromkeys(
+                ref["conda"]
+                for ref in refs
+                if isinstance(ref, dict) and isinstance(ref.get("conda"), str)
             )
-
-        self.validate_env_for_conversion(
-            payload,
-            name,
-            platform,
-            package_platform=package_platform,
-        )
-
-        conversion_platform = package_platform or platform
-        records = None
-        if metadata_only:
-            records = self.package_records_for_env_data(
-                payload,
+            selected_records = [
+                records_by_url[url] for url in selected_urls if url in records_by_url
+            ]
+            selected_env_data = {
+                "channels": env_data["channels"],
+                "packages": {platform: refs},
+            }
+            selected_payload = {
+                "version": LOCKFILE_VERSION,
+                "environments": {name: selected_env_data},
+                "packages": selected_records,
+            }
+            self.validate_env_for_conversion(
+                selected_payload,
                 name,
                 platform,
                 package_platform=conversion_platform,
-            )
-        if conversion_platform != platform:
-            packages = payload["environments"][name]["packages"]
-            packages[conversion_platform] = packages[platform]
-        if records is None:
-            from conda_lockfiles.rattler_lock.v6 import (
-                rattler_lock_v6_to_conda_env,
+                records_by_url=records_by_url,
             )
 
-            from ._lockfile_compat import WorkspaceLock
+            if metadata_only:
+                from conda.models.channel import Channel
+                from conda.models.environment import Environment, EnvironmentConfig
+                from conda_lockfiles.rattler_lock.v6 import RattlerLockV6Environment
 
-            # The shared rattler model requires a default environment, while
-            # conda.lock may contain only a named environment. Adapt the copy.
-            payload.update(version=6, environments={"default": env_data})
-            lockfile_model = WorkspaceLock.model_validate(payload)
-            env = rattler_lock_v6_to_conda_env(
-                lockfile_model,
-                name="default",
-                platform=conversion_platform,
-            )
-        else:
-            from conda.models.channel import Channel
-            from conda.models.environment import Environment, EnvironmentConfig
-            from conda_lockfiles.rattler_lock.v6 import RattlerLockV6Environment
+                records = self.package_records_for_env_data(
+                    selected_payload,
+                    name,
+                    platform,
+                    package_platform=conversion_platform,
+                )
+                lock_environment = RattlerLockV6Environment.model_validate(
+                    selected_env_data
+                )
+                env = Environment(
+                    name=name,
+                    platform=conversion_platform,
+                    config=EnvironmentConfig(
+                        channels=tuple(
+                            Channel(channel.url).canonical_name
+                            for channel in lock_environment.channels
+                        )
+                    ),
+                    explicit_packages=records,
+                )
+            else:
+                from conda_lockfiles.rattler_lock.v6 import (
+                    rattler_lock_v6_to_conda_env,
+                )
 
-            lock_environment = RattlerLockV6Environment.model_validate(env_data)
-            env = Environment(
-                name=name,
-                platform=conversion_platform,
-                config=EnvironmentConfig(
-                    channels=tuple(
-                        Channel(channel.url).canonical_name
-                        for channel in lock_environment.channels
-                    )
-                ),
-                explicit_packages=records,
-            )
-        env.name = name
-        if conversion_platform != platform:
-            setattr(env, "lock_platform", platform)
-        return env
+                from ._lockfile_compat import WorkspaceLock
+
+                # The shared rattler model requires a default environment,
+                # while conda.lock may contain only a named environment.
+                conversion_payload = {
+                    "version": 6,
+                    "environments": {
+                        "default": {
+                            "channels": selected_env_data["channels"],
+                            "packages": {conversion_platform: refs},
+                        }
+                    },
+                    "packages": selected_records,
+                }
+                DocumentExpansionBudget(
+                    items=MAX_LOCKFILE_ITEMS,
+                    strings=MAX_LOCKFILE_BYTES,
+                ).consume(conversion_payload, label="Lockfile")
+                lockfile_model = WorkspaceLock.model_validate(conversion_payload)
+                env = rattler_lock_v6_to_conda_env(
+                    lockfile_model,
+                    name="default",
+                    platform=conversion_platform,
+                )
+            env.name = name
+            if conversion_platform != platform:
+                setattr(env, "lock_platform", platform)
+            envs.append(env)
+        return envs
 
     def validate_env_for_conversion(
         self,
@@ -735,8 +1157,9 @@ class CondaLockLoader(EnvironmentSpecBase):
         platform: str,
         *,
         package_platform: str | None = None,
+        records_by_url: Mapping[str, dict[str, Any]] | None = None,
     ) -> None:
-        """Validate one redacted slice before generic rattler conversion."""
+        """Validate one environment target before rattler conversion."""
         env_data = data["environments"][name]
         refs = env_data.get("packages", {}).get(platform, ())
         channel_urls = self.channel_urls_for_env_data(
@@ -744,10 +1167,12 @@ class CondaLockLoader(EnvironmentSpecBase):
             package_platform or platform,
             path=self.path,
         )
-        try:
-            records_by_url = self.package_records_by_url_from_data(data)
-        except ValueError as exc:
-            raise LockfileIntegrityError(self.path, str(exc)) from exc
+        channel_locations = self._channel_locations(channel_urls)
+        if records_by_url is None:
+            try:
+                records_by_url = self.package_records_by_url_from_data(data)
+            except ValueError as exc:
+                raise LockfileIntegrityError(self.path, str(exc)) from exc
 
         for ref in refs:
             if not isinstance(ref, dict):
@@ -773,7 +1198,7 @@ class CondaLockLoader(EnvironmentSpecBase):
                     self.path,
                     f"environment {name!r} has an invalid conda package ref",
                 )
-            if not self.url_matches_channel(url, channel_urls):
+            if not self._url_matches_locations(url, channel_locations):
                 raise LockfileIntegrityError(
                     self.path,
                     f"package URL {redact_url(url)!r} is not under any channel "
@@ -841,11 +1266,12 @@ class CondaLockLoader(EnvironmentSpecBase):
                 f"Environment {name!r} does not include packages for {platform!r}"
             )
 
-        records_by_url = self.package_records_by_url()
+        records_by_url = self._records_index()
         channel_urls = self.channel_urls_for(
             env_data,
             package_platform or platform,
         )
+        channel_locations = self._channel_locations(channel_urls)
         explicit_specs: list[str] = []
         for ref in platform_refs:
             if not isinstance(ref, dict):
@@ -871,7 +1297,7 @@ class CondaLockLoader(EnvironmentSpecBase):
                     self.path,
                     f"environment {name!r} has an invalid conda package ref",
                 )
-            if not self.url_matches_channel(url, channel_urls):
+            if not self._url_matches_locations(url, channel_locations):
                 raise LockfileIntegrityError(
                     self.path,
                     f"package URL {redact_url(url)!r} is not under any channel "
@@ -890,7 +1316,27 @@ class CondaLockLoader(EnvironmentSpecBase):
 
     def package_records_by_url(self) -> dict[str, dict[str, Any]]:
         """Return top-level conda package records keyed by their exact URL."""
-        return self.package_records_by_url_from_data(self._data)
+        return dict(self._records_index())
+
+    def _records_index(self) -> dict[str, dict[str, Any]]:
+        """Cache the package URL index for repeated target selection."""
+        if self._records_by_url_cache is None:
+            self._records_by_url_cache = self.package_records_by_url_from_data(
+                self._data
+            )
+        return self._records_by_url_cache
+
+    def _environment_budget(self, env_data: dict[str, Any]) -> tuple[int, int]:
+        """Cache resources left after accounting for an environment's refs."""
+        identity = id(env_data)
+        if identity not in self._environment_budgets:
+            budget = DocumentExpansionBudget(
+                items=MAX_LOCKFILE_ITEMS,
+                strings=MAX_LOCKFILE_BYTES,
+            )
+            budget.consume({"environment": env_data}, label="Lockfile")
+            self._environment_budgets[identity] = budget.items, budget.strings
+        return self._environment_budgets[identity]
 
     @staticmethod
     def package_records_by_url_from_data(
@@ -898,6 +1344,8 @@ class CondaLockLoader(EnvironmentSpecBase):
     ) -> dict[str, dict[str, Any]]:
         """Return top-level conda package records from *data* keyed by URL."""
         records_by_url: dict[str, dict[str, Any]] = {}
+        equal_value_pairs: dict[tuple[int, int], tuple[object, object]] = {}
+        validated_paths: set[str] = set()
         packages = data.get("packages", [])
         if not isinstance(packages, list):
             raise ValueError("Lockfile package records must be a list")
@@ -906,8 +1354,25 @@ class CondaLockLoader(EnvironmentSpecBase):
                 continue
             url = record.get("conda") or record.get("url") or record.get("pypi")
             if isinstance(url, str) and url:
+                site_packages_path = record.get("python_site_packages_path")
+                if site_packages_path is not None:
+                    try:
+                        if not isinstance(site_packages_path, str):
+                            raise ValueError
+                        if site_packages_path not in validated_paths:
+                            parse_relative_posix_path(site_packages_path)
+                            validated_paths.add(site_packages_path)
+                    except ValueError:
+                        raise ValueError(
+                            "Lockfile python_site_packages_path must be a relative "
+                            "POSIX path"
+                        ) from None
                 existing = records_by_url.get(url)
-                if existing is not None and existing != record:
+                if existing is not None and not document_values_equal(
+                    existing,
+                    record,
+                    equal_value_pairs=equal_value_pairs,
+                ):
                     raise ValueError(
                         f"Conflicting package metadata for URL {redact_url(url)!r}"
                     )
@@ -954,16 +1419,27 @@ class CondaLockLoader(EnvironmentSpecBase):
         *,
         package_platform: str | None = None,
     ) -> list[PackageRecord]:
-        """Reconstruct package records for one lockfile environment slice.
+        """Reconstruct package records for one lockfile environment target.
 
         This path uses the metadata already embedded in ``conda.lock``. It
         deliberately avoids :meth:`env_for`, whose generic rattler-lock
         conversion may fetch package archives to fill missing metadata.
         """
-        from conda.base.context import context
-        from conda.models.records import PackageRecord
+        return cls(LOCKFILE_NAME, data=data).package_records_for(
+            name,
+            platform,
+            package_platform=package_platform,
+        )
 
-        data = cls.redact_data_urls(data)
+    def package_records_for(
+        self,
+        name: str,
+        platform: str,
+        *,
+        package_platform: str | None = None,
+    ) -> list[PackageRecord]:
+        """Reconstruct one target using the sanitized lockfile and cached index."""
+        data = self._data
         environments = data.get("environments", {})
         env_data = environments.get(name)
         if not isinstance(env_data, dict):
@@ -974,7 +1450,59 @@ class CondaLockLoader(EnvironmentSpecBase):
                 f"Environment {name!r} does not include platform {platform!r}"
             )
 
-        records_by_url = cls.package_records_by_url_from_data(data)
+        records_by_url = self._records_index()
+        remaining_items, remaining_strings = self._environment_budget(env_data)
+        return self._package_records_from_refs(
+            env_data,
+            refs,
+            name,
+            platform,
+            records_by_url,
+            package_platform=package_platform,
+            remaining_items=remaining_items,
+            remaining_strings=remaining_strings,
+        )
+
+    @classmethod
+    def _package_records_from_refs(
+        cls,
+        env_data: dict[str, Any],
+        refs: list[dict[str, Any]],
+        name: str,
+        platform: str,
+        records_by_url: Mapping[str, dict[str, Any]],
+        *,
+        package_platform: str | None = None,
+        remaining_items: int,
+        remaining_strings: int,
+        batch_expansion_budget: DocumentExpansionBudget | None = None,
+    ) -> list[PackageRecord]:
+        """Reconstruct one target from sanitized data and a shared index.
+
+        Callers account for expanded environment refs once. This method charges
+        selected package records against the remaining expansion budget.
+        """
+        from conda.base.context import context
+        from conda.models.records import PackageRecord
+
+        selected_metadata: list[dict[str, Any]] = []
+        for ref in refs:
+            if isinstance(ref, dict):
+                url = ref.get("conda")
+                if isinstance(url, str) and url in records_by_url:
+                    selected_metadata.append(records_by_url[url])
+        if batch_expansion_budget is not None:
+            batch_expansion_budget.consume(
+                {"packages": selected_metadata},
+                label="Lockfile batch",
+            )
+        DocumentExpansionBudget(
+            items=remaining_items,
+            strings=remaining_strings,
+        ).consume(
+            {"packages": selected_metadata},
+            label="Lockfile",
+        )
         records: list[PackageRecord] = []
         for ref in refs:
             if not isinstance(ref, dict) or "conda" not in ref:
@@ -1038,7 +1566,7 @@ class CondaLockLoader(EnvironmentSpecBase):
     @classmethod
     def seed_prefix_from_data(
         cls,
-        data: dict[str, Any],
+        data: dict[str, Any] | CondaLockLoader,
         name: str,
         platform: str,
         prefix: Path,
@@ -1046,16 +1574,16 @@ class CondaLockLoader(EnvironmentSpecBase):
         *,
         package_platform: str | None = None,
     ) -> list[PackageRecord]:
-        """Create a metadata-only prefix from one canonical lockfile slice."""
+        """Create a metadata-only prefix from one lockfile target."""
         from conda.core.prefix_data import PrefixData
         from conda.history import History
         from conda.models.records import PrefixRecord
 
-        records = cls.package_records_for_env_data(
-            data,
-            name,
-            platform,
-            package_platform=package_platform,
+        loader = (
+            data if isinstance(data, CondaLockLoader) else cls(LOCKFILE_NAME, data=data)
+        )
+        records = loader.package_records_for(
+            name, platform, package_platform=package_platform
         )
         (prefix / "conda-meta").mkdir(parents=True)
         prefix_data = PrefixData(str(prefix))
@@ -1069,40 +1597,82 @@ class CondaLockLoader(EnvironmentSpecBase):
     @staticmethod
     def redact_data_urls(data: dict[str, Any]) -> dict[str, Any]:
         """Return lockfile data with every serialized URL credential-free."""
-        result = deepcopy(data)
+        result = plain_document(
+            data,
+            maximum_items=MAX_LOCKFILE_ITEMS,
+            maximum_collection_items=MAX_LOCKFILE_COLLECTION_ITEMS,
+            string_budget=DocumentStringBudget(MAX_LOCKFILE_BYTES),
+        )
 
         environments = result.get("environments")
+        normalized_channels: set[int] = set()
+        normalized_urls: dict[int, tuple[str, str]] = {}
         if isinstance(environments, dict):
             for environment in environments.values():
                 if not isinstance(environment, dict):
                     continue
                 channels = environment.get("channels")
-                if isinstance(channels, list):
+                if (
+                    isinstance(channels, list)
+                    and id(channels) not in normalized_channels
+                ):
+                    normalized_channels.add(id(channels))
                     for index, entry in enumerate(channels):
                         if isinstance(entry, str):
-                            channels[index] = {"url": redact_channel_name(entry)}
+                            url = entry
                         elif isinstance(entry, dict):
+                            if id(entry) in normalized_channels:
+                                continue
+                            normalized_channels.add(id(entry))
                             channel_entry = cast("dict[str, Any]", entry)
                             url = channel_entry.get("url")
-                            if isinstance(url, str):
-                                channel_entry["url"] = redact_channel_name(url)
+                        else:
+                            continue
+                        if isinstance(url, str):
+                            if id(url) not in normalized_urls:
+                                normalized_urls[id(url)] = (
+                                    url,
+                                    redact_channel_name(url),
+                                )
+                            normalized = normalized_urls[id(url)][1]
+                            if isinstance(entry, str):
+                                channels[index] = {"url": normalized}
+                            else:
+                                cast("dict[str, Any]", entry)["url"] = normalized
+        visited: set[int] = set()
+        checked_keys: set[int] = set()
+        string_budget = DocumentStringBudget(MAX_LOCKFILE_BYTES)
+        # Retain source strings while replacing values so IDs cannot be reused.
+        redacted_urls: dict[int, tuple[str, str]] = {}
         values: list[dict[str, Any] | list[Any]] = [result]
         while values:
             container = values.pop()
+            if id(container) in visited:
+                continue
+            visited.add(id(container))
             if isinstance(container, dict):
                 for key, value in list(container.items()):
-                    if has_url_credentials(key):
-                        raise ValueError(
-                            "Lockfile contains credentials in a mapping key"
-                        )
+                    string_budget.consume(key, label="Lockfile data")
+                    if id(key) not in checked_keys:
+                        if has_url_credentials(key):
+                            raise ValueError(
+                                "Lockfile contains credentials in a mapping key"
+                            )
+                        checked_keys.add(id(key))
                     if isinstance(value, str):
-                        container[key] = redact_url(value)
+                        string_budget.consume(value, label="Lockfile data")
+                        if id(value) not in redacted_urls:
+                            redacted_urls[id(value)] = (value, redact_url(value))
+                        container[key] = redacted_urls[id(value)][1]
                     elif isinstance(value, (dict, list)):
                         values.append(value)
             else:
                 for index, value in enumerate(container):
                     if isinstance(value, str):
-                        container[index] = redact_url(value)
+                        string_budget.consume(value, label="Lockfile data")
+                        if id(value) not in redacted_urls:
+                            redacted_urls[id(value)] = (value, redact_url(value))
+                        container[index] = redacted_urls[id(value)][1]
                     elif isinstance(value, (dict, list)):
                         values.append(value)
         if has_url_credentials_in_data(result):
@@ -1114,17 +1684,55 @@ class CondaLockLoader(EnvironmentSpecBase):
         cls,
         baseline: dict[str, Any],
         envs: Iterable[_SolvedEnvironment],
+        *,
+        platforms_by_environment: Mapping[str, Sequence[str]] | None = None,
     ) -> dict[str, Any]:
-        """Replace solved environment slices and canonicalize package records."""
+        """Replace solutions and canonicalize referenced package records.
+
+        *platforms_by_environment* reconciles platform declarations while
+        retaining existing solutions and their metadata. New targets may be
+        added, removed targets are discarded, and shared package hashes must
+        still agree with newly solved records.
+        """
         result = cls.redact_data_urls(baseline)
+        retained_urls: set[str] = set()
+        if platforms_by_environment is not None:
+            environments = result.get("environments", {})
+            for name in platforms_by_environment:
+                if name not in environments:
+                    raise ValueError(
+                        f"Environment {name!r} is missing from the lockfile"
+                    )
+            result["environments"] = {
+                name: environment
+                for name, environment in environments.items()
+                if name in platforms_by_environment
+            }
+            for name, environment in result["environments"].items():
+                environment["packages"] = {
+                    platform: refs
+                    for platform, refs in environment.get("packages", {}).items()
+                    if platform in platforms_by_environment[name]
+                }
+                for refs in environment["packages"].values():
+                    for ref in refs:
+                        url = ref.get("conda") or ref.get("url") or ref.get("pypi")
+                        if url:
+                            retained_urls.add(url)
         updates = cls.compose(envs)
         for name, update in updates["environments"].items():
             if name not in result.get("environments", {}):
                 raise ValueError(f"Environment {name!r} is missing from the lockfile")
             result_env = result["environments"][name]
-            result_env["channels"] = update["channels"]
+            if platforms_by_environment is None:
+                result_env["channels"] = update["channels"]
             for platform, refs in update["packages"].items():
-                if platform not in result_env.get("packages", {}):
+                allowed = (
+                    result_env.get("packages", {})
+                    if platforms_by_environment is None
+                    else platforms_by_environment[name]
+                )
+                if platform not in allowed:
                     raise ValueError(
                         f"Environment {name!r} does not include platform {platform!r}"
                     )
@@ -1137,11 +1745,13 @@ class CondaLockLoader(EnvironmentSpecBase):
             if existing_record is None:
                 packages_by_url[url] = update_record
                 continue
-            packages_by_url[url] = cls.merge_package_records(
+            merged = cls.merge_package_records(
                 existing_record,
                 update_record,
                 url,
             )
+            if url not in retained_urls:
+                packages_by_url[url] = merged
         packages: list[dict[str, Any]] = []
         seen_urls: set[str] = set()
         for environment in result.get("environments", {}).values():
@@ -1176,11 +1786,14 @@ class CondaLockLoader(EnvironmentSpecBase):
         from conda.models.channel import Channel
 
         urls: set[str] = set()
+        seen_raw_urls: set[str] = set()
         for entry in env_data.get("channels", []) or []:
             if not isinstance(entry, dict):
                 continue
             raw_url = entry.get("url")
             if not isinstance(raw_url, str) or not raw_url:
+                continue
+            if raw_url in seen_raw_urls:
                 continue
             try:
                 channel = Channel(raw_url)
@@ -1191,6 +1804,7 @@ class CondaLockLoader(EnvironmentSpecBase):
                             subdirs=(platform, "noarch"),
                         )
                     )
+                seen_raw_urls.add(raw_url)
             except Exception:
                 reason = (
                     "environment channel"
@@ -1204,13 +1818,7 @@ class CondaLockLoader(EnvironmentSpecBase):
     @staticmethod
     def url_location(
         url: str,
-    ) -> (
-        tuple[
-            tuple[str, str, int | None, str | None, str | None],
-            tuple[str, ...],
-        ]
-        | None
-    ):
+    ) -> UrlLocation | None:
         """Return a normalized URL origin and traversal-safe path segments."""
         try:
             parsed = urlsplit(url)
@@ -1252,21 +1860,44 @@ class CondaLockLoader(EnvironmentSpecBase):
     @classmethod
     def url_matches_channel(cls, url: str, channel_urls: tuple[str, ...]) -> bool:
         """Return whether *url* is a traversal-safe child of a declared channel."""
+        return cls._url_matches_locations(url, cls._channel_locations(channel_urls))
+
+    @classmethod
+    def _channel_locations(cls, channel_urls: Iterable[str]) -> ChannelLocations:
+        """Index declared channel paths by origin and decoded segments."""
+        locations: ChannelLocations = {}
+        for channel_url in channel_urls:
+            location = cls.url_location(channel_url)
+            if location is not None:
+                origin, path = location
+                node = locations.setdefault(origin, {})
+                for segment in path:
+                    node = node.setdefault(segment, {})
+                # Empty segments are omitted by url_location, so this marks
+                # a complete channel path without colliding with a URL segment.
+                node[""] = {}
+        return locations
+
+    @classmethod
+    def _url_matches_locations(
+        cls,
+        url: str,
+        channel_locations: ChannelLocations,
+    ) -> bool:
+        """Follow a package path through declared channels for its URL origin."""
         package_location = cls.url_location(url)
         if package_location is None:
             return False
         package_origin, package_path = package_location
-        for channel_url in channel_urls:
-            channel_location = cls.url_location(channel_url)
-            if channel_location is None:
-                continue
-            channel_origin, channel_path = channel_location
-            if (
-                package_origin == channel_origin
-                and len(package_path) > len(channel_path)
-                and package_path[: len(channel_path)] == channel_path
-            ):
+        node = channel_locations.get(package_origin)
+        if node is None:
+            return False
+        for segment in package_path:
+            if "" in node:
                 return True
+            node = node.get(segment)
+            if node is None:
+                return False
         return False
 
     def digest_fragment_for(self, record: dict[str, Any], url: str) -> str:
@@ -1450,6 +2081,7 @@ def render_lockfile(
     on_skip: Callable[[str, str, SolveError], None] | None = None,
     baseline_data: dict[str, Any] | None = None,
     update_targets: Mapping[tuple[str, str], set[str]] | None = None,
+    preserve_existing: bool = False,
     dry_run: bool = False,
 ) -> str:
     """Solve workspace environments and serialize ``conda.lock`` content.
@@ -1478,6 +2110,11 @@ def render_lockfile(
 
     Returns the serialized lockfile without writing it. When *dry_run* is
     true, solver package-cache writes use disposable storage.
+    *preserve_existing* retains declared solutions from *baseline_data*,
+    solves missing targets, and removes undeclared targets. The caller must
+    validate the baseline against the previous manifest first. This mode
+    requires the complete environment set and cannot be combined with
+    selective updates, a platform filter, or skipped solver failures.
     """
     from conda.common.serialize.yaml import dumps as yaml_dumps
     from conda.models.environment import EnvironmentConfig
@@ -1491,18 +2128,36 @@ def render_lockfile(
 
     if update_targets is not None and baseline_data is None:
         raise ValueError("Selective lock updates require baseline lockfile data")
+    if preserve_existing:
+        if baseline_data is None:
+            raise ValueError("Lock preservation requires baseline lockfile data")
+        if update_targets is not None or platforms is not None or skip_unsolvable:
+            raise ValueError(
+                "Lock preservation requires complete platform reconciliation"
+            )
     baseline = {} if baseline_data is None else baseline_data
-    if update_targets is not None:
-        baseline = CondaLockLoader.redact_data_urls(baseline)
+    baseline_loader: CondaLockLoader | None = None
+    if update_targets is not None or preserve_existing:
+        baseline_loader = CondaLockLoader(lockfile_path(ctx), data=baseline)
+        baseline = baseline_loader._data
 
+    platforms_by_environment = {
+        name: sorted(set(resolved.platforms or [host_platform]))
+        for name, resolved in resolved_envs.items()
+    }
     solved_targets: set[tuple[str, str]] = set()
     with isolated_package_cache(dry_run):
         for name, resolved in resolved_envs.items():
-            declared = sorted(set(resolved.platforms or [host_platform]))
+            declared = platforms_by_environment[name]
             if update_targets is not None:
                 targets = [
                     target for target in declared if update_targets.get((name, target))
                 ]
+            elif preserve_existing:
+                locked = (
+                    baseline.get("environments", {}).get(name, {}).get("packages", {})
+                )
+                targets = [target for target in declared if target not in locked]
             elif platforms is None:
                 targets = declared
             else:
@@ -1547,7 +2202,9 @@ def render_lockfile(
                                 )
                                 try:
                                     records = CondaLockLoader.seed_prefix_from_data(
-                                        baseline,
+                                        baseline_loader
+                                        if baseline_loader is not None
+                                        else baseline,
                                         name,
                                         target,
                                         prefix,
@@ -1597,30 +2254,36 @@ def render_lockfile(
                     )
                 )
 
-    if update_targets is not None:
-        missing_targets = {
-            target for target, names in update_targets.items() if names
-        } - solved_targets
-        if missing_targets:
-            targets = ", ".join(
-                f"{name}/{platform}" for name, platform in sorted(missing_targets)
-            )
-            raise ValueError(f"Selective lock targets are not declared: {targets}")
-        updated = CondaLockLoader.replace_solutions(baseline, envs)
+    if update_targets is not None or preserve_existing:
+        if update_targets is not None:
+            missing_targets = {
+                target for target, names in update_targets.items() if names
+            } - solved_targets
+            if missing_targets:
+                targets = ", ".join(
+                    f"{name}/{platform}" for name, platform in sorted(missing_targets)
+                )
+                raise ValueError(f"Selective lock targets are not declared: {targets}")
+        updated = CondaLockLoader.replace_solutions(
+            baseline,
+            envs,
+            platforms_by_environment=(
+                platforms_by_environment if preserve_existing else None
+            ),
+        )
         if config is not None:
-            declared_platforms = {
-                platform
-                for resolved in resolved_envs.values()
-                for platform in (resolved.platforms or [host_platform])
-            }
-            for platform in declared_platforms:
-                status = check_lockfile_satisfiability(config, updated, platform)
-                if status.status != LockfileStatus.UP_TO_DATE:
-                    raise LockfileStaleError(
-                        config.manifest_path,
-                        lockfile_path(ctx),
-                        reason=status.reason,
-                    )
+            updated_loader = CondaLockLoader(lockfile_path(ctx), data=updated)
+            status = updated_loader.check_targets(
+                config,
+                match_budget_scope="platform",
+                default_platform=host_platform,
+            )
+            if status.status != LockfileStatus.UP_TO_DATE:
+                raise LockfileStaleError(
+                    config.manifest_path,
+                    lockfile_path(ctx),
+                    reason=status.reason,
+                )
         return yaml_dumps(updated)
 
     if failures and not envs:
@@ -1763,8 +2426,11 @@ def merge_lockfiles(
     package_sources_by_url: dict[str, Path] = {}
     manifest_env_channels: dict[str, list[dict[str, str]]] = {}
     manifest_env_channel_urls: dict[str, list[str]] = {}
+    equal_package_record_pairs: dict[tuple[int, int], tuple[object, object]] = {}
+    equal_channel_pairs: dict[tuple[int, int], tuple[object, object]] = {}
     fragment_bytes = 0
     fragment_items = 0
+    fragment_strings = DocumentStringBudget(MAX_LOCKFILE_BYTES)
 
     for env_name, env_obj in ctx.config.environments.items():
         entries = _manifest_channel_entries(ctx.config, env_obj)
@@ -1793,7 +2459,7 @@ def merge_lockfiles(
                 f"{MAX_LOCKFILE_BYTES:,} bytes"
             )
         try:
-            data = load_lockfile_data(content)
+            data = load_lockfile_data(content, string_budget=fragment_strings)
             fragment_items += validate_document_limits(
                 data,
                 label="Lockfile fragments",
@@ -1807,9 +2473,11 @@ def merge_lockfiles(
                     f"{MAX_LOCKFILE_ITEMS:,} aggregate collection items"
                 )
             data = CondaLockLoader.redact_data_urls(data)
+            version = data.get("version")
+            if type(version) is not int:
+                raise ValueError("Lockfile version must be an integer")
         except ValueError as exc:
             raise LockfileMergeError(str(exc)) from exc
-        version = data.get("version")
         if version != LOCKFILE_VERSION:
             raise LockfileMergeError(
                 f"fragment '{path}' has version {version!r}, "
@@ -1823,7 +2491,11 @@ def merge_lockfiles(
             if existing is None:
                 packages_by_url[url] = record
                 package_sources_by_url[url] = path
-            elif existing != record:
+            elif not document_values_equal(
+                existing,
+                record,
+                equal_value_pairs=equal_package_record_pairs,
+            ):
                 raise LockfileMergeError(
                     f"fragment '{path}' has a conflicting package record for "
                     f"URL '{redact_url(url)}'",
@@ -1837,12 +2509,23 @@ def merge_lockfiles(
                 )
 
         for env_name, env_data in (data.get("environments") or {}).items():
-            channels = list(env_data.get("channels") or [])
+            channels = env_data.get("channels")
+            if channels is None:
+                channels = []
+            if not isinstance(channels, list) or not all(
+                isinstance(channel, dict)
+                and isinstance(channel.get("url"), str)
+                and channel["url"]
+                for channel in channels
+            ):
+                raise LockfileMergeError(
+                    f"Lockfile environment {env_name!r} has invalid channels"
+                )
             manifest_channels = manifest_env_channels.get(env_name)
             if manifest_channels is not None:
                 manifest_urls = manifest_env_channel_urls[env_name]
                 fragment_urls = _normalize_channel_urls(
-                    str(entry.get("url", "")) for entry in channels
+                    entry["url"] for entry in channels
                 )
                 next_index = 0
                 for url in fragment_urls:
@@ -1866,7 +2549,11 @@ def merge_lockfiles(
                 env_order.append(env_name)
                 env_channels[env_name] = channels
                 env_platforms[env_name] = {}
-            elif existing != channels:
+            elif not document_values_equal(
+                existing,
+                channels,
+                equal_value_pairs=equal_channel_pairs,
+            ):
                 raise LockfileMergeError(
                     f"environment '{env_name}' channels differ between "
                     f"fragments; '{path}' disagrees with an earlier fragment",
@@ -1898,6 +2585,7 @@ def merge_lockfiles(
                         {"channels": channels},
                         package_platform,
                     )
+                    channel_locations = CondaLockLoader._channel_locations(channel_urls)
                 except ValueError as exc:
                     raise LockfileMergeError(
                         f"environment '{env_name}' channels in fragment "
@@ -1918,7 +2606,9 @@ def merge_lockfiles(
                             f"environment '{env_name}' contains an invalid "
                             f"package ref on '{platform}' in fragment '{path}'"
                         )
-                    if not CondaLockLoader.url_matches_channel(url, channel_urls):
+                    if not CondaLockLoader._url_matches_locations(
+                        url, channel_locations
+                    ):
                         raise LockfileMergeError(
                             f"package URL '{redact_url(url)}' in environment "
                             f"'{env_name}' on '{platform}' is not under any "
@@ -2119,6 +2809,7 @@ class LockfileInstallPlan:
         platform: str | None = None,
         target_prefix_override: str | Path | None = None,
         lockfile_data: dict[str, Any] | None = None,
+        lockfile_loader: CondaLockLoader | None = None,
         update_names: set[str] | None = None,
         prune: bool = True,
         replace_existing: bool = False,
@@ -2134,23 +2825,26 @@ class LockfileInstallPlan:
         from conda.models.match_spec import MatchSpec
 
         path = lockfile_path(ctx)
-        if lockfile_data is None:
-            try:
-                if validate_workspace is not None:
-                    validate_workspace()
-                lockfile_data = load_lockfile_data(
-                    read_regular_file_bytes(
-                        path,
-                        maximum_bytes=MAX_LOCKFILE_BYTES,
-                        label="workspace lockfile",
+        if lockfile_loader is not None and lockfile_data is not None:
+            raise ValueError("Provide either lockfile data or a prepared loader")
+        if lockfile_loader is None:
+            if lockfile_data is None:
+                try:
+                    if validate_workspace is not None:
+                        validate_workspace()
+                    lockfile_data = load_lockfile_data(
+                        read_regular_file_bytes(
+                            path,
+                            maximum_bytes=MAX_LOCKFILE_BYTES,
+                            label="workspace lockfile",
+                        )
                     )
-                )
-                if validate_workspace is not None:
-                    validate_workspace()
-            except (OSError, ValueError) as exc:
-                raise LockfileNotFoundError("(all)", path) from exc
+                    if validate_workspace is not None:
+                        validate_workspace()
+                except (OSError, ValueError) as exc:
+                    raise LockfileNotFoundError("(all)", path) from exc
+            lockfile_loader = CondaLockLoader(path, data=lockfile_data)
 
-        loader = CondaLockLoader(path, data=lockfile_data)
         lock_platform = platform or ctx.platform
         package_platform = ctx.config.platform_subdir(lock_platform)
         resolved: ResolvedEnvironment | None = None
@@ -2178,7 +2872,7 @@ class LockfileInstallPlan:
                     f"Cannot install platform '{lock_platform}' on this machine "
                     f"({conda_context._native_subdir()})."
                 )
-            urls = loader.explicit_package_specs_for(
+            urls = lockfile_loader.explicit_package_specs_for(
                 lock_platform,
                 env_name,
                 package_platform=package_platform,

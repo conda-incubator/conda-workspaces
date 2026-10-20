@@ -66,8 +66,9 @@ receipt.
 
 ## Extract an archive
 
-Archive inspection and extraction reject more than 100,000 members, member
-paths or link targets deeper than 256 components or longer than 4,096 UTF-8
+Archive inspection and extraction reject more than 100,000 members or 100,000
+distinct filesystem entries, member paths or link targets deeper than 256
+components or longer than 4,096 UTF-8
 bytes, more than 128 consecutive GNU or PAX extension headers, more than 100,000
 PAX records, more than 64 MiB of expanded GNU and PAX metadata, and more than
 100 GiB of declared regular-file data including possible link fallbacks. GNU
@@ -76,6 +77,18 @@ payloads are traversed. Extraction requires a supported Python patch release
 with `tarfile.data_filter`. Repack sparse or metadata-heavy inputs as ordinary
 files, split an archive, or exclude unneeded files when a trusted workspace
 exceeds one of these safety limits.
+
+Extraction stops at 4 GiB of raw archive bytes or expanded regular files and
+possible link fallbacks by default. For an archive you trust, pass
+`--allow-large-archive` to
+`conda workspace unarchive` or `allow_large_archive=True` to
+`WorkspaceArchive.extract()`, `WorkspaceArchive.install()`, or `extract_archive()`.
+The 100 GiB hard limit still applies. Extraction checks free space before
+snapshotting the archive, writing expanded files, and copying bundled packages
+to a private installation cache. It reserves 16 KiB per extracted file or
+directory and checks available inodes where the filesystem reports them. Each
+space check preserves 64 MiB for other disk use. These checks cannot account
+for concurrent disk use.
 
 When a receipt is configured, its archive digest is verified before member
 inspection. Archive creation also rejects a symbolic-link workspace manifest
@@ -97,15 +110,13 @@ print(result.target)
 print(result.verified)
 ```
 
-When a bundled archive has a verified receipt, extraction can prime the
-local conda package cache from packages stored inside the archive. Without
-a receipt, bundled packages are left in the extracted workspace and cache
-priming is skipped.
-
-Pass `prime_cache=False` to disable cache priming:
+Extraction leaves bundled packages in the extracted workspace's `packages/`
+directory. It does not write records to a conda package cache. To install
+offline from a bundled archive, call `WorkspaceArchive.install()` with a
+receipt. It stages packages in a temporary cache for that installation:
 
 ```python
-archive.extract(target="/tmp/restored", prime_cache=False)
+archive.install(target="/tmp/restored")
 ```
 
 ## Install from an archive

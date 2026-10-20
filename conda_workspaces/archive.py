@@ -21,6 +21,7 @@ import tempfile
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from io import BytesIO
+from itertools import chain
 from os.path import expanduser
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, cast
@@ -69,7 +70,7 @@ from .paths import (
 from .publication import WorkspacePublication
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Generator, Iterator, Mapping
     from typing import Any, BinaryIO, Final
 
     from .context import WorkspaceContext
@@ -95,6 +96,24 @@ CONDA_PACKAGE_SUFFIXES: tuple[str, ...] = (".conda", ".tar.bz2")
 MAX_ARCHIVE_MEMBERS: Final = 100_000
 """Maximum number of members accepted from one workspace archive."""
 
+MAX_ARCHIVE_FILESYSTEM_ENTRIES: Final = 100_000
+"""Maximum distinct files, links, and directories one archive may create."""
+
+MAX_ARCHIVE_CANDIDATES: Final = 200_000
+"""Maximum directory entries or tracked paths examined for one archive."""
+
+MAX_ARCHIVE_SELECTION_PATTERNS: Final = 10_000
+"""Maximum user include and exclude patterns for one workspace archive."""
+
+MAX_ARCHIVE_PATTERN_MATCHES: Final = 50_000_000
+"""Maximum glob comparisons while selecting workspace archive members."""
+
+MAX_ARCHIVE_USER_PATTERN_MATCHES: Final = 10_000_000
+"""Maximum user include and exclude glob comparisons for one archive."""
+
+MAX_ARCHIVE_PATTERN_CHARACTERS: Final = 10_000_000_000
+"""Maximum combined path and pattern characters examined by glob matching."""
+
 MAX_ARCHIVE_PATH_DEPTH: Final = 256
 """Maximum number of path components accepted for one archive member."""
 
@@ -105,7 +124,7 @@ MAX_ARCHIVE_COMPONENTS: Final = 1_000_000
 """Maximum cumulative path components accepted across archive members."""
 
 MAX_ARCHIVE_METADATA_BYTES: Final = 64 * 1024**2
-"""Maximum combined expanded size of GNU and PAX metadata, in bytes."""
+"""Maximum metadata payload bytes and effective PAX text characters."""
 
 MAX_ARCHIVE_METADATA_HEADERS: Final = 128
 """Maximum consecutive GNU and PAX extension headers."""
@@ -114,10 +133,19 @@ MAX_ARCHIVE_METADATA_HEADERS_TOTAL: Final = 100_000
 """Maximum combined GNU and PAX extension headers in one archive."""
 
 MAX_ARCHIVE_PAX_RECORDS: Final = 100_000
-"""Maximum combined PAX key/value records."""
+"""Maximum encoded or cumulatively copied PAX key/value records."""
 
 MAX_ARCHIVE_EXPANDED_BYTES: Final = 100 * 1024**3
 """Maximum combined expanded size of regular archive members, in bytes."""
+
+DEFAULT_ARCHIVE_EXTRACT_BYTES: Final = 4 * 1024**3
+"""Maximum expanded bytes extracted without explicit trust in the archive."""
+
+ARCHIVE_STAGING_RESERVE_BYTES: Final = 64 * 1024**2
+"""Minimum free space retained after archive staging copies."""
+
+ARCHIVE_STAGING_ENTRY_BYTES: Final = 16 * 1024
+"""Conservative disk-space allowance per extracted file or directory."""
 
 MAX_ARCHIVE_RAW_BYTES: Final = 100 * 1024**3
 """Maximum byte size accepted for one compressed or uncompressed archive."""
@@ -159,6 +187,46 @@ class _ArchiveWriteLimits:
         self.path_components = path_components
 
 
+@dataclass
+class _ArchiveMemberUsage:
+    """Collect extraction metadata while validating member paths."""
+
+    filesystem_entries: int = 0
+
+
+@dataclass
+class _ArchivePaxLimits:
+    """Bound inherited metadata work as well as encoded header payloads."""
+
+    global_headers: Mapping[str, str]
+    records: int = 0
+    text_size: int = 0
+    global_text_size: int | None = None
+
+    def reserve(self, headers: Mapping[str, str]) -> None:
+        """Charge effective metadata before tarfile iterates or copies it."""
+        records = self.records + len(headers)
+        if records > MAX_ARCHIVE_PAX_RECORDS:
+            raise ArchiveError(
+                "Archive exceeds the maximum count of"
+                f" {MAX_ARCHIVE_PAX_RECORDS:,} expanded PAX metadata records."
+            )
+        if headers is self.global_headers and self.global_text_size is not None:
+            text_size = self.global_text_size
+        else:
+            text_size = sum(len(key) + len(value) for key, value in headers.items())
+            if headers is self.global_headers:
+                self.global_text_size = text_size
+        text_size += self.text_size
+        if text_size > MAX_ARCHIVE_METADATA_BYTES:
+            raise ArchiveError(
+                "Archive exceeds the maximum expanded PAX metadata text"
+                f" of {MAX_ARCHIVE_METADATA_BYTES:,} characters."
+            )
+        self.records = records
+        self.text_size = text_size
+
+
 ALLOWED_TAR_TYPES: frozenset[bytes] = frozenset(
     {
         tarfile.REGTYPE,
@@ -182,9 +250,14 @@ EXTENDED_TAR_TYPES: frozenset[bytes] = frozenset(
 
 
 class _BoundedTarInfo(tarfile.TarInfo):
-    """Reject oversized GNU and PAX metadata before tarfile reads its payload."""
+    """Bound metadata and raw file sizes before tarfile processes their headers."""
 
     def _proc_member(self, archive: tarfile.TarFile) -> tarfile.TarInfo:
+        limits = getattr(archive, "_workspace_pax_limits", None)
+        if limits is None:
+            limits = _ArchivePaxLimits(archive.pax_headers)
+            setattr(archive, "_workspace_pax_limits", limits)
+        self._workspace_pax_limits: _ArchivePaxLimits = limits
         if self.type == tarfile.GNUTYPE_SPARSE:
             raise ArchiveError("Sparse archive members are not supported.")
         if self.type in EXTENDED_TAR_TYPES:
@@ -239,6 +312,18 @@ class _BoundedTarInfo(tarfile.TarInfo):
                     f" {MAX_ARCHIVE_METADATA_BYTES:,} bytes."
                 )
             setattr(archive, "_workspace_metadata_bytes", expanded)
+        if self.isreg():
+            if self.size < 0:
+                raise ArchiveError(f"Archive member '{self.name}' has a negative size.")
+            self._workspace_raw_size = self.size
+            expanded = getattr(archive, "_workspace_raw_file_bytes", 0) + self.size
+            if expanded > MAX_ARCHIVE_EXPANDED_BYTES:
+                raise ArchiveError(
+                    "Archive regular files expand beyond the maximum size of"
+                    f" {MAX_ARCHIVE_EXPANDED_BYTES:,} bytes."
+                )
+            # tarfile computes the skip offset before global PAX replaces size.
+            setattr(archive, "_workspace_raw_file_bytes", expanded)
         return super()._proc_member(archive)  # ty: ignore[unresolved-attribute]
 
     def _proc_pax(self, archive: tarfile.TarFile) -> tarfile.TarInfo:
@@ -277,7 +362,17 @@ class _BoundedTarInfo(tarfile.TarInfo):
         )
         archive.fileobj.seek(position)
         del data
+        if self.type == tarfile.XGLTYPE:
+            self._workspace_pax_limits.global_text_size = None
+        else:
+            self._workspace_pax_limits.reserve(archive.pax_headers)
         return super()._proc_pax(archive)  # ty: ignore[unresolved-attribute]
+
+    def _apply_pax_info(
+        self, pax_headers: dict[str, str], encoding: str, errors: str
+    ) -> None:
+        self._workspace_pax_limits.reserve(pax_headers)
+        super()._apply_pax_info(pax_headers, encoding, errors)  # ty: ignore[unresolved-attribute]
 
     def _reject_sparse(self, *_args: object) -> None:
         """Reject PAX sparse maps before tarfile parses their data payload."""
@@ -1205,17 +1300,23 @@ class WorkspaceArchive:
         *,
         target: str | Path | None = None,
         require_sha256: bool = False,
-        prime_cache: bool = True,
+        prime_cache: bool = False,
         package_cache: str | Path | None = None,
         dry_run: bool = False,
+        allow_large_archive: bool = False,
     ) -> WorkspaceArchiveExtractResult:
-        """Extract the archive and optionally prime bundled package cache files."""
+        """Extract without cache publication. *package_cache* is ignored."""
+        if prime_cache:
+            raise ArchiveError(
+                "Persistent package cache priming is not supported.",
+                hints=["Use archive installation to consume bundled packages."],
+            )
         return self._extract(
             target=target,
             require_sha256=require_sha256,
-            prime_cache=prime_cache,
-            package_cache=package_cache,
+            package_cache=None,
             dry_run=dry_run,
+            allow_large_archive=allow_large_archive,
         )
 
     def _extract(
@@ -1223,9 +1324,9 @@ class WorkspaceArchive:
         *,
         target: str | Path | None,
         require_sha256: bool,
-        prime_cache: bool,
-        package_cache: str | Path | None,
+        package_cache: Path | None,
         dry_run: bool,
+        allow_large_archive: bool,
         validate_workspace: Callable[[Path, ArchiveReceipt | None], None] | None = None,
         validate_install: Callable[[], None] | None = None,
     ) -> WorkspaceArchiveExtractResult:
@@ -1261,10 +1362,21 @@ class WorkspaceArchive:
             dir=temporary_parent,
         ) as temporary:
             snapshot_path = Path(temporary) / archive_path.name
-            self.snapshot_archive(archive_path, snapshot_path)
+            self.snapshot_archive(
+                archive_path,
+                snapshot_path,
+                allow_large_archive=allow_large_archive,
+            )
             if receipt is not None:
                 receipt.verify_archive(snapshot_path)
-            info = inspect_archive(snapshot_path)
+            info = inspect_archive(
+                snapshot_path,
+                max_expanded_bytes=(
+                    MAX_ARCHIVE_EXPANDED_BYTES
+                    if allow_large_archive
+                    else DEFAULT_ARCHIVE_EXTRACT_BYTES
+                ),
+            )
             if not info["has_manifest"]:
                 raise ArchiveError(
                     "Not a workspace archive: no manifest found.",
@@ -1288,21 +1400,27 @@ class WorkspaceArchive:
                                 f"Receipt {label} is not a regular archive member."
                             )
 
-            staged = extract_archive(snapshot_path, Path(temporary) / "workspace")
+            staged = extract_archive(
+                snapshot_path,
+                Path(temporary) / "workspace",
+                allow_large_archive=allow_large_archive,
+            )
             if receipt is not None:
                 receipt.verify_extracted(staged, require_sha256=require_sha256)
             cache_priming_skipped = bool(
-                info["has_packages"] and prime_cache and receipt is None
+                info["has_packages"]
+                and not (package_cache is not None and receipt is not None)
             )
-            cache_plan: list[tuple[str, Path, str]] = []
+            cache_plan: list[tuple[str, Path, str, int]] = []
             cache_packages: list[tuple[Path, dict[str, object]]] = []
             cache_records: list[tuple[Path, Path, dict[str, object]]] = []
             cache_path = None
-            if info["has_packages"] and prime_cache and receipt is not None:
-                if package_cache is None:
-                    cache_path = Path(conda_context.pkgs_dirs[0])
-                else:
-                    cache_path = Path(package_cache)
+            if (
+                info["has_packages"]
+                and package_cache is not None
+                and receipt is not None
+            ):
+                cache_path = package_cache
                 if cache_path.resolve().is_relative_to(target_path):
                     raise ArchiveError(
                         "Package cache must be outside the archive extraction target.",
@@ -1374,7 +1492,14 @@ class WorkspaceArchive:
                                 actual=actual,
                             )
                     else:
-                        cache_plan.append((package.name, destination, expected))
+                        cache_plan.append(
+                            (
+                                package.name,
+                                destination,
+                                expected,
+                                package.lstat().st_size,
+                            )
+                        )
                     extracted = cache_path / extracted_name
                     if extracted.exists() or extracted.is_symlink():
                         if not self.package_cache_record_matches(
@@ -1395,13 +1520,18 @@ class WorkspaceArchive:
                 validate_workspace(staged, receipt)
 
             primed_packages = len(
-                {name for name, _, _ in cache_plan}
+                {name for name, _, _, _ in cache_plan}
                 | {package.name for package, _, _ in cache_records}
             )
             if dry_run:
                 if validate_install is not None:
                     if cache_packages:
                         preview_cache = Path(temporary) / "package-cache"
+                        require_archive_staging_space(
+                            Path(temporary),
+                            0,
+                            filesystem_entries=3 + 4 * len(cache_packages),
+                        )
                         preview_cache.mkdir()
                         (preview_cache / "urls.txt").write_text("", encoding="utf-8")
                         for package, receipt_record in cache_packages:
@@ -1409,7 +1539,46 @@ class WorkspaceArchive:
                             try:
                                 os.link(package, preview_package)
                             except OSError:
-                                shutil.copy2(package, preview_package)
+                                expected_size = package.lstat().st_size
+                                require_archive_staging_space(
+                                    preview_cache, expected_size
+                                )
+                                with (
+                                    open_stable_regular_file(
+                                        package,
+                                        label="Bundled package source",
+                                        maximum_bytes=expected_size,
+                                    ) as input_stream,
+                                    atomic_binary_writer(
+                                        preview_package,
+                                        expected_identity=None,
+                                    ) as output_stream,
+                                ):
+                                    if (
+                                        os.fstat(input_stream.fileno()).st_size
+                                        != expected_size
+                                    ):
+                                        raise ArchiveError(
+                                            "Bundled package source changed during"
+                                            " cache staging."
+                                        )
+                                    remaining = expected_size
+                                    while remaining:
+                                        chunk = input_stream.read(
+                                            min(1024 * 1024, remaining)
+                                        )
+                                        if not chunk:
+                                            raise ArchiveError(
+                                                "Bundled package source changed"
+                                                " during cache staging."
+                                            )
+                                        output_stream.write(chunk)
+                                        remaining -= len(chunk)
+                                    if input_stream.read(1):
+                                        raise ArchiveError(
+                                            "Bundled package source changed during"
+                                            " cache staging."
+                                        )
                             self.publish_package_cache_record(
                                 preview_package,
                                 receipt_record,
@@ -1428,7 +1597,25 @@ class WorkspaceArchive:
                         validate_install()
                 extracted = target_path
             else:
-                for name, destination, expected in cache_plan:
+                if cache_path is not None:
+                    cache_space_path = cache_path
+                    missing_cache_directories = 0
+                    while not cache_space_path.exists():
+                        cache_space_path = cache_space_path.parent
+                        missing_cache_directories += 1
+                    cache_entries = (
+                        missing_cache_directories
+                        + len(cache_plan)
+                        + 3 * len(cache_records)
+                        + int(not (cache_path / "urls.txt").exists())
+                    )
+                    if cache_entries:
+                        require_archive_staging_space(
+                            cache_space_path,
+                            sum(size for _, _, _, size in cache_plan),
+                            filesystem_entries=cache_entries + 1,
+                        )
+                for name, destination, expected, expected_size in cache_plan:
                     source = staged / "packages" / name
                     try:
                         with atomic_binary_writer(
@@ -1438,13 +1625,34 @@ class WorkspaceArchive:
                             with open_stable_regular_file(
                                 source,
                                 label="Bundled package source",
+                                maximum_bytes=expected_size,
                             ) as input_stream:
+                                if (
+                                    os.fstat(input_stream.fileno()).st_size
+                                    != expected_size
+                                ):
+                                    raise ArchiveError(
+                                        "Bundled package source changed during"
+                                        " cache staging."
+                                    )
                                 hashing_reader = _HashingReader(input_stream)
-                                shutil.copyfileobj(
-                                    hashing_reader,
-                                    output_stream,
-                                    length=1024 * 1024,
-                                )
+                                remaining = expected_size
+                                while remaining:
+                                    chunk = hashing_reader.read(
+                                        min(1024 * 1024, remaining)
+                                    )
+                                    if not chunk:
+                                        raise ArchiveError(
+                                            "Bundled package source changed during"
+                                            " cache staging."
+                                        )
+                                    output_stream.write(chunk)
+                                    remaining -= len(chunk)
+                                if input_stream.read(1):
+                                    raise ArchiveError(
+                                        "Bundled package source changed during"
+                                        " cache staging."
+                                    )
                                 actual = hashing_reader.digest.hexdigest()
                                 if actual != expected:
                                     raise ArchiveHashMismatchError(
@@ -1626,11 +1834,13 @@ class WorkspaceArchive:
         install_handler: Callable[[Path, str | None, Path | None, str | None], int]
         | None = None,
         dry_run: bool = False,
+        allow_large_archive: bool = False,
     ) -> WorkspaceArchiveInstallResult:
         """Extract the archive and install environments from its lockfile.
 
         When *dry_run* is true, archive and install inputs are validated
         without extracting files or changing an environment prefix.
+        *package_cache* is ignored because bundled packages use a private cache.
         """
         final_prefix = str(prefix) if prefix is not None else None
         if final_prefix is not None and not environment:
@@ -1758,39 +1968,55 @@ class WorkspaceArchive:
                     dry_run=True,
                 )
 
-        extract_result = self._extract(
-            target=target,
-            require_sha256=require_sha256,
-            prime_cache=prime_cache,
-            package_cache=package_cache,
-            dry_run=dry_run,
-            validate_workspace=validate_workspace,
-            validate_install=validate_install,
-        )
-
-        if dry_run:
-            return_code = 0
-        else:
-            handler = install_handler or self.install_from_lockfile
-            cache_override = (
-                conda_context._override(
-                    "_pkgs_dirs",
-                    (str(Path(package_cache)),),
-                )
-                if package_cache is not None
-                else nullcontext()
+        with (
+            tempfile.TemporaryDirectory(prefix="conda-workspaces-pkgs-")
+            if prime_cache
+            else nullcontext(None)
+        ) as temporary_cache:
+            private_cache = (
+                Path(temporary_cache) if temporary_cache is not None else None
             )
-            PackageCacheData.clear()
-            try:
-                with cache_override:
-                    return_code = handler(
-                        extract_result.target,
-                        environment,
-                        install_prefix,
-                        runtime_prefix,
+            extract_result = self._extract(
+                target=target,
+                require_sha256=require_sha256,
+                package_cache=private_cache,
+                dry_run=dry_run,
+                allow_large_archive=allow_large_archive,
+                validate_workspace=validate_workspace,
+                validate_install=validate_install,
+            )
+
+            if dry_run:
+                return_code = 0
+            else:
+                handler = install_handler or self.install_from_lockfile
+                use_private_cache = bool(
+                    private_cache is not None and extract_result.primed_packages
+                )
+                cache_override = (
+                    conda_context._override(
+                        "_pkgs_dirs",
+                        (str(private_cache),),
                     )
-            finally:
+                    if use_private_cache
+                    else nullcontext()
+                )
+                copy_override = (
+                    conda_context._override("always_copy", True)
+                    if use_private_cache
+                    else nullcontext()
+                )
                 PackageCacheData.clear()
+                try:
+                    with cache_override, copy_override:
+                        return_code = handler(
+                            extract_result.target,
+                            environment,
+                            install_prefix,
+                            runtime_prefix,
+                        )
+                finally:
+                    PackageCacheData.clear()
 
         prefix_matches: tuple[Path, ...] = ()
         prefix_matches_truncated = False
@@ -1892,7 +2118,12 @@ class WorkspaceArchive:
         return self.path
 
     @staticmethod
-    def snapshot_archive(source: Path, destination: Path) -> None:
+    def snapshot_archive(
+        source: Path,
+        destination: Path,
+        *,
+        allow_large_archive: bool = False,
+    ) -> None:
         """Copy one no-follow archive generation into private staging."""
         try:
             with atomic_binary_writer(
@@ -1904,11 +2135,25 @@ class WorkspaceArchive:
                     label="Archive",
                     maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
                 ) as input_stream:
-                    shutil.copyfileobj(
-                        input_stream,
-                        output_stream,
-                        length=1024 * 1024,
-                    )
+                    source_size = os.fstat(input_stream.fileno()).st_size
+                    if (
+                        not allow_large_archive
+                        and source_size > DEFAULT_ARCHIVE_EXTRACT_BYTES
+                    ):
+                        raise ArchiveError(
+                            "Archive exceeds the default extraction limit of"
+                            f" {DEFAULT_ARCHIVE_EXTRACT_BYTES:,} raw bytes."
+                        )
+                    require_archive_staging_space(destination.parent, source_size)
+                    remaining = source_size
+                    while remaining:
+                        chunk = input_stream.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            raise ArchiveError("Archive changed during snapshot.")
+                        output_stream.write(chunk)
+                        remaining -= len(chunk)
+                    if input_stream.read(1):
+                        raise ArchiveError("Archive changed during snapshot.")
         except (OSError, ValueError) as exc:
             raise ArchiveError(
                 f"Archive cannot be snapshotted safely: {source}"
@@ -2066,25 +2311,141 @@ def is_git_repo(root: Path) -> bool:
         return False
 
 
-def git_tracked_files(root: Path) -> list[Path]:
-    """Return absolute paths for all git-tracked files under *root*."""
-    result = subprocess.run(
+def git_tracked_files(root: Path) -> Generator[Path, None, None]:
+    """Yield existing git-tracked files without buffering the full index output."""
+    process = subprocess.Popen(
         ["git", "ls-files", "-z"],
         cwd=root,
-        capture_output=True,
-        text=True,
-        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
     )
-    paths = []
-    for entry in result.stdout.split("\0"):
-        if entry:
-            full = root / entry
-            if full.is_file():
-                paths.append(full)
-    return paths
+    try:
+        assert process.stdout is not None
+        pending = b""
+        entries_seen = 0
+        while chunk := process.stdout.read(64 * 1024):
+            entries = (pending + chunk).split(b"\0")
+            pending = entries.pop()
+            if len(pending) > MAX_ARCHIVE_PATH_BYTES:
+                raise ArchiveError("A tracked archive candidate path is too long.")
+            for entry in entries:
+                if not entry:
+                    continue
+                entries_seen += 1
+                if entries_seen > MAX_ARCHIVE_CANDIDATES:
+                    raise ArchiveError(
+                        "Archive selection exceeds the maximum candidate count"
+                        f" of {MAX_ARCHIVE_CANDIDATES:,}."
+                    )
+                if len(entry) > MAX_ARCHIVE_PATH_BYTES:
+                    raise ArchiveError("A tracked archive candidate path is too long.")
+                path = root / os.fsdecode(entry)
+                if path.is_file():
+                    yield path
+        if pending or process.wait() != 0:
+            raise ArchiveError("Could not enumerate tracked archive files.")
+    finally:
+        try:
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            process.wait()
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
 
 
-def is_excluded_by_builtins(rel_path: str) -> bool:
+@dataclass
+class _ArchiveSelectionBudget:
+    """Bound candidate scans and glob comparisons before archive validation."""
+
+    candidates: int = 0
+    pattern_matches: int = 0
+    user_pattern_matches: int = 0
+    pattern_characters: int = 0
+
+    def reserve_candidate(self) -> None:
+        self.candidates += 1
+        if self.candidates > MAX_ARCHIVE_CANDIDATES:
+            raise ArchiveError(
+                "Archive selection exceeds the maximum candidate count"
+                f" of {MAX_ARCHIVE_CANDIDATES:,}."
+            )
+
+    def filesystem_candidates(self, root: Path) -> Iterator[Path]:
+        """Charge filesystem entries without entering builtin-excluded trees."""
+        for directory, directory_names, file_names in os.walk(root, followlinks=False):
+            parent = Path(directory)
+            retained_directories = []
+            for name in directory_names:
+                path = parent / name
+                relative = path.relative_to(root).as_posix()
+                normalized = "/".join(portable_path_key(PurePosixPath(relative)))
+                if normalized in BUILTIN_EXCLUDE_DIRS:
+                    continue
+                retained_directories.append(name)
+                self.reserve_candidate()
+                yield path
+            directory_names[:] = retained_directories
+            for name in file_names:
+                self.reserve_candidate()
+                yield parent / name
+
+    def matches_patterns(
+        self,
+        rel_path: str,
+        patterns: tuple[str, ...],
+        *,
+        user_patterns: bool = False,
+    ) -> bool:
+        """Match a path or ancestor while charging each glob comparison."""
+        if not patterns:
+            return False
+        ancestors = []
+        parent = ""
+        for component in rel_path.split("/")[:-1]:
+            parent = f"{parent}/{component}" if parent else component
+            ancestors.append(parent)
+        paths = (rel_path, *ancestors)
+        for pattern in patterns:
+            for path in paths:
+                if self.pattern_matches >= MAX_ARCHIVE_PATTERN_MATCHES:
+                    raise ArchiveError(
+                        "Archive selection exceeds the maximum pattern"
+                        f" comparison count of {MAX_ARCHIVE_PATTERN_MATCHES:,}."
+                    )
+                if (
+                    user_patterns
+                    and self.user_pattern_matches >= MAX_ARCHIVE_USER_PATTERN_MATCHES
+                ):
+                    raise ArchiveError(
+                        "Archive selection exceeds the maximum user pattern"
+                        f" comparison count of {MAX_ARCHIVE_USER_PATTERN_MATCHES:,}."
+                    )
+                comparison_characters = len(path) + len(pattern)
+                if (
+                    self.pattern_characters + comparison_characters
+                    > MAX_ARCHIVE_PATTERN_CHARACTERS
+                ):
+                    raise ArchiveError(
+                        "Archive selection exceeds the maximum pattern"
+                        f" character work of {MAX_ARCHIVE_PATTERN_CHARACTERS:,}."
+                    )
+                self.pattern_matches += 1
+                if user_patterns:
+                    self.user_pattern_matches += 1
+                self.pattern_characters += comparison_characters
+                if fnmatch.fnmatch(path, pattern):
+                    return True
+        return False
+
+
+def is_excluded_by_builtins(
+    rel_path: str,
+    budget: _ArchiveSelectionBudget,
+) -> bool:
     """Return True if *rel_path* falls under a builtin-excluded directory."""
     normalized_path = "/".join(portable_path_key(PurePosixPath(rel_path)))
     for excl in BUILTIN_EXCLUDE_DIRS:
@@ -2096,25 +2457,12 @@ def is_excluded_by_builtins(rel_path: str) -> bool:
     normalized_exceptions = tuple(
         pattern.casefold() for pattern in BUILTIN_SENSITIVE_EXCLUDE_EXCEPTIONS
     )
-    if matches_patterns(normalized_path, normalized_exceptions):
+    if budget.matches_patterns(normalized_path, normalized_exceptions):
         return False
     normalized_patterns = tuple(
         pattern.casefold() for pattern in BUILTIN_SENSITIVE_EXCLUDE_PATTERNS
     )
-    return matches_patterns(normalized_path, normalized_patterns)
-
-
-def matches_patterns(rel_path: str, patterns: tuple[str, ...]) -> bool:
-    """Return True if *rel_path* or any parent matches one glob pattern."""
-    for pattern in patterns:
-        if fnmatch.fnmatch(rel_path, pattern):
-            return True
-        parts = rel_path.split("/")
-        for i in range(len(parts)):
-            partial = "/".join(parts[: i + 1])
-            if fnmatch.fnmatch(partial, pattern):
-                return True
-    return False
+    return budget.matches_patterns(normalized_path, normalized_patterns)
 
 
 def collect_archive_files(
@@ -2130,25 +2478,65 @@ def collect_archive_files(
     when they are untracked or not written yet. Builtin and user filters
     apply to every candidate.
     """
-    if is_git_repo(root):
-        candidates = git_tracked_files(root)
-    else:
-        candidates = [p for p in root.rglob("*") if p.is_file()]
-    candidates.extend(extra_files)
+    pattern_count = len(archive_config.include) + len(archive_config.exclude)
+    if pattern_count > MAX_ARCHIVE_SELECTION_PATTERNS:
+        raise ArchiveError(
+            "Archive selection exceeds the maximum number of patterns"
+            f" of {MAX_ARCHIVE_SELECTION_PATTERNS:,}."
+        )
+    for pattern in chain(archive_config.include, archive_config.exclude):
+        if len(pattern) > MAX_ARCHIVE_PATH_BYTES or (
+            len(pattern.encode("utf-8")) > MAX_ARCHIVE_PATH_BYTES
+        ):
+            raise ArchiveError("An archive selection pattern is too long.")
 
+    budget = _ArchiveSelectionBudget()
     result: list[Path] = []
-    for path in set(candidates):
-        try:
-            rel = path.relative_to(root).as_posix()
-        except ValueError:
-            continue
-        if is_excluded_by_builtins(rel):
-            continue
-        if archive_config.include and not matches_patterns(rel, archive_config.include):
-            continue
-        if matches_patterns(rel, archive_config.exclude):
-            continue
-        result.append(path)
+    seen: set[Path] = set()
+    git_candidates = git_tracked_files(root) if is_git_repo(root) else None
+    candidates = (
+        git_candidates
+        if git_candidates is not None
+        else budget.filesystem_candidates(root)
+    )
+    try:
+        for path, is_extra in chain(
+            ((path, False) for path in candidates),
+            ((path, True) for path in extra_files),
+        ):
+            if git_candidates is not None or is_extra:
+                budget.reserve_candidate()
+            if not is_extra and not path.is_file():
+                continue
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                rel = path.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            if len(rel) > MAX_ARCHIVE_PATH_BYTES or (
+                len(rel.encode("utf-8")) > MAX_ARCHIVE_PATH_BYTES
+            ):
+                raise ArchiveError("An archive candidate path is too long.")
+            if len(PurePosixPath(rel).parts) > MAX_ARCHIVE_PATH_DEPTH:
+                raise ArchiveError("An archive candidate path is too deep.")
+            if is_excluded_by_builtins(rel, budget):
+                continue
+            if archive_config.include and not budget.matches_patterns(
+                rel, archive_config.include, user_patterns=True
+            ):
+                continue
+            if budget.matches_patterns(rel, archive_config.exclude, user_patterns=True):
+                continue
+            if len(result) >= MAX_ARCHIVE_MEMBERS:
+                raise ArchiveError(
+                    f"Archive contains more than {MAX_ARCHIVE_MEMBERS:,} members."
+                )
+            result.append(path)
+    finally:
+        if git_candidates is not None:
+            git_candidates.close()
 
     return sorted(result)
 
@@ -2728,8 +3116,10 @@ def validate_tar_member(
 def validate_tar_members(
     members: list[tarfile.TarInfo],
     target: Path | None = None,
-) -> None:
-    """Validate the paths and extraction topology of all archive *members*."""
+    *,
+    usage: _ArchiveMemberUsage | None = None,
+) -> int:
+    """Validate all archive *members* and return their maximum extracted bytes."""
     if len(members) > MAX_ARCHIVE_MEMBERS:
         raise ArchiveError(
             f"Archive contains more than {MAX_ARCHIVE_MEMBERS:,} members."
@@ -2738,6 +3128,7 @@ def validate_tar_members(
     expanded_bytes = 0
     path_components = 0
     children: list[dict[str, int]] = [{}]
+    filesystem_children: list[dict[str, int]] = [{}]
     node_members: dict[int, tarfile.TarInfo] = {}
     first_descendants: dict[int, tarfile.TarInfo] = {}
     members_by_path: dict[
@@ -2757,8 +3148,9 @@ def validate_tar_members(
             )
 
         node = 0
+        filesystem_node = 0
         ancestors: list[int] = []
-        for part in path_key:
+        for part, filesystem_part in zip(path_key, member_path.parts, strict=True):
             parent_member = node_members.get(node)
             if parent_member is not None and not parent_member.isdir():
                 raise ArchiveError(
@@ -2772,6 +3164,17 @@ def validate_tar_members(
                 children[node][part] = child
                 children.append({})
             node = child
+            filesystem_child = filesystem_children[filesystem_node].get(filesystem_part)
+            if filesystem_child is None:
+                if len(filesystem_children) > MAX_ARCHIVE_FILESYSTEM_ENTRIES:
+                    raise ArchiveError(
+                        "Archive member paths require more than"
+                        f" {MAX_ARCHIVE_FILESYSTEM_ENTRIES:,} filesystem entries."
+                    )
+                filesystem_child = len(filesystem_children)
+                filesystem_children[filesystem_node][filesystem_part] = filesystem_child
+                filesystem_children.append({})
+            filesystem_node = filesystem_child
 
         if node in node_members:
             raise ArchiveError(f"Archive contains duplicate member: {member.name}")
@@ -2831,6 +3234,9 @@ def validate_tar_members(
                     "Archive regular files and link fallbacks expand beyond the"
                     f" maximum size of {MAX_ARCHIVE_EXPANDED_BYTES:,} bytes."
                 )
+    if usage is not None:
+        usage.filesystem_entries = len(filesystem_children) - 1
+    return expanded_bytes
 
 
 def validate_tar_member_limits(
@@ -2882,16 +3288,31 @@ def validate_tar_member_limits(
     return expanded_bytes
 
 
-def read_tar_members(tf: tarfile.TarFile) -> list[tarfile.TarInfo]:
+def read_tar_members(
+    tf: tarfile.TarFile,
+    *,
+    max_expanded_bytes: int | None = None,
+) -> list[tarfile.TarInfo]:
     """Read archive members while enforcing resource limits before advancing."""
     members: list[tarfile.TarInfo] = []
     expanded_bytes = 0
+    limit = (
+        MAX_ARCHIVE_EXPANDED_BYTES if max_expanded_bytes is None else max_expanded_bytes
+    )
     while member := tf.next():
         if len(members) >= MAX_ARCHIVE_MEMBERS:
             raise ArchiveError(
                 f"Archive contains more than {MAX_ARCHIVE_MEMBERS:,} members."
             )
+        if member.isreg():
+            raw_size = getattr(member, "_workspace_raw_size", member.size)
+            expanded_bytes += max(0, raw_size - member.size)
         expanded_bytes = validate_tar_member_limits(member, expanded_bytes)
+        if expanded_bytes > limit:
+            raise ArchiveError(
+                f"Archive exceeds the default extraction limit of {limit:,}"
+                " expanded bytes."
+            )
         members.append(member)
     return members
 
@@ -2972,13 +3393,21 @@ def open_stable_regular_file(
 
 
 @contextmanager
-def open_tar(archive_path: Path) -> Iterator[tarfile.TarFile]:
+def open_tar(
+    archive_path: Path,
+    *,
+    max_raw_bytes: int | None = None,
+) -> Iterator[tarfile.TarFile]:
     """Open one stable archive generation without following filesystem links."""
     compression = detect_compression(archive_path)
     with open_stable_regular_file(
         archive_path,
         label="Archive",
-        maximum_bytes=MAX_ARCHIVE_RAW_BYTES,
+        maximum_bytes=(
+            MAX_ARCHIVE_RAW_BYTES
+            if max_raw_bytes is None
+            else min(MAX_ARCHIVE_RAW_BYTES, max_raw_bytes)
+        ),
     ) as archive_stream:
         if compression == "zst" and not tarfile_supports_zstd():
             with zstd_module().open(archive_stream, "rb") as compressed:
@@ -3213,11 +3642,52 @@ def extract_tar_members(
             raise ArchiveError("Archive extraction staging changed while extracting.")
 
 
-def extract_archive(archive_path: Path, target: Path) -> Path:
+def require_archive_staging_space(
+    directory: Path,
+    required_bytes: int,
+    *,
+    filesystem_entries: int = 0,
+) -> None:
+    """Check free space and available inodes before archive staging writes."""
+    if filesystem_entries > MAX_ARCHIVE_FILESYSTEM_ENTRIES:
+        raise ArchiveError(
+            "Archive staging requires more than"
+            f" {MAX_ARCHIVE_FILESYSTEM_ENTRIES:,} filesystem entries."
+        )
+    try:
+        free_bytes = shutil.disk_usage(directory).free
+    except OSError as exc:
+        raise ArchiveError(
+            "Cannot determine available space for archive staging."
+        ) from exc
+    required_bytes += filesystem_entries * ARCHIVE_STAGING_ENTRY_BYTES
+    if required_bytes + ARCHIVE_STAGING_RESERVE_BYTES >= free_bytes:
+        raise ArchiveError("Archive staging needs more free space than is available.")
+    statvfs = getattr(os, "statvfs", None)
+    if filesystem_entries and statvfs is not None:
+        try:
+            filesystem = statvfs(directory)
+        except OSError as exc:
+            raise ArchiveError(
+                "Cannot determine available filesystem entries for archive staging."
+            ) from exc
+        if filesystem.f_files and filesystem_entries >= filesystem.f_favail:
+            raise ArchiveError(
+                "Archive staging needs more free filesystem entries than are available."
+            )
+
+
+def extract_archive(
+    archive_path: Path,
+    target: Path,
+    *,
+    allow_large_archive: bool = False,
+) -> Path:
     """Extract *archive_path* into *target* with path traversal protection.
 
     Every member is validated before extraction. Ownership and unsafe mode
-    bits are discarded on every supported Python version.
+    bits are discarded on every supported Python version. Archives larger than
+    the default expanded-size limit require explicit trust from the caller.
     """
     ensure_extract_target_empty(target)
     target = target.expanduser().absolute().resolve(strict=False)
@@ -3231,9 +3701,36 @@ def extract_archive(archive_path: Path, target: Path) -> Path:
         staged = Path(temporary) / "workspace"
         staged.mkdir()
         staged_identity = staged.lstat()
-        with open_tar(archive_path) as tf:
-            members = read_tar_members(tf)
-            validate_tar_members(members, target)
+        with open_tar(
+            archive_path,
+            max_raw_bytes=(
+                MAX_ARCHIVE_RAW_BYTES
+                if allow_large_archive
+                else DEFAULT_ARCHIVE_EXTRACT_BYTES
+            ),
+        ) as tf:
+            limit = (
+                MAX_ARCHIVE_EXPANDED_BYTES
+                if allow_large_archive
+                else DEFAULT_ARCHIVE_EXTRACT_BYTES
+            )
+            members = read_tar_members(tf, max_expanded_bytes=limit)
+            usage = _ArchiveMemberUsage()
+            expanded_bytes = validate_tar_members(members, target, usage=usage)
+            if expanded_bytes > limit:
+                raise ArchiveError(
+                    "Archive exceeds the default extraction limit of"
+                    f" {limit:,} expanded bytes.",
+                    hints=[
+                        "For a trusted archive, pass --allow-large-archive or set"
+                        " allow_large_archive=True."
+                    ],
+                )
+            require_archive_staging_space(
+                staged,
+                expanded_bytes,
+                filesystem_entries=usage.filesystem_entries,
+            )
             if not hasattr(tarfile, "data_filter"):
                 raise ArchiveError(
                     "Safe archive extraction requires Python's tar data filter.",
@@ -3515,11 +4012,20 @@ def verify_package_hashes(
             )
 
 
-def inspect_archive(archive_path: Path) -> dict[str, object]:
+def inspect_archive(
+    archive_path: Path,
+    *,
+    max_expanded_bytes: int | None = None,
+) -> dict[str, object]:
     """Validate archive members and return metadata without extracting."""
     with open_tar(archive_path) as tf:
-        members = read_tar_members(tf)
-        validate_tar_members(members)
+        members = read_tar_members(tf, max_expanded_bytes=max_expanded_bytes)
+        expanded_bytes = validate_tar_members(members)
+        if max_expanded_bytes is not None and expanded_bytes > max_expanded_bytes:
+            raise ArchiveError(
+                "Archive exceeds the default extraction limit of"
+                f" {max_expanded_bytes:,} expanded bytes."
+            )
     manifest_members = [
         member
         for member in members

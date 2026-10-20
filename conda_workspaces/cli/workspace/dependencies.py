@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import tomlkit
 from conda.base.constants import KNOWN_SUBDIRS
 from conda.utils import quote_for_shell
+from tomlkit.container import OutOfOrderTableProxy
 from tomlkit.items import InlineTable, Table
 
 from ...exceptions import CondaWorkspacesError, PlatformError
@@ -119,8 +120,8 @@ class DependencyLocation:
 
     def find_table(
         self,
-        source: tomlkit.TOMLDocument | Table | InlineTable,
-    ) -> tomlkit.TOMLDocument | Table | InlineTable | None:
+        source: tomlkit.TOMLDocument | Table | InlineTable | OutOfOrderTableProxy,
+    ) -> tomlkit.TOMLDocument | Table | InlineTable | OutOfOrderTableProxy | None:
         """Look up this location without changing the document."""
         current: Any = source
         for key in self.path:
@@ -129,7 +130,9 @@ class DependencyLocation:
             current = current.get(key)
             if current is None:
                 return None
-        if isinstance(current, (tomlkit.TOMLDocument, Table, InlineTable)):
+        if isinstance(
+            current, (tomlkit.TOMLDocument, Table, InlineTable, OutOfOrderTableProxy)
+        ):
             return current
         return None
 
@@ -151,14 +154,14 @@ class DependencyLocation:
 
     def ensure_table(
         self,
-        source: tomlkit.TOMLDocument | Table | InlineTable,
-    ) -> tuple[tomlkit.TOMLDocument | Table | InlineTable, bool]:
+        source: tomlkit.TOMLDocument | Table | InlineTable | OutOfOrderTableProxy,
+    ) -> tuple[tomlkit.TOMLDocument | Table | InlineTable | OutOfOrderTableProxy, bool]:
         """Return this location, creating and normalizing its owner as needed."""
         created_environment = False
         if self.environment is not None:
             environments = ensure_child_table(source, "environments")
             definition = environments.get(self.environment)
-            if isinstance(definition, (Table, InlineTable)):
+            if isinstance(definition, (Table, InlineTable, OutOfOrderTableProxy)):
                 owner = definition
             else:
                 owner = (
@@ -174,7 +177,7 @@ class DependencyLocation:
         elif self.feature is not None:
             features = ensure_child_table(source, "feature")
             definition = features.get(self.feature)
-            if isinstance(definition, (Table, InlineTable)):
+            if isinstance(definition, (Table, InlineTable, OutOfOrderTableProxy)):
                 owner = definition
             else:
                 owner = (
@@ -191,7 +194,7 @@ class DependencyLocation:
 
         targets = ensure_child_table(owner, "target")
         definition = targets.get(self.platform)
-        if isinstance(definition, (Table, InlineTable)):
+        if isinstance(definition, (Table, InlineTable, OutOfOrderTableProxy)):
             return definition, created_environment
         target = (
             tomlkit.inline_table()
@@ -204,7 +207,7 @@ class DependencyLocation:
     def validate_platform(
         self,
         config: WorkspaceConfig,
-        source: tomlkit.TOMLDocument | Table | InlineTable,
+        source: tomlkit.TOMLDocument | Table | InlineTable | OutOfOrderTableProxy,
         *,
         namespace: tuple[str, ...] = (),
         allow_existing: bool = False,
@@ -328,22 +331,27 @@ class DependencyLocation:
 
     def has_declared_platform(
         self,
-        source: tomlkit.TOMLDocument | Table | InlineTable,
+        source: tomlkit.TOMLDocument | Table | InlineTable | OutOfOrderTableProxy,
     ) -> bool:
         """Return whether this platform has a target table at any location."""
         if self.platform is None:
             return False
-        owners: list[tomlkit.TOMLDocument | Table | InlineTable] = [source]
+        owners: list[
+            tomlkit.TOMLDocument | Table | InlineTable | OutOfOrderTableProxy
+        ] = [source]
         for key in ("feature", "environments"):
             container = source.get(key)
-            if isinstance(container, (Table, InlineTable)):
+            if isinstance(container, (Table, InlineTable, OutOfOrderTableProxy)):
                 owners.extend(
                     owner
                     for owner in container.values()
-                    if isinstance(owner, (Table, InlineTable))
+                    if isinstance(owner, (Table, InlineTable, OutOfOrderTableProxy))
                 )
         return any(
-            isinstance(targets := owner.get("target"), (Table, InlineTable))
+            isinstance(
+                targets := owner.get("target"),
+                (Table, InlineTable, OutOfOrderTableProxy),
+            )
             and self.platform in targets
             for owner in owners
         )
@@ -358,12 +366,12 @@ class DependencyDeclaration:
 
 
 def ensure_child_table(
-    source: tomlkit.TOMLDocument | Table | InlineTable,
+    source: tomlkit.TOMLDocument | Table | InlineTable | OutOfOrderTableProxy,
     key: str,
-) -> Table | InlineTable:
+) -> Table | InlineTable | OutOfOrderTableProxy:
     """Return a child table using the representation required by its parent."""
     child = source.get(key)
-    if isinstance(child, (Table, InlineTable)):
+    if isinstance(child, (Table, InlineTable, OutOfOrderTableProxy)):
         return child
     child = (
         tomlkit.inline_table() if isinstance(source, InlineTable) else tomlkit.table()
@@ -377,7 +385,10 @@ def workspace_toml_source(
     manifest_path: Path,
     *,
     create: bool,
-) -> tuple[tomlkit.TOMLDocument | Table | InlineTable | None, tuple[str, ...]]:
+) -> tuple[
+    tomlkit.TOMLDocument | Table | InlineTable | OutOfOrderTableProxy | None,
+    tuple[str, ...],
+]:
     """Return the workspace namespace selected by *manifest_path*."""
     if manifest_path.name != "pyproject.toml":
         return document, ()
@@ -385,10 +396,14 @@ def workspace_toml_source(
     if tool is None:
         return None, ()
     conda = tool.get("conda")
-    if isinstance(conda, (Table, InlineTable)) and conda.get("workspace"):
+    if isinstance(conda, Table | InlineTable | OutOfOrderTableProxy) and conda.get(
+        "workspace"
+    ):
         return conda, ("tool", "conda")
     pixi = tool.get("pixi")
-    if isinstance(pixi, (Table, InlineTable)) and pixi.get("workspace"):
+    if isinstance(pixi, Table | InlineTable | OutOfOrderTableProxy) and pixi.get(
+        "workspace"
+    ):
         return pixi, ("tool", "pixi")
     if create:
         return ensure_child_table(tool, "conda"), ("tool", "conda")
@@ -396,11 +411,11 @@ def workspace_toml_source(
 
 
 def reject_legacy_default_feature(
-    source: tomlkit.TOMLDocument | Table | InlineTable,
+    source: tomlkit.TOMLDocument | Table | InlineTable | OutOfOrderTableProxy,
 ) -> None:
     """Require manual migration before mutating a legacy default feature."""
     features = source.get("feature")
-    if not isinstance(features, (Table, InlineTable)):
+    if not isinstance(features, (Table, InlineTable, OutOfOrderTableProxy)):
         return
     if Feature.DEFAULT_NAME not in features:
         return
@@ -425,40 +440,40 @@ def reject_legacy_default_feature(
 
 
 def dependency_declarations(
-    source: tomlkit.TOMLDocument | Table | InlineTable,
+    source: tomlkit.TOMLDocument | Table | InlineTable | OutOfOrderTableProxy,
     name: str,
 ) -> list[DependencyDeclaration]:
     """Return all membership declarations named *name*, excluding the shared pool."""
     locations = [DependencyLocation()]
     targets = source.get("target")
-    if isinstance(targets, (Table, InlineTable)):
+    if isinstance(targets, (Table, InlineTable, OutOfOrderTableProxy)):
         locations.extend(
             DependencyLocation(platform=platform) for platform in sorted(targets)
         )
 
     features = source.get("feature")
-    if isinstance(features, (Table, InlineTable)):
+    if isinstance(features, (Table, InlineTable, OutOfOrderTableProxy)):
         for feature in sorted(features):
             owner = features[feature]
             locations.append(DependencyLocation(feature=feature))
-            if not isinstance(owner, (Table, InlineTable)):
+            if not isinstance(owner, (Table, InlineTable, OutOfOrderTableProxy)):
                 continue
             targets = owner.get("target")
-            if isinstance(targets, (Table, InlineTable)):
+            if isinstance(targets, (Table, InlineTable, OutOfOrderTableProxy)):
                 locations.extend(
                     DependencyLocation(feature=feature, platform=platform)
                     for platform in sorted(targets)
                 )
 
     environments = source.get("environments")
-    if isinstance(environments, (Table, InlineTable)):
+    if isinstance(environments, (Table, InlineTable, OutOfOrderTableProxy)):
         for environment in sorted(environments):
             owner = environments[environment]
             locations.append(DependencyLocation(environment=environment))
-            if not isinstance(owner, (Table, InlineTable)):
+            if not isinstance(owner, (Table, InlineTable, OutOfOrderTableProxy)):
                 continue
             targets = owner.get("target")
-            if isinstance(targets, (Table, InlineTable)):
+            if isinstance(targets, (Table, InlineTable, OutOfOrderTableProxy)):
                 locations.extend(
                     DependencyLocation(environment=environment, platform=platform)
                     for platform in sorted(targets)
@@ -476,7 +491,7 @@ def dependency_declarations(
 
 
 def effective_dependency_location(
-    source: tomlkit.TOMLDocument | Table | InlineTable,
+    source: tomlkit.TOMLDocument | Table | InlineTable | OutOfOrderTableProxy,
     config: WorkspaceConfig,
     environment: Environment,
     platform: str,
