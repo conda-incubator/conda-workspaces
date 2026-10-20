@@ -14,6 +14,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/).
   be removed. Lock updates retain existing solutions and solve newly required
   targets without changing installed environments. (#200)
 
+### Changed
+
+- Updated CI and release workflows to `prefix-dev/setup-pixi` 0.11.0,
+  `actions/upload-artifact` 7.0.2, and `actions/download-artifact` 8.0.2. (#202)
+
 ### Fixed
 
 - Apply the total lockfile document limit to aggregate target metadata, so valid
