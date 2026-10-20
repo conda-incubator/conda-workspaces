@@ -13,7 +13,7 @@ from conda.base.context import context as conda_context
 from packaging.version import InvalidVersion, Version
 from rich.console import Console
 
-from ...exceptions import CondaWorkspacesError, LockfileNotFoundError
+from ...exceptions import CondaWorkspacesError
 from ...lockfile import (
     CondaLockLoader,
     check_lockfile_satisfiability,
@@ -64,7 +64,10 @@ def execute_ship(args: argparse.Namespace, *, console: Console | None = None) ->
     manifest = Path(config.manifest_path)
     lock = lockfile_path(ctx)
     if not lock.is_file():
-        raise LockfileNotFoundError(args.environment, lock)
+        raise CondaWorkspacesError(
+            f"No conda.lock found at {lock}.",
+            hints=["Run `conda workspace lock` before building the launcher."],
+        )
     try:
         data = load_lockfile_path(lock)
         current = check_lockfile_satisfiability(
@@ -153,6 +156,9 @@ def execute_ship(args: argparse.Namespace, *, console: Console | None = None) ->
         )
     else:
         status.message(
-            console, "Would write" if args.dry_run else "Wrote", "launcher", str(output)
+            console,
+            "Would write" if args.dry_run else "Wrote",
+            f"outputs to {output}",
+            "launcher",
         )
     return 0

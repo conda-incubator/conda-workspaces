@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from conda.base.context import context as conda_context
 from conda.base.context import reset_context
 from conda.models.dist import Dist
 from conda.models.records import PackageRecord
@@ -21,6 +22,7 @@ from conda_workspaces.cli.workspace import ship
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
+    from conda_workspaces.context import WorkspaceContext
     from conda_workspaces.models import WorkspaceConfig
 
 
@@ -89,6 +91,50 @@ def record_ship_builder(
         return calls
 
     return record
+
+
+@pytest.fixture
+def native_ship_workspace(
+    image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
+) -> Path:
+    """Create complete package metadata for a native build without downloads."""
+    platform = conda_context.subdir
+    config, ctx = image_workspace(
+        platforms=(platform,),
+        manifest_extra=(
+            '\n[dependencies]\npython = "3.12.*"\n'
+            '\n[tool.conda-ship]\nruntime-name = "ship-smoke"\n'
+            'runtime-version = "0.1.0"\ndelegate-executable = "python"\n'
+        ),
+    )
+    manifest = Path(config.manifest_path)
+    manifest.write_text(
+        manifest.read_text().replace("channels = []", 'channels = ["conda-forge"]'),
+        encoding="utf-8",
+    )
+    url = (
+        f"https://conda.anaconda.org/conda-forge/{platform}/python-3.12.0-h123_0.conda"
+    )
+    lock = ctx.root / "conda.lock"
+    data = json.loads(lock.read_text())
+    data["environments"]["default"]["channels"] = [
+        {"url": "https://conda.anaconda.org/conda-forge"}
+    ]
+    data["environments"]["default"]["packages"][platform] = [{"conda": url}]
+    data["packages"] = [
+        {
+            "conda": url,
+            "name": "python",
+            "version": "3.12.0",
+            "build": "h123_0",
+            "build_number": 0,
+            "subdir": platform,
+            "sha256": "a" * 64,
+            "depends": [],
+        }
+    ]
+    lock.write_text(json.dumps(data), encoding="utf-8")
+    return ctx.root
 
 
 @pytest.fixture

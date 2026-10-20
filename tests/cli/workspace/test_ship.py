@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from conda.base.context import context as conda_context
 from conda.base.context import reset_context
 
 from conda_workspaces.cli.main import execute_workspace, generate_workspace_parser
@@ -52,7 +53,7 @@ def test_ship_requires_explicit_selection(missing: str) -> None:
 @pytest.mark.parametrize("layout", [None, "online", "external", "embedded"], ids=str)
 @pytest.mark.parametrize("dry_run", [False, True], ids=["build", "preview"])
 @pytest.mark.parametrize("json_output", [False, True], ids=["human", "json"])
-def test_ship_delegates_without_solving_or_changing_workspace(
+def test_ship_delegates_without_solving_or_changing_inputs(
     image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
     record_ship_builder: Callable[..., list[list[str]]],
     snapshot_tree: SnapshotTree,
@@ -130,7 +131,62 @@ def test_ship_delegates_without_solving_or_changing_workspace(
             "dry_run": dry_run,
         }
     else:
-        assert "launcher" in captured.out
+        verb = "Would write" if dry_run else "Wrote"
+        assert f"{verb} launcher outputs to" in captured.out
+
+
+@pytest.mark.usefixtures("reset_conda_context")
+def test_ship_builds_with_installed_conda_ship(
+    native_ship_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    if sys.version_info < (3, 11):
+        pytest.skip("conda-ship requires Python 3.11 or later")
+    if conda_context.subdir == "linux-aarch64":
+        pytest.skip("conda-forge does not provide conda-ship for linux-aarch64")
+    monkeypatch.delenv("CONDA_SHIP_EXECUTABLE", raising=False)
+    monkeypatch.delenv("CONDA_SHIP_TEMPLATE", raising=False)
+    root = native_ship_workspace
+    manifest = root / "conda.toml"
+    lock = root / "conda.lock"
+    before = manifest.read_bytes(), lock.read_bytes()
+    output = root / "dist with spaces"
+    args = generate_workspace_parser().parse_args(
+        [
+            "--file",
+            str(manifest),
+            "ship",
+            "-e",
+            "default",
+            "--platform",
+            conda_context.subdir,
+            "-o",
+            str(output),
+            "--artifact-layout",
+            "online",
+            "--json",
+        ]
+    )
+
+    assert execute_workspace(args) == 0
+
+    assert json.loads(capfd.readouterr().out) == {
+        "success": True,
+        "environment": "default",
+        "platform": conda_context.subdir,
+        "output": str(output),
+        "dry_run": False,
+    }
+    assert (manifest.read_bytes(), lock.read_bytes()) == before
+    executable = "ship-smoke.exe" if sys.platform == "win32" else "ship-smoke"
+    assert (output / executable).is_file()
+    for suffix in ("info.json", "sha256", "runtime.lock", "packages.txt", "cdx.json"):
+        assert (output / f"ship-smoke.{suffix}").is_file()
+    info = json.loads((output / "ship-smoke.info.json").read_text())
+    assert info["platform"] == conda_context.subdir
+    assert info["layout"] == "online"
+    assert info["package_count"] == 1
 
 
 @pytest.mark.usefixtures("reset_conda_context")
@@ -295,8 +351,11 @@ def test_ship_rejects_invalid_locks_before_running_builder(
         args.environment = "unknown"
     elif problem == "unsupported-platform":
         args.platform = "osx-64"
-    with pytest.raises(CondaWorkspacesError):
+    with pytest.raises(CondaWorkspacesError) as exc:
         execute_ship(args)
+    if problem == "missing":
+        assert "conda workspace lock" in str(exc.value)
+        assert "conda workspace install" not in str(exc.value)
     assert calls == []
     assert snapshot_tree(ctx.root) == before
 

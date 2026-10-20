@@ -150,10 +150,13 @@ manifest's layout. Runtime naming and version settings remain in
 `[tool.conda-ship]`. The global `--file` option selects the exact source manifest.
 
 `--dry-run` previews the build without downloading packages or writing
-artifacts. `--json` emits a structured result on stdout while build diagnostics
-go to stderr. Named platform variants and local path, Git, or URL PyPI
-dependencies are unsupported. No project source files or manifest tasks are
-copied into the launcher.
+artifacts. `--json` emits one result on stdout with `success`, `environment`,
+`platform`, `output`, and `dry_run`. `output` is the absolute output directory,
+and `dry_run` indicates whether this was a preview. The detailed builder plan
+and build diagnostics go to stderr. A failed builder preserves its exit code
+and emits no success result. Named platform variants and local path, Git, or
+URL PyPI dependencies are unsupported. No project source files or manifest
+tasks are copied into the launcher.
 
 The launcher installs its managed environment on first use. Online artifacts
 download packages then, while external and embedded bundles download them
