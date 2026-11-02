@@ -18,6 +18,7 @@ from conda_workspaces.manifests import (
     detect_task_file,
     detect_workspace_file,
     find_parser,
+    walk_manifests,
 )
 from conda_workspaces.manifests.pixi_toml import PixiTomlParser
 from conda_workspaces.manifests.pyproject_toml import PyprojectTomlParser
@@ -40,6 +41,68 @@ def test_detect_walks_up(sample_pixi_toml):
     subdir.mkdir(parents=True)
     path = detect_workspace_file(subdir)
     assert path == sample_pixi_toml
+
+
+@pytest.mark.parametrize("reject_symlinks", [False, True], ids=["read", "mutation"])
+def test_detect_walks_up_from_parent_components(
+    tmp_path: Path,
+    reject_symlinks: bool,
+) -> None:
+    root_manifest = tmp_path / "conda.toml"
+    root_manifest.write_text("[workspace]\nname='root'\n", encoding="utf-8")
+    child = tmp_path / "outer" / "inner"
+    child.mkdir(parents=True)
+    (child / "conda.toml").write_text("[workspace]\nname='child'\n", encoding="utf-8")
+
+    assert (
+        detect_workspace_file(
+            child / "..",
+            reject_symlinks=reject_symlinks,
+        )
+        == root_manifest
+    )
+
+
+@pytest.mark.parametrize(
+    ("parser", "filename"),
+    [
+        (CondaTomlParser, "conda.toml"),
+        (PixiTomlParser, "pixi.toml"),
+        (PyprojectTomlParser, "pyproject.toml"),
+    ],
+    ids=["conda", "pixi", "pyproject"],
+)
+@pytest.mark.parametrize(
+    "predicate", ["has_workspace", "has_tasks"], ids=["workspace", "tasks"]
+)
+def test_strict_discovery_does_not_parse_raced_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    parser: type[manifest_base.ManifestParser],
+    filename: str,
+    predicate: str,
+) -> None:
+    manifest = tmp_path / filename
+    manifest.write_text("[workspace]\nname='source'\n", encoding="utf-8")
+    private = tmp_path / "private.toml"
+    private.write_text("private_marker=1\nprivate_marker=2\n", encoding="utf-8")
+    select = getattr(parser, predicate)
+
+    def replace_before_selection(
+        self: manifest_base.ManifestParser,
+        path: Path,
+        **kwargs: bool,
+    ) -> bool:
+        path.unlink()
+        path.symlink_to(private)
+        return select(self, path, **kwargs)
+
+    monkeypatch.setattr(parser, predicate, replace_before_selection)
+
+    with pytest.raises(WorkspaceParseError) as exc_info:
+        walk_manifests(tmp_path, predicate, reject_symlinks=True)
+
+    assert "private_marker" not in str(exc_info.value)
 
 
 def test_detect_not_found(tmp_path):
@@ -215,7 +278,8 @@ def test_detect_reject_symlinks_skips_irrelevant_candidate(tmp_path: Path) -> No
     assert detect_workspace_file(child, reject_symlinks=True) == outer_manifest
 
 
-def test_detect_reject_symlinks_rejects_selected_candidate(tmp_path: Path) -> None:
+@pytest.mark.parametrize("reject_symlinks", [False, True], ids=["read", "mutation"])
+def test_detect_selected_symlink(tmp_path: Path, reject_symlinks: bool) -> None:
     source = tmp_path / "source.toml"
     source.write_text(
         '[workspace]\nname = "linked"\nchannels = []\nplatforms = []\n',
@@ -227,8 +291,14 @@ def test_detect_reject_symlinks_rejects_selected_candidate(tmp_path: Path) -> No
     except OSError as exc:
         pytest.skip(f"symlink unavailable: {exc}")
 
-    with pytest.raises(WorkspaceParseError, match="symbolic links"):
-        detect_workspace_file(tmp_path, reject_symlinks=True)
+    if reject_symlinks:
+        with pytest.raises(WorkspaceParseError, match="symbolic links"):
+            detect_workspace_file(tmp_path, reject_symlinks=True)
+    else:
+        assert detect_workspace_file(tmp_path) == candidate
+        path, config = detect_and_parse(candidate)
+        assert path == candidate
+        assert config.name == "linked"
 
 
 @pytest.mark.parametrize(

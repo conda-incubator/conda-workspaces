@@ -4,16 +4,137 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+import sys
+from importlib import metadata as importlib_metadata
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from conda.base.context import context as conda_context
 from conda.base.context import reset_context
 from conda.models.dist import Dist
 from conda.models.records import PackageRecord
 
+from conda_workspaces.cli.main import generate_workspace_parser
+from conda_workspaces.cli.workspace import ship
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-    from pathlib import Path
+
+    from conda_workspaces.context import WorkspaceContext
+    from conda_workspaces.models import WorkspaceConfig
+
+
+@pytest.fixture
+def ship_args() -> Callable[..., argparse.Namespace]:
+    """Parse the common locked workspace selection for ship failure tests."""
+
+    def parse(config: WorkspaceConfig, *options: str) -> argparse.Namespace:
+        return generate_workspace_parser().parse_args(
+            [
+                "--file",
+                config.manifest_path,
+                "ship",
+                "-e",
+                "default",
+                "--platform",
+                "linux-64",
+                "-o",
+                str(Path(config.root) / "dist"),
+                *options,
+            ]
+        )
+
+    return parse
+
+
+@pytest.fixture
+def record_ship_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[..., list[list[str]]]:
+    """Record the external builder and simulate its output and failures."""
+
+    def record(
+        *,
+        available: bool = True,
+        installed_version: str = "0.11.1",
+        exit_code: int = 0,
+        execution_error: OSError | None = None,
+    ) -> list[list[str]]:
+        calls: list[list[str]] = []
+        original_version = importlib_metadata.version
+
+        def version(distribution: str) -> str:
+            if distribution != "conda-ship":
+                return original_version(distribution)
+            if not available:
+                raise importlib_metadata.PackageNotFoundError(distribution)
+            return installed_version
+
+        monkeypatch.setattr(importlib_metadata, "version", version)
+
+        def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(list(args))
+            assert args[:4] == [sys.executable, "-m", "conda_ship.cli", "build"]
+            assert not kwargs.get("shell")
+            if execution_error is not None:
+                raise execution_error
+            assert kwargs["stdout"] is sys.stderr
+            assert kwargs["stderr"] is sys.stderr
+            print("conda-ship build output", file=sys.stderr)
+            if exit_code:
+                print("conda-ship: unsupported dependency", file=sys.stderr)
+            return subprocess.CompletedProcess(args, exit_code)
+
+        monkeypatch.setattr(ship.subprocess, "run", run)
+        return calls
+
+    return record
+
+
+@pytest.fixture
+def native_ship_workspace(
+    image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
+) -> Path:
+    """Create complete package metadata for a native build without downloads."""
+    platform = conda_context.subdir
+    config, ctx = image_workspace(
+        platforms=(platform,),
+        manifest_extra=(
+            '\n[dependencies]\npython = "3.12.*"\n'
+            '\n[tool.conda-ship]\nruntime-name = "ship-smoke"\n'
+            'runtime-version = "0.1.0"\ndelegate-executable = "python"\n'
+        ),
+    )
+    manifest = Path(config.manifest_path)
+    manifest.write_text(
+        manifest.read_text().replace("channels = []", 'channels = ["conda-forge"]'),
+        encoding="utf-8",
+    )
+    url = (
+        f"https://conda.anaconda.org/conda-forge/{platform}/python-3.12.0-h123_0.conda"
+    )
+    lock = ctx.root / "conda.lock"
+    data = json.loads(lock.read_text())
+    data["environments"]["default"]["channels"] = [
+        {"url": "https://conda.anaconda.org/conda-forge"}
+    ]
+    data["environments"]["default"]["packages"][platform] = [{"conda": url}]
+    data["packages"] = [
+        {
+            "conda": url,
+            "name": "python",
+            "version": "3.12.0",
+            "build": "h123_0",
+            "build_number": 0,
+            "subdir": platform,
+            "sha256": "a" * 64,
+            "depends": [],
+        }
+    ]
+    lock.write_text(json.dumps(data), encoding="utf-8")
+    return ctx.root
 
 
 @pytest.fixture

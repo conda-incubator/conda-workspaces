@@ -22,7 +22,7 @@ from ..exceptions import (
     WorkspaceParseError,
 )
 from ..models import redact_url_text
-from ..paths import validate_path_parent
+from ..paths import canonicalize_system_path_alias, validate_path_parent
 from .base import ManifestParser
 from .pixi_toml import PixiTomlParser
 from .pyproject_toml import PyprojectTomlParser
@@ -60,7 +60,14 @@ def walk_manifests(
     ``"has_workspace"`` or ``"has_tasks"``.  Returns the first
     matching file path, or ``None`` if none is found.
     """
-    current = start_dir.resolve()
+    current = (
+        canonicalize_system_path_alias(start_dir)
+        if reject_symlinks
+        else start_dir.resolve()
+    )
+    if reject_symlinks:
+        validate_path_parent(current / _SEARCH_FILES[0])
+        current = Path(os.path.abspath(current))
     while True:
         for fname in _SEARCH_FILES:
             candidate = current / fname
@@ -81,7 +88,9 @@ def walk_manifests(
                     )
                 continue
             try:
-                selected = getattr(parser, predicate)(candidate)
+                selected = getattr(parser, predicate)(
+                    candidate, reject_symlinks=reject_symlinks
+                )
             except WorkspaceParseError:
                 raise
             except Exception as exc:

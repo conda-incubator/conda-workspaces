@@ -1,0 +1,164 @@
+"""Build native launchers with the optional conda-ship builder."""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+from importlib import import_module, metadata
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from conda.base.constants import DEFAULT_JSON_REPORTER_BACKEND
+from conda.base.context import context as conda_context
+from packaging.version import InvalidVersion, Version
+from rich.console import Console
+
+from ...exceptions import CondaWorkspacesError
+from ...lockfile import (
+    CondaLockLoader,
+    check_lockfile_satisfiability,
+    load_lockfile_path,
+    lockfile_path,
+)
+from ...models import LockfileStatus
+from ...resolver import resolve_environment
+from .. import status
+from . import workspace_context_from_args
+
+if TYPE_CHECKING:
+    import argparse
+
+
+def execute_ship(args: argparse.Namespace, *, console: Console | None = None) -> int:
+    """Build a launcher from an existing, current workspace lockfile."""
+    config, ctx = workspace_context_from_args(args)
+    resolved = resolve_environment(config, args.environment)
+    platform = config.platform_subdir(args.platform)
+    if platform != args.platform or any(
+        name != platform and config.platform_subdir(name) == platform
+        for name in resolved.platforms
+    ):
+        raise CondaWorkspacesError(
+            "Shipping named platform variants is not supported by conda-ship. "
+            "Use an environment with an ordinary conda platform."
+        )
+    resolved = resolve_environment(config, args.environment, platform)
+    for name, dependency in resolved.pypi_dependencies.items():
+        if dependency.path is not None or dependency.git or dependency.url:
+            raise CondaWorkspacesError(
+                f"Cannot ship dependency '{name}' from a local path, Git, "
+                "or URL source.",
+                hints=["Package the application as a conda package and lock it first."],
+            )
+    if resolved.pypi_dependencies:
+        try:
+            import_module("conda_pypi.translate").pypi_to_conda_name
+        except (ImportError, AttributeError) as exc:
+            raise CondaWorkspacesError(
+                "conda-pypi is required to check the locked PyPI requirements.",
+                hints=[
+                    "Install it with: conda install -n base conda-forge::conda-pypi"
+                ],
+            ) from exc
+
+    manifest = Path(config.manifest_path)
+    lock = lockfile_path(ctx)
+    if not lock.is_file():
+        raise CondaWorkspacesError(
+            f"No conda.lock found at {lock}.",
+            hints=["Run `conda workspace lock` before building the launcher."],
+        )
+    try:
+        data = load_lockfile_path(lock)
+        current = check_lockfile_satisfiability(
+            config, data, platform, environment=args.environment
+        )
+        if current.status != LockfileStatus.UP_TO_DATE:
+            raise CondaWorkspacesError(
+                f"Cannot ship from an outdated conda.lock: {current.reason}",
+                hints=["Run `conda workspace lock` before building the launcher."],
+            )
+        platforms = CondaLockLoader(lock, data=data).platforms_for(args.environment)
+        if platform not in platforms:
+            raise CondaWorkspacesError(
+                f"The lockfile does not cover environment '{args.environment}' "
+                f"on platform '{platform}'."
+            )
+    except (ValueError, OSError, TypeError, AttributeError) as exc:
+        raise CondaWorkspacesError(f"Cannot ship from conda.lock: {exc}") from exc
+
+    output = args.output.expanduser().absolute()
+    minimum_version = Version("0.11.1")
+    requirement = (
+        f"Install conda-ship >={minimum_version} in the environment that runs "
+        "conda, for example: conda install -n base "
+        f"'conda-forge::conda-ship>={minimum_version}'"
+    )
+    try:
+        installed_version = Version(metadata.version("conda-ship"))
+    except metadata.PackageNotFoundError as exc:
+        raise CondaWorkspacesError(
+            "conda-ship is not installed.", hints=[requirement]
+        ) from exc
+    except InvalidVersion as exc:
+        raise CondaWorkspacesError(
+            "Cannot determine the installed conda-ship version.", hints=[requirement]
+        ) from exc
+    if installed_version < minimum_version:
+        raise CondaWorkspacesError(
+            f"conda-ship >={minimum_version} is required "
+            f"(installed: {installed_version}).",
+            hints=[requirement],
+        )
+
+    command = [
+        sys.executable,
+        "-m",
+        "conda_ship.cli",
+        "build",
+        "--manifest",
+        str(manifest),
+        "--source-lock",
+        str(lock),
+        "--source-environment",
+        args.environment,
+        "--platform",
+        platform,
+        "--out-dir",
+        str(output),
+    ]
+    if args.delegate_executable is not None:
+        command.extend(["--delegate-executable", args.delegate_executable])
+    if args.artifact_layout is not None:
+        command.extend(["--artifact-layout", args.artifact_layout])
+    if args.dry_run:
+        command.append("--dry-run")
+    try:
+        result = subprocess.run(
+            command, stdout=sys.stderr, stderr=sys.stderr, check=False
+        )
+    except OSError as exc:
+        raise CondaWorkspacesError(f"Cannot run conda-ship: {exc}") from exc
+    if result.returncode:
+        return result.returncode if result.returncode > 0 else 128 - result.returncode
+
+    if console is None:
+        console = Console(highlight=False)
+    if args.json or conda_context.console == DEFAULT_JSON_REPORTER_BACKEND:
+        console.print_json(
+            data={
+                "success": True,
+                "environment": args.environment,
+                "platform": platform,
+                "output": str(output),
+                "dry_run": bool(args.dry_run),
+            }
+        )
+    else:
+        status.message(
+            console,
+            "Would write" if args.dry_run else "Wrote",
+            f"outputs to {output}",
+            "launcher",
+        )
+    return 0

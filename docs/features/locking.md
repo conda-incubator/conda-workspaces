@@ -32,12 +32,11 @@ solution. It does not require environments to be installed first.
 # Generate or update the lockfile for every platform declared in the manifest
 conda workspace lock
 
-# Lock only a subset of platforms into an explicit fragment
-conda workspace lock --platform linux-64 --platform osx-arm64 \
-  --output conda.lock.selected-platforms
+# Lock only a subset of platforms (repeatable flag)
+conda workspace lock --platform linux-64 --platform osx-arm64 --output conda.lock.unix
 
-# Keep solvable pairs in an explicit fragment
-conda workspace lock --skip-unsolvable --output conda.lock.solvable
+# Keep going when individual (environment, platform) pairs fail to solve
+conda workspace lock --skip-unsolvable --output conda.lock.partial
 
 # Install from lockfile, validating freshness against the manifest
 conda workspace install --locked
@@ -45,6 +44,10 @@ conda workspace install --locked
 # Install from lockfile as-is without checking freshness
 conda workspace install --frozen
 ```
+
+`--environment`, `--platform`, and `--skip-unsolvable` require `--output`.
+Write these partial results to a separate file so the workspace's
+complete `conda.lock` remains available.
 
 `conda workspace lock` solves every environment for every platform it
 declares in the manifest. Each solve runs with conda's
@@ -54,23 +57,16 @@ tighter constraints with `CONDA_OVERRIDE_*` or the
 `[system-requirements]` table when cross-compiling, for example to
 fix a minimum `__glibc` version when solving `linux-64` from macOS.
 
-`--environment`, `--platform`, and `--skip-unsolvable` can produce an
-incomplete result, so they require `--output`. An unfiltered lock is
-the only `workspace lock` form that implicitly replaces the canonical
-`conda.lock`. Pass `--output conda.lock` when replacement with a
-filtered result is intentional.
-
 Solves are fail-fast by default. The first platform that cannot be
 resolved raises an error that names the environment and the platform,
 and no lockfile is written. Pass `--skip-unsolvable` to keep locking
-the remaining pairs into an explicit `--output` path, emitting a yellow
-`Skipping ...` line for each one that failed. If *every* pair fails, the
-command still raises with an aggregated summary rather than writing an
-empty lockfile. Non-solver errors such as a missing channel or invalid
-manifest always abort regardless of the flag.
+the remaining pairs, emitting a yellow `Skipping ...` line for each
+one that failed. If *every* pair fails, the command still raises
+with an aggregated summary rather than writing an empty lockfile.
+Non-solver errors such as a missing channel or invalid manifest always
+abort regardless of the flag.
 
-The canonical lockfile contains all environments and their resolved
-packages:
+The lockfile contains all environments and their resolved packages:
 
 ```yaml
 version: 1
@@ -105,14 +101,10 @@ installs directly from the lockfile with no solver needed. When the
 lockfile is missing or out of date, it falls back to a full solve and
 regenerates `conda.lock`.
 
-The check compares the manifest's dependency specs against locked package
-versions, so whitespace or comment changes do not trigger a re-solve.
-
-With `-e` / `--environment`, only the selected prefix is installed or
-updated. The solve path covers every declared environment and platform
-when producing or previewing the canonical `conda.lock`. Use
-`conda workspace lock -e <environment> --output <fragment>` when a
-partial lock artifact is intentional.
+This means day-to-day installs are fast while the lockfile stays current
+when the manifest changes. The check compares the manifest's dependency
+specs against locked package versions, so whitespace or comment changes
+do not trigger a re-solve.
 
 | Lockfile state | Default behavior | `--locked` | `--frozen` | `--no-lock` |
 | --- | --- | --- | --- | --- |
@@ -123,11 +115,6 @@ partial lock artifact is intentional.
 Use `--no-lock` to force a full solve even when the lockfile is
 satisfiable, for example to pick up channel updates without editing
 the manifest.
-
-`--force-reinstall` controls prefix replacement independently of lockfile
-selection. It recreates prefixes when using a satisfiable lockfile,
-`--locked`, `--frozen`, or CI strict mode. Combine it with `--no-lock` when
-both a fresh solve and prefix recreation are required.
 
 ## Lock freshness indicator
 
@@ -173,14 +160,14 @@ conda workspace install --no-lock
 :::{versionadded} 0.4.0
 `conda workspace lock --output <path>` writes the solved lockfile
 to an arbitrary path so matrix runners can each emit one fragment.
-`--merge <glob>` combines fragments into a single `conda.lock`
-without running the solver. It validates schema versions and channel
-lists and rejects overlapping `(environment, platform)` pairs.
+`--merge <glob>` stitches fragments into a single `conda.lock`
+without running the solver, validating schema version, channel
+lists, and rejecting overlapping `(environment, platform)` pairs.
 :::
 
 Solving every platform in one job becomes expensive as a workspace
 grows. `conda workspace lock` supports matrix pipelines that split
-solving across runners and combine the fragments in a
+solving across runners and stitch the fragments back together on a
 coordinator job:
 
 ```bash
@@ -194,10 +181,8 @@ conda workspace lock --merge "conda.lock.*"
 ```
 
 `--output` writes the solved lockfile to the given path instead of the
-default `<workspace>/conda.lock`. It is required with `--environment`,
-`--platform`, and `--skip-unsolvable`, so filtered operations cannot
-silently replace the complete canonical lock. Each matrix runner can
-emit exactly one `(env, platform)` pair.
+default `<workspace>/conda.lock`. With `--platform`, each matrix runner
+writes records for its selected platforms and environments.
 
 `--merge` loads every fragment, validates that they agree on schema
 version and on each shared environment's channel list, and rejects
@@ -207,15 +192,11 @@ overlapping `(environment, platform)` pairs. On success the merged
 is mutually exclusive with `--environment`, `--platform`,
 `--skip-unsolvable`, and `--output`.
 
-You can also select an exact manifest with the global `--file` / `-f`
-option:
+You can also point to a specific manifest with `--file` / `-f`:
 
 ```bash
 conda workspace --file path/to/conda.toml install
 ```
-
-The path must name a manifest file. Omit the option to auto-detect a
-manifest by searching the current directory and its parents.
 
 See [Lockfile management](../tutorials/lockfile-management.md) for a
 guided workflow that creates, installs from, and updates a lockfile.

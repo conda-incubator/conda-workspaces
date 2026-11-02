@@ -23,7 +23,7 @@ class PixiTomlImporter(ManifestImporter):
 
     def convert(self, path: Path) -> tomlkit.TOMLDocument:
         parser = find_parser(path)
-        content = parser.read_manifest_text(path)
+        content, _ = parser.read_manifest_text_with_generation(path)
         source = parser.parse_toml_text_with_redacted_errors(content, path).unwrap()
         config = parser.parse_data_with_redacted_errors(source, path)
         tasks = parser.parse_tasks_data(source)

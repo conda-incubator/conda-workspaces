@@ -540,16 +540,37 @@ def test_atomic_binary_writer_rejects_generation_change_while_writing(
     assert path.read_text(encoding="utf-8") == concurrent_content
 
 
-def test_atomic_write_text_drops_special_permission_bits(tmp_path: Path) -> None:
+@pytest.mark.parametrize("fallback", [False, True], ids=["native", "fallback"])
+@pytest.mark.parametrize("mask", [0o022, 0o077, 0o277], ids=["022", "077", "277"])
+@pytest.mark.parametrize(
+    "existing_mode", [None, 0o640, 0o6755], ids=["new", "existing", "special"]
+)
+def test_atomic_write_text_permissions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fallback: bool,
+    mask: int,
+    existing_mode: int | None,
+) -> None:
     if os.name == "nt":
         pytest.skip("POSIX permission bits are unavailable")
+    if fallback:
+        monkeypatch.setattr(paths_mod, "_SUPPORTS_ANCHORED_DIRECTORY_OPERATIONS", False)
     path = tmp_path / "output.txt"
-    path.write_text("old", encoding="utf-8")
-    path.chmod(0o6755)
+    if existing_mode is not None:
+        path.write_text("old", encoding="utf-8")
+        path.chmod(existing_mode)
 
-    atomic_write_text(path, "new")
+    previous_mask = os.umask(mask)
+    try:
+        atomic_write_text(path, "new")
+    finally:
+        os.umask(previous_mask)
 
-    assert stat.S_IMODE(path.stat().st_mode) == 0o755
+    expected = 0o600 & ~mask if existing_mode is None else existing_mode & 0o777
+    assert stat.S_IMODE(path.stat().st_mode) == expected
+    assert path.read_text(encoding="utf-8") == "new"
+    assert list(tmp_path.iterdir()) == [path]
 
 
 def test_read_regular_file_bytes_rejects_same_length_in_place_rewrite(

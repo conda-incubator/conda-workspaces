@@ -53,12 +53,13 @@ pixi run -e docs docs        # build documentation
 - Use `pytest.mark.parametrize` for multiple test cases with the same logic.
 - Use `monkeypatch` and native pytest fixtures instead of `unittest.mock`.
 - Tests mirror the source structure (e.g., tests for
-  `conda_workspaces/cli/install.py` live in `tests/cli/test_install.py`).
+  `conda_workspaces/cli/workspace/install.py` live in
+  `tests/cli/workspace/test_install.py`).
 
 ### Documentation
 
 - Docs use Sphinx with MyST Markdown.
-- Build locally with `pixi run docs`.
+- Build locally with `pixi run -e docs docs`.
 - Follow the [Diataxis framework](https://diataxis.fr/) for new content.
 
 ## Submitting a pull request

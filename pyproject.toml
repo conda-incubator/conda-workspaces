@@ -131,6 +131,18 @@ trivy = ">=0.74,<0.75"
 [tool.pixi.feature.test.pypi-dependencies]
 conda-sboms = ">=0.3.0"
 
+[tool.pixi.feature.ship-test.target.linux-64.dependencies]
+conda-ship = ">=0.11.1"
+
+[tool.pixi.feature.ship-test.target.osx-64.dependencies]
+conda-ship = ">=0.11.1"
+
+[tool.pixi.feature.ship-test.target.osx-arm64.dependencies]
+conda-ship = ">=0.11.1"
+
+[tool.pixi.feature.ship-test.target.win-64.dependencies]
+conda-ship = ">=0.11.1"
+
 [tool.pixi.feature.py310.dependencies]
 python = "3.10.*"
 
@@ -158,12 +170,12 @@ sphinx-argparse = ">=0.4"
 
 [tool.pixi.environments]
 dev = {features = ["dev"], solve-group = "default"}
-test = {features = ["test"], solve-group = "default"}
+test = {features = ["test", "ship-test"], solve-group = "default"}
 test-py310 = {features = ["test", "py310"], solve-group = "test-py310"}
-test-py311 = {features = ["test", "py311"], solve-group = "test-py311"}
-test-py312 = {features = ["test", "py312"], solve-group = "test-py312"}
-test-py313 = {features = ["test", "py313"], solve-group = "test-py313"}
-test-py314 = {features = ["test", "py314"], solve-group = "test-py314"}
+test-py311 = {features = ["test", "ship-test", "py311"], solve-group = "test-py311"}
+test-py312 = {features = ["test", "ship-test", "py312"], solve-group = "test-py312"}
+test-py313 = {features = ["test", "ship-test", "py313"], solve-group = "test-py313"}
+test-py314 = {features = ["test", "ship-test", "py314"], solve-group = "test-py314"}
 docs = {features = ["docs"], solve-group = "default"}
 
 [tool.pixi.tasks]

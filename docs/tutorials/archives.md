@@ -45,6 +45,9 @@ If no `-o` is given, the archive is named after the workspace
 must be a single filename segment for this default. Pass `-o/--output`
 when you want to write the archive somewhere else.
 
+New archives and receipts follow the
+{ref}`generated file permissions <generated-file-permissions>`.
+
 ## Use gzip compression
 
 For broader compatibility, use a `.tar.gz` extension:
