@@ -40,6 +40,62 @@ archive = WorkspaceArchive.create(
 )
 ```
 
+## Open a remote archive
+
+Use `WorkspaceArchive.open_source()` as a context manager for a local path or
+an HTTP or HTTPS URL. It downloads remote inputs into private temporary
+storage and yields a `WorkspaceArchive` for the existing inspection,
+verification, extraction, and installation methods:
+
+```python
+from conda_workspaces.archive import WorkspaceArchive
+
+with WorkspaceArchive.open_source(
+    "https://example.org/workspaces/my-project.tar.zst",
+    receipt=True,
+) as archive:
+    result = archive.extract(target="./restored")
+    print(result.target)
+    print(result.verified)
+```
+
+`receipt=True` retrieves the conventional sibling receipt. Pass a local
+receipt path or an explicit receipt URL as `receipt=` when it is stored
+elsewhere. When requesting a receipt for an archive URL with a query string or
+fragment, supply an explicit receipt location. A selected receipt that cannot
+be retrieved or verified aborts the operation. With no receipt selected, no
+sibling request is made.
+
+The archive handle's downloaded files are valid only inside the `with` block.
+Temporary storage is removed on exit, including when an operation raises.
+Extracted workspaces and installed environments remain in their selected
+destinations. A local source continues to refer to its original local file.
+
+Downloads use conda's authentication and TLS settings and follow HTTP and
+HTTPS redirects. They enforce download size limits before the existing archive
+safety checks. Servers must serve the file bytes without additional HTTP
+content compression, as described under {ref}`archive-downloads`.
+Pass `allow_large_archive=True` to both `open_source()` and the extraction or
+installation operation when a trusted archive exceeds the default limit:
+
+```python
+with WorkspaceArchive.open_source(
+    "https://example.org/workspaces/my-project.tar.zst",
+    receipt=True,
+    allow_large_archive=True,
+) as archive:
+    result = archive.install(
+        target="./restored-large",
+        allow_large_archive=True,
+        dry_run=True,
+    )
+```
+
+A remote preview downloads and validates its inputs but leaves the target and
+environment prefixes unchanged. Installation validation may also download
+packages into a temporary cache. Keep the archive's original basename when
+publishing it because the receipt identifies that name.
+
 ## Inspect and verify an archive
 
 Inspect archive metadata without extracting files:

@@ -12,7 +12,8 @@ from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING
 
 import pytest
-from conda.base.context import context
+from conda import CondaError
+from conda.base.context import context, reset_context
 from rich.console import Console
 
 import conda_workspaces.archive as archive_module
@@ -25,6 +26,7 @@ from conda_workspaces.archive import (
     runtime_prefix_relative_path,
     scan_prefix_references,
 )
+from conda_workspaces.cli.main import execute_workspace, generate_workspace_parser
 from conda_workspaces.cli.workspace.archive import (
     execute_archive,
     execute_unarchive,
@@ -38,8 +40,12 @@ from conda_workspaces.receipts import ArchiveReceipt
 from ..conftest import make_args
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    import argparse
+    from collections.abc import Callable, Iterator
 
+    from pytest_httpserver import HTTPServer
+
+    from conda_workspaces.archive import WorkspaceArchive
     from tests.conftest import SnapshotTree
 
 _ARCHIVE_DEFAULTS = {
@@ -67,6 +73,14 @@ _UNARCHIVE_DEFAULTS = {
     "dry_run": False,
     "json": False,
 }
+
+
+@pytest.fixture
+def isolated_conda_context() -> Iterator[None]:
+    """Keep CLI argument resets from loading the developer's conda configuration."""
+    reset_context(())
+    yield
+    reset_context(())
 
 
 @pytest.mark.parametrize(
@@ -1294,3 +1308,260 @@ def test_execute_unarchive_dest_rejects_prefix_traversal(
         execute_unarchive(args, console=console)
 
     assert not dest.exists()
+
+
+@pytest.mark.parametrize("receipt", [False, True], ids=["unsigned", "receipt"])
+@pytest.mark.parametrize("dry_run", [False, True], ids=["extract", "dry-run"])
+@pytest.mark.parametrize("install", [False, True], ids=["files", "install"])
+def test_execute_unarchive_json_result(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    receipt: bool,
+    dry_run: bool,
+    install: bool,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "test.tar.gz"
+    archive_module.WorkspaceArchive.create(
+        workspace=archive_workspace, output=archive, receipt=receipt
+    )
+    target = tmp_path / "restored"
+    install_calls: list[argparse.Namespace] = []
+
+    def install_workspace(args: argparse.Namespace, *, console: Console) -> int:
+        install_calls.append(args)
+        console.print("nested status")
+        print("nested direct output")
+        return 0
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.execute_install", install_workspace
+    )
+    stream = StringIO()
+    result = execute_unarchive(
+        make_args(
+            _UNARCHIVE_DEFAULTS,
+            archive_path=archive,
+            target=target,
+            receipt=receipt,
+            install=install,
+            environment="default" if install else None,
+            dry_run=dry_run,
+            json=True,
+        ),
+        console=Console(file=stream, highlight=False),
+    )
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert stream.getvalue() == ""
+    assert payload["success"] is True
+    assert payload["source"] == str(archive)
+    assert payload["target"] == str(target)
+    assert payload["verified"] is receipt
+    assert payload["receipt"] == (
+        str(ArchiveReceipt.default_path(archive)) if receipt else None
+    )
+    assert payload["dry_run"] is dry_run
+    assert payload["installed"] is (install and not dry_run)
+    assert payload["environment"] == ("default" if install else None)
+    assert target.exists() is not dry_run
+    assert bool(install_calls) is (install and not dry_run)
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["extract", "dry-run"])
+def test_execute_unarchive_json_failure_has_no_status_output(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    dry_run: bool,
+) -> None:
+    monkeypatch.chdir(archive_workspace)
+    archive = tmp_path / "test.tar.gz"
+    archive_module.WorkspaceArchive.create(
+        workspace=archive_workspace, output=archive, receipt=True
+    )
+    archive.write_bytes(archive.read_bytes() + b"tamper")
+    target = tmp_path / "restored"
+    stream = StringIO()
+
+    with pytest.raises(ArchiveError, match="Hash mismatch"):
+        execute_unarchive(
+            make_args(
+                _UNARCHIVE_DEFAULTS,
+                archive_path=archive,
+                target=target,
+                receipt=True,
+                dry_run=dry_run,
+                json=True,
+            ),
+            console=Console(file=stream, highlight=False),
+        )
+
+    assert stream.getvalue() == ""
+    assert capsys.readouterr().out == ""
+    assert not target.exists()
+
+
+@pytest.mark.usefixtures("isolated_conda_context")
+@pytest.mark.parametrize("json_mode", ["flag", "environment", "console"])
+def test_unarchive_dispatch_preserves_json_result(
+    archive_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    json_mode: str,
+) -> None:
+    archive = tmp_path / "test.tar.gz"
+    archive_module.WorkspaceArchive.create(workspace=archive_workspace, output=archive)
+    target = tmp_path / "restored"
+    options = ["unarchive", str(archive), "--target", str(target)]
+    if json_mode == "flag":
+        options.append("--json")
+    elif json_mode == "console":
+        options.extend(["--console", "json"])
+    else:
+        monkeypatch.setenv("CONDA_JSON", "true")
+    args = generate_workspace_parser().parse_args(options)
+    reset_context((), argparse_args=args)
+
+    assert execute_workspace(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["success"] is True
+    assert payload["target"] == str(target)
+    assert payload["source"] == str(archive)
+
+
+@pytest.fixture
+def remote_cli_source(
+    downloadable_archive: WorkspaceArchive,
+    httpserver: HTTPServer,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> tuple[Path, HTTPServer, Path]:
+    archive = downloadable_archive.path
+    archive_route = "/" + archive.name
+    httpserver.expect_request(archive_route).respond_with_data(archive.read_bytes())
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    monkeypatch.setattr(archive_module.tempfile, "tempdir", str(downloads))
+    return archive, httpserver, downloads
+
+
+@pytest.mark.usefixtures("isolated_conda_context")
+@pytest.mark.parametrize(
+    ("source_kind", "receipt_mode", "operation"),
+    [
+        ("remote", "none", "extract"),
+        ("remote", "sibling", "extract"),
+        ("remote", "none", "install"),
+        ("remote", "sibling", "install"),
+        ("remote", "none", "dry-run"),
+        ("remote", "sibling", "dry-run"),
+        ("local", "remote", "extract"),
+    ],
+    ids=[
+        "remote-extract",
+        "remote-extract-receipt",
+        "remote-install",
+        "remote-install-receipt",
+        "remote-preview",
+        "remote-preview-receipt",
+        "local-archive-remote-receipt",
+    ],
+)
+def test_unarchive_http_cli(
+    remote_cli_source: tuple[Path, HTTPServer, Path],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    source_kind: str,
+    receipt_mode: str,
+    operation: str,
+) -> None:
+    archive, server, downloads = remote_cli_source
+    archive_route = "/" + archive.name
+    receipt_route = archive_route + ".receipt.json"
+    target = tmp_path / "restored"
+    source = server.url_for(archive_route) if source_kind == "remote" else str(archive)
+    options = ["unarchive", source, "--target", str(target), "--json"]
+    if receipt_mode != "none":
+        server.expect_request(receipt_route).respond_with_data(
+            ArchiveReceipt.default_path(archive).read_bytes()
+        )
+        options.append("--receipt")
+        if receipt_mode == "remote":
+            options.append(server.url_for(receipt_route))
+    if operation in {"install", "dry-run"}:
+        options.extend(["--install", "-e", "default"])
+    if operation == "dry-run":
+        options.append("--dry-run")
+    args = generate_workspace_parser().parse_args(options)
+    reset_context((), argparse_args=args)
+
+    assert execute_workspace(args) == 0
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["success"] is True
+    assert payload["source"] == source
+    assert payload["target"] == str(target)
+    assert payload["receipt"] == (
+        server.url_for(receipt_route) if receipt_mode != "none" else None
+    )
+    assert payload["verified"] is (receipt_mode != "none")
+    assert payload["dry_run"] is (operation == "dry-run")
+    assert payload["installed"] is (operation == "install")
+    assert payload["primed_packages"] == 0
+    assert not list(downloads.iterdir())
+    assert str(downloads) not in captured.out
+    assert target.exists() is (operation != "dry-run")
+    if operation != "dry-run":
+        assert (target / "conda.lock").read_bytes() == (
+            tmp_path / "workspace" / "conda.lock"
+        ).read_bytes()
+        assert (target / "app.py").read_text() == 'print("hello")\n'
+    prefix = target / ".conda" / "envs" / "default"
+    assert (prefix / "conda-meta" / "history").is_file() is (operation == "install")
+    expected_requests = [archive_route] if source_kind == "remote" else []
+    if receipt_mode != "none":
+        expected_requests.append(receipt_route)
+    assert [request.path for request, _ in server.log] == expected_requests
+
+
+@pytest.mark.usefixtures("isolated_conda_context")
+def test_unarchive_http_cli_missing_receipt_aborts_cleanly(
+    remote_cli_source: tuple[Path, HTTPServer, Path],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    archive, server, downloads = remote_cli_source
+    route = "/" + archive.name
+    server.expect_request(route + ".receipt.json").respond_with_data(b"", status=404)
+    target = tmp_path / "restored"
+    args = generate_workspace_parser().parse_args(
+        [
+            "unarchive",
+            server.url_for(route),
+            "--receipt",
+            "--install",
+            "--target",
+            str(target),
+            "--json",
+        ]
+    )
+    reset_context((), argparse_args=args)
+
+    with pytest.raises(CondaError, match="404"):
+        execute_workspace(args)
+
+    assert capsys.readouterr().out == ""
+    assert not target.exists()
+    assert not list(downloads.iterdir())
+    assert [request.path for request, _ in server.log] == [
+        route,
+        route + ".receipt.json",
+    ]

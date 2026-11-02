@@ -898,8 +898,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
     add_output_and_prompt_options(unarchive_parser)
     unarchive_parser.add_argument(
         "archive_path",
-        type=Path,
-        help="Path to the workspace archive.",
+        help="Local path or HTTP(S) URL of the workspace archive.",
     )
     unarchive_parser.add_argument(
         "--target",
@@ -947,11 +946,10 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         nargs="?",
         const=True,
         default=None,
-        type=Path,
-        metavar="PATH",
+        metavar="PATH_OR_URL",
         help=(
-            "Verify an external in-toto receipt JSON file."
-            " Defaults to <archive>.receipt.json when PATH is omitted."
+            "Verify an external in-toto receipt JSON file from a local path"
+            " or HTTP(S) URL. Defaults to <archive>.receipt.json when omitted."
         ),
     )
     unarchive_parser.add_argument(
@@ -1139,7 +1137,6 @@ def execute_workspace(args: argparse.Namespace) -> int:
         "clean",
         "import",
         "archive",
-        "unarchive",
     }
     if json_result:
         captured = StringIO()
