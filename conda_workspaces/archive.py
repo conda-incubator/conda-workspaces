@@ -18,22 +18,28 @@ import stat
 import subprocess
 import tarfile
 import tempfile
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
+from copy import copy
 from dataclasses import dataclass
 from io import BytesIO
 from itertools import chain
 from os.path import expanduser
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, cast
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 
 from conda import CondaError
 from conda.base.context import context as conda_context
+from conda.common.io import disable_logger
 from conda.common.path import strip_pkg_extension
 from conda.core.package_cache_data import PackageCacheData
+from conda.gateways.connection.adapters.http import HTTPAdapter
+from conda.gateways.connection.session import get_session
 from conda.models.match_spec import MatchSpec
 from conda.models.records import PackageRecord
 from conda_lockfiles.load_yaml import load_yaml
+from requests import Request
+from requests.exceptions import RequestException
 
 from .exceptions import (
     ArchiveError,
@@ -50,6 +56,7 @@ from .models import (
     LockfileStatus,
     has_url_credentials,
     has_url_credentials_in_data,
+    redact_url,
     redact_url_text,
 )
 from .paths import (
@@ -71,7 +78,9 @@ from .publication import WorkspacePublication
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterator, Mapping
-    from typing import Any, BinaryIO, Final
+    from typing import Any, BinaryIO, Final, TypeGuard
+
+    from requests import Response
 
     from .context import WorkspaceContext
     from .models import ArchiveConfig
@@ -552,6 +561,229 @@ class WorkspaceArchive:
     def __init__(self, path: str | Path, receipt: bool | str | Path | None = None):
         object.__setattr__(self, "path", Path(path).expanduser().absolute())
         object.__setattr__(self, "receipt", receipt)
+
+    @staticmethod
+    def is_remote_source(source: object) -> TypeGuard[str]:
+        """Recognize URL inputs while preserving POSIX and Windows paths."""
+        return (
+            isinstance(source, str)
+            and "://" in source
+            and not has_absolute_path_syntax(source)
+        )
+
+    @classmethod
+    def source_label(cls, source: str | Path) -> str:
+        """Describe a source without exposing URL credentials or query parameters."""
+        return redact_url(source) if cls.is_remote_source(source) else str(source)
+
+    @classmethod
+    @contextmanager
+    def open_source(
+        cls,
+        source: str | Path,
+        *,
+        receipt: bool | str | Path | None = None,
+        allow_large_archive: bool = False,
+    ) -> Iterator[WorkspaceArchive]:
+        """Open local inputs or privately download HTTP inputs for this context.
+
+        Downloads are temporary even when the caller only inspects or previews
+        extraction. The existing archive methods own content verification.
+        """
+        from .receipts import MAX_RECEIPT_BYTES
+
+        remote = cls.is_remote_source(source)
+        remote_receipt = cls.is_remote_source(receipt)
+        if not remote and not remote_receipt:
+            yield cls(source, receipt=receipt)
+            return
+
+        name = Path(source).name if not remote else ""
+        if remote:
+            try:
+                parts = urlsplit(str(source))
+                name = unquote(parts.path.rsplit("/", 1)[-1], errors="strict")
+            except (ValueError, UnicodeError):
+                name = ""
+            if not is_path_segment(name) or not name.endswith(ARCHIVE_SUFFIXES):
+                raise ArchiveError(
+                    f"Invalid remote archive URL: {cls.source_label(source)}",
+                    hints=[
+                        "Use an HTTP or HTTPS URL ending in a workspace"
+                        " archive filename."
+                    ],
+                )
+            if receipt is True:
+                if parts.query or parts.fragment:
+                    raise ArchiveError(
+                        "An archive URL with a query or fragment requires an"
+                        " explicit receipt location.",
+                        hints=["Use --receipt PATH or --receipt URL."],
+                    )
+                receipt = parts._replace(path=parts.path + ".receipt.json").geturl()
+                remote_receipt = True
+
+        with tempfile.TemporaryDirectory(
+            prefix="conda-workspaces-download-"
+        ) as temporary:
+            root = Path(temporary)
+            archive_path = Path(source) if not remote else root / name
+            if remote:
+                cls.download_source(
+                    str(source),
+                    archive_path,
+                    maximum_bytes=(
+                        MAX_ARCHIVE_RAW_BYTES
+                        if allow_large_archive
+                        else DEFAULT_ARCHIVE_EXTRACT_BYTES
+                    ),
+                )
+            if remote_receipt:
+                receipt_path = root / "receipts" / "receipt.json"
+                receipt_path.parent.mkdir()
+                cls.download_source(
+                    str(receipt), receipt_path, maximum_bytes=MAX_RECEIPT_BYTES
+                )
+                receipt = receipt_path
+            yield cls(archive_path, receipt=receipt)
+
+    @classmethod
+    def download_source(
+        cls, url: str, destination: Path, *, maximum_bytes: int
+    ) -> None:
+        """Stream a bounded HTTP object using conda's session and authentication."""
+        label = cls.source_label(url)
+        try:
+            parts = urlsplit(url)
+            if parts.scheme not in {"http", "https"} or not parts.hostname:
+                raise ValueError("Unsupported download URL")
+            _ = parts.port
+        except ValueError:
+            raise ArchiveError(f"Invalid download URL: {label}") from None
+        if conda_context.offline:
+            raise ArchiveError(f"Cannot download in offline mode: {label}")
+
+        def guard_response(response: Response, **kwargs: object) -> Response:
+            # Requests otherwise buffers redirect bodies, including proxy challenges.
+            assert response.status_code is not None
+            if response.is_redirect or response.status_code >= 400:
+                response.close()
+            if response.is_redirect:
+                assert response.url is not None
+                assert response.request is not None
+                old = urlsplit(response.url)
+                new = urlsplit(urljoin(response.url, response.headers["Location"]))
+                if new.scheme not in {"http", "https"} or not new.hostname:
+                    raise ArchiveError(
+                        f"Download redirects must use HTTP or HTTPS: {label}"
+                    )
+                old_origin = (
+                    old.scheme,
+                    old.hostname,
+                    old.port or (443 if old.scheme == "https" else 80),
+                )
+                new_origin = (
+                    new.scheme,
+                    new.hostname,
+                    new.port or (443 if new.scheme == "https" else 80),
+                )
+                if old_origin != new_origin:
+                    # Requests removes Authorization, but not plugin credential headers.
+                    # After authentication it redirects using the pre-retry request.
+                    for prior in (*response.history, response):
+                        if prior.request is None:
+                            continue
+                        for header in list(prior.request.headers):
+                            if header.lower() not in {
+                                "accept",
+                                "accept-encoding",
+                                "user-agent",
+                                "connection",
+                            }:
+                                del prior.request.headers[header]
+            return response
+
+        try:
+            with ExitStack() as stack:
+                # Transport debug logs can expose signed query strings and auth headers.
+                for logger in (
+                    "conda.gateways.connection.session",
+                    "urllib3.connectionpool",
+                    "urllib3.poolmanager",
+                    "urllib3.util.retry",
+                ):
+                    stack.enter_context(disable_logger(logger))
+                session = copy(get_session(url))
+                session.adapters = session.adapters.copy()
+                # Status retries drain unbounded bodies before response hooks run.
+                # Own these adapters without changing conda's cached session.
+                for scheme in ("http://", "https://"):
+                    original = session.adapters[scheme]
+                    adapter = HTTPAdapter(
+                        ssl_context=original.poolmanager.connection_pool_kw.get(
+                            "ssl_context"
+                        ),
+                        max_retries=original.max_retries.new(
+                            status=0, raise_on_status=False
+                        ),
+                        pool_connections=original._pool_connections,
+                        pool_maxsize=original._pool_maxsize,
+                        pool_block=original._pool_block,
+                    )
+                    session.mount(scheme, adapter)
+                    stack.callback(adapter.close)
+                request = session.prepare_request(
+                    Request("GET", url, headers={"Accept-Encoding": "identity"})
+                )
+                request.hooks["response"].insert(0, guard_response)
+                # Authentication hooks can replace the response with a direct retry.
+                request.hooks["response"].append(guard_response)
+                settings = session.merge_environment_settings(
+                    request.url, session.proxies.copy(), True, None, None
+                )
+                response = stack.enter_context(
+                    session.send(
+                        request,
+                        timeout=(
+                            conda_context.remote_connect_timeout_secs,
+                            conda_context.remote_read_timeout_secs,
+                        ),
+                        **settings,
+                    )
+                )
+                if response.status_code >= 400:
+                    raise ArchiveError(
+                        f"HTTP {response.status_code} while downloading {label}"
+                    )
+                encoding = response.headers.get("Content-Encoding", "identity")
+                if encoding.lower() != "identity":
+                    raise ArchiveError(
+                        f"Downloads require identity HTTP content encoding: {label}"
+                    )
+                length = response.headers.get("Content-Length")
+                expected = int(length) if length is not None else None
+                if expected is not None and (expected < 0 or expected > maximum_bytes):
+                    raise ArchiveError(
+                        f"Download exceeds the {maximum_bytes:,}-byte limit: {label}"
+                    )
+                total = 0
+                with destination.open("xb") as output:
+                    for chunk in response.iter_content(
+                        chunk_size=min(1024 * 1024, maximum_bytes + 1)
+                    ):
+                        total += len(chunk)
+                        if total > maximum_bytes:
+                            raise ArchiveError(
+                                f"Download exceeds the {maximum_bytes:,}-byte limit:"
+                                f" {label}"
+                            )
+                        output.write(chunk)
+                if expected is not None and total != expected:
+                    raise ArchiveError(f"Incomplete download: {label}")
+        except ArchiveError:
+            raise
+        except (CondaError, RequestException, OSError, ValueError):
+            raise ArchiveError(f"Could not download {label}") from None
 
     @classmethod
     def create(

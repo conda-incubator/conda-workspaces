@@ -22,7 +22,7 @@ manifest, lockfile, and package inventory it was created from.
 | Statement type | `https://in-toto.io/Statement/v1` |
 | Predicate type | `https://conda-incubator.github.io/conda-workspaces/workspace-archive-receipt-1.schema.json` |
 | Producer | `conda workspace archive --receipt [PATH]` |
-| Consumer | `conda workspace unarchive ARCHIVE --receipt [PATH]` |
+| Consumer | `conda workspace unarchive ARCHIVE --receipt [PATH_OR_URL]` |
 
 ## File naming
 
@@ -42,6 +42,43 @@ conda workspace unarchive my-project.tar.zst --receipt attestations/my-project.j
 ```
 
 The receipt path must be separate from the archive path.
+
+(remote-archive-receipts)=
+
+## Remote receipts
+
+For an HTTP or HTTPS archive URL, `--receipt` requests the conventional sibling
+receipt. For example:
+
+```bash
+conda workspace unarchive https://example.org/workspaces/my-project.tar.zst --receipt
+```
+
+This downloads `https://example.org/workspaces/my-project.tar.zst.receipt.json`.
+The archive's basename must match its receipt subject, even when a server
+redirects the download or provides a different filename in response headers.
+
+A receipt can also be read from a local path or a separate URL:
+
+```bash
+conda workspace unarchive https://example.org/workspaces/my-project.tar.zst \
+  --receipt ./my-project.receipt.json
+conda workspace unarchive https://example.org/workspaces/my-project.tar.zst \
+  --receipt https://example.org/receipts/my-project.json
+```
+
+When requesting a receipt for an archive URL with a query string or fragment,
+pass an explicit receipt path or URL. The command does not reuse a signed archive query to
+construct a receipt request. Receipt URLs use the same conda authentication,
+TLS settings, and redirect behavior as archive URLs. Configure credentials
+through conda rather than storing them in the archive or receipt.
+
+A requested receipt is required. A missing, unavailable, malformed, or
+mismatching receipt stops the operation before the restored workspace is
+accepted or installation starts. Without `--receipt`, unarchive does not look
+for a sibling receipt. Extraction and installation remain available without a
+receipt, but installation leaves bundled packages unused and uses conda's
+normal package download path.
 
 ## Statement structure
 
@@ -137,7 +174,7 @@ fragments are removed.
 
 ## Verification
 
-`conda workspace unarchive ARCHIVE --receipt [PATH]` verifies in this
+`conda workspace unarchive ARCHIVE --receipt [PATH_OR_URL]` verifies in this
 order:
 
 1. Load the receipt JSON and reject duplicate object keys.
@@ -166,7 +203,11 @@ compares all package identity and digest fields that are present.
 Archive receipts are integrity documents, not signatures. They detect
 whether the archive, extracted manifest, extracted lockfile, or lockfile
 package inventory differs from the receipt, but they do not prove who
-created the receipt.
+created the receipt. Downloading an archive and its unsigned receipt from the
+same server does not establish independent publisher identity. HTTP also lacks
+server authentication and protection against modification in transit. Both
+HTTP and HTTPS downloads use conda's authentication and TLS settings. See
+{ref}`archive-downloads` for download and retry behavior.
 
 For provenance-sensitive workflows, distribute the receipt through an
 independent trusted channel or sign it with an external signing system.

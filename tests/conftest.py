@@ -13,8 +13,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 import pytest
+from conda.base.context import context as conda_context
 
 import conda_workspaces.publication as publication_mod
+from conda_workspaces.archive import WorkspaceArchive
 from conda_workspaces.context import WorkspaceContext
 from conda_workspaces.manifests import detect_and_parse
 from conda_workspaces.models import (
@@ -101,6 +103,19 @@ def image_workspace(
         return config, WorkspaceContext(config)
 
     return create
+
+
+@pytest.fixture
+def downloadable_archive(
+    image_workspace: Callable[..., tuple[WorkspaceConfig, WorkspaceContext]],
+    tmp_path: Path,
+) -> WorkspaceArchive:
+    config, _ = image_workspace(platforms=(conda_context.subdir,))
+    return WorkspaceArchive.create(
+        workspace=config.root,
+        output=tmp_path / "example.tar.gz",
+        receipt=True,
+    )
 
 
 @pytest.fixture

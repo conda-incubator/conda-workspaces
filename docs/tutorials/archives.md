@@ -107,6 +107,61 @@ cd my-project
 conda workspace install --locked
 ```
 
+## Restore a hosted archive
+
+You can give unarchive an HTTP or HTTPS URL instead of downloading the archive
+by hand. For an archive hosted at the example URL below:
+
+```bash
+conda workspace unarchive https://example.org/workspaces/my-project.tar.zst
+```
+
+The command downloads the archive into temporary storage, validates it, and
+restores the workspace into `my-project/` in your current directory. That
+directory must not already exist. The temporary download is removed after the
+operation, and the restored workspace remains available.
+
+For a private host, first configure the credentials using conda's existing
+authentication facilities. The command has the same form:
+
+```bash
+conda workspace unarchive https://repo.example.org/workspaces/my-project.tar.zst \
+  --target ./private-workspace
+```
+
+Downloads use conda's TLS settings and redirect handling. Plain HTTP is also
+supported, although it does not authenticate the server or protect the
+connection from modification. Choose a source you trust to provide the
+workspace and its packages.
+
+If the publisher supplies the conventional sibling receipt, require it with
+`--receipt`:
+
+```bash
+conda workspace unarchive https://example.org/workspaces/my-project.tar.zst \
+  --receipt \
+  --target ./verified-workspace
+```
+
+This retrieves `my-project.tar.zst.receipt.json` from the same URL directory
+and verifies it before accepting the workspace. A missing or invalid receipt
+stops restoration. Without `--receipt`, unarchive does not request that file.
+A receipt provided separately can be selected with `--receipt PATH` or
+`--receipt URL`. See {ref}`remote-archive-receipts` for examples and trust details.
+
+To install a hosted workspace in the same operation, add `--install`:
+
+```bash
+conda workspace unarchive https://example.org/workspaces/my-project.tar.zst \
+  --receipt \
+  --target ./installed-workspace \
+  --install
+```
+
+Without a verified receipt, installation can still use conda's normal package
+download path, but it does not use packages bundled inside the archive.
+Extraction alone does not install packages or run manifest tasks.
+
 ## Extract and install in one step
 
 ![archive install demo](../../demos/archives-install.gif)
@@ -189,6 +244,19 @@ The archive is staged in a temporary directory so its manifest, lockfile,
 packages, and optional receipt follow the same validation path as a real
 extraction. The staging directory is discarded, the requested target and
 package cache remain unchanged, and no environment prefix is created or changed.
+
+For a remote archive, a preview still downloads the archive and any requested
+receipt to validate them:
+
+```bash
+conda workspace unarchive https://example.org/workspaces/my-project.tar.zst \
+  --receipt \
+  --target ./preview-workspace \
+  --dry-run
+```
+
+Temporary downloads are removed afterward. Add `--json` when a script needs a
+single structured result rather than progress messages.
 
 ## Write a receipt for verification
 

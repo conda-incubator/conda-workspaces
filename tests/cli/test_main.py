@@ -470,11 +470,6 @@ def test_workspace_sbom_owns_json_output(
             "execute_import",
         ),
         ("archive", "conda_workspaces.cli.workspace.archive", "execute_archive"),
-        (
-            "unarchive",
-            "conda_workspaces.cli.workspace.archive",
-            "execute_unarchive",
-        ),
     ],
     ids=[
         "add",
@@ -486,7 +481,6 @@ def test_workspace_sbom_owns_json_output(
         "clean",
         "import",
         "archive",
-        "unarchive",
     ],
 )
 @pytest.mark.parametrize(
@@ -853,7 +847,7 @@ def test_unarchive_subparser_receipt() -> None:
         ]
     )
 
-    assert ns.receipt == Path("project.receipt.json")
+    assert ns.receipt == "project.receipt.json"
     assert ns.require_sha256 is True
 
 
@@ -862,3 +856,15 @@ def test_unarchive_subparser_allows_trusted_large_archives() -> None:
     ns = parser.parse_args(["unarchive", "project.tar.gz", "--allow-large-archive"])
 
     assert ns.allow_large_archive is True
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_unarchive_parser_preserves_remote_sources(scheme: str) -> None:
+    archive = f"{scheme}://example.org/workspace.tar.gz?signature=archive"
+    receipt = f"{scheme}://example.org/receipt.json?signature=receipt"
+    args = generate_workspace_parser().parse_args(
+        ["unarchive", archive, "--receipt", receipt]
+    )
+
+    assert args.archive_path == archive
+    assert args.receipt == receipt

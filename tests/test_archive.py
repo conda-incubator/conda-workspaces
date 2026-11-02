@@ -4,8 +4,10 @@ import gzip
 import hashlib
 import io
 import json
+import logging
 import os
 import shutil
+import ssl
 import subprocess
 import tarfile
 from contextlib import contextmanager
@@ -13,9 +15,17 @@ from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
+import conda.gateways.connection.session as conda_session_module
 import pytest
+import trustme
+from conda import CondaError
 from conda.base.context import context as conda_context
 from conda.core.package_cache_data import PackageCacheData
+from conda.gateways.connection.session import CondaSession
+from pytest_httpserver import HTTPServer
+from requests.auth import AuthBase
+from urllib3.response import HTTPResponse as RawHTTPResponse
+from werkzeug import Response
 
 import conda_workspaces.archive as archive_module
 import conda_workspaces.paths as paths_module
@@ -49,7 +59,10 @@ from conda_workspaces.models import ArchiveConfig
 from conda_workspaces.receipts import ArchiveReceipt
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
+
+    from requests import PreparedRequest
+    from requests import Response as HTTPResponse
 
     from tests.conftest import SnapshotTree
 
@@ -4570,3 +4583,474 @@ def test_url_to_filename_error_redacts_embedded_and_relative_credentials() -> No
     message = str(caught.value)
     assert "ABSOLUTE-LEAK" not in message
     assert "RELATIVE-LEAK" not in message
+
+
+@pytest.fixture
+def https_archive_server(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> Iterator[tuple[HTTPServer, Path]]:
+    ca = trustme.CA()
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ca.issue_cert("localhost").configure_cert(server_context)
+    ca_path = tmp_path / "ca.pem"
+    ca.cert_pem.write_to_path(ca_path)
+
+    # Conda captures ssl_verify when it creates a cached session.
+    monkeypatch.setattr(CondaSession._thread_local, "sessions", {}, raising=False)
+    archive_module.get_session.cache_clear()
+    for variable in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+        monkeypatch.delenv(variable, raising=False)
+    try:
+        with HTTPServer(ssl_context=server_context) as server:
+            yield server, ca_path
+    finally:
+        for session in CondaSession._thread_local.sessions.values():
+            session.close()
+        archive_module.get_session.cache_clear()
+
+
+@pytest.mark.parametrize("trusted", [False, True], ids=["untrusted", "configured-ca"])
+def test_remote_archive_https_uses_conda_certificate_verification(
+    https_archive_server: tuple[HTTPServer, Path],
+    downloadable_archive: WorkspaceArchive,
+    trusted: bool,
+    tmp_path: Path,
+) -> None:
+    server, ca_path = https_archive_server
+    server.expect_request("/example.tar.gz").respond_with_data(
+        downloadable_archive.path.read_bytes()
+    )
+    assert downloadable_archive.receipt_path is not None
+    server.expect_request("/example.tar.gz.receipt.json").respond_with_data(
+        downloadable_archive.receipt_path.read_bytes()
+    )
+    source = server.url_for("/example.tar.gz")
+    target = tmp_path / "restored"
+    with (
+        conda_context._override("ssl_verify", str(ca_path) if trusted else True),
+        conda_context._override("remote_max_retries", 0),
+    ):
+        if not trusted:
+            with pytest.raises(ArchiveError, match="Could not download"):
+                with WorkspaceArchive.open_source(source, receipt=True):
+                    pytest.fail("An untrusted HTTPS certificate was accepted")
+            assert not server.log
+            assert not target.exists()
+        else:
+            with WorkspaceArchive.open_source(source, receipt=True) as archive:
+                assert archive.extract(target=target).verified
+            assert (target / "app.py").read_text() == 'print("hello")\n'
+            assert len(server.log) == 2
+
+
+@pytest.mark.parametrize("receipt_kind", ["none", "sibling", "local", "remote"])
+@pytest.mark.parametrize("dry_run", [False, True], ids=["extract", "dry-run"])
+def test_open_remote_archive_preserves_verification_and_cleans_downloads(
+    httpserver: HTTPServer,
+    downloadable_archive: WorkspaceArchive,
+    receipt_kind: str,
+    dry_run: bool,
+    tmp_path: Path,
+) -> None:
+    assert downloadable_archive.receipt_path is not None
+    httpserver.expect_request("/example.tar.gz").respond_with_data(
+        downloadable_archive.path.read_bytes()
+    )
+    httpserver.expect_request("/example.tar.gz.receipt.json").respond_with_data(
+        downloadable_archive.receipt_path.read_bytes()
+    )
+    source = httpserver.url_for("/example.tar.gz")
+    receipt = {
+        "none": None,
+        "sibling": True,
+        "local": downloadable_archive.receipt_path,
+        "remote": source + ".receipt.json",
+    }[receipt_kind]
+    target = tmp_path / "restored"
+    with WorkspaceArchive.open_source(source, receipt=receipt) as archive:
+        temporary = archive.path.parent
+        assert archive.path.name == "example.tar.gz"
+        result = archive.extract(target=target, dry_run=dry_run)
+        assert result.verified is (receipt_kind != "none")
+        assert target.exists() is not dry_run
+        if not dry_run:
+            assert (target / "app.py").read_text() == 'print("hello")\n'
+    assert not temporary.exists()
+    assert len(httpserver.log) == (2 if receipt_kind in {"sibling", "remote"} else 1)
+
+
+@pytest.mark.parametrize("receipt_failure", ["missing", "invalid", "mismatch"])
+def test_remote_receipt_failure_never_publishes_target(
+    httpserver: HTTPServer,
+    downloadable_archive: WorkspaceArchive,
+    receipt_failure: str,
+    tmp_path: Path,
+) -> None:
+    assert downloadable_archive.receipt_path is not None
+    httpserver.expect_request("/example.tar.gz").respond_with_data(
+        downloadable_archive.path.read_bytes()
+    )
+    if receipt_failure != "missing":
+        content = downloadable_archive.receipt_path.read_bytes()
+        if receipt_failure == "invalid":
+            content = b"not json"
+        else:
+            data = json.loads(content)
+            data["subject"][0]["digest"]["sha256"] = "0" * 64
+            content = json.dumps(data).encode()
+        httpserver.expect_request("/example.tar.gz.receipt.json").respond_with_data(
+            content
+        )
+    else:
+        httpserver.expect_request("/example.tar.gz.receipt.json").respond_with_data(
+            status=404
+        )
+    target = tmp_path / "restored"
+    with pytest.raises(ArchiveError):
+        with WorkspaceArchive.open_source(
+            httpserver.url_for("/example.tar.gz"), receipt=True
+        ) as archive:
+            archive.extract(target=target)
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("declared_length", ["1024", ""], ids=["declared", "streamed"])
+@pytest.mark.parametrize("kind", ["archive", "receipt"])
+def test_remote_downloads_enforce_byte_limits(
+    httpserver: HTTPServer,
+    downloadable_archive: WorkspaceArchive,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    declared_length: str,
+) -> None:
+    import conda_workspaces.receipts as receipts_module
+
+    route = "/example.tar.gz"
+    if kind == "archive":
+        monkeypatch.setattr(archive_module, "DEFAULT_ARCHIVE_EXTRACT_BYTES", 64)
+    else:
+        monkeypatch.setattr(receipts_module, "MAX_RECEIPT_BYTES", 64)
+        httpserver.expect_request(route).respond_with_data(
+            downloadable_archive.path.read_bytes()
+        )
+        route += ".receipt.json"
+    response = Response(iter([b"x" * 1024]))
+    if declared_length:
+        response.headers["Content-Length"] = declared_length
+    httpserver.expect_request(route).respond_with_response(response)
+    with pytest.raises(ArchiveError, match="limit"):
+        with WorkspaceArchive.open_source(
+            httpserver.url_for("/example.tar.gz"), receipt=kind == "receipt"
+        ):
+            pytest.fail("Oversized download was accepted")
+
+
+@pytest.mark.parametrize("suffix", ["?signature=secret", "#fragment"])
+def test_remote_sibling_receipt_rejects_ambiguous_url_before_download(
+    httpserver: HTTPServer,
+    suffix: str,
+) -> None:
+    with pytest.raises(ArchiveError, match="explicit"):
+        with WorkspaceArchive.open_source(
+            httpserver.url_for("/example.tar.gz") + suffix, receipt=True
+        ):
+            pytest.fail("Ambiguous sibling location accepted")
+    assert httpserver.log == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["%2e%2e%2fexample.tar.gz", "%5cexample.tar.gz", "CON.tar.gz", "", "download"],
+)
+def test_remote_archive_rejects_unsafe_or_unknown_name(
+    httpserver: HTTPServer,
+    name: str,
+) -> None:
+    with pytest.raises(ArchiveError):
+        with WorkspaceArchive.open_source(httpserver.url_for("/" + name)):
+            pytest.fail("Unsafe download name accepted")
+    assert httpserver.log == []
+
+
+@pytest.mark.parametrize("failure", ["status", "truncated", "truncated-identity"])
+def test_remote_download_errors_redact_credentials_and_query(
+    httpserver: HTTPServer,
+    failure: str,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = "/t/path-secret/example.tar.gz"
+    response = (
+        Response(b"secret response", status=403)
+        if failure == "status"
+        else Response(iter([b"short"]), headers={"Content-Length": "100"})
+    )
+    if failure == "truncated-identity":
+        response.headers["Content-Encoding"] = "identity"
+    httpserver.expect_request(
+        path, query_string="signature=query-secret"
+    ).respond_with_response(response)
+    source = httpserver.url_for(path + "?signature=query-secret").replace(
+        "http://", "http://fake-user:password-secret@"
+    )
+
+    def allow_short_response(response: HTTPResponse, **kwargs: object) -> HTTPResponse:
+        # urllib3 1.26 leaves length enforcement to the caller.
+        response.raw.enforce_content_length = False
+        return response
+
+    session = archive_module.get_session(source)
+    monkeypatch.setitem(session.hooks, "response", [allow_short_response])
+    # Server access logs contain the test credentials, unlike client diagnostics.
+    caplog.set_level(logging.CRITICAL, logger="werkzeug")
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(ArchiveError) as error:
+            with WorkspaceArchive.open_source(source):
+                pytest.fail("Failed download accepted")
+    diagnostic = str(error.value) + caplog.text
+    assert "query-secret" not in diagnostic
+    assert "path-secret" not in diagnostic
+    assert "password-secret" not in diagnostic
+    assert "fake-user" not in diagnostic
+    assert "example.tar.gz" in str(error.value)
+
+
+def test_remote_redirect_drops_source_credentials_and_does_not_read_redirect_body(
+    httpserver: HTTPServer,
+    downloadable_archive: WorkspaceArchive,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from conda.gateways.connection.session import get_session
+
+    with HTTPServer() as destination:
+        httpserver.expect_request("/example.tar.gz").respond_with_response(
+            Response(
+                iter([]),
+                status=302,
+                headers={
+                    "Location": destination.url_for("/other.tar.gz"),
+                    "Content-Length": str(2**30),
+                },
+            )
+        )
+        destination.expect_request("/other.tar.gz").respond_with_data(
+            downloadable_archive.path.read_bytes()
+        )
+        source = httpserver.url_for("/example.tar.gz").replace(
+            "http://", "http://user:secret@"
+        )
+        session = get_session(source)
+        monkeypatch.setitem(session.headers, "X-API-Key", "source-secret")
+        with WorkspaceArchive.open_source(source) as archive:
+            assert archive.path.read_bytes() == downloadable_archive.path.read_bytes()
+            assert archive.path.name == "example.tar.gz"
+        assert httpserver.log[0][0].headers["X-API-Key"] == "source-secret"
+        assert "Authorization" not in destination.log[0][0].headers
+        assert "X-API-Key" not in destination.log[0][0].headers
+
+
+@pytest.mark.parametrize("scheme", ["file", "ftp"])
+def test_remote_archive_rejects_redirect_to_other_protocol(
+    httpserver: HTTPServer,
+    downloadable_archive: WorkspaceArchive,
+    scheme: str,
+) -> None:
+    destination = (
+        downloadable_archive.path.as_uri()
+        if scheme == "file"
+        else "ftp://example.invalid/example.tar.gz"
+    )
+    httpserver.expect_request("/example.tar.gz").respond_with_data(
+        status=302, headers={"Location": destination}
+    )
+    with pytest.raises(ArchiveError, match="HTTP"):
+        with WorkspaceArchive.open_source(httpserver.url_for("/example.tar.gz")):
+            pytest.fail("A non-HTTP redirect was followed")
+
+
+def test_remote_archive_offline_mode_makes_no_request(
+    httpserver: HTTPServer,
+) -> None:
+    with conda_context._override("offline", True):
+        with pytest.raises(ArchiveError, match="offline"):
+            with WorkspaceArchive.open_source(httpserver.url_for("/example.tar.gz")):
+                pytest.fail("Offline download accepted")
+    assert httpserver.log == []
+
+
+def test_remote_download_rejects_unbounded_http_content_encoding(
+    httpserver: HTTPServer,
+    tmp_path: Path,
+) -> None:
+    httpserver.expect_request("/example.tar.gz").respond_with_response(
+        Response(
+            iter([gzip.compress(b"ok") + gzip.compress(b"") * 100]),
+            headers={"Content-Encoding": "gzip"},
+        )
+    )
+    with pytest.raises(ArchiveError, match="encoding"):
+        WorkspaceArchive.download_source(
+            httpserver.url_for("/example.tar.gz"),
+            tmp_path / "download",
+            maximum_bytes=64,
+        )
+
+
+def test_remote_download_redacts_authentication_plugin_errors(
+    httpserver: HTTPServer,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class FailingAuth(AuthBase):
+        def __call__(self, request: PreparedRequest) -> PreparedRequest:
+            raise CondaError(f"Authentication failed: {request.url}")
+
+    source = httpserver.url_for("/example.tar.gz?signature=query-secret").replace(
+        "http://", "http://fake-user:password-secret@"
+    )
+    session = archive_module.get_session(source)
+    monkeypatch.setattr(session, "auth", FailingAuth())
+    with pytest.raises(ArchiveError) as error:
+        WorkspaceArchive.download_source(
+            source, tmp_path / "download", maximum_bytes=64
+        )
+    assert "query-secret" not in str(error.value)
+    assert "password-secret" not in str(error.value)
+    assert "fake-user" not in str(error.value)
+    assert "example.tar.gz" in str(error.value)
+    assert not httpserver.log
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "C://archives/example.tar.gz",
+        "c://archives/example.tar.gz",
+        "C:/archives/example.tar.gz",
+        r"C:\archives\example.tar.gz",
+        "//server/share/example.tar.gz",
+        r"\\server\share\example.tar.gz",
+        "/archives/https://example.tar.gz",
+    ],
+    ids=[
+        "drive-upper",
+        "drive-lower",
+        "drive-slash",
+        "drive-backslash",
+        "unc-slash",
+        "unc-backslash",
+        "posix",
+    ],
+)
+def test_open_source_preserves_local_path_spellings(source: str) -> None:
+    receipt = source + ".receipt.json"
+    with WorkspaceArchive.open_source(source, receipt=receipt) as archive:
+        assert archive.path == Path(source).expanduser().absolute()
+        assert archive.receipt == receipt
+    assert WorkspaceArchive.source_label(source) == source
+    assert WorkspaceArchive.source_label(receipt) == receipt
+
+
+@pytest.mark.parametrize("host", ["example.org:bad", "[bad]", ""])
+def test_open_source_rejects_malformed_urls_without_exposing_credentials(
+    host: str,
+) -> None:
+    source = (
+        f"https://fake-user:password-secret@{host}/example.tar.gz"
+        "?signature=query-secret"
+    )
+    with pytest.raises(ArchiveError) as error:
+        with WorkspaceArchive.open_source(source):
+            pytest.fail("A malformed URL was accepted")
+    diagnostic = str(error.value) + WorkspaceArchive.source_label(source)
+    assert "fake-user" not in diagnostic
+    assert "password-secret" not in diagnostic
+    assert "query-secret" not in diagnostic
+
+
+@pytest.mark.parametrize("status_code", [413, 429, 500, 503])
+def test_remote_status_errors_do_not_read_bodies_or_change_shared_retries(
+    httpserver: HTTPServer,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    status_code: int,
+) -> None:
+    httpserver.expect_request("/example.tar.gz").respond_with_data(
+        b"x" * 1024 * 1024, status=status_code
+    )
+    source = httpserver.url_for("/example.tar.gz")
+    shared = archive_module.get_session(source)
+    original_adapter = shared.get_adapter(source)
+    policy = original_adapter.max_retries.new(total=1, backoff_factor=0)
+    monkeypatch.setattr(original_adapter, "max_retries", policy)
+    body_reads: list[int] = []
+    original_read = RawHTTPResponse.read
+
+    def record_read(
+        response: RawHTTPResponse,
+        amt: int | None = None,
+        decode_content: bool | None = None,
+        cache_content: bool = False,
+    ) -> bytes:
+        data = original_read(response, amt, decode_content, cache_content)
+        if response.status == status_code:
+            body_reads.append(len(data))
+        return data
+
+    monkeypatch.setattr(RawHTTPResponse, "read", record_read)
+    downloaded = tmp_path / "download"
+    with pytest.raises(ArchiveError, match=f"HTTP {status_code}"):
+        WorkspaceArchive.download_source(source, downloaded, maximum_bytes=64)
+    assert body_reads == []
+    assert len(httpserver.log) == 1
+    assert not downloaded.exists()
+    assert shared.get_adapter(source) is original_adapter
+    assert original_adapter.max_retries is policy
+
+
+@pytest.mark.parametrize("redirect_kind", ["local-file", "cross-origin"])
+def test_remote_proxy_authentication_preserves_redirect_checks(
+    httpserver: HTTPServer,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    redirect_kind: str,
+) -> None:
+    local = tmp_path / "local.tar.gz"
+    local.write_bytes(b"local file must not be downloaded")
+    destination = (
+        local.as_uri()
+        if redirect_kind == "local-file"
+        else "http://other.example.invalid/download.tar.gz"
+    )
+    httpserver.expect_oneshot_request("/example.tar.gz").respond_with_data(status=407)
+    httpserver.expect_request("/example.tar.gz").respond_with_data(
+        status=302, headers={"Location": destination}
+    )
+    httpserver.expect_request("/download.tar.gz").respond_with_data(b"ok")
+    source = "http://download.example.invalid/example.tar.gz"
+    session = archive_module.get_session(source)
+    monkeypatch.setitem(session.proxies, "http", httpserver.url_for("/"))
+    monkeypatch.setitem(session.headers, "X-API-Key", "source-secret")
+    monkeypatch.setattr(session, "trust_env", False)
+
+    def proxy_credentials(scheme: str) -> tuple[str, str]:
+        assert scheme == "http"
+        return "test-user", "test-password"
+
+    monkeypatch.setattr(
+        conda_session_module, "get_proxy_username_and_pass", proxy_credentials
+    )
+    downloaded = tmp_path / "download"
+    if redirect_kind == "local-file":
+        with pytest.raises(ArchiveError, match="HTTP"):
+            WorkspaceArchive.download_source(source, downloaded, maximum_bytes=64)
+        assert not downloaded.exists()
+        assert len(httpserver.log) == 2
+    else:
+        WorkspaceArchive.download_source(source, downloaded, maximum_bytes=64)
+        assert downloaded.read_bytes() == b"ok"
+        assert len(httpserver.log) == 3
+        assert "X-API-Key" not in httpserver.log[-1][0].headers
+    assert httpserver.log[0][0].headers["X-API-Key"] == "source-secret"
+    assert "Proxy-Authorization" in httpserver.log[1][0].headers

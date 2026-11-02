@@ -10,8 +10,7 @@ accept the same subcommands, flags, and arguments.
 Successful commands that advertise `--json` emit exactly one JSON
 value on stdout. Successful `add`, `update`, `remove`, `platform add`,
 `platform remove`, `install`,
-`lock`, `clean`, `import`, `archive`, and `unarchive` operations
-return:
+`lock`, `clean`, `import`, and `archive` operations return:
 
 ```json
 {"success": true}
@@ -21,6 +20,15 @@ Query and export commands return command-specific data. `quickstart`
 returns its workspace, environment, manifest, added specs, and shell
 state. `init`, `activate`, `run`, and `shell` tolerate a global
 `--json` flag but intentionally emit no structured result.
+
+`unarchive` returns `success`, `source`, `target`, `receipt`, `verified`,
+`dry_run`, `installed`, `environment`, `primed_packages`,
+`cache_priming_skipped`, and `return_code`. `source` and `receipt` describe the
+original inputs with credentials, tokens, query strings, and fragments removed.
+The result does not expose temporary download paths. `target` is the resolved
+destination. `receipt` is `null` when no receipt was selected, and `verified`
+reports whether receipt verification succeeded. `installed` remains false for
+extraction-only operations and previews.
 
 `conda workspace sbom --json` returns `success`, `format`, and `environment`.
 It adds `content` when writing to stdout or previewing a file with `--dry-run`.
@@ -34,6 +42,52 @@ After a file is written, it returns the path in `file` instead:
   "file": "exports/default.cdx.json"
 }
 ```
+
+(archive-downloads)=
+
+### Restoring archives
+
+`conda workspace unarchive ARCHIVE` accepts a local path or an HTTP or HTTPS
+URL. The URL path must end in a valid archive filename, such as
+`example.tar.zst`, `example.tar.gz`, or `example.tar.bz2`. Response headers do
+not change that filename. Remote archives are downloaded into private temporary
+storage and pass through the same archive validation and extraction as local
+files. The default target is a directory named after the archive in the current
+directory.
+`--target PATH` selects another destination. The target must not already exist.
+
+```bash
+conda workspace unarchive https://example.org/workspaces/example.tar.zst --target ./example
+```
+
+Extraction does not install environments. Add `--install` to install from the
+included lockfile, and `-e/--environment` to select one environment.
+
+Use `--receipt` to require the conventional sibling receipt,
+`--receipt PATH` for a local receipt, or `--receipt URL` for an explicitly
+located remote receipt. Without `--receipt`, unarchive does not request a
+sibling receipt. See [Archive receipt reference](archive-receipts.md) for
+selection, verification, and trust rules.
+
+Downloads use conda's authentication and TLS settings. Redirects may switch
+between HTTP and HTTPS, following conda's behavior, but cannot use other
+schemes. Configure credentials through conda's existing authentication
+facilities before retrieving an archive from a private host.
+
+Connection retries use conda's settings. HTTP error responses abort the
+download without automatic status retries, which could otherwise consume an
+unbounded error body before the download size checks run.
+
+Servers must send archive and receipt files without HTTP content compression.
+Downloads request `Accept-Encoding: identity` and reject other HTTP
+`Content-Encoding` values so download size limits apply to the transferred
+bytes. The archive file's own compression, such as `.tar.gz` or `.tar.zst`,
+remains supported.
+
+`--dry-run` downloads and validates remote inputs in temporary storage. It
+leaves the target and environment prefixes unchanged. With `--install`,
+validation can also download packages into a temporary cache. Temporary
+downloads are removed when the operation finishes or fails.
 
 ### Locked installation
 
