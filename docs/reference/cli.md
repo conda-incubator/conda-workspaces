@@ -132,6 +132,12 @@ Archive URLs cannot be combined with extra positional arguments. Quickstart
 does not probe a server or retry a failed archive operation as a package
 operation to decide how to interpret an input.
 
+Conda's `MatchSpec` parser identifies package specifications, including
+URL-qualified channels such as `https://conda.anaconda.org/conda-forge::numpy`
+and bracketed URL selectors. Conda's registered package formats remain
+available. `--archive` explicitly selects workspace restoration when a
+filename format overlaps.
+
 By default, the URL filename without its archive suffix names a new directory
 under the current directory. The derived name must be a valid directory name.
 `--target PATH` selects a different destination. An existing destination,
@@ -156,6 +162,20 @@ also suppresses the shell. `--dry-run` downloads and validates the archive
 and selected environment without creating the destination. See
 {ref}`the quickstart guide <quickstart-workspace>` for recovery
 after an installation or shell failure.
+
+### Shell startup
+
+`conda workspace shell` and quickstart's shell step use conda-spawn for
+activation and the interactive session. The shell executable must be outside
+the workspace. Lookup uses absolute PATH directories and ignores relative
+entries and executables that resolve into the workspace.
+
+Current conda activation code cannot safely quote all prefix paths. Shell
+startup rejects workspace paths containing quotes, shell expansion or
+command characters, or control characters. Spaces and Unicode text are
+supported. For archive quickstart, choose a suitable full destination path
+with `--target`, or use `--no-shell` to restore and install without starting
+a shell. A failed shell step leaves the installed workspace in place.
 
 ### Locked installation
 

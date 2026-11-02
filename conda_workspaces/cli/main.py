@@ -21,6 +21,7 @@ from conda.cli.helpers import (
 )
 from conda.common.constants import NULL
 from conda.exceptions import CondaError, CondaSystemExit, DryRunExit
+from conda.reporters import render
 
 
 def _accept_json_silently(parser: argparse.ArgumentParser) -> None:
@@ -74,13 +75,12 @@ def _add_workspace_channel_options(parser: argparse.ArgumentParser) -> None:
 def _handle_error(exc: CondaError) -> int:
     """Render a CondaError with Rich and return its exit code.
 
-    In debug mode, re-raises the original error for its traceback. In JSON
-    mode, raises a credential-redacted ``CondaError`` for conda's structured
-    renderer.
+    In debug mode, re-raises the original error for its traceback. JSON
+    output uses conda's renderer after redacting credentials.
     """
     if conda_context.debug:
         raise exc
-    if conda_context.json:
+    if conda_context.json or conda_context.console == DEFAULT_JSON_REPORTER_BACKEND:
         from ..models import redact_url_text
 
         def redact_value(value: object) -> object:
@@ -109,6 +109,9 @@ def _handle_error(exc: CondaError) -> int:
         exc._kwargs = {}
         exc._caused_by = None
         exc.args = (message,)
+        if not conda_context.json:
+            render(exc.dump_map())
+            return getattr(exc, "return_code", 1)
         raise exc from None
 
     from rich.console import Console
@@ -1166,18 +1169,16 @@ def execute_workspace(args: argparse.Namespace) -> int:
     }
     if json_result:
         captured = StringIO()
-        with redirect_stdout(captured):
-            try:
+        try:
+            with redirect_stdout(captured):
                 result = _dispatch_workspace(args, subcmd)
-            except DryRunExit:
-                result = 0
-            except CondaError as exc:
-                result = _handle_error(exc)
+        except DryRunExit:
+            result = 0
+        except CondaError as exc:
+            return _handle_error(exc)
         if result != 0:
             sys.stderr.write(captured.getvalue())
             return result
-
-        from conda.reporters import render
 
         render({"success": True})
         return 0

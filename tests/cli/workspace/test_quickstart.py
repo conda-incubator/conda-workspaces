@@ -144,6 +144,17 @@ def orchestrated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         (["python=3.14", "numpy>=2.4"], True, False),
         (["https://example.org/pkg-1.0-0.conda"], True, False),
         (["https://example.org/pkg-1.0-0.tar.bz2"], True, False),
+        (["https://conda.anaconda.org/conda-forge::numpy"], True, False),
+        (["https://conda.anaconda.org/conda-forge::numpy.tar.gz"], True, False),
+        (["numpy[url=https://example.org/numpy-2.0-py_0.conda]"], True, False),
+        (["numpy[url=https://example.org/workspace.tar.gz]"], True, False),
+        (["conda-forge::numpy[url=https://example.org/numpy.conda]"], True, False),
+        (["https://example.org/pkg-1.0-0.CONDA"], True, False),
+        (
+            ["https://example.org/pkg-1.0-0.CONDA#d41d8cd98f00b204e9800998ecf8427e"],
+            True,
+            False,
+        ),
     ],
     ids=[
         "no-specs-runs-install",
@@ -151,6 +162,13 @@ def orchestrated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         "multi-spec-skips-install",
         "conda-package-url",
         "bz2-package-url",
+        "url-channel-matchspec",
+        "url-channel-archive-shaped-name",
+        "url-selector-matchspec",
+        "url-selector-archive-shaped-name",
+        "named-channel-url-selector",
+        "uppercase-package-extension",
+        "uppercase-package-extension-hash",
     ],
 )
 def test_quickstart_from_scratch(
@@ -171,6 +189,34 @@ def test_quickstart_from_scratch(
     if expect_add:
         assert runners["add"].calls[0].specs == specs
         assert runners["add"].calls[0].environment == "default"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "https://reader:password@example.org:invalid/channel::numpy",
+        "https://reader:password@[invalid/channel::numpy",
+        "https://reader:password@example.org/%FF.conda",
+        "https://reader:password@example.org/%FF::numpy",
+    ],
+    ids=[
+        "invalid-port",
+        "invalid-ipv6",
+        "invalid-package-encoding",
+        "invalid-channel-encoding",
+    ],
+)
+def test_quickstart_rejects_malformed_url_specs_before_writes(
+    orchestrated: dict,
+    source: str,
+) -> None:
+    before = set(orchestrated["root"].iterdir())
+    with pytest.raises(ArgumentError, match="Invalid source URL") as error:
+        orchestrated["run"](specs=[source])
+
+    assert "password" not in str(error.value)
+    assert set(orchestrated["root"].iterdir()) == before
+    assert all(not runner.calls for runner in orchestrated["runners"].values())
 
 
 def test_quickstart_copy_from_dir_skips_init(
@@ -772,7 +818,7 @@ def test_quickstart_archive_uses_restored_workspace(
     target = caller / "new workspace"
     spawned = []
 
-    def spawn(*, prefix: Path, command=None) -> int:
+    def spawn(*, prefix: Path, shell_cls=None, command=None) -> int:
         spawned.append((prefix, Path.cwd(), command))
         return 0
 
@@ -967,7 +1013,7 @@ def test_quickstart_archive_installs_only_selected_environment(
     archive, server, caller = named_remote_quickstart
     spawned = []
 
-    def spawn(*, prefix: Path, command=None) -> int:
+    def spawn(*, prefix: Path, shell_cls=None, command=None) -> int:
         spawned.append((prefix, Path.cwd()))
         return 0
 
@@ -1010,7 +1056,7 @@ def test_quickstart_archive_preserves_workspace_on_install_failure(
             raise CondaWorkspacesError("Package installation failed")
         return 7
 
-    def unexpected_shell(*, prefix, command=None) -> int:
+    def unexpected_shell(*, prefix, shell_cls=None, command=None) -> int:
         pytest.fail("Shell must not start after installation failure")
 
     monkeypatch.setattr(
@@ -1083,7 +1129,7 @@ def test_quickstart_archive_reports_installed_workspace_on_shell_failure(
     archive, server, caller = named_remote_quickstart
     target = caller / "selected"
 
-    def fail_shell(*, prefix, command=None) -> int:
+    def fail_shell(*, prefix, shell_cls=None, command=None) -> int:
         if failure == "raise":
             raise OSError("Cannot start shell")
         return 9
@@ -1131,22 +1177,26 @@ def test_quickstart_archive_can_disambiguate_bz2(
 
 
 @pytest.mark.parametrize("json_mode", ["flag", "console", "environment"])
+@pytest.mark.parametrize("token", ["secret", "secret:1"], ids=["plain", "colon"])
+@pytest.mark.parametrize("scheme", ["http", "HTTP"], ids=["lowercase", "uppercase"])
 def test_quickstart_archive_json_redacts_source_credentials(
     remote_quickstart: tuple[WorkspaceArchive, HTTPServer, Path],
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
     json_mode: str,
+    token: str,
+    scheme: str,
 ) -> None:
     archive, server, _ = remote_quickstart
     source = server.url_for("/" + archive.path.name).replace(
-        "http://", "http://reader:password@"
+        "http://", f"{scheme}://reader:password@"
     )
 
-    def unexpected_shell(*, prefix, command=None) -> int:
+    def unexpected_shell(*, prefix, shell_cls=None, command=None) -> int:
         pytest.fail("JSON mode must not start a shell")
 
     monkeypatch.setattr("conda_spawn.main.spawn", unexpected_shell)
-    options = ["quickstart", source + "?token=secret"]
+    options = ["quickstart", source + "?token=" + token]
     if json_mode == "flag":
         options.append("--json")
     elif json_mode == "console":
@@ -1261,14 +1311,18 @@ def test_quickstart_archive_leaves_unverified_bundled_packages_unused(
 @pytest.mark.parametrize(
     "path", ["/download", "/workspace.zip"], ids=["no-suffix", "zip"]
 )
+@pytest.mark.parametrize("token", ["secret", "secret:1"], ids=["plain", "colon"])
+@pytest.mark.parametrize("scheme", ["http", "HTTP"], ids=["lowercase", "uppercase"])
 def test_quickstart_rejects_unknown_url_without_side_effects(
     remote_quickstart: tuple[WorkspaceArchive, HTTPServer, Path],
     path: str,
+    token: str,
+    scheme: str,
 ) -> None:
     _, server, caller = remote_quickstart
-    source = server.url_for(path).replace("http://", "http://reader:password@")
+    source = server.url_for(path).replace("http://", f"{scheme}://reader:password@")
     args = generate_workspace_parser().parse_args(
-        ["quickstart", source + "?token=secret", "--no-shell"]
+        ["quickstart", source + "?token=" + token, "--no-shell"]
     )
     reset_context((), argparse_args=args)
 

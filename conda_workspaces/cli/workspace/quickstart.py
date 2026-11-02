@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import io
 import json
-import os
 import shutil
 import sys
 import tempfile
@@ -28,7 +27,8 @@ from urllib.parse import unquote, urlsplit
 from conda.base.constants import DEFAULT_JSON_REPORTER_BACKEND
 from conda.base.context import context as conda_context
 from conda.common.compat import on_win
-from conda.exceptions import ArgumentError, CondaError
+from conda.exceptions import ArgumentError, CondaError, InvalidMatchSpec
+from conda.models.match_spec import MatchSpec
 from conda.utils import quote_for_shell
 from rich.console import Console
 
@@ -81,7 +81,21 @@ def execute_quickstart(
     for spec in specs:
         if WorkspaceArchive.is_remote_source(spec):
             try:
-                name = unquote(urlsplit(spec).path.rsplit("/", 1)[-1], errors="strict")
+                parts = urlsplit(spec)
+                name = unquote(parts.path.rsplit("/", 1)[-1], errors="strict")
+                if not getattr(args, "archive", False):
+                    try:
+                        match_spec = MatchSpec(spec)
+                    except InvalidMatchSpec:
+                        pass
+                    else:
+                        # A query colon can parse as a MatchSpec namespace separator.
+                        if (
+                            not spec.lstrip().lower().startswith(f"{parts.scheme}://")
+                            or "::" in parts.path
+                            or match_spec.get_raw_value("url") == spec.partition("#")[0]
+                        ):
+                            continue
             except (ValueError, UnicodeError):
                 raise ArgumentError(
                     f"Invalid source URL: {WorkspaceArchive.source_label(spec)}"
@@ -364,15 +378,13 @@ def execute_quickstart(
     shell_spawned = False
     installed = not dry_run and return_code == 0
     if not no_shell and installed:
-        original_cwd = Path.cwd()
         try:
-            if archive_source is not None:
-                os.chdir(workspace_root)
             shell_code = execute_shell(
                 with_prompts(
                     manifest_file=manifest_path if archive_source is not None else None,
                     environment=env_name,
                     cmd=None,
+                    cwd=workspace_root if archive_source is not None else None,
                 )
             )
         except (CondaError, OSError, ImportError) as exc:
@@ -383,9 +395,6 @@ def execute_quickstart(
                 f" but the shell failed: {exc}",
                 hints=[*recovery_hint, recovery[0], recovery[2]],
             ) from exc
-        finally:
-            if archive_source is not None:
-                os.chdir(original_cwd)
         shell_spawned = True
         if archive_source is not None:
             return_code = shell_code

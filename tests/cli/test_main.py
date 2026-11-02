@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from conda.base.constants import DEFAULT_JSON_REPORTER_BACKEND
 from conda.base.context import reset_context
+from conda.exception_handler import ExceptionHandler
 from conda.exceptions import CondaError, CondaSystemExit, DryRunExit
 from rich.console import Console
 
@@ -633,6 +634,39 @@ def test_workspace_json_conda_error_redacts_credentials(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+@pytest.mark.usefixtures("reset_conda_context")
+@pytest.mark.parametrize(
+    "json_options", [["--json"], ["--console", "json"]], ids=["flag", "console"]
+)
+@pytest.mark.parametrize("command", ["quickstart", "install"])
+def test_workspace_json_errors_use_conda_renderer(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    json_options: list[str],
+) -> None:
+    options = (
+        [
+            "quickstart",
+            "https://reader:password@example.invalid/workspace.zip?token=secret",
+        ]
+        if command == "quickstart"
+        else ["--file", str(tmp_path / "missing.toml"), "install"]
+    )
+    args = generate_workspace_parser().parse_args([*options, *json_options])
+    reset_context((), argparse_args=args)
+
+    result = ExceptionHandler()(execute_workspace, args)
+
+    captured = capsys.readouterr()
+    assert result != 0
+    payload = json.loads(captured.out)
+    assert payload["error"]
+    assert captured.err == ""
+    assert "password" not in captured.out
+    assert "secret" not in captured.out
 
 
 @pytest.mark.usefixtures("reset_conda_context")
