@@ -969,7 +969,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         "quickstart",
         help=(
             "Bootstrap a workspace in one command: init (or copy an existing"
-            " manifest), add the given specs, install the environment,"
+            " manifest or restore an archive URL), install the environment,"
             " and drop into a shell."
         ),
         add_help=False,
@@ -981,14 +981,40 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         nargs="*",
         default=[],
         help=(
-            "Optional package specs to add immediately (same grammar as"
+            "A workspace archive URL, or package specs to add (same grammar as"
             " `conda workspace add`, e.g. 'python=3.14' 'numpy>=2.4')."
         ),
     )
     quickstart_parser.add_argument(
+        "--archive",
+        action="store_true",
+        help="Treat the positional URL as a workspace archive, including .tar.bz2.",
+    )
+    quickstart_parser.add_argument(
+        "--target",
+        type=Path,
+        help="New directory for an archive workspace (default: archive filename stem).",
+    )
+    quickstart_parser.add_argument(
+        "--receipt",
+        nargs="?",
+        const=True,
+        help="Verify an archive with its sibling receipt, or a receipt PATH or URL.",
+    )
+    quickstart_parser.add_argument(
+        "--require-sha256",
+        action="store_true",
+        help="Require SHA-256 for receipt package records (requires --receipt).",
+    )
+    quickstart_parser.add_argument(
+        "--allow-large-archive",
+        action="store_true",
+        help="Allow archives larger than the default 4 GiB limit.",
+    )
+    quickstart_parser.add_argument(
         "--format",
         choices=["pixi", "conda", "pyproject"],
-        default="conda",
+        default=None,
         dest="manifest_format",
         help=(
             "Manifest format for the generated workspace (default: conda)."

@@ -2,7 +2,8 @@
 
 Archive receipts are external sidecar JSON documents written by
 `conda workspace archive --receipt` and verified by
-`conda workspace unarchive --receipt`.
+`conda workspace unarchive --receipt` or archive-based
+`conda workspace quickstart --receipt`.
 
 They use the
 [in-toto Statement v1][in-toto-statement] envelope and a
@@ -22,7 +23,7 @@ manifest, lockfile, and package inventory it was created from.
 | Statement type | `https://in-toto.io/Statement/v1` |
 | Predicate type | `https://conda-incubator.github.io/conda-workspaces/workspace-archive-receipt-1.schema.json` |
 | Producer | `conda workspace archive --receipt [PATH]` |
-| Consumer | `conda workspace unarchive ARCHIVE --receipt [PATH_OR_URL]` |
+| Consumers | `conda workspace unarchive ARCHIVE --receipt [PATH_OR_URL]`, `conda workspace quickstart URL --receipt [PATH_OR_URL]` |
 
 ## File naming
 

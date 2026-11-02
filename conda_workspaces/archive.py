@@ -1379,6 +1379,11 @@ class WorkspaceArchive:
             if stem.endswith(suffix):
                 stem = stem[: -len(suffix)]
                 break
+        if not is_path_segment(stem):
+            raise ArchiveError(
+                "Archive filename cannot be used as a default extraction directory.",
+                hints=["Pass --target to choose the destination explicitly."],
+            )
         return Path.cwd() / stem if cwd is None else Path(cwd) / stem
 
     def inspect(self) -> dict[str, object]:
@@ -3632,6 +3637,9 @@ def open_tar(
 ) -> Iterator[tarfile.TarFile]:
     """Open one stable archive generation without following filesystem links."""
     compression = detect_compression(archive_path)
+    read_errors: tuple[type[Exception], ...] = (tarfile.TarError, EOFError)
+    if compression == "zst":
+        read_errors += (zstd_module().ZstdError,)
     with open_stable_regular_file(
         archive_path,
         label="Archive",
@@ -3641,21 +3649,27 @@ def open_tar(
             else min(MAX_ARCHIVE_RAW_BYTES, max_raw_bytes)
         ),
     ) as archive_stream:
-        if compression == "zst" and not tarfile_supports_zstd():
-            with zstd_module().open(archive_stream, "rb") as compressed:
-                with tarfile.open(
-                    fileobj=compressed,
-                    mode="r:",
-                    tarinfo=_BoundedTarInfo,
-                ) as tf:
-                    yield tf
-            return
-        with tarfile.open(  # ty: ignore[no-matching-overload]
-            fileobj=archive_stream,
-            mode=f"r:{compression}",
-            tarinfo=_BoundedTarInfo,
-        ) as tf:
-            yield tf
+        try:
+            if compression == "zst" and not tarfile_supports_zstd():
+                with zstd_module().open(archive_stream, "rb") as compressed:
+                    with tarfile.open(
+                        fileobj=compressed,
+                        mode="r:",
+                        tarinfo=_BoundedTarInfo,
+                    ) as tf:
+                        yield tf
+                return
+            with tarfile.open(  # ty: ignore[no-matching-overload]
+                fileobj=archive_stream,
+                mode=f"r:{compression}",
+                tarinfo=_BoundedTarInfo,
+            ) as tf:
+                yield tf
+        except read_errors as exc:
+            raise ArchiveError(
+                f"Cannot read archive '{archive_path.name}':"
+                " invalid or truncated content."
+            ) from exc
 
 
 def ensure_extract_target_empty(target: Path) -> None:

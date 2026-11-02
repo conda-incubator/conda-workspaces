@@ -170,7 +170,8 @@ def print_error(
                 for hint in getattr(inner, "hints", []):
                     console.print(
                         "[bold cyan]Hint:[/bold cyan] "
-                        f"{escape_for_console(redact_url_text(str(hint)))}"
+                        f"{escape_for_console(redact_url_text(str(hint)))}",
+                        soft_wrap=True,
                     )
     else:
         msg = _format_error_message(exc)
@@ -178,5 +179,6 @@ def print_error(
         for hint in getattr(exc, "hints", []):
             console.print(
                 "[bold cyan]Hint:[/bold cyan] "
-                f"{escape_for_console(redact_url_text(str(hint)))}"
+                f"{escape_for_console(redact_url_text(str(hint)))}",
+                soft_wrap=True,
             )

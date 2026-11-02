@@ -109,6 +109,18 @@ conda workspace install --locked
 
 ## Restore a hosted archive
 
+To restore a hosted archive, install its default environment, and open a shell
+in the restored workspace, use:
+
+```bash
+conda workspace quickstart https://example.org/workspaces/my-project.tar.zst
+```
+
+This creates a new `my-project/` directory and installs from the published
+lockfile. Add `--no-shell` to install without opening a shell. See
+{ref}`quickstart-workspace` for destination
+and environment selection, receipts, and recovery after a failed install.
+
 You can give unarchive an HTTP or HTTPS URL instead of downloading the archive
 by hand. For an archive hosted at the example URL below:
 

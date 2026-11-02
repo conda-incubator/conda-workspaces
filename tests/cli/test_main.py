@@ -112,6 +112,17 @@ def test_workspace_unknown_subcmd_prints_help(
 @pytest.mark.parametrize(
     "args, expected_attr, expected_value",
     [
+        (["quickstart", "--archive"], "archive", True),
+        (["quickstart", "--target", "new"], "target", Path("new")),
+        (["quickstart", "--receipt"], "receipt", True),
+        (["quickstart", "--receipt", "receipt.json"], "receipt", "receipt.json"),
+        (
+            ["quickstart", "--receipt", "https://example.org/receipt.json"],
+            "receipt",
+            "https://example.org/receipt.json",
+        ),
+        (["quickstart", "--require-sha256"], "require_sha256", True),
+        (["quickstart", "--allow-large-archive"], "allow_large_archive", True),
         (["init", "--format", "conda"], "manifest_format", "conda"),
         (["init", "--format", "pyproject"], "manifest_format", "pyproject"),
         (["init", "--name", "myproj"], "name", "myproj"),
@@ -224,6 +235,13 @@ def test_workspace_unknown_subcmd_prints_help(
         (["sbom", "--json"], "json", True),
     ],
     ids=[
+        "quickstart-archive",
+        "quickstart-target",
+        "quickstart-sibling-receipt",
+        "quickstart-local-receipt",
+        "quickstart-remote-receipt",
+        "quickstart-require-sha256",
+        "quickstart-large-archive",
         "init-format-conda",
         "init-format-pyproject",
         "init-name",
