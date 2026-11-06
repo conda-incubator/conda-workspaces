@@ -15,6 +15,10 @@ For the normative description of every field accepted in `conda.toml` and
 the `[tool.conda.*]` embedded form, see the [`conda.toml`
 specification](reference/conda-toml-spec.md).
 
+The proposed {ref}`published workspace source settings <workspace-source-configuration>`
+are specified separately. They are not implemented yet and do not change
+package channel configuration.
+
 ## Workspace search order
 
 1. `conda.toml`: conda-native workspace manifest

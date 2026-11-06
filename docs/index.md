@@ -231,6 +231,7 @@ reference/api
 configuration
 reference/conda-toml-spec
 reference/archive-receipts
+reference/workspace-publications
 reference/format-aliases
 ```
 
