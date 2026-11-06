@@ -201,6 +201,11 @@ compares all package identity and digest fields that are present.
 
 ## Trust model
 
+The proposed {ref}`publication convention <publication-receipt-selection>`
+specifies automatic verification of source-declared receipts and how they
+combine with an explicit receipt selection. Named lookup awaits implementation
+in [#212](https://github.com/conda-incubator/conda-workspaces/issues/212).
+
 Archive receipts are integrity documents, not signatures. They detect
 whether the archive, extracted manifest, extracted lockfile, or lockfile
 package inventory differs from the receipt, but they do not prove who
