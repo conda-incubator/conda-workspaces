@@ -5,12 +5,18 @@ from __future__ import annotations
 import json
 import sys
 from io import StringIO
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from conda.base.context import reset_context
+from conda.common.compat import on_win
 from conda.exceptions import ArgumentError, InvalidMatchSpec
+from conda.utils import quote_for_shell
 from rich.console import Console
 
+from conda_workspaces.archive import WorkspaceArchive, create_archive
+from conda_workspaces.cli.main import execute_workspace, generate_workspace_parser
 from conda_workspaces.cli.workspace import quickstart as quickstart_module
 from conda_workspaces.cli.workspace.quickstart import execute_quickstart
 from conda_workspaces.exceptions import (
@@ -21,13 +27,16 @@ from conda_workspaces.exceptions import (
     ManifestExistsError,
     QuickstartCopyError,
 )
+from conda_workspaces.models import ArchiveConfig
+from conda_workspaces.receipts import ArchiveReceipt
 
 from ..conftest import make_args
 
 if TYPE_CHECKING:
     import argparse
-    from collections.abc import Callable
-    from pathlib import Path
+    from collections.abc import Callable, Iterator
+
+    from pytest_httpserver import HTTPServer
 
     from tests.conftest import SnapshotTree
 
@@ -35,7 +44,7 @@ pytestmark = pytest.mark.usefixtures("configure_conda_channels")
 
 _DEFAULTS = {
     "specs": [],
-    "manifest_format": "conda",
+    "manifest_format": None,
     "name": None,
     "channel": None,
     "override_channels": False,
@@ -133,11 +142,33 @@ def orchestrated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         ([], False, True),
         (["python=3.14"], True, False),
         (["python=3.14", "numpy>=2.4"], True, False),
+        (["https://example.org/pkg-1.0-0.conda"], True, False),
+        (["https://example.org/pkg-1.0-0.tar.bz2"], True, False),
+        (["https://conda.anaconda.org/conda-forge::numpy"], True, False),
+        (["https://conda.anaconda.org/conda-forge::numpy.tar.gz"], True, False),
+        (["numpy[url=https://example.org/numpy-2.0-py_0.conda]"], True, False),
+        (["numpy[url=https://example.org/workspace.tar.gz]"], True, False),
+        (["conda-forge::numpy[url=https://example.org/numpy.conda]"], True, False),
+        (["https://example.org/pkg-1.0-0.CONDA"], True, False),
+        (
+            ["https://example.org/pkg-1.0-0.CONDA#d41d8cd98f00b204e9800998ecf8427e"],
+            True,
+            False,
+        ),
     ],
     ids=[
         "no-specs-runs-install",
         "single-spec-skips-install",
         "multi-spec-skips-install",
+        "conda-package-url",
+        "bz2-package-url",
+        "url-channel-matchspec",
+        "url-channel-archive-shaped-name",
+        "url-selector-matchspec",
+        "url-selector-archive-shaped-name",
+        "named-channel-url-selector",
+        "uppercase-package-extension",
+        "uppercase-package-extension-hash",
     ],
 )
 def test_quickstart_from_scratch(
@@ -158,6 +189,34 @@ def test_quickstart_from_scratch(
     if expect_add:
         assert runners["add"].calls[0].specs == specs
         assert runners["add"].calls[0].environment == "default"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "https://reader:password@example.org:invalid/channel::numpy",
+        "https://reader:password@[invalid/channel::numpy",
+        "https://reader:password@example.org/%FF.conda",
+        "https://reader:password@example.org/%FF::numpy",
+    ],
+    ids=[
+        "invalid-port",
+        "invalid-ipv6",
+        "invalid-package-encoding",
+        "invalid-channel-encoding",
+    ],
+)
+def test_quickstart_rejects_malformed_url_specs_before_writes(
+    orchestrated: dict,
+    source: str,
+) -> None:
+    before = set(orchestrated["root"].iterdir())
+    with pytest.raises(ArgumentError, match="Invalid source URL") as error:
+        orchestrated["run"](specs=[source])
+
+    assert "password" not in str(error.value)
+    assert set(orchestrated["root"].iterdir()) == before
+    assert all(not runner.calls for runner in orchestrated["runners"].values())
 
 
 def test_quickstart_copy_from_dir_skips_init(
@@ -663,3 +722,617 @@ def test_quickstart_forwards_sub_handler_flags(
     ns = orchestrated["runners"][subhandler].calls[0]
     for key, value in expected.items():
         assert getattr(ns, key) == value
+
+
+@pytest.fixture
+def remote_quickstart(
+    downloadable_archive: WorkspaceArchive,
+    httpserver: HTTPServer,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[tuple[WorkspaceArchive, HTTPServer, Path]]:
+    """Serve a real locked workspace while keeping the caller separate."""
+    reset_context(())
+    route = "/" + downloadable_archive.path.name
+    httpserver.expect_request(route).respond_with_data(
+        downloadable_archive.path.read_bytes()
+    )
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    monkeypatch.chdir(caller)
+    yield downloadable_archive, httpserver, caller
+    reset_context(())
+
+
+@pytest.mark.parametrize("receipt", ["none", "sibling", "local", "remote"])
+@pytest.mark.parametrize("dry_run", [False, True], ids=["install", "preview"])
+def test_quickstart_archive_installs_published_lock(
+    remote_quickstart: tuple[WorkspaceArchive, HTTPServer, Path],
+    capsys: pytest.CaptureFixture[str],
+    receipt: str,
+    dry_run: bool,
+) -> None:
+    archive, server, caller = remote_quickstart
+    route = "/" + archive.path.name
+    source = server.url_for(route)
+    options = ["quickstart", source, "--json"]
+    if receipt in {"sibling", "remote"}:
+        server.expect_request(route + ".receipt.json").respond_with_data(
+            ArchiveReceipt.default_path(archive.path).read_bytes()
+        )
+    if receipt != "none":
+        options.append("--receipt")
+        if receipt == "remote":
+            options.append(server.url_for(route + ".receipt.json"))
+        elif receipt == "local":
+            options.append(str(ArchiveReceipt.default_path(archive.path)))
+    if dry_run:
+        options.append("--dry-run")
+    args = generate_workspace_parser().parse_args(options)
+    reset_context((), argparse_args=args)
+
+    assert execute_workspace(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    target = caller / "example"
+    assert payload["source"] == source
+    assert payload["workspace"] == str(target)
+    assert payload["artifact"] == "example.tar.gz"
+    assert payload["environment"] == "default"
+    assert payload["verified"] is (receipt != "none")
+    assert payload["installed"] is not dry_run
+    assert payload["shell_spawned"] is False
+    assert payload["primed_packages"] == 0
+    assert payload["return_code"] == 0
+    assert target.exists() is not dry_run
+    assert not (caller / "conda.toml").exists()
+    if not dry_run:
+        original = archive.path.parent / "workspace"
+        assert (target / "conda.toml").read_bytes() == (
+            original / "conda.toml"
+        ).read_bytes()
+        assert (target / "conda.lock").read_bytes() == (
+            original / "conda.lock"
+        ).read_bytes()
+        assert (target / "app.py").read_text() == 'print("hello")\n'
+        assert (
+            target / ".conda" / "envs" / "default" / "conda-meta" / "history"
+        ).is_file()
+    expected_requests = (
+        [route, route + ".receipt.json"]
+        if receipt in {"sibling", "remote"}
+        else [route]
+    )
+    assert [request.path for request, _ in server.log] == expected_requests
+
+
+@pytest.mark.parametrize("no_shell", [False, True], ids=["shell", "no-shell"])
+def test_quickstart_archive_uses_restored_workspace(
+    remote_quickstart: tuple[WorkspaceArchive, HTTPServer, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    no_shell: bool,
+) -> None:
+    archive, server, caller = remote_quickstart
+    original_manifest = b"[workspace]\nname = 'caller'\nchannels = []\n"
+    (caller / "conda.toml").write_bytes(original_manifest)
+    target = caller / "new workspace"
+    spawned = []
+
+    def spawn(*, prefix: Path, shell_cls=None, command=None) -> int:
+        spawned.append((prefix, Path.cwd(), command))
+        return 0
+
+    monkeypatch.setattr("conda_spawn.main.spawn", spawn)
+    options = [
+        "quickstart",
+        server.url_for("/" + archive.path.name),
+        "--target",
+        str(target),
+    ]
+    if no_shell:
+        options.append("--no-shell")
+    args = generate_workspace_parser().parse_args(options)
+    reset_context((), argparse_args=args)
+
+    assert execute_workspace(args) == 0
+
+    prefix = target / ".conda" / "envs" / "default"
+    assert (prefix / "conda-meta" / "history").is_file()
+    assert spawned == ([] if no_shell else [(prefix, target, None)])
+    assert Path.cwd() == caller
+    assert (caller / "conda.toml").read_bytes() == original_manifest
+    assert not (caller / ".conda").exists()
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["numpy"],
+        ["https://example.org/second.tar.gz"],
+        ["--copy", "."],
+        ["--clone", "."],
+        ["--name", "other"],
+        ["--platform", "linux-64"],
+        ["--format", "conda"],
+        ["--format", "pixi"],
+        ["--channel", "conda-forge"],
+        ["--override-channels"],
+        ["--force-reinstall"],
+        ["--frozen"],
+    ],
+    ids=[
+        "package",
+        "second-archive",
+        "copy",
+        "clone",
+        "name",
+        "platform",
+        "conda-format",
+        "pixi-format",
+        "channel",
+        "override-channels",
+        "reinstall",
+        "frozen",
+    ],
+)
+def test_quickstart_archive_rejects_conflicting_options_before_download(
+    remote_quickstart: tuple[WorkspaceArchive, HTTPServer, Path],
+    options: list[str],
+) -> None:
+    archive, server, caller = remote_quickstart
+    args = generate_workspace_parser().parse_args(
+        ["quickstart", server.url_for("/" + archive.path.name), *options]
+    )
+    reset_context((), argparse_args=args)
+
+    with pytest.raises(ArgumentError):
+        execute_quickstart(args, console=Console(file=StringIO()))
+
+    assert server.log == []
+    assert list(caller.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--target", "new"],
+        ["--receipt"],
+        ["--receipt", "receipt.json"],
+        ["--require-sha256"],
+        ["--allow-large-archive"],
+        ["--archive"],
+    ],
+    ids=["target", "sibling-receipt", "receipt", "require-sha256", "large", "archive"],
+)
+def test_quickstart_archive_options_require_archive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    options: list[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    before = set(tmp_path.iterdir())
+    args = generate_workspace_parser().parse_args(["quickstart", *options])
+
+    with pytest.raises(ArgumentError):
+        execute_quickstart(args, console=Console(file=StringIO()))
+
+    assert set(tmp_path.iterdir()) == before
+
+
+@pytest.mark.parametrize("kind", ["missing", "mismatch"], ids=["missing", "mismatch"])
+def test_quickstart_archive_requested_receipt_aborts_before_install(
+    remote_quickstart: tuple[WorkspaceArchive, HTTPServer, Path],
+    kind: str,
+) -> None:
+    archive, server, caller = remote_quickstart
+    route = "/" + archive.path.name
+    receipt = json.loads(ArchiveReceipt.default_path(archive.path).read_text())
+    if kind == "mismatch":
+        receipt["subject"][0]["digest"]["sha256"] = "0" * 64
+    server.expect_request(route + ".receipt.json").respond_with_data(
+        json.dumps(receipt), status=404 if kind == "missing" else 200
+    )
+    args = generate_workspace_parser().parse_args(
+        ["quickstart", server.url_for(route), "--receipt", "--no-shell"]
+    )
+    reset_context((), argparse_args=args)
+
+    with pytest.raises(CondaWorkspacesError):
+        execute_quickstart(args, console=Console(file=StringIO()))
+
+    assert list(caller.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    [".tar.gz", "...tar.gz", "CON.tar.gz"],
+    ids=["empty", "parent", "windows-device"],
+)
+def test_quickstart_archive_rejects_unsafe_derived_directory(
+    remote_quickstart: tuple[WorkspaceArchive, HTTPServer, Path],
+    name: str,
+) -> None:
+    archive, server, caller = remote_quickstart
+    server.expect_request("/" + name).respond_with_data(archive.path.read_bytes())
+    args = generate_workspace_parser().parse_args(
+        ["quickstart", server.url_for("/" + name), "--no-shell"]
+    )
+    reset_context((), argparse_args=args)
+
+    with pytest.raises(CondaWorkspacesError):
+        execute_quickstart(args, console=Console(file=StringIO()))
+
+    assert list(caller.iterdir()) == []
+
+
+def test_quickstart_archive_preserves_existing_destination(
+    remote_quickstart: tuple[WorkspaceArchive, HTTPServer, Path],
+) -> None:
+    archive, server, caller = remote_quickstart
+    target = caller / "example"
+    target.mkdir()
+    marker = target / "keep.txt"
+    marker.write_bytes(b"existing work")
+    args = generate_workspace_parser().parse_args(
+        ["quickstart", server.url_for("/" + archive.path.name), "--no-shell"]
+    )
+    reset_context((), argparse_args=args)
+
+    with pytest.raises(CondaWorkspacesError):
+        execute_quickstart(args, console=Console(file=StringIO()))
+
+    assert marker.read_bytes() == b"existing work"
+    assert not (target / "conda.toml").exists()
+
+
+@pytest.fixture
+def named_remote_quickstart(
+    remote_quickstart: tuple[WorkspaceArchive, HTTPServer, Path],
+) -> tuple[WorkspaceArchive, HTTPServer, Path]:
+    archive, server, caller = remote_quickstart
+    original = archive.path.parent / "workspace"
+    manifest = original / "conda.toml"
+    manifest.write_text(manifest.read_text() + "\n[environments]\nresearch = []\n")
+    lock = original / "conda.lock"
+    data = json.loads(lock.read_text())
+    data["environments"]["research"] = data["environments"]["default"]
+    lock.write_text(json.dumps(data))
+    selected = WorkspaceArchive.create(
+        workspace=original, output=archive.path.parent / "selected.tar.gz", receipt=True
+    )
+    server.expect_request("/selected.tar.gz").respond_with_data(
+        selected.path.read_bytes()
+    )
+    return selected, server, caller
+
+
+def test_quickstart_archive_installs_only_selected_environment(
+    named_remote_quickstart: tuple[WorkspaceArchive, HTTPServer, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive, server, caller = named_remote_quickstart
+    spawned = []
+
+    def spawn(*, prefix: Path, shell_cls=None, command=None) -> int:
+        spawned.append((prefix, Path.cwd()))
+        return 0
+
+    monkeypatch.setattr("conda_spawn.main.spawn", spawn)
+    args = generate_workspace_parser().parse_args(
+        ["quickstart", server.url_for("/" + archive.path.name), "-e", "research"]
+    )
+    reset_context((), argparse_args=args)
+
+    assert execute_workspace(args) == 0
+
+    target = caller / "selected"
+    prefix = target / ".conda" / "envs" / "research"
+    assert (prefix / "conda-meta" / "history").is_file()
+    assert not (target / ".conda" / "envs" / "default").exists()
+    assert spawned == [(prefix, target)]
+    assert not (caller / "automatic-task.txt").exists()
+    assert not (target / "automatic-task.txt").exists()
+
+
+@pytest.mark.parametrize("failure", ["return", "raise"], ids=["status", "exception"])
+@pytest.mark.parametrize("json_output", [False, True], ids=["human", "json"])
+def test_quickstart_archive_preserves_workspace_on_install_failure(
+    named_remote_quickstart: tuple[WorkspaceArchive, HTTPServer, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: str,
+    json_output: bool,
+) -> None:
+    archive, server, caller = named_remote_quickstart
+    target = caller / "preserved workspace"
+    original_install = quickstart_module.execute_install
+
+    def fail_install(args, *, console=None) -> int:
+        assert args.locked is True
+        assert args.environment == "research"
+        assert args.manifest_file == target / "conda.toml"
+        assert (target / "app.py").is_file()
+        if failure == "raise":
+            raise CondaWorkspacesError("Package installation failed")
+        return 7
+
+    def unexpected_shell(*, prefix, shell_cls=None, command=None) -> int:
+        pytest.fail("Shell must not start after installation failure")
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.execute_install", fail_install
+    )
+    monkeypatch.setattr("conda_spawn.main.spawn", unexpected_shell)
+    options = [
+        "quickstart",
+        server.url_for("/" + archive.path.name),
+        "--target",
+        str(target),
+        "-e",
+        "research",
+    ]
+    if json_output:
+        options.append("--json")
+    args = generate_workspace_parser().parse_args(options)
+    reset_context((), argparse_args=args)
+    stream = StringIO()
+    if failure == "raise":
+        with pytest.raises(CondaWorkspacesError) as error:
+            execute_quickstart(args, console=Console(file=stream))
+        diagnostic = str(error.value)
+        captured = capsys.readouterr()
+        if json_output:
+            assert captured.out == ""
+    else:
+        assert execute_quickstart(args, console=Console(file=stream)) == 7
+        captured = capsys.readouterr()
+        if json_output:
+            payload = json.loads(captured.out)
+            assert payload["success"] is False
+            assert payload["installed"] is False
+            assert payload["workspace"] == str(target)
+            assert payload["return_code"] == 7
+            assert payload["shell_spawned"] is False
+            diagnostic = "\n".join(payload["recovery"])
+        else:
+            diagnostic = stream.getvalue() + captured.err
+    assert str(target) in diagnostic
+    assert "conda workspace install --locked -e research" in diagnostic
+    assert "conda workspace shell -e research" in diagnostic
+    assert quote_for_shell("cd", *(["/d"] if on_win else []), str(target)) in diagnostic
+    assert (target / "conda.toml").is_file()
+    assert (target / "conda.lock").read_bytes() == (
+        archive.path.parent / "workspace" / "conda.lock"
+    ).read_bytes()
+    assert Path.cwd() == caller
+
+    monkeypatch.setattr(
+        "conda_workspaces.cli.workspace.install.execute_install", original_install
+    )
+    monkeypatch.chdir(target)
+    resume = generate_workspace_parser().parse_args(
+        ["install", "--locked", "-e", "research"]
+    )
+    reset_context((), argparse_args=resume)
+    assert execute_workspace(resume) == 0
+    assert (
+        target / ".conda" / "envs" / "research" / "conda-meta" / "history"
+    ).is_file()
+
+
+@pytest.mark.parametrize("failure", ["return", "raise"], ids=["status", "exception"])
+def test_quickstart_archive_reports_installed_workspace_on_shell_failure(
+    named_remote_quickstart: tuple[WorkspaceArchive, HTTPServer, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    archive, server, caller = named_remote_quickstart
+    target = caller / "selected"
+
+    def fail_shell(*, prefix, shell_cls=None, command=None) -> int:
+        if failure == "raise":
+            raise OSError("Cannot start shell")
+        return 9
+
+    monkeypatch.setattr("conda_spawn.main.spawn", fail_shell)
+    args = generate_workspace_parser().parse_args(
+        ["quickstart", server.url_for("/" + archive.path.name), "-e", "research"]
+    )
+    reset_context((), argparse_args=args)
+    stream = StringIO()
+    if failure == "raise":
+        with pytest.raises(CondaWorkspacesError) as error:
+            execute_quickstart(args, console=Console(file=stream))
+        diagnostic = str(error.value)
+    else:
+        assert execute_quickstart(args, console=Console(file=stream)) == 9
+        diagnostic = stream.getvalue()
+    assert "install" in diagnostic.lower()
+    assert "conda workspace shell -e research" in diagnostic
+    assert (
+        target / ".conda" / "envs" / "research" / "conda-meta" / "history"
+    ).is_file()
+    assert Path.cwd() == caller
+
+
+def test_quickstart_archive_can_disambiguate_bz2(
+    remote_quickstart: tuple[WorkspaceArchive, HTTPServer, Path],
+) -> None:
+    archive, server, caller = remote_quickstart
+    bz2 = WorkspaceArchive.create(
+        workspace=archive.path.parent / "workspace",
+        output=archive.path.parent / "workspace.tar.bz2",
+    )
+    server.expect_request("/workspace.tar.bz2").respond_with_data(bz2.path.read_bytes())
+    args = generate_workspace_parser().parse_args(
+        ["quickstart", server.url_for("/workspace.tar.bz2"), "--archive", "--no-shell"]
+    )
+    reset_context((), argparse_args=args)
+
+    assert execute_workspace(args) == 0
+
+    assert (
+        caller / "workspace" / ".conda" / "envs" / "default" / "conda-meta" / "history"
+    ).is_file()
+
+
+@pytest.mark.parametrize("json_mode", ["flag", "console", "environment"])
+@pytest.mark.parametrize("token", ["secret", "secret:1"], ids=["plain", "colon"])
+@pytest.mark.parametrize("scheme", ["http", "HTTP"], ids=["lowercase", "uppercase"])
+def test_quickstart_archive_json_redacts_source_credentials(
+    remote_quickstart: tuple[WorkspaceArchive, HTTPServer, Path],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    json_mode: str,
+    token: str,
+    scheme: str,
+) -> None:
+    archive, server, _ = remote_quickstart
+    source = server.url_for("/" + archive.path.name).replace(
+        "http://", f"{scheme}://reader:password@"
+    )
+
+    def unexpected_shell(*, prefix, shell_cls=None, command=None) -> int:
+        pytest.fail("JSON mode must not start a shell")
+
+    monkeypatch.setattr("conda_spawn.main.spawn", unexpected_shell)
+    options = ["quickstart", source + "?token=" + token]
+    if json_mode == "flag":
+        options.append("--json")
+    elif json_mode == "console":
+        options.extend(["--console", "json"])
+    else:
+        monkeypatch.setenv("CONDA_JSON", "true")
+    args = generate_workspace_parser().parse_args(options)
+    reset_context((), argparse_args=args)
+
+    assert execute_workspace(args) == 0
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["artifact"] == archive.path.name
+    for secret in ["password", "secret"]:
+        assert secret not in captured.out
+        assert secret not in captured.err
+
+
+@pytest.mark.parametrize("failure", ["missing", "corrupt"])
+def test_quickstart_archive_failure_does_not_fall_back_to_package_install(
+    remote_quickstart: tuple[WorkspaceArchive, HTTPServer, Path],
+    failure: str,
+) -> None:
+    _, server, caller = remote_quickstart
+    server.expect_request("/unusable.tar.gz").respond_with_data(
+        b"not an archive", status=404 if failure == "missing" else 200
+    )
+    args = generate_workspace_parser().parse_args(
+        ["quickstart", server.url_for("/unusable.tar.gz"), "--no-shell"]
+    )
+    reset_context((), argparse_args=args)
+
+    with pytest.raises(CondaWorkspacesError):
+        execute_quickstart(args, console=Console(file=StringIO()))
+
+    assert list(caller.iterdir()) == []
+    assert [request.path for request, _ in server.log] == ["/unusable.tar.gz"]
+
+
+def test_quickstart_archive_rejects_explicit_caller_manifest(
+    remote_quickstart: tuple[WorkspaceArchive, HTTPServer, Path],
+) -> None:
+    archive, server, caller = remote_quickstart
+    manifest = caller / "conda.toml"
+    manifest.write_text("[workspace]\nname = 'caller'\nchannels = []\n")
+    args = generate_workspace_parser().parse_args(
+        ["--file", str(manifest), "quickstart", server.url_for("/" + archive.path.name)]
+    )
+    reset_context((), argparse_args=args)
+
+    with pytest.raises(ArgumentError, match="--file"):
+        execute_quickstart(args, console=Console(file=StringIO()))
+
+    assert server.log == []
+    assert not (caller / "example").exists()
+
+
+def test_quickstart_parser_default_format_creates_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    installed = []
+
+    def install(args, *, console=None) -> int:
+        assert (tmp_path / "conda.toml").is_file()
+        installed.append(args.environment)
+        return 0
+
+    monkeypatch.setattr(quickstart_module, "execute_install", install)
+    args = generate_workspace_parser().parse_args(["quickstart", "--no-shell"])
+
+    assert execute_quickstart(args, console=Console(file=StringIO())) == 0
+
+    assert installed == ["default"]
+    assert "[workspace]" in (tmp_path / "conda.toml").read_text()
+
+
+def test_quickstart_archive_leaves_unverified_bundled_packages_unused(
+    remote_quickstart: tuple[WorkspaceArchive, HTTPServer, Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    archive, server, caller = remote_quickstart
+    package = archive.path.parent / "unused-1.0-0.conda"
+    package.write_bytes(b"not a valid conda package")
+    bundled = archive.path.parent / "bundled.tar.gz"
+    create_archive(
+        archive.path.parent / "workspace",
+        bundled,
+        ArchiveConfig(),
+        bundle_packages=[package],
+    )
+    server.expect_request("/bundled.tar.gz").respond_with_data(bundled.read_bytes())
+    args = generate_workspace_parser().parse_args(
+        ["quickstart", server.url_for("/bundled.tar.gz"), "--json"]
+    )
+    reset_context((), argparse_args=args)
+
+    assert execute_workspace(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["installed"] is True
+    assert payload["verified"] is False
+    assert payload["primed_packages"] == 0
+    assert payload["cache_priming_skipped"] is True
+    assert (
+        caller / "bundled" / ".conda" / "envs" / "default" / "conda-meta" / "history"
+    ).is_file()
+
+
+@pytest.mark.parametrize(
+    "path", ["/download", "/workspace.zip"], ids=["no-suffix", "zip"]
+)
+@pytest.mark.parametrize("token", ["secret", "secret:1"], ids=["plain", "colon"])
+@pytest.mark.parametrize("scheme", ["http", "HTTP"], ids=["lowercase", "uppercase"])
+def test_quickstart_rejects_unknown_url_without_side_effects(
+    remote_quickstart: tuple[WorkspaceArchive, HTTPServer, Path],
+    path: str,
+    token: str,
+    scheme: str,
+) -> None:
+    _, server, caller = remote_quickstart
+    source = server.url_for(path).replace("http://", f"{scheme}://reader:password@")
+    args = generate_workspace_parser().parse_args(
+        ["quickstart", source + "?token=" + token, "--no-shell"]
+    )
+    reset_context((), argparse_args=args)
+
+    with pytest.raises(ArgumentError) as error:
+        execute_quickstart(args, console=Console(file=StringIO()))
+
+    message = str(error.value)
+    assert ".conda" in message
+    assert ".tar" in message
+    assert "password" not in message
+    assert "secret" not in message
+    assert server.log == []
+    assert list(caller.iterdir()) == []

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from conda.base.constants import DEFAULT_JSON_REPORTER_BACKEND
 from conda.base.context import reset_context
+from conda.exception_handler import ExceptionHandler
 from conda.exceptions import CondaError, CondaSystemExit, DryRunExit
 from rich.console import Console
 
@@ -112,6 +113,17 @@ def test_workspace_unknown_subcmd_prints_help(
 @pytest.mark.parametrize(
     "args, expected_attr, expected_value",
     [
+        (["quickstart", "--archive"], "archive", True),
+        (["quickstart", "--target", "new"], "target", Path("new")),
+        (["quickstart", "--receipt"], "receipt", True),
+        (["quickstart", "--receipt", "receipt.json"], "receipt", "receipt.json"),
+        (
+            ["quickstart", "--receipt", "https://example.org/receipt.json"],
+            "receipt",
+            "https://example.org/receipt.json",
+        ),
+        (["quickstart", "--require-sha256"], "require_sha256", True),
+        (["quickstart", "--allow-large-archive"], "allow_large_archive", True),
         (["init", "--format", "conda"], "manifest_format", "conda"),
         (["init", "--format", "pyproject"], "manifest_format", "pyproject"),
         (["init", "--name", "myproj"], "name", "myproj"),
@@ -224,6 +236,13 @@ def test_workspace_unknown_subcmd_prints_help(
         (["sbom", "--json"], "json", True),
     ],
     ids=[
+        "quickstart-archive",
+        "quickstart-target",
+        "quickstart-sibling-receipt",
+        "quickstart-local-receipt",
+        "quickstart-remote-receipt",
+        "quickstart-require-sha256",
+        "quickstart-large-archive",
         "init-format-conda",
         "init-format-pyproject",
         "init-name",
@@ -615,6 +634,39 @@ def test_workspace_json_conda_error_redacts_credentials(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+@pytest.mark.usefixtures("reset_conda_context")
+@pytest.mark.parametrize(
+    "json_options", [["--json"], ["--console", "json"]], ids=["flag", "console"]
+)
+@pytest.mark.parametrize("command", ["quickstart", "install"])
+def test_workspace_json_errors_use_conda_renderer(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    json_options: list[str],
+) -> None:
+    options = (
+        [
+            "quickstart",
+            "https://reader:password@example.invalid/workspace.zip?token=secret",
+        ]
+        if command == "quickstart"
+        else ["--file", str(tmp_path / "missing.toml"), "install"]
+    )
+    args = generate_workspace_parser().parse_args([*options, *json_options])
+    reset_context((), argparse_args=args)
+
+    result = ExceptionHandler()(execute_workspace, args)
+
+    captured = capsys.readouterr()
+    assert result != 0
+    payload = json.loads(captured.out)
+    assert payload["error"]
+    assert captured.err == ""
+    assert "password" not in captured.out
+    assert "secret" not in captured.out
 
 
 @pytest.mark.usefixtures("reset_conda_context")

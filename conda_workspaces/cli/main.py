@@ -21,6 +21,7 @@ from conda.cli.helpers import (
 )
 from conda.common.constants import NULL
 from conda.exceptions import CondaError, CondaSystemExit, DryRunExit
+from conda.reporters import render
 
 
 def _accept_json_silently(parser: argparse.ArgumentParser) -> None:
@@ -74,13 +75,12 @@ def _add_workspace_channel_options(parser: argparse.ArgumentParser) -> None:
 def _handle_error(exc: CondaError) -> int:
     """Render a CondaError with Rich and return its exit code.
 
-    In debug mode, re-raises the original error for its traceback. In JSON
-    mode, raises a credential-redacted ``CondaError`` for conda's structured
-    renderer.
+    In debug mode, re-raises the original error for its traceback. JSON
+    output uses conda's renderer after redacting credentials.
     """
     if conda_context.debug:
         raise exc
-    if conda_context.json:
+    if conda_context.json or conda_context.console == DEFAULT_JSON_REPORTER_BACKEND:
         from ..models import redact_url_text
 
         def redact_value(value: object) -> object:
@@ -109,6 +109,9 @@ def _handle_error(exc: CondaError) -> int:
         exc._kwargs = {}
         exc._caused_by = None
         exc.args = (message,)
+        if not conda_context.json:
+            render(exc.dump_map())
+            return getattr(exc, "return_code", 1)
         raise exc from None
 
     from rich.console import Console
@@ -969,7 +972,7 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         "quickstart",
         help=(
             "Bootstrap a workspace in one command: init (or copy an existing"
-            " manifest), add the given specs, install the environment,"
+            " manifest or restore an archive URL), install the environment,"
             " and drop into a shell."
         ),
         add_help=False,
@@ -981,14 +984,40 @@ def configure_workspace_parser(parser: argparse.ArgumentParser) -> None:
         nargs="*",
         default=[],
         help=(
-            "Optional package specs to add immediately (same grammar as"
+            "A workspace archive URL, or package specs to add (same grammar as"
             " `conda workspace add`, e.g. 'python=3.14' 'numpy>=2.4')."
         ),
     )
     quickstart_parser.add_argument(
+        "--archive",
+        action="store_true",
+        help="Treat the positional URL as a workspace archive, including .tar.bz2.",
+    )
+    quickstart_parser.add_argument(
+        "--target",
+        type=Path,
+        help="New directory for an archive workspace (default: archive filename stem).",
+    )
+    quickstart_parser.add_argument(
+        "--receipt",
+        nargs="?",
+        const=True,
+        help="Verify an archive with its sibling receipt, or a receipt PATH or URL.",
+    )
+    quickstart_parser.add_argument(
+        "--require-sha256",
+        action="store_true",
+        help="Require SHA-256 for receipt package records (requires --receipt).",
+    )
+    quickstart_parser.add_argument(
+        "--allow-large-archive",
+        action="store_true",
+        help="Allow archives larger than the default 4 GiB limit.",
+    )
+    quickstart_parser.add_argument(
         "--format",
         choices=["pixi", "conda", "pyproject"],
-        default="conda",
+        default=None,
         dest="manifest_format",
         help=(
             "Manifest format for the generated workspace (default: conda)."
@@ -1140,18 +1169,16 @@ def execute_workspace(args: argparse.Namespace) -> int:
     }
     if json_result:
         captured = StringIO()
-        with redirect_stdout(captured):
-            try:
+        try:
+            with redirect_stdout(captured):
                 result = _dispatch_workspace(args, subcmd)
-            except DryRunExit:
-                result = 0
-            except CondaError as exc:
-                result = _handle_error(exc)
+        except DryRunExit:
+            result = 0
+        except CondaError as exc:
+            return _handle_error(exc)
         if result != 0:
             sys.stderr.write(captured.getvalue())
             return result
-
-        from conda.reporters import render
 
         render({"success": True})
         return 0

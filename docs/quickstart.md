@@ -50,6 +50,8 @@ conda task list        # see all tasks
 Tasks run in your current conda environment. You can start with tasks
 alone and add a workspace definition later.
 
+(quickstart-workspace)=
+
 ## Your first workspace
 
 ![workspace-quickstart demo](../demos/workspace-quickstart.gif)
@@ -60,8 +62,62 @@ alone and add a workspace definition later.
 `--json` for a scriptable summary.
 :::
 
-To create a workspace, install its environment, and open an activated
-shell, run `conda workspace quickstart`:
+To start from a published workspace, pass its archive URL:
+
+```bash
+conda workspace quickstart https://example.org/workspaces/example.tar.zst
+```
+
+This creates `example/` in your current directory, restores the published
+manifest, lockfile, and project files, installs the `default` environment from
+`conda.lock`, and opens an activated shell inside `example/`. It uses the
+restored manifest even when you run the command from another workspace.
+Manifest tasks do not run automatically.
+
+The destination must not already exist, including as an empty directory.
+Repeating the command does not update or replace an existing workspace.
+Choose another destination with `--target`, select an environment with `-e`,
+or skip the shell with `--no-shell`:
+
+```bash
+conda workspace quickstart https://example.org/workspaces/example.tar.zst --target ./demo
+conda workspace quickstart https://example.org/workspaces/example.tar.zst -e dev --no-shell
+```
+
+`--no-shell` still installs the environment. `--json` also skips the shell
+and emits one structured result. `--dry-run` downloads and validates the
+archive without creating the destination or installing an environment.
+
+Choose a publisher you trust. HTTP and HTTPS downloads use conda's
+authentication and TLS settings. When the publisher supplies an archive
+receipt, add `--receipt` to require its conventional sibling file:
+
+```bash
+conda workspace quickstart https://example.org/workspaces/example.tar.zst --receipt
+```
+
+A requested receipt must be retrieved and verified before installation.
+Without a receipt, installation uses conda's normal package checks and leaves
+packages bundled in the archive unused. See the
+{ref}`receipt reference <remote-archive-receipts>` for local
+receipts, separate receipt URLs, and verification details.
+
+If installation fails after restoration, the workspace remains in the
+reported destination. Resume there without downloading the archive again:
+
+```bash
+cd example
+conda workspace install --locked -e default
+conda workspace shell -e default
+```
+
+Use the selected environment name in both commands. Recovery commands printed
+on Windows use Command Prompt syntax. If only shell startup fails,
+installation is complete and you can retry the shell command.
+
+### Start with package specs
+
+To create a workspace in the current directory, pass package specs instead:
 
 ```bash
 conda workspace quickstart python=3.14 numpy
@@ -308,8 +364,10 @@ conda workspace lock --dry-run
 A preview may parse manifests, validate inputs, and run the solver. It
 does not modify manifests, lockfiles, environment prefixes, activation
 metadata, archives, receipts, or extraction targets, and it does not
-modify configured package caches. `quickstart` validates a temporary
-prospective manifest and discards it afterward.
+modify configured package caches. When creating a workspace from package
+specs, `quickstart` validates a temporary prospective manifest and discards
+it afterward. For an archive URL, it validates the downloaded archive and
+the selected locked environment in temporary storage.
 
 ## Lock
 

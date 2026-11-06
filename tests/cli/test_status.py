@@ -5,7 +5,7 @@ from __future__ import annotations
 from io import StringIO
 
 import pytest
-from conda.exceptions import CondaError
+from conda.exceptions import CondaError, CondaMultiError
 from rich.console import Console
 
 from conda_workspaces.cli import status
@@ -15,6 +15,7 @@ from conda_workspaces.cli.status import (
     print_error,
 )
 from conda_workspaces.exceptions import (
+    CondaWorkspacesError,
     EnvironmentNotFoundError,
     SolveError,
 )
@@ -116,6 +117,20 @@ def test_print_error_with_hints(capsys, exc, expected_error, expected_hint):
     assert expected_error in captured.err
     assert "Hint:" in captured.err
     assert expected_hint in captured.err
+
+
+@pytest.mark.parametrize("multi", [False, True], ids=["single-error", "multi-error"])
+def test_print_error_preserves_recovery_command(multi: bool) -> None:
+    command = "cd '/tmp/workspaces/an example workspace with a long directory name'"
+    error: Exception = CondaWorkspacesError("Install failed.", hints=[command])
+    if multi:
+        error = CondaMultiError([error])
+    output = StringIO()
+    console = Console(file=output, width=40, highlight=False, force_terminal=False)
+
+    print_error(console, error)
+
+    assert f"Hint: {command}\n" in output.getvalue()
 
 
 def test_print_error_conda_exception(capsys):

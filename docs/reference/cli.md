@@ -21,6 +21,17 @@ returns its workspace, environment, manifest, added specs, and shell
 state. `init`, `activate`, `run`, and `shell` tolerate a global
 `--json` flag but intentionally emit no structured result.
 
+For an archive URL, `quickstart` also returns `success`, `source`, `artifact`,
+`receipt`, `verified`, `dry_run`, `installed`, `primed_packages`,
+`cache_priming_skipped`, and `return_code`. `artifact` is the downloaded
+archive's filename. `source` and `receipt` omit credentials, tokens, query
+strings, and fragments. `workspace` is the restored destination, and no
+temporary download path is exposed. `manifest` is null for an archive preview.
+JSON output suppresses the interactive shell and keeps recovery instructions
+inside structured output on failure. A nonzero installation result includes
+`recovery` commands and their `recovery_shell` (`sh` or `cmd.exe`). Exceptions
+use conda's structured error output with recovery hints.
+
 `unarchive` returns `success`, `source`, `target`, `receipt`, `verified`,
 `dry_run`, `installed`, `environment`, `primed_packages`,
 `cache_priming_skipped`, and `return_code`. `source` and `receipt` describe the
@@ -88,6 +99,83 @@ remains supported.
 leaves the target and environment prefixes unchanged. With `--install`,
 validation can also download packages into a temporary cache. Temporary
 downloads are removed when the operation finishes or fails.
+
+### Quickstart from an archive URL
+
+```bash
+conda workspace quickstart https://example.org/workspaces/example.tar.zst
+```
+
+This restores a new workspace, installs the selected environment from its
+published `conda.lock`, and opens a shell in that workspace. The default
+environment is `default`. Select another with `-e/--environment`.
+The manifest, lockfile, and project files are preserved. A missing or stale
+lockfile stops the operation instead of triggering a new solve.
+
+The positional arguments determine which quickstart flow runs:
+
+| Input | Behavior |
+| --- | --- |
+| One HTTP or HTTPS URL ending in `.tar.zst`, `.tar.zstd`, `.tar.gz`, or `.tgz` | Restore a workspace archive |
+| Package specs, including URLs ending in `.conda` or `.tar.bz2` | Add packages to a workspace in the current directory |
+| `--archive` with one archive URL | Restore a workspace archive, including `.tar.bz2` |
+
+Filename matching uses the decoded URL path, excluding queries and fragments.
+Use `--archive` for a workspace archive with the `.tar.bz2` suffix, which is
+also used by conda packages:
+
+```bash
+conda workspace quickstart --archive https://example.org/workspaces/example.tar.bz2
+```
+
+Archive URLs cannot be combined with extra positional arguments. Quickstart
+does not probe a server or retry a failed archive operation as a package
+operation to decide how to interpret an input.
+
+Conda's `MatchSpec` parser identifies package specifications, including
+URL-qualified channels such as `https://conda.anaconda.org/conda-forge::numpy`
+and bracketed URL selectors. Conda's registered package formats remain
+available. `--archive` explicitly selects workspace restoration when a
+filename format overlaps.
+
+By default, the URL filename without its archive suffix names a new directory
+under the current directory. The derived name must be a valid directory name.
+`--target PATH` selects a different destination. An existing destination,
+including an empty directory or symlink, is rejected. Archive metadata and
+redirects cannot change the destination.
+
+Archive quickstart rejects `--copy`/`--clone`, `--file`, `--format`, `--name`,
+`--platform`, `-c/--channel`, `--override-channels`, `--force-reinstall`, and
+`--frozen`. These options would select another source or change the published
+workspace. `--locked` is accepted but unnecessary because archive installation
+always uses the lockfile. `--copy` and `--clone` remain local manifest-copy
+operations.
+
+`--receipt`, `--receipt PATH`, and `--receipt URL` use the
+{ref}`archive receipt rules <remote-archive-receipts>`.
+`--require-sha256` requires a receipt and checks its conda package records.
+`--allow-large-archive` raises the usual archive size limit.
+These archive options and `--target` require an archive URL.
+
+`--no-shell` suppresses the shell without skipping installation. `--json`
+also suppresses the shell. `--dry-run` downloads and validates the archive
+and selected environment without creating the destination. See
+{ref}`the quickstart guide <quickstart-workspace>` for recovery
+after an installation or shell failure.
+
+### Shell startup
+
+`conda workspace shell` and quickstart's shell step use conda-spawn for
+activation and the interactive session. The shell executable must be outside
+the workspace. Lookup uses absolute PATH directories and ignores relative
+entries and executables that resolve into the workspace.
+
+Current conda activation code cannot safely quote all prefix paths. Shell
+startup rejects workspace paths containing quotes, shell expansion or
+command characters, or control characters. Spaces and Unicode text are
+supported. For archive quickstart, choose a suitable full destination path
+with `--target`, or use `--no-shell` to restore and install without starting
+a shell. A failed shell step leaves the installed workspace in place.
 
 ### Locked installation
 

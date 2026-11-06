@@ -1697,6 +1697,37 @@ def test_open_tar_preserves_pax_file_sizes(
                 assert stream.read() == b"data"
 
 
+@pytest.mark.parametrize(
+    ("suffix", "force_zstd_fallback"),
+    [(".tar.gz", False), (".tar.bz2", False), (".tar.zst", False), (".tar.zst", True)],
+    ids=["gzip", "bzip2", "zstd", "zstd-fallback"],
+)
+@pytest.mark.parametrize("corruption", ["invalid", "truncated"])
+def test_open_tar_reports_corrupt_content(
+    project_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    suffix: str,
+    force_zstd_fallback: bool,
+    corruption: str,
+) -> None:
+    archive = tmp_path / f"broken{suffix}"
+    create_archive(project_dir, archive, ArchiveConfig())
+    archive.write_bytes(
+        b"not an archive" if corruption == "invalid" else archive.read_bytes()[:8]
+    )
+    if force_zstd_fallback:
+        monkeypatch.setattr(archive_module, "tarfile_supports_zstd", lambda: False)
+
+    with pytest.raises(ArchiveError, match="Cannot read archive") as error:
+        with open_tar(archive) as tf:
+            read_tar_members(tf)
+
+    assert archive.name in str(error.value)
+    assert str(tmp_path) not in str(error.value)
+    assert error.value.__cause__ is not None
+
+
 def test_open_tar_rejects_symlink_input(project_dir: Path, tmp_path: Path) -> None:
     archive = tmp_path / "archive.tar.gz"
     create_archive(project_dir, archive, ArchiveConfig())
@@ -2269,6 +2300,37 @@ def test_inspect_archive_ignores_ambient_symlinks(
     monkeypatch.chdir(ambient)
 
     assert inspect_archive(archive)["has_manifest"] is False
+
+
+@pytest.mark.parametrize("suffix", archive_module.ARCHIVE_SUFFIXES)
+@pytest.mark.parametrize("explicit_cwd", [False, True], ids=["cwd", "explicit-cwd"])
+def test_workspace_archive_default_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    suffix: str,
+    explicit_cwd: bool,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    archive = WorkspaceArchive(tmp_path / "downloads" / f"example{suffix}")
+
+    assert archive.default_target(tmp_path if explicit_cwd else None) == (
+        tmp_path / "example"
+    )
+
+
+@pytest.mark.parametrize(
+    "stem",
+    ["", ".", "..", "NUL", "CON", "workspace.", "workspace "],
+    ids=["empty", "dot", "parent", "nul", "con", "trailing-dot", "trailing-space"],
+)
+def test_workspace_archive_default_target_rejects_unsafe_name(
+    tmp_path: Path,
+    stem: str,
+) -> None:
+    archive = WorkspaceArchive(tmp_path / f"{stem}.tar.gz")
+
+    with pytest.raises(ArchiveError, match="default extraction directory"):
+        archive.default_target(tmp_path)
 
 
 def test_workspace_archive_create_writes_receipt(
