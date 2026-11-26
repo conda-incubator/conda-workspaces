@@ -57,8 +57,10 @@ from urllib.parse import unquote, urlsplit
 
 from conda.common.io import dashlist
 from conda.core.prefix_data import delete_prefix_from_linked_data
+from conda.models.channel import Channel
 from conda.models.dist import Dist
 from conda.plugins.types import EnvironmentSpecBase
+from conda_lockfiles import CONDA_PYPI_CHANNEL_NAME, PYTHONHOSTED_URL_PREFIX
 
 from .context import isolated_package_cache
 from .exceptions import (
@@ -1864,18 +1866,13 @@ class CondaLockLoader(EnvironmentSpecBase):
 
     @classmethod
     def _channel_locations(cls, channel_urls: Iterable[str]) -> ChannelLocations:
-        """Index declared channel paths and the artifact origins they serve.
+        """Index declared channel locations and the hosts their records use.
 
-        ``conda-pypi`` publishes wheel metadata only: the URLs it records
-        point at the PyPI artifact host instead of the channel itself.  When
-        that channel is declared, trust the upstream PyPI origin the same way
-        ``conda-lockfiles`` does on lockfile restore.
+        The conda-pypi channel lists wheel metadata but points each package at
+        files.pythonhosted.org. Declaring that channel also allows PyPI artifact URLs.
         """
-        from conda.models.channel import Channel
-        from conda_lockfiles import CONDA_PYPI_CHANNEL_NAME, PYTHONHOSTED_URL_PREFIX
-
+        channel_urls = tuple(channel_urls)
         locations: ChannelLocations = {}
-        wheel_origin: UrlOrigin | None = None
         for channel_url in channel_urls:
             location = cls.url_location(channel_url)
             if location is not None:
@@ -1886,14 +1883,13 @@ class CondaLockLoader(EnvironmentSpecBase):
                 # Empty segments are omitted by url_location, so this marks
                 # a complete channel path without colliding with a URL segment.
                 node[""] = {}
-            if wheel_origin is None and (
-                Channel(channel_url).canonical_name == CONDA_PYPI_CHANNEL_NAME
-            ):
-                wheel_location = cls.url_location(PYTHONHOSTED_URL_PREFIX)
-                if wheel_location is not None:
-                    wheel_origin = wheel_location[0]
-        if wheel_origin is not None:
-            locations.setdefault(wheel_origin, {})[""] = {}
+        if any(
+            Channel(channel_url).canonical_name == CONDA_PYPI_CHANNEL_NAME
+            for channel_url in channel_urls
+        ):
+            wheel_location = cls.url_location(PYTHONHOSTED_URL_PREFIX)
+            if wheel_location is not None:
+                locations.setdefault(wheel_location[0], {})[""] = {}
         return locations
 
     @classmethod

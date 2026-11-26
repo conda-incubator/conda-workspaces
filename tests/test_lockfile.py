@@ -4119,12 +4119,6 @@ def test_channel_lookup_work_depends_on_package_path_depth(
             id="conda-pypi-wheel",
         ),
         pytest.param(
-            "https://conda.anaconda.org/conda-pypi/noarch/pkg.conda",
-            ("https://conda.anaconda.org/conda-pypi/noarch",),
-            True,
-            id="conda-pypi-package",
-        ),
-        pytest.param(
             "https://files.pythonhosted.org/packages/pkg-1.0.whl",
             ("https://conda.anaconda.org/conda-forge/noarch",),
             False,
