@@ -1864,8 +1864,18 @@ class CondaLockLoader(EnvironmentSpecBase):
 
     @classmethod
     def _channel_locations(cls, channel_urls: Iterable[str]) -> ChannelLocations:
-        """Index declared channel paths by origin and decoded segments."""
+        """Index declared channel paths and the artifact origins they serve.
+
+        ``conda-pypi`` publishes wheel metadata only: the URLs it records
+        point at the PyPI artifact host instead of the channel itself.  When
+        that channel is declared, trust the upstream PyPI origin the same way
+        ``conda-lockfiles`` does on lockfile restore.
+        """
+        from conda.models.channel import Channel
+        from conda_lockfiles import CONDA_PYPI_CHANNEL_NAME, PYTHONHOSTED_URL_PREFIX
+
         locations: ChannelLocations = {}
+        wheel_origin: UrlOrigin | None = None
         for channel_url in channel_urls:
             location = cls.url_location(channel_url)
             if location is not None:
@@ -1876,6 +1886,14 @@ class CondaLockLoader(EnvironmentSpecBase):
                 # Empty segments are omitted by url_location, so this marks
                 # a complete channel path without colliding with a URL segment.
                 node[""] = {}
+            if wheel_origin is None and (
+                Channel(channel_url).canonical_name == CONDA_PYPI_CHANNEL_NAME
+            ):
+                wheel_location = cls.url_location(PYTHONHOSTED_URL_PREFIX)
+                if wheel_location is not None:
+                    wheel_origin = wheel_location[0]
+        if wheel_origin is not None:
+            locations.setdefault(wheel_origin, {})[""] = {}
         return locations
 
     @classmethod
@@ -1889,11 +1907,6 @@ class CondaLockLoader(EnvironmentSpecBase):
         if package_location is None:
             return False
         package_origin, package_path = package_location
-        # conda-pypi pulls wheels from PyPI, so allow that origin
-        if package_origin[1] == "files.pythonhosted.org" and "conda-pypi" in str(
-            channel_locations
-        ).lower():
-            return True
         node = channel_locations.get(package_origin)
         if node is None:
             return False
