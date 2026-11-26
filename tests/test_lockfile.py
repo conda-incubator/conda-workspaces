@@ -4109,6 +4109,13 @@ def test_channel_lookup_work_depends_on_package_path_depth(
     assert len(probes) <= 2 * len(package_path)
 
 
+def test_url_matches_channel_allows_pypi_origin() -> None:
+    assert CondaLockLoader.url_matches_channel(
+        "https://files.pythonhosted.org/packages/pkg-1.0.whl",
+        ("https://conda.anaconda.org/conda-pypi/noarch",),
+    )
+
+
 @pytest.mark.parametrize(
     ("record", "detail"),
     [

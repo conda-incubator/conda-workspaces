@@ -1889,6 +1889,11 @@ class CondaLockLoader(EnvironmentSpecBase):
         if package_location is None:
             return False
         package_origin, package_path = package_location
+        # conda-pypi pulls wheels from PyPI, so allow that origin only when a conda-pypi channel is declared.
+        if package_origin[1] == "files.pythonhosted.org" and "conda-pypi" in str(
+            channel_locations
+        ).lower():
+            return True
         node = channel_locations.get(package_origin)
         if node is None:
             return False
