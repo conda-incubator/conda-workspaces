@@ -1872,6 +1872,11 @@ class CondaLockLoader(EnvironmentSpecBase):
         files.pythonhosted.org. Declaring that channel also allows PyPI artifact URLs.
         """
         channel_urls = tuple(channel_urls)
+        if any(
+            Channel(channel_url).canonical_name == CONDA_PYPI_CHANNEL_NAME
+            for channel_url in channel_urls
+        ):
+            channel_urls += (PYTHONHOSTED_URL_PREFIX,)
         locations: ChannelLocations = {}
         for channel_url in channel_urls:
             location = cls.url_location(channel_url)
@@ -1883,13 +1888,6 @@ class CondaLockLoader(EnvironmentSpecBase):
                 # Empty segments are omitted by url_location, so this marks
                 # a complete channel path without colliding with a URL segment.
                 node[""] = {}
-        if any(
-            Channel(channel_url).canonical_name == CONDA_PYPI_CHANNEL_NAME
-            for channel_url in channel_urls
-        ):
-            wheel_location = cls.url_location(PYTHONHOSTED_URL_PREFIX)
-            if wheel_location is not None:
-                locations.setdefault(wheel_location[0], {})[""] = {}
         return locations
 
     @classmethod
