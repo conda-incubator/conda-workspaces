@@ -57,8 +57,10 @@ from urllib.parse import unquote, urlsplit
 
 from conda.common.io import dashlist
 from conda.core.prefix_data import delete_prefix_from_linked_data
+from conda.models.channel import Channel
 from conda.models.dist import Dist
 from conda.plugins.types import EnvironmentSpecBase
+from conda_lockfiles import CONDA_PYPI_CHANNEL_NAME, PYTHONHOSTED_URL_PREFIX
 
 from .context import isolated_package_cache
 from .exceptions import (
@@ -1864,7 +1866,17 @@ class CondaLockLoader(EnvironmentSpecBase):
 
     @classmethod
     def _channel_locations(cls, channel_urls: Iterable[str]) -> ChannelLocations:
-        """Index declared channel paths by origin and decoded segments."""
+        """Index declared channel locations and the hosts their records use.
+
+        The conda-pypi channel lists wheel metadata but points each package at
+        files.pythonhosted.org. Declaring that channel also allows PyPI artifact URLs.
+        """
+        channel_urls = tuple(channel_urls)
+        if any(
+            Channel(channel_url).canonical_name == CONDA_PYPI_CHANNEL_NAME
+            for channel_url in channel_urls
+        ):
+            channel_urls += (PYTHONHOSTED_URL_PREFIX,)
         locations: ChannelLocations = {}
         for channel_url in channel_urls:
             location = cls.url_location(channel_url)

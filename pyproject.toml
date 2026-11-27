@@ -23,7 +23,7 @@ classifiers = [
 dependencies = [
   # These are required but only available via conda, not PyPI:
   # "conda >=26.3",
-  # "conda-lockfiles >=0.2.0",  # shares rattler-lock v6 schema with conda.lock
+  # "conda-lockfiles >=0.2.1",  # shares rattler-lock v6 schema with conda.lock
   # "conda-spawn >=0.1.0",
   #
   # These are optional (gracefully skipped when absent):
@@ -107,7 +107,7 @@ platforms = ["linux-64", "osx-64", "osx-arm64", "win-64", "linux-aarch64"]
 [tool.pixi.dependencies]
 python = ">=3.10"
 conda = ">=26.3"
-conda-lockfiles = ">=0.2.0"
+conda-lockfiles = ">=0.2.1"
 conda-pypi = ">=0.9.0"
 conda-rattler-solver = ">=0.0.6"
 conda-spawn = ">=0.1.0"

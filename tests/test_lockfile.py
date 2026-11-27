@@ -4110,6 +4110,37 @@ def test_channel_lookup_work_depends_on_package_path_depth(
 
 
 @pytest.mark.parametrize(
+    ("package_url", "channel_urls", "expected"),
+    [
+        pytest.param(
+            "https://files.pythonhosted.org/packages/pkg-1.0.whl",
+            ("https://conda.anaconda.org/conda-pypi/noarch",),
+            True,
+            id="conda-pypi-wheel",
+        ),
+        pytest.param(
+            "https://files.pythonhosted.org/packages/pkg-1.0.whl",
+            ("https://conda.anaconda.org/conda-forge/noarch",),
+            False,
+            id="wheel-without-conda-pypi",
+        ),
+        pytest.param(
+            "https://example.com/packages/pkg-1.0.whl",
+            ("https://conda.anaconda.org/conda-pypi/noarch",),
+            False,
+            id="other-external-origin",
+        ),
+    ],
+)
+def test_url_matches_channel_wheel_origin(
+    package_url: str,
+    channel_urls: tuple[str, ...],
+    expected: bool,
+) -> None:
+    assert CondaLockLoader.url_matches_channel(package_url, channel_urls) is expected
+
+
+@pytest.mark.parametrize(
     ("record", "detail"),
     [
         ({"sha256": "invalid"}, "invalid sha256 digest"),
